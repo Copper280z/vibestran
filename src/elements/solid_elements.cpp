@@ -80,10 +80,38 @@ LocalKe CHexa8::stiffness_matrix() const {
     auto coords = node_coords();
     Eigen::Matrix<double,6,6> D = constitutive_D();
 
-    // 2x2x2 Gauss quadrature
+    // Selective Reduced Integration (SRI) to eliminate volumetric locking:
+    // D = D_dev + D_vol, where D_vol = lam * e*e^T (e = [1,1,1,0,0,0]^T)
+    // D_dev uses full 2x2x2 Gauss; D_vol uses 1-point centroidal integration.
+    // This prevents over-stiffness in constrained states without losing stability.
+    double lam = D(0,1);  // D(i,j) = lam for i,j in {0,1,2}, since D(0,0)=lam+2mu
+    Eigen::Matrix<double,6,6> D_vol = Eigen::Matrix<double,6,6>::Zero();
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            D_vol(i,j) = lam;
+    Eigen::Matrix<double,6,6> D_dev = D - D_vol;
+
+    // 2x2x2 Gauss quadrature for deviatoric part
     const double gp = 1.0/std::sqrt(3.0);
     const double gpts[2] = {-gp, gp};
     const double gwts[2] = {1.0, 1.0};
+
+    auto build_B = [&](const ShapeData& sd, const Eigen::Matrix3d& Jinv,
+                       Eigen::MatrixXd& B) {
+        B.setZero();
+        for (int n = 0; n < 8; ++n) {
+            double dnx = Jinv(0,0)*sd.dNdxi[n] + Jinv(0,1)*sd.dNdeta[n] + Jinv(0,2)*sd.dNdzeta[n];
+            double dny = Jinv(1,0)*sd.dNdxi[n] + Jinv(1,1)*sd.dNdeta[n] + Jinv(1,2)*sd.dNdzeta[n];
+            double dnz = Jinv(2,0)*sd.dNdxi[n] + Jinv(2,1)*sd.dNdeta[n] + Jinv(2,2)*sd.dNdzeta[n];
+            int c0 = 3*n;
+            B(0,c0+0)=dnx;
+            B(1,c0+1)=dny;
+            B(2,c0+2)=dnz;
+            B(3,c0+0)=dny; B(3,c0+1)=dnx;
+            B(4,c0+1)=dnz; B(4,c0+2)=dny;
+            B(5,c0+0)=dnz; B(5,c0+2)=dnx;
+        }
+    };
 
     for (int gi = 0; gi < 2; ++gi)
     for (int gj = 0; gj < 2; ++gj)
@@ -105,32 +133,32 @@ LocalKe CHexa8::stiffness_matrix() const {
             throw SolverError(std::format("CHEXA8 {}: non-positive Jacobian det={:.6g}", eid_.value, detJ));
         Eigen::Matrix3d Jinv = J.inverse();
 
-        // Physical shape fn derivatives [3x8]
-        Eigen::MatrixXd dNdx(3, 8);
-        for (int n = 0; n < 8; ++n) {
-            dNdx(0,n) = Jinv(0,0)*sd.dNdxi[n] + Jinv(0,1)*sd.dNdeta[n] + Jinv(0,2)*sd.dNdzeta[n];
-            dNdx(1,n) = Jinv(1,0)*sd.dNdxi[n] + Jinv(1,1)*sd.dNdeta[n] + Jinv(1,2)*sd.dNdzeta[n];
-            dNdx(2,n) = Jinv(2,0)*sd.dNdxi[n] + Jinv(2,1)*sd.dNdeta[n] + Jinv(2,2)*sd.dNdzeta[n];
-        }
-
-        // Strain-displacement B [6x24]
-        // Strain ordering: εxx,εyy,εzz,γxy,γyz,γzx
-        // DOF ordering: u1,v1,w1, u2,v2,w2, ...
         Eigen::MatrixXd B(6, NUM_DOFS);
-        B.setZero();
-        for (int n = 0; n < 8; ++n) {
-            double dnx = dNdx(0,n), dny = dNdx(1,n), dnz = dNdx(2,n);
-            int c0 = 3*n;
-            B(0,c0+0)=dnx;
-            B(1,c0+1)=dny;
-            B(2,c0+2)=dnz;
-            B(3,c0+0)=dny; B(3,c0+1)=dnx;
-            B(4,c0+1)=dnz; B(4,c0+2)=dny;
-            B(5,c0+0)=dnz; B(5,c0+2)=dnx;
-        }
+        build_B(sd, Jinv, B);
 
-        Ke += B.transpose() * D * B * detJ * wi * wj * wk;
+        Ke += B.transpose() * D_dev * B * detJ * wi * wj * wk;
     }
+
+    // Volumetric part: 1-point centroidal integration (weight = 2*2*2 = 8)
+    {
+        auto sd0 = shape_functions(0.0, 0.0, 0.0);
+        Eigen::Matrix3d J0 = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 8; ++n) {
+            J0(0,0)+=sd0.dNdxi[n]  *coords[n].x; J0(0,1)+=sd0.dNdxi[n]  *coords[n].y; J0(0,2)+=sd0.dNdxi[n]  *coords[n].z;
+            J0(1,0)+=sd0.dNdeta[n] *coords[n].x; J0(1,1)+=sd0.dNdeta[n] *coords[n].y; J0(1,2)+=sd0.dNdeta[n] *coords[n].z;
+            J0(2,0)+=sd0.dNdzeta[n]*coords[n].x; J0(2,1)+=sd0.dNdzeta[n]*coords[n].y; J0(2,2)+=sd0.dNdzeta[n]*coords[n].z;
+        }
+        double detJ0 = J0.determinant();
+        if (detJ0 <= 0)
+            throw SolverError(std::format("CHEXA8 {}: non-positive centroidal Jacobian det={:.6g}", eid_.value, detJ0));
+        Eigen::Matrix3d Jinv0 = J0.inverse();
+
+        Eigen::MatrixXd B0(6, NUM_DOFS);
+        build_B(sd0, Jinv0, B0);
+
+        Ke += B0.transpose() * D_vol * B0 * detJ0 * 8.0;
+    }
+
     return Ke;
 }
 
@@ -291,9 +319,9 @@ LocalKe CTetra4::stiffness_matrix() const {
     Eigen::MatrixXd B(6, NUM_DOFS);
     B.setZero();
     for (int n = 0; n < 4; ++n) {
-        double bx = cofA(n,1) / V6;
-        double by = cofA(n,2) / V6;
-        double bz = cofA(n,3) / V6;
+        double bx = cofA(1,n) / V6;
+        double by = cofA(2,n) / V6;
+        double bz = cofA(3,n) / V6;
         int c0 = 3*n;
         B(0,c0+0)=bx;
         B(1,c0+1)=by;
@@ -345,7 +373,7 @@ LocalFe CTetra4::thermal_load(std::span<const double> temperatures, double t_ref
     Eigen::MatrixXd B(6, NUM_DOFS);
     B.setZero();
     for (int n = 0; n < 4; ++n) {
-        double bx = cofA(n,1)/V6, by = cofA(n,2)/V6, bz = cofA(n,3)/V6;
+        double bx = cofA(1,n)/V6, by = cofA(2,n)/V6, bz = cofA(3,n)/V6;
         int c0=3*n;
         B(0,c0+0)=bx; B(1,c0+1)=by; B(2,c0+2)=bz;
         B(3,c0+0)=by; B(3,c0+1)=bx;

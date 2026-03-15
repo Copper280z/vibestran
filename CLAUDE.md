@@ -1,4 +1,5 @@
 - This project uses meson build as it's build system.
+  - build the project by running `ninja` from the build directory. Don't specify -j, ninja default behavior is a parallel build.
 - The build directory is always named 'build'.
 - There's a build target for cppcheck, you can run it from the build directory with `ninja cppcheck`.
 - When you're finished with a change, always run cppcheck and correct any errors before committing/submitting. 
@@ -8,3 +9,5 @@
 - We use C++20, but generally prefer error values to exceptions.
 - NEVER use exceptions for intentional control flow, you should ALWAYS prefer an error value, optional, or variant over an exception as control flow. 
 - Exceptions should only be used for unrecoverable errors. Any time an exception is thrown you must include as much information as possible, so the developer can debug the exception. We expect that exceptions should not happen in production.
+- All tests must be relevant and useful for proving the correctness of the business logic or mathematical model. Tests that only check superficial or obvious cases are both insufficient and unacceptable. 
+- It can be acceptable to edit the criteria of a test that's failing, if you believe it is appropriate, make sure to document your reasoning in the commit message.

@@ -619,6 +619,7 @@ void BdfParser::process_spc1(ParseContext &ctx,
     std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
     if (upper == "THRU") {
       thru_mode = true;
+      if (!node_ids.empty()) node_ids.pop_back(); // start was prematurely added
     } else if (thru_mode) {
       int end = parse_int(f[i], ctx.line_num);
       for (int n = thru_start; n <= end; ++n)

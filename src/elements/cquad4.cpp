@@ -90,6 +90,16 @@ LocalKe CQuad4::stiffness_matrix() const {
     Eigen::Matrix3d Dm = membrane_D();
     Eigen::Matrix3d Db = bending_D();
 
+    // Selective Reduced Integration for membrane:
+    // Normal strains (ε_xx, ε_yy) use full 2x2 Gauss to prevent hourglass modes.
+    // Shear strain (γ_xy) uses 1-point centroidal integration to eliminate membrane
+    // shear locking in bending, which otherwise causes severe under-prediction of
+    // in-plane bending deflections.
+    Eigen::Matrix3d Dm_normal = Dm;
+    Dm_normal(2,2) = 0.0;  // zero out shear-shear term for 2x2 integration
+    Eigen::Matrix3d Dm_shear = Eigen::Matrix3d::Zero();
+    Dm_shear(2,2) = Dm(2,2);  // only in-plane shear stiffness for centroidal integration
+
     // ── Membrane part (DOFs: u1,v1, u2,v2, u3,v3, u4,v4 → local indices 0,1,6,7,12,13,18,19)
     // We compute membrane and bending separately then overlay into 24x24 Ke.
 
@@ -134,8 +144,8 @@ LocalKe CQuad4::stiffness_matrix() const {
                 Bm(2, 2*n+1) = dNdx(0,n);
             }
 
-            // Membrane stiffness contribution
-            Eigen::MatrixXd Km_contrib = t * Bm.transpose() * Dm * Bm * detJ * wi * wj;
+            // Membrane normal stiffness contribution (2x2 Gauss, no shear)
+            Eigen::MatrixXd Km_contrib = t * Bm.transpose() * Dm_normal * Bm * detJ * wi * wj;
 
             // Map membrane DOFs into global 24-DOF Ke
             // Node i has DOFs: u=6i+0, v=6i+1, w=6i+2, θx=6i+3, θy=6i+4, θz=6i+5
@@ -179,8 +189,9 @@ LocalKe CQuad4::stiffness_matrix() const {
                 }
             }
 
-            // ── Transverse shear (reduced 1-point at centroid done separately) 
-            // For now: included at full 2x2 (may need reduced integration for thin plates)
+            // ── Transverse shear: included at full 2x2
+            // Note: reduced integration for thin-plate transverse shear (Mindlin Ks) is a
+            // future improvement; for current tests (in-plane bending) Ks is not exercised.
             // Shear strains: γ_xz = dw/dx - θx, γ_yz = dw/dy - θy
             // (Mindlin assumption)
             double kappa  = pshell().tst; // shear correction factor (~5/6)
@@ -213,6 +224,47 @@ LocalKe CQuad4::stiffness_matrix() const {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // ── Membrane shear SRI: 1-point centroidal integration for γ_xy term.
+    // Evaluated at (xi=0,eta=0) with quadrature weight 4.0 (full reference element area).
+    {
+        auto sd0 = shape_functions(0.0, 0.0);
+        Eigen::Matrix2d J0 = Eigen::Matrix2d::Zero();
+        for (int n = 0; n < 4; ++n) {
+            J0(0,0) += sd0.dNdxi[n]  * coords[n].x;
+            J0(0,1) += sd0.dNdxi[n]  * coords[n].y;
+            J0(1,0) += sd0.dNdeta[n] * coords[n].x;
+            J0(1,1) += sd0.dNdeta[n] * coords[n].y;
+        }
+        double detJ0 = J0.determinant();
+        Eigen::Matrix2d Jinv0 = J0.inverse();
+
+        Eigen::MatrixXd dNdx0(2, 4);
+        for (int n = 0; n < 4; ++n) {
+            dNdx0(0,n) = Jinv0(0,0)*sd0.dNdxi[n] + Jinv0(0,1)*sd0.dNdeta[n];
+            dNdx0(1,n) = Jinv0(1,0)*sd0.dNdxi[n] + Jinv0(1,1)*sd0.dNdeta[n];
+        }
+
+        Eigen::MatrixXd Bm0(3, 8);
+        Bm0.setZero();
+        for (int n = 0; n < 4; ++n) {
+            Bm0(0, 2*n)   = dNdx0(0,n);
+            Bm0(1, 2*n+1) = dNdx0(1,n);
+            Bm0(2, 2*n)   = dNdx0(1,n);
+            Bm0(2, 2*n+1) = dNdx0(0,n);
+        }
+
+        Eigen::MatrixXd Km_shear = t * Bm0.transpose() * Dm_shear * Bm0 * detJ0 * 4.0;
+
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                Ke(6*i+0, 6*j+0) += Km_shear(2*i+0, 2*j+0);
+                Ke(6*i+0, 6*j+1) += Km_shear(2*i+0, 2*j+1);
+                Ke(6*i+1, 6*j+0) += Km_shear(2*i+1, 2*j+0);
+                Ke(6*i+1, 6*j+1) += Km_shear(2*i+1, 2*j+1);
             }
         }
     }

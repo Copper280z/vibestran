@@ -430,8 +430,8 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         Eigen::MatrixXd B(6, 12);
         B.setZero();
         for (int n = 0; n < 4; ++n) {
-          double bx = cofA(n, 1) / V6, by = cofA(n, 2) / V6,
-                 bz = cofA(n, 3) / V6;
+          double bx = cofA(1, n) / V6, by = cofA(2, n) / V6,
+                 bz = cofA(3, n) / V6;
           int c0 = 3 * n;
           B(0, c0) = bx;
           B(1, c0 + 1) = by;

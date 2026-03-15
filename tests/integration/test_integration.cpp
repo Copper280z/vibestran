@@ -71,9 +71,12 @@ $ Shell property: t=0.1
 PSHELL,1,1,0.1
 $ Single CQUAD4 element
 CQUAD4,1,1,1,2,3,4
-$ BCs: fix all DOFs on left edge (nodes 1 and 4)
-SPC1,1,123456,1
-SPC1,1,123456,4
+$ Minimal BCs: fix T1 (x) for both left-edge nodes (prevents T1 and R3 rigid body)
+$ Fix T2 (y) for node 1 only (prevents T2 rigid body)
+$ Allows Poisson contraction in y so the exact bilinear solution is recoverable
+SPC1,1,1,1
+SPC1,1,1,4
+SPC1,1,2,1
 $ Loads: 500 N in x on nodes 2 and 3
 FORCE,1,2,0,500.0,1.0,0.0,0.0
 FORCE,1,3,0,500.0,1.0,0.0,0.0
@@ -94,9 +97,11 @@ ENDDATA
     double u_node2 = get_disp(res, 2, 0); // x-displacement at node 2
     double u_node3 = get_disp(res, 3, 0); // x-displacement at node 3
 
-    EXPECT_NEAR(u_node2, expected, 0.005 * expected)
+    // CQUAD4 bilinear shape functions exactly represent the linear displacement field
+    // u=F*x/(E*A). With minimal BCs allowing Poisson contraction, result is exact.
+    EXPECT_NEAR(u_node2, expected, 1e-10)
         << "Node 2 x-disp = " << u_node2 << ", expected " << expected;
-    EXPECT_NEAR(u_node3, expected, 0.005 * expected)
+    EXPECT_NEAR(u_node3, expected, 1e-10)
         << "Node 3 x-disp = " << u_node3 << ", expected " << expected;
 
     // Left edge should have zero displacement
@@ -215,16 +220,26 @@ CTETRA,3,1,1,4,8,7
 CTETRA,4,1,2,1,6,7
 CTETRA,5,1,5,1,8,7
 CTETRA,6,1,4,1,3,7
-$ Fix bottom face (z=0): nodes 1-4, translations only
-SPC1,1,123,1
-SPC1,1,123,2
-SPC1,1,123,3
-SPC1,1,123,4
-$ Apply F=250 N (z-direction) at each top corner = total 1000 N
-FORCE,1,5,0,250.0,0.0,0.0,1.0
-FORCE,1,6,0,250.0,0.0,0.0,1.0
-FORCE,1,7,0,250.0,0.0,0.0,1.0
-FORCE,1,8,0,250.0,0.0,0.0,1.0
+$ Minimal BCs to prevent rigid body motion while allowing Poisson contraction:
+$ Fix T3 (z) for all base nodes (eliminates T3 translation and R1,R2 rotations)
+$ Fix T1,T2 (x,y) for node 1 (eliminates T1,T2 translations)
+$ Fix T2 (y) for node 2 (eliminates R3 rotation)
+SPC1,1,3,1
+SPC1,1,3,2
+SPC1,1,3,3
+SPC1,1,3,4
+SPC1,1,12,1
+SPC1,1,2,2
+$ Consistent nodal loads for uniform traction σ_zz = 1000 Pa on the top face.
+$ The Kuhn mesh divides the top face into triangles 5-6-7 and 5-7-8 (diagonal 5-7).
+$ Each triangle has area 0.5 m², so traction load = 500 N per triangle.
+$ Consistent load per node per triangle = 500/3 N.
+$ Nodes 5 and 7 share both triangles: F = 2*(500/3) = 1000/3 N each.
+$ Nodes 6 and 8 are in one triangle each: F = 500/3 N each. Total = 1000 N.
+FORCE,1,5,0,333.3333333333333,0.0,0.0,1.0
+FORCE,1,6,0,166.6666666666667,0.0,0.0,1.0
+FORCE,1,7,0,333.3333333333333,0.0,0.0,1.0
+FORCE,1,8,0,166.6666666666667,0.0,0.0,1.0
 ENDDATA
 )";
 
@@ -244,11 +259,14 @@ ENDDATA
     double w7 = get_disp(res, 7, 2);
     double w8 = get_disp(res, 8, 2);
 
-    // Uniform axial: all top nodes should have same z-displacement
-    EXPECT_NEAR(w5, expected, 0.05 * expected) << "Node 5 z-disp = " << w5;
-    EXPECT_NEAR(w6, expected, 0.05 * expected) << "Node 6 z-disp = " << w6;
-    EXPECT_NEAR(w7, expected, 0.05 * expected) << "Node 7 z-disp = " << w7;
-    EXPECT_NEAR(w8, expected, 0.05 * expected) << "Node 8 z-disp = " << w8;
+    // CTETRA4 uses constant-strain shape functions, which exactly represent linear
+    // displacement fields. With minimal BCs (only z fixed at base + RBM prevention),
+    // the uniform axial solution w=ε*z is within the element's function space, so
+    // all top nodes should be exact to machine precision.
+    EXPECT_NEAR(w5, expected, 1e-10) << "Node 5 z-disp = " << w5;
+    EXPECT_NEAR(w6, expected, 1e-10) << "Node 6 z-disp = " << w6;
+    EXPECT_NEAR(w7, expected, 1e-10) << "Node 7 z-disp = " << w7;
+    EXPECT_NEAR(w8, expected, 1e-10) << "Node 8 z-disp = " << w8;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -349,11 +367,14 @@ GRID,8,,0.0,1.0,1.0
 MAT1,1,1.0E6,,0.3
 PSOLID,1,1
 CHEXA,1,1,1,2,3,4,5,6,7,8
-$ Fix bottom face z=0: nodes 1-4, all DOFs
-SPC1,1,123456,1
-SPC1,1,123456,2
-SPC1,1,123456,3
-SPC1,1,123456,4
+$ Minimal BCs: fix T3 (z) for all base nodes, plus minimal RBM prevention
+$ Allows Poisson contraction so the exact bar-extension solution is recoverable
+SPC1,1,3,1
+SPC1,1,3,2
+SPC1,1,3,3
+SPC1,1,3,4
+SPC1,1,12,1
+SPC1,1,2,2
 $ 250 N z-force at each top corner = 1000 N total
 FORCE,1,5,0,250.0,0.0,0.0,1.0
 FORCE,1,6,0,250.0,0.0,0.0,1.0
@@ -369,19 +390,60 @@ ENDDATA
     LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
     SolverResults res = solver.solve(model);
 
+    // CHEXA8 trilinear shape functions exactly represent the linear displacement field
+    // w=ε_zz*z. With minimal BCs allowing Poisson contraction, all top nodes are exact.
     double expected = 1.0e-3;
     for (int n : {5,6,7,8}) {
         double w = get_disp(res, n, 2);
-        EXPECT_NEAR(w, expected, 0.02 * expected)
+        EXPECT_NEAR(w, expected, 1e-10)
             << "Node " << n << " z-disp = " << w;
     }
 
-    // Also verify Poisson contraction: x-displacement of node at (1,0,1)
-    // ε_xx = -nu * ε_zz = -0.3e-3
-    // δ_x of node 6 at x=1: u = -nu * ε_zz * 1.0 = -3e-4
+    // Verify Poisson contraction: with minimal BCs allowing free lateral motion,
+    // ε_xx = -nu * ε_zz = -0.3e-3, so node 6 at (1,0,1): u = -nu*ε_zz*x = -3e-4.
+    // The trilinear element represents this exactly.
     double expected_poisson = -0.3 * 1e-3;
     double u6 = get_disp(res, 6, 0);
-    EXPECT_NEAR(u6, expected_poisson, 0.05 * std::abs(expected_poisson))
+    EXPECT_NEAR(u6, expected_poisson, 1e-10)
         << "Poisson contraction: node 6 x-disp = " << u6
         << ", expected " << expected_poisson;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Test 6: Default subcase path via run_analysis helper
+//
+// Verifies that run_analysis (which uses BdfParser::parse_string directly
+// without manually adding subcases) correctly falls back to the default subcase
+// {1, "DEFAULT", LoadSetId{1}, SpcSetId{1}} and produces the same result as the
+// manually-configured axial plate extension test.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+TEST(Integration, DefaultSubcaseViaRunAnalysis) {
+    // Same geometry as AxialPlateExtension, but using run_analysis (no manual subcase setup).
+    // The BDF does not specify a SUBCASE entry; the parser creates the default subcase.
+    const std::string bdf = R"(
+SOL 101
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,10.0,0.0,0.0
+GRID,3,,10.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+MAT1,1,1.0E6,,0.3
+PSHELL,1,1,0.1
+CQUAD4,1,1,1,2,3,4
+SPC1,1,1,1
+SPC1,1,1,4
+SPC1,1,2,1
+FORCE,1,2,0,500.0,1.0,0.0,0.0
+FORCE,1,3,0,500.0,1.0,0.0,0.0
+ENDDATA
+)";
+
+    SolverResults res = run_analysis(bdf);
+
+    // Same hand calc: δ = F*L/(E*A) = 1000*10/(1e6*0.1) = 0.1
+    // Minimal BCs allow exact representation; result is exact to machine precision.
+    double expected = 0.1;
+    EXPECT_NEAR(get_disp(res, 2, 0), expected, 1e-10);
+    EXPECT_NEAR(get_disp(res, 3, 0), expected, 1e-10);
 }
