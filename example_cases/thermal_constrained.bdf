@@ -1,0 +1,35 @@
+$ Constrained thermal expansion — SOL 101
+$ A 1×1 plate fixed on all edges, uniformly heated
+$ Material: E=1e7, nu=0.3, alpha=1e-5
+$ dT = 100 degrees (T=100, T_ref=0)
+$
+$ Hand calculation for biaxial constraint:
+$   σ_xx = σ_yy = -E*alpha*dT/(1-nu) = -1e7*1e-5*100/(1-0.3) = -14285.7 Pa
+$   (plane stress, fully constrained)
+$
+SOL 101
+CEND
+SUBCASE 1
+  LABEL = CONSTRAINED THERMAL PLATE
+  LOAD  = 1
+  SPC   = 1
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,1.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+$ alpha = 1e-5
+MAT1,1,1.0E7,,0.3,0.0,1.0E-5
+PSHELL,1,1,0.1
+CQUAD4,1,1,1,2,3,4
+$ All nodes fully fixed (overconstrained but demonstrates thermal stress)
+SPC1,1,123456,1
+SPC1,1,123456,2
+SPC1,1,123456,3
+SPC1,1,123456,4
+$ Uniform temperature of 100 degrees
+TEMP,1,1,100.0
+TEMP,1,2,100.0
+TEMP,1,3,100.0
+TEMP,1,4,100.0
+ENDDATA

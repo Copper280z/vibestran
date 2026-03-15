@@ -1,0 +1,7 @@
+[wrap-git]
+url = https://gitlab.com/libeigen/eigen.git
+revision = 3.4.0
+depth = 1
+
+[provide]
+eigen3 = eigen_dep
