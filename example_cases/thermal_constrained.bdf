@@ -22,11 +22,11 @@ $ alpha = 1e-5
 MAT1,1,1.0E7,,0.3,0.0,1.0E-5
 PSHELL,1,1,0.1
 CQUAD4,1,1,1,2,3,4
-$ All nodes fully fixed (overconstrained but demonstrates thermal stress)
+$ All nodes fixed along 2, to demonstrate thermal stress
 SPC1,1,123456,1
-SPC1,1,123456,2
-SPC1,1,123456,3
-SPC1,1,123456,4
+SPC1,1,2,2
+SPC1,1,2,3
+SPC1,1,2,4
 $ Uniform temperature of 100 degrees
 TEMP,1,1,100.0
 TEMP,1,2,100.0

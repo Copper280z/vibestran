@@ -4,6 +4,7 @@
 - There's a build target for cppcheck, you can run it from the build directory with `ninja cppcheck`.
 - When you're finished with a change, always run cppcheck and correct any errors before committing/submitting. 
   - Note: We've attempted to reduce/eliminate false positives, but there's always a chance. If you believe there is a false positive, report it to the user and, if applicable, the git commit.
+  - There is currently one false positive in an Eigen header file.
   - unused function warnings likely mean that function is desired for some planned use, but not currently tested. You should add tests for any functions that are present but unused. Make a note in the function description comment that it is only used in a test.
 - If you use a function in the main codebase that has a comment about being unused, remove that comment. You do not need to explain where any functions are used, the LSP does that for us.
 - We use C++20, but generally prefer error values to exceptions.

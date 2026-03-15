@@ -238,6 +238,15 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
     res.displacements.push_back(nd);
   }
 
+  // ── Build nodal temperature map for thermal stress correction ────────────
+  // σ_mech = D * (B*u - ε_th).  Without subtracting ε_th the recovered stress
+  // would be D * ε_total, which is wrong for any case with thermal loads.
+  std::unordered_map<NodeId, double> nodal_temps_rec;
+  for (const Load *lp : model.loads_for_set(sc.load_set)) {
+    if (const TempLoad *tl = std::get_if<TempLoad>(lp))
+      nodal_temps_rec[tl->node] = tl->temperature;
+  }
+
   // ── Recover element stresses ──────────────────────────────────────────────
   for (const auto &elem_data : model.elements) {
     auto elem = make_element(elem_data, model);
@@ -443,7 +452,18 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
           B(5, c0) = bz;
           B(5, c0 + 2) = bx;
         }
-        sigma = D_ * B * ue;
+        // Thermal correction: σ = D*(B*u − ε_th).  ε_th = α*dT*[1,1,1,0,0,0].
+        double T_avg_tet = 0.0;
+        for (int i = 0; i < 4; ++i) {
+          auto it = nodal_temps_rec.find(elem_data.nodes[i]);
+          T_avg_tet += (it != nodal_temps_rec.end()) ? it->second : sc.t_ref;
+        }
+        T_avg_tet /= 4.0;
+        double dT_tet = T_avg_tet - sc.t_ref;
+        double alpha_tet = mat_.A;
+        Eigen::Matrix<double, 6, 1> eps_th_tet;
+        eps_th_tet << alpha_tet*dT_tet, alpha_tet*dT_tet, alpha_tet*dT_tet, 0, 0, 0;
+        sigma = D_ * (B * ue - eps_th_tet);
       } else {
         // CHEXA8: evaluate B at centroid (0,0,0)
         auto sd = CHexa8::shape_functions(0, 0, 0);
@@ -490,7 +510,18 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
           B(5, c0) = dnz;
           B(5, c0 + 2) = dnx;
         }
-        sigma = D_ * B * ue;
+        // Thermal correction: σ = D*(B*u − ε_th).
+        double T_avg_hex = 0.0;
+        for (int i = 0; i < 8; ++i) {
+          auto it = nodal_temps_rec.find(elem_data.nodes[i]);
+          T_avg_hex += (it != nodal_temps_rec.end()) ? it->second : sc.t_ref;
+        }
+        T_avg_hex /= 8.0;
+        double dT_hex = T_avg_hex - sc.t_ref;
+        double alpha_hex = mat_.A;
+        Eigen::Matrix<double, 6, 1> eps_th_hex;
+        eps_th_hex << alpha_hex*dT_hex, alpha_hex*dT_hex, alpha_hex*dT_hex, 0, 0, 0;
+        sigma = D_ * (B * ue - eps_th_hex);
       }
 
       ss.sx = sigma(0);
