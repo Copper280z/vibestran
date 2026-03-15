@@ -147,3 +147,86 @@ TEST(BdfParser, ModelValidationCatchesMissingNode) {
     m.elements.push_back(e);
     EXPECT_THROW(m.validate(), SolverError);
 }
+
+// ── Model accessor methods (only used in tests) ───────────────────────────────
+
+static Model make_simple_model() {
+    const std::string bdf = R"(
+SOL 101
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,1.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+MAT1,1,2.0E7,,0.3
+PSHELL,1,1,0.1
+CQUAD4,1,1,1,2,3,4
+SPC1,1,123456,1
+FORCE,1,2,0,500.0,1.0,0.0,0.0
+ENDDATA
+)";
+    return BdfParser::parse_string(bdf);
+}
+
+TEST(Model, NodeAccessorReturnsCorrectPosition) {
+    Model m = make_simple_model();
+    const GridPoint& gp = m.node(NodeId{3});
+    EXPECT_NEAR(gp.position.x, 1.0, 1e-10);
+    EXPECT_NEAR(gp.position.y, 1.0, 1e-10);
+}
+
+TEST(Model, NodeAccessorThrowsForMissingNode) {
+    Model m = make_simple_model();
+    EXPECT_THROW(m.node(NodeId{999}), SolverError);
+}
+
+TEST(Model, MaterialAccessorReturnsCorrectE) {
+    Model m = make_simple_model();
+    const Mat1& mat = m.material(MaterialId{1});
+    EXPECT_NEAR(mat.E, 2.0e7, 1.0);
+    EXPECT_NEAR(mat.nu, 0.3, 1e-10);
+}
+
+TEST(Model, MaterialAccessorThrowsForMissingMaterial) {
+    Model m = make_simple_model();
+    EXPECT_THROW(m.material(MaterialId{999}), SolverError);
+}
+
+TEST(Model, PropertyAccessorReturnsPShell) {
+    Model m = make_simple_model();
+    const Property& prop = m.property(PropertyId{1});
+    const PShell& ps = std::get<PShell>(prop);
+    EXPECT_NEAR(ps.t, 0.1, 1e-10);
+}
+
+TEST(Model, PropertyAccessorThrowsForMissingProperty) {
+    Model m = make_simple_model();
+    EXPECT_THROW(m.property(PropertyId{999}), SolverError);
+}
+
+TEST(Model, LoadsForSetReturnsMatchingLoads) {
+    Model m = make_simple_model();
+    auto loads = m.loads_for_set(LoadSetId{1});
+    ASSERT_EQ(loads.size(), 1u);
+    const ForceLoad& f = std::get<ForceLoad>(*loads[0]);
+    EXPECT_EQ(f.node.value, 2);
+}
+
+TEST(Model, LoadsForSetReturnsEmptyForUnknownSet) {
+    Model m = make_simple_model();
+    auto loads = m.loads_for_set(LoadSetId{999});
+    EXPECT_TRUE(loads.empty());
+}
+
+TEST(Model, SpcsForSetReturnsMatchingSpcs) {
+    Model m = make_simple_model();
+    auto spcs = m.spcs_for_set(SpcSetId{1});
+    ASSERT_EQ(spcs.size(), 1u);
+    EXPECT_EQ(spcs[0]->node.value, 1);
+}
+
+TEST(Model, SpcsForSetReturnsEmptyForUnknownSet) {
+    Model m = make_simple_model();
+    auto spcs = m.spcs_for_set(SpcSetId{999});
+    EXPECT_TRUE(spcs.empty());
+}

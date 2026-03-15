@@ -25,8 +25,8 @@ struct NodeDisplacement {
 struct PlateStress {
   constexpr PlateStress() = default;
   ElementId eid{0};
-  double sx, sy, sxy;  // membrane stresses
-  double mx, my, mxy;  // moments (plate bending)
+  double sx{0}, sy{0}, sxy{0};  // membrane stresses
+  double mx{0}, my{0}, mxy{0};  // moments (plate bending)
   double von_mises{0}; // derived
 };
 
@@ -34,8 +34,8 @@ struct PlateStress {
 struct SolidStress {
   constexpr SolidStress() = default;
   ElementId eid{0};
-  double sx, sy, sz;
-  double sxy, syz, szx;
+  double sx{0}, sy{0}, sz{0};
+  double sxy{0}, syz{0}, szx{0};
   double von_mises{0};
 };
 

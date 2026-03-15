@@ -97,3 +97,64 @@ TEST(DofMap, GlobalIndicesSubset) {
     EXPECT_EQ(indices.size(), 3u);
     for (auto eq : indices) EXPECT_NE(eq, CONSTRAINED_DOF);
 }
+
+// Tests for is_free (only used in tests)
+TEST(DofMap, IsFreeTrueForUnconstrainedDof) {
+    auto nodes = two_nodes();
+    DofMap dm;
+    dm.build(nodes, 6);
+
+    // All DOFs should be free before any constraint
+    for (int d = 0; d < 6; ++d) {
+        EXPECT_TRUE(dm.is_free(NodeId{1}, d));
+        EXPECT_TRUE(dm.is_free(NodeId{2}, d));
+    }
+}
+
+TEST(DofMap, IsFreeFalseAfterConstrain) {
+    auto nodes = two_nodes();
+    DofMap dm;
+    dm.build(nodes, 6);
+
+    dm.constrain(NodeId{1}, 2); // fix T3 of node 1
+    EXPECT_FALSE(dm.is_free(NodeId{1}, 2));
+    // Other DOFs on same node should still be free
+    EXPECT_TRUE(dm.is_free(NodeId{1}, 0));
+    EXPECT_TRUE(dm.is_free(NodeId{2}, 2));
+}
+
+TEST(DofMap, IsFreeFalseForUnknownNode) {
+    auto nodes = two_nodes();
+    DofMap dm;
+    dm.build(nodes, 6);
+
+    // Unknown nodes are reported as not-free (CONSTRAINED_DOF)
+    EXPECT_FALSE(dm.is_free(NodeId{999}, 0));
+}
+
+// Tests for global_indices (only used in tests)
+TEST(DofMap, GlobalIndicesMatchEqIndex) {
+    auto nodes = two_nodes();
+    DofMap dm;
+    dm.build(nodes, 6);
+
+    std::array<EqIndex, 6> out{};
+    dm.global_indices(NodeId{1}, out);
+
+    for (int d = 0; d < 6; ++d)
+        EXPECT_EQ(out[d], dm.eq_index(NodeId{1}, d));
+}
+
+TEST(DofMap, GlobalIndicesAfterConstraint) {
+    auto nodes = two_nodes();
+    DofMap dm;
+    dm.build(nodes, 6);
+    dm.constrain(NodeId{1}, 0);
+
+    std::array<EqIndex, 6> out{};
+    dm.global_indices(NodeId{1}, out);
+
+    EXPECT_EQ(out[0], CONSTRAINED_DOF);
+    for (int d = 1; d < 6; ++d)
+        EXPECT_NE(out[d], CONSTRAINED_DOF);
+}

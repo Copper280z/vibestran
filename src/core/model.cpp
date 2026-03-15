@@ -8,11 +8,11 @@ namespace nastran {
 void Model::validate() const {
     // Check all element nodes exist
     for (const auto& elem : elements) {
-        for (NodeId nid : elem.nodes) {
-            if (!nodes.count(nid))
-                throw SolverError(std::format(
-                    "Element {} references undefined node {}", elem.id.value, nid.value));
-        }
+        auto missing_node = std::find_if(elem.nodes.begin(), elem.nodes.end(),
+            [&](NodeId nid) { return !nodes.count(nid); });
+        if (missing_node != elem.nodes.end())
+            throw SolverError(std::format(
+                "Element {} references undefined node {}", elem.id.value, missing_node->value));
         if (!properties.count(elem.pid))
             throw SolverError(std::format(
                 "Element {} references undefined property {}", elem.id.value, elem.pid.value));
@@ -35,11 +35,11 @@ void Model::validate() const {
     }
 
     // Check SPCs reference existing nodes
-    for (const auto& spc : spcs) {
-        if (!nodes.count(spc.node))
-            throw SolverError(std::format(
-                "SPC references undefined node {}", spc.node.value));
-    }
+    auto missing_spc = std::find_if(spcs.begin(), spcs.end(),
+        [&](const Spc& spc) { return !nodes.count(spc.node); });
+    if (missing_spc != spcs.end())
+        throw SolverError(std::format(
+            "SPC references undefined node {}", missing_spc->node.value));
 
     // Check load nodes exist
     for (const auto& load : loads) {

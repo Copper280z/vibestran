@@ -76,8 +76,8 @@ std::vector<EqIndex> DofMap::global_indices_subset(
     const auto& blk = block(node);
     std::vector<EqIndex> result;
     result.reserve(local_dofs.size());
-    for (int d : local_dofs)
-        result.push_back(blk.eq[d]);
+    std::transform(local_dofs.begin(), local_dofs.end(), std::back_inserter(result),
+                   [&](int d) { return blk.eq[d]; });
     return result;
 }
 

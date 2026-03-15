@@ -19,14 +19,9 @@ namespace nastran {
 struct BdfParser::ParseContext {
   Model model;
   int line_num{0};
-  std::string filename{"<string>"};
 
   // Collected TEMPD (default temperature) per set
   std::unordered_map<int, double> tempd_map;
-
-  // Current subcase being built during case control parsing
-  SubCase current_subcase;
-  bool in_subcase{false};
 };
 
 // ── Public entry points
@@ -101,7 +96,6 @@ Model BdfParser::parse_stream(std::istream &in) {
     // Simple tokenizer for case control
     SubCase cur_sc;
     bool in_sc = false;
-    int sc_id = 1;
 
     for (int i = 0; i < begin_bulk_line; ++i) {
       std::string upper = lines[i];
@@ -140,7 +134,6 @@ Model BdfParser::parse_stream(std::istream &in) {
             }
           }
         }
-        sc_id = cur_sc.id;
       } else if (kw.starts_with("LOAD")) {
         size_t eq = kw.find('=');
         if (eq != std::string::npos)
@@ -386,9 +379,8 @@ double BdfParser::parse_double(const std::string &s, int line) {
   // Nastran allows "1.5E+3", "1.5+3" (implicit E), "1.5D+3" (Fortran D)
   std::string clean = s;
   // Replace D exponent with E
-  for (char &c : clean)
-    if (c == 'D' || c == 'd')
-      c = 'E';
+  std::replace_if(clean.begin(), clean.end(),
+                  [](char c) { return c == 'D' || c == 'd'; }, 'E');
 
   // Handle implicit exponent: "1.5+3" → "1.5E+3"
   // Look for +/- not preceded by E or at the start

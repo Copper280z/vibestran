@@ -130,6 +130,8 @@ unit_test_sources = files(
   'tests/unit/test_dof_map.cpp',
   'tests/unit/test_bdf_parser.cpp',
   'tests/unit/test_elements.cpp',
+  'tests/unit/test_types.cpp',
+  'tests/unit/test_sparse_matrix.cpp',
 )
 
 unit_tests = executable(

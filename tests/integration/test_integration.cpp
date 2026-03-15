@@ -38,7 +38,7 @@ static SolverResults run_analysis(const std::string& bdf) {
 static double get_disp(const SolverResults& res, int node_id, int dof_0based) {
     for (const auto& sc : res.subcases)
         for (const auto& nd : sc.displacements)
-            if (nd.node.value == node_id)
+            if (nd.node.value == node_id) // cppcheck-suppress useStlAlgorithm
                 return nd.d[dof_0based];
     throw std::runtime_error("Node not found in results");
 }
