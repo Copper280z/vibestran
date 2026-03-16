@@ -49,6 +49,20 @@ static VkCommandBuffer begin_one_shot(const VulkanContext& ctx) {
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &begin);
+
+    // Full memory barrier: make all writes from previous submissions (uploads,
+    // compute dispatches) visible before any operation in this command buffer.
+    // Vulkan does not guarantee cross-submission memory visibility via fences
+    // alone — explicit barriers are required even on the same queue.
+    VkMemoryBarrier mb{};
+    mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        0, 1, &mb, 0, nullptr, 0, nullptr);
+
     return cmd;
 }
 
@@ -195,12 +209,23 @@ solve_full_gpu(VulkanContext& ctx, Pipelines& pl,
 
     double rz_old = gpu_dot(ctx, pl, r_buf, z_buf, partial_buf, n);
 
-    double norm_b_sq = std::inner_product(F.begin(), F.end(), F.begin(), 0.0);
-    double norm_b    = std::sqrt(norm_b_sq);
-    if (norm_b < 1e-300) norm_b = 1.0;
+    // Use the M^{-1}-norm of b as the convergence denominator.
+    // Mixed norms (preconditioned numerator / Euclidean denominator) cause false
+    // convergence for stiff systems where K_ii >> ||F||_2: the initial ratio
+    // sqrt(r^T M^{-1} r) / ||b||_2 can already be below tolerance before any
+    // meaningful iteration occurs.  With norm_b_m = sqrt(b^T M^{-1} b) =
+    // sqrt(rz_old) (since x=0 => r=b at this point), the initial residual
+    // ratio is exactly 1.0 by construction.
+    double norm_b_m = std::sqrt(std::abs(rz_old));
+    if (norm_b_m < 1e-300) {
+        // b is effectively zero — trivial solution is x = 0
+        out_iters    = 0;
+        out_residual = 0.0;
+        return std::vector<double>(n, 0.0);
+    }
 
     out_iters    = 0;
-    out_residual = std::sqrt(std::abs(rz_old)) / norm_b;
+    out_residual = 1.0; // sqrt(rz_old) / norm_b_m = 1 by construction
 
     // ── PCG iteration ─────────────────────────────────────────────────────
     double best_residual  = out_residual;
@@ -223,7 +248,7 @@ solve_full_gpu(VulkanContext& ctx, Pipelines& pl,
         gpu_jacobi(ctx, pl, diag_buf, r_buf, z_buf, n);
 
         double rz_new = gpu_dot(ctx, pl, r_buf, z_buf, partial_buf, n);
-        out_residual  = std::sqrt(std::abs(rz_new)) / norm_b;
+        out_residual  = std::sqrt(std::abs(rz_new)) / norm_b_m;
         out_iters     = iter + 1;
 
         if (out_residual < cfg.tolerance) break;
@@ -376,11 +401,17 @@ solve_full_gpu_double(VulkanContext& ctx, Pipelines& pl,
 
     double rz_old = gpu_dot_d(ctx, pl, r_buf, z_buf, partial_buf, n);
 
-    double norm_b = std::sqrt(std::inner_product(F.begin(), F.end(), F.begin(), 0.0));
-    if (norm_b < 1e-300) norm_b = 1.0;
+    // Use the M^{-1}-norm of b as the convergence denominator (same rationale
+    // as solve_full_gpu — see comment there for full explanation).
+    double norm_b_m = std::sqrt(std::abs(rz_old));
+    if (norm_b_m < 1e-300) {
+        out_iters    = 0;
+        out_residual = 0.0;
+        return std::vector<double>(n, 0.0);
+    }
 
     out_iters    = 0;
-    out_residual = std::sqrt(std::abs(rz_old)) / norm_b;
+    out_residual = 1.0; // sqrt(rz_old) / norm_b_m = 1 by construction
 
     // ── PCG iteration ─────────────────────────────────────────────────────
     double best_residual   = out_residual;
@@ -403,7 +434,7 @@ solve_full_gpu_double(VulkanContext& ctx, Pipelines& pl,
         gpu_jacobi_d(ctx, pl, diag_buf, r_buf, z_buf, n);
 
         double rz_new = gpu_dot_d(ctx, pl, r_buf, z_buf, partial_buf, n);
-        out_residual  = std::sqrt(std::abs(rz_new)) / norm_b;
+        out_residual  = std::sqrt(std::abs(rz_new)) / norm_b_m;
         out_iters     = iter + 1;
 
         if (out_residual < cfg.tolerance) break;

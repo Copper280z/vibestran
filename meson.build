@@ -56,8 +56,9 @@ else
   message('Using system Eigen3')
 endif
 
-# ── Thread support (for future parallel assembly) ────────────────────────────
+# ── Thread / parallel execution support ──────────────────────────────────────
 thread_dep = dependency('threads')
+tbb_dep    = dependency('tbb')
 
 # ── Vulkan compute backend (optional) ────────────────────────────────────────
 vulkan_dep = dependency('vulkan', required : false)
@@ -148,7 +149,7 @@ inc     = include_directories('include')
 src_inc = include_directories('src/solver') # for internal vulkan_pipelines.hpp
 
 # ── Library (solver logic, no main) ──────────────────────────────────────────
-solver_lib_deps = [eigen_dep, thread_dep]
+solver_lib_deps = [eigen_dep, thread_dep, tbb_dep]
 if have_vulkan_backend
   solver_lib_deps += vulkan_dep
 endif
