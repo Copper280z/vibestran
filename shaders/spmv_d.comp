@@ -1,0 +1,43 @@
+// shaders/spmv_d.comp
+// Double-precision sparse matrix-vector product: y = A * x (CSR format)
+// Identical structure to spmv.comp but with float64 storage buffers.
+// Requires shaderFloat64 physical device feature.
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PC {
+    uint row_start;
+    uint row_count;
+    uint n;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer RowPtr { int    row_ptr[]; };
+layout(set = 0, binding = 1) readonly buffer ColInd { int    col_ind[]; };
+layout(set = 0, binding = 2) readonly buffer Values { double values[]; };
+layout(set = 0, binding = 3) readonly buffer X      { double x[];       };
+layout(set = 0, binding = 4)          buffer Y      { double y[];       };
+
+shared double s[64];
+
+void main() {
+    uint row = gl_WorkGroupID.x + pc.row_start;
+    if (row >= pc.row_start + pc.row_count) return;
+
+    int start = row_ptr[row];
+    int end   = row_ptr[row + 1];
+    uint tid  = gl_LocalInvocationID.x;
+
+    double sum = 0.0;
+    for (int i = start + int(tid); i < end; i += 64)
+        sum += values[i] * x[col_ind[i]];
+
+    s[tid] = sum;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) s[tid] += s[tid + stride];
+        barrier();
+    }
+    if (tid == 0u) y[row] = s[0];
+}

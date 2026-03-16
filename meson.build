@@ -1,5 +1,6 @@
 # meson.build — NastranSolver build system
 # Requires: Meson >= 1.0, C++20 compiler, Eigen3
+# Optional: Vulkan SDK (vulkan headers + loader) and glslc for GPU acceleration
 # Usage:
 #   meson setup build --buildtype=release
 #   cd build && meson compile
@@ -14,6 +15,8 @@ project('nastran_solver', 'cpp',
     'default_library=static',
   ]
 )
+
+fs = import('fs')
 
 # ── Compiler setup ────────────────────────────────────────────────────────────
 cxx = meson.get_compiler('cpp')
@@ -56,6 +59,47 @@ endif
 # ── Thread support (for future parallel assembly) ────────────────────────────
 thread_dep = dependency('threads')
 
+# ── Vulkan compute backend (optional) ────────────────────────────────────────
+vulkan_dep = dependency('vulkan', required : false)
+glslc      = find_program('glslc', required : false)
+xxd        = find_program('xxd',   required : false)
+
+vulkan_sources = []
+vulkan_compile_args = []
+spirv_hdrs = []
+have_vulkan_backend = vulkan_dep.found() and glslc.found() and xxd.found()
+
+if have_vulkan_backend
+  shader_names = ['spmv', 'dot_reduce', 'axpby', 'jacobi_precond',
+                  'spmv_d', 'dot_reduce_d', 'axpby_d', 'jacobi_precond_d']
+  foreach name : shader_names
+    spv = custom_target(name + '_spv',
+      input   : 'shaders' / name + '.comp',
+      output  : name + '.spv',
+      command : [glslc, '--target-env=vulkan1.1', '-O', '@INPUT@', '-o', '@OUTPUT@'],
+    )
+    hdr = custom_target(name + '_hdr',
+      input   : spv,
+      output  : name + '_spv.h',
+      command : [xxd, '-i', '-n', name + '_spv', '@INPUT@', '@OUTPUT@'],
+    )
+    spirv_hdrs += hdr
+  endforeach
+
+  vulkan_sources = files(
+    'src/solver/vulkan_context.cpp',
+    'src/solver/vulkan_buffer.cpp',
+    'src/solver/vulkan_pipelines.cpp',
+    'src/solver/vulkan_pcg_full.cpp',
+    'src/solver/vulkan_pcg_tiled.cpp',
+    'src/solver/vulkan_solver_backend.cpp',
+  )
+  vulkan_compile_args = ['-DHAVE_VULKAN=1']
+  message('Vulkan compute backend: enabled')
+else
+  message('Vulkan compute backend: disabled (need vulkan, glslc, and xxd)')
+endif
+
 # ── cppcheck ─────────────────────────────────────────────────────────────────
 cppcheck = find_program('cppcheck', required: false)
 if cppcheck.found()
@@ -78,6 +122,7 @@ endif
 
 # ── Source files ─────────────────────────────────────────────────────────────
 solver_sources = files(
+  # Vulkan sources are appended conditionally below
   # Core
   'src/core/model.cpp',
   'src/core/dof_map.cpp',
@@ -95,22 +140,33 @@ solver_sources = files(
   'src/solver/linear_static.cpp',
 )
 
+# Append Vulkan sources when available
+solver_sources += vulkan_sources
+
 # Include directories
-inc = include_directories('include')
+inc     = include_directories('include')
+src_inc = include_directories('src/solver') # for internal vulkan_pipelines.hpp
 
 # ── Library (solver logic, no main) ──────────────────────────────────────────
+solver_lib_deps = [eigen_dep, thread_dep]
+if have_vulkan_backend
+  solver_lib_deps += vulkan_dep
+endif
+
 solver_lib = static_library(
   'nastransolver',
-  solver_sources,
-  include_directories : inc,
-  dependencies        : [eigen_dep, thread_dep],
+  [solver_sources, spirv_hdrs],
+  include_directories : [inc, src_inc],
+  dependencies        : solver_lib_deps,
+  cpp_args            : vulkan_compile_args,
   install             : false,
 )
 
 solver_lib_dep = declare_dependency(
   link_with           : solver_lib,
-  include_directories : inc,
-  dependencies        : [eigen_dep, thread_dep],
+  include_directories : [inc, src_inc],
+  dependencies        : solver_lib_deps,
+  compile_args        : vulkan_compile_args,
 )
 
 # ── Executable ───────────────────────────────────────────────────────────────
@@ -165,11 +221,26 @@ test('integration_tests', integration_tests,
   args    : ['--gtest_output=xml:' + meson.project_build_root() + '/integration_test_results.xml'],
 )
 
+# ── Vulkan unit tests (built only when Vulkan backend is available) ────────────
+if have_vulkan_backend
+  vulkan_tests = executable(
+    'vulkan_tests',
+    files('tests/unit/test_vulkan_solver.cpp'),
+    dependencies        : [solver_lib_dep, gtest_dep],
+    include_directories : [inc, src_inc],
+  )
+  test('vulkan_tests', vulkan_tests,
+    timeout : 120,
+    suite   : 'unit',
+  )
+endif
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 summary({
-  'Build type'  : get_option('buildtype'),
-  'C++ std'     : 'C++20',
-  'Eigen'       : eigen_dep.found(),
-  'Solver lib'  : solver_lib.name(),
-  'Executable'  : nastran_exe.name(),
+  'Build type'     : get_option('buildtype'),
+  'C++ std'        : 'C++20',
+  'Eigen'          : eigen_dep.found(),
+  'Vulkan backend' : have_vulkan_backend,
+  'Solver lib'     : solver_lib.name(),
+  'Executable'     : nastran_exe.name(),
 }, section : 'NastranSolver')

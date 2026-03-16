@@ -63,6 +63,10 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
 
   // 3. Solve
   auto csr = K_builder.build_csr();
+  const auto t4b = Clock::now();
+  std::clog << std::format("[subcase {}] build_csr: {:.3f} ms  ({} nnz)\n",
+                           sc.id, Ms(t4b - t4).count(), csr.nnz);
+
   std::vector<double> u_free = backend_->solve(csr, F);
   const auto t5 = Clock::now();
   std::clog << std::format("[subcase {}] linear solve: {:.3f} ms\n",

@@ -1,0 +1,32 @@
+// shaders/dot_reduce.comp
+// Dot product: partials[wg] = sum_{i in wg} a[i] * b[i]
+// Pass 1: each workgroup writes one partial sum.
+// Pass 2: CPU sums the partials (typically < 4096 values).
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    uint n;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer A        { float a[];        };
+layout(set = 0, binding = 1) readonly buffer B        { float b[];        };
+layout(set = 0, binding = 2)          buffer Partials { float partials[]; };
+
+shared float s[256];
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint tid = gl_LocalInvocationID.x;
+
+    s[tid] = (gid < pc.n) ? a[gid] * b[gid] : 0.0;
+    barrier();
+
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) s[tid] += s[tid + stride];
+        barrier();
+    }
+    if (tid == 0u)
+        partials[gl_WorkGroupID.x] = s[0];
+}

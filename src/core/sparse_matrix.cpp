@@ -1,7 +1,6 @@
 // src/core/sparse_matrix.cpp
 #include "core/sparse_matrix.hpp"
 #include "core/dof_map.hpp"
-#include <Eigen/Sparse>
 #include <algorithm>
 #include <numeric>
 #include <stdexcept>
@@ -40,25 +39,51 @@ void SparseMatrixBuilder::add_element_force(
   }
 }
 
-SparseMatrixBuilder::CsrData SparseMatrixBuilder::build_csr() const {
-  // Use Eigen to sum duplicates and compress into CSR
-  using ESM = Eigen::SparseMatrix<double, Eigen::RowMajor>;
-  std::vector<Eigen::Triplet<double>> eigen_trips;
-  eigen_trips.reserve(triplets_.size());
-  for (const auto &t : triplets_)
-    eigen_trips.emplace_back(t.row, t.col, t.value);
+SparseMatrixBuilder::CsrData SparseMatrixBuilder::build_csr() {
+  // Sort in-place by (row, col) so duplicates are adjacent.
+  std::sort(triplets_.begin(), triplets_.end(), [](const Triplet &a, const Triplet &b) {
+    return a.row != b.row ? a.row < b.row : a.col < b.col;
+  });
 
-  ESM mat(size_, size_);
-  mat.setFromTriplets(eigen_trips.begin(), eigen_trips.end());
-  mat.makeCompressed();
+  // Deduplicate in-place: sum values for identical (row, col).
+  // Write deduplicated entries back into triplets_ without any extra allocation.
+  size_t out = 0;
+  for (size_t i = 0; i < triplets_.size(); ++i) {
+    if (out > 0 && triplets_[i].row == triplets_[out - 1].row &&
+        triplets_[i].col == triplets_[out - 1].col) {
+      triplets_[out - 1].value += triplets_[i].value;
+    } else {
+      triplets_[out++] = triplets_[i];
+    }
+  }
+  triplets_.resize(out);
 
-  const int nnz = static_cast<int>(mat.nonZeros());
+  // Build CSR directly from the sorted, deduplicated triplets.
+  const int nnz = static_cast<int>(triplets_.size());
   CsrData csr;
-  csr.n = size_;
+  csr.n   = size_;
   csr.nnz = nnz;
-  csr.row_ptr.assign(mat.outerIndexPtr(), mat.outerIndexPtr() + size_ + 1);
-  csr.col_ind.assign(mat.innerIndexPtr(), mat.innerIndexPtr() + nnz);
-  csr.values.assign(mat.valuePtr(), mat.valuePtr() + nnz);
+  csr.row_ptr.assign(static_cast<size_t>(size_ + 1), 0);
+  csr.col_ind.resize(static_cast<size_t>(nnz));
+  csr.values.resize(static_cast<size_t>(nnz));
+
+  // Histogram: count entries per row.
+  for (const auto &t : triplets_)
+    ++csr.row_ptr[static_cast<size_t>(t.row + 1)];
+
+  // Prefix sum to get row_ptr.
+  std::partial_sum(csr.row_ptr.begin(), csr.row_ptr.end(), csr.row_ptr.begin());
+
+  // Fill col_ind and values.
+  for (int i = 0; i < nnz; ++i) {
+    csr.col_ind[static_cast<size_t>(i)] = triplets_[static_cast<size_t>(i)].col;
+    csr.values[static_cast<size_t>(i)]  = triplets_[static_cast<size_t>(i)].value;
+  }
+
+  // Release source memory now that CSR is built.
+  triplets_.clear();
+  triplets_.shrink_to_fit();
+
   return csr;
 }
 

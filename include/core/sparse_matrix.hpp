@@ -14,13 +14,6 @@
 #include <span>
 #include <vector>
 
-// Forward declare Eigen types to avoid including heavy headers in this
-// interface
-namespace Eigen {
-template <typename, int, typename> class SparseMatrix;
-template <typename, typename> class Triplet;
-} // namespace Eigen
-
 namespace nastran {
 
 /// A triplet (row, col, value) for sparse matrix assembly
@@ -56,7 +49,8 @@ public:
 
   [[nodiscard]] int size() const noexcept { return size_; }
 
-  /// Finalize: sort triplets and produce Eigen sparse matrix.
+  /// Finalize: sort and deduplicate triplets in-place, then produce CSR data.
+  /// Destructive: clears the triplet list to free memory after building.
   /// Returns the CSR data directly for potential GPU upload.
   struct CsrData {
     std::vector<int> row_ptr;   // size = n+1
@@ -66,7 +60,7 @@ public:
     int nnz;
   };
 
-  [[nodiscard]] CsrData build_csr() const;
+  [[nodiscard]] CsrData build_csr();
 
   /// The raw triplet list (useful for testing / inspection)
   [[nodiscard]] const std::vector<Triplet> &triplets() const noexcept {

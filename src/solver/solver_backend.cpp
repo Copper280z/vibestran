@@ -17,20 +17,18 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
     throw SolverError(
         std::format("Force vector size {} != matrix size {}", F.size(), n));
 
-  // Reconstruct Eigen sparse matrix from CSR
+  // Map CsrData arrays directly into an Eigen RowMajor sparse matrix.
+  // No copies: Eigen::Map references the existing vectors in-place.
+  using ESMR = Eigen::SparseMatrix<double, Eigen::RowMajor>;
+  Eigen::Map<const ESMR> K_row(
+      n, n, K_csr.nnz,
+      K_csr.row_ptr.data(),
+      K_csr.col_ind.data(),
+      K_csr.values.data());
+
+  // SimplicialLLT/LDLT expect ColMajor; convert with a single structural copy.
   using ESM = Eigen::SparseMatrix<double>;
-  ESM K(n, n);
-  {
-    std::vector<Eigen::Triplet<double>> trips;
-    trips.reserve(K_csr.nnz);
-    for (int row = 0; row < n; ++row) {
-      for (int idx = K_csr.row_ptr[row]; idx < K_csr.row_ptr[row + 1]; ++idx) {
-        trips.emplace_back(row, K_csr.col_ind[idx], K_csr.values[idx]);
-      }
-    }
-    K.setFromTriplets(trips.begin(), trips.end());
-  }
-  K.makeCompressed();
+  ESM K(K_row);
 
   // Map force vector
   Eigen::Map<const Eigen::VectorXd> F_eigen(F.data(), n);
