@@ -3,9 +3,12 @@
 //
 // Default backend is the Eigen CPU solver.  Use --backend to select a GPU solver
 // when available:
-//   --backend=cpu    Eigen sparse Cholesky (always available, default)
-//   --backend=vulkan Vulkan PCG (requires Vulkan SDK; note: higher latency than CUDA)
-//   --backend=cuda   NVIDIA cuSOLVER sparse Cholesky (requires CUDA toolkit)
+//   --backend=cpu               Eigen sparse Cholesky (always available, default)
+//   --backend=vulkan            Vulkan PCG (requires Vulkan SDK; note: higher latency than CUDA)
+//   --backend=cuda              NVIDIA cuSOLVER sparse Cholesky (requires CUDA toolkit)
+//   --cuda-single-precision     Use float32 instead of float64 for the CUDA solve.
+//                               Halves device memory usage; useful for very large problems
+//                               that exceed GPU memory in double precision.
 
 #include "io/bdf_parser.hpp"
 #include "io/results.hpp"
@@ -27,22 +30,26 @@ enum class BackendChoice { Auto, Cpu, Vulkan, Cuda };
 
 static void print_usage() {
     std::cerr <<
-        "Usage: nastran_solver [--backend=<cpu|vulkan|cuda>] <input.bdf> [output.f06]\n"
-        "  --backend=cpu    Eigen sparse Cholesky CPU solver (default)\n"
-        "  --backend=vulkan Vulkan PCG GPU solver (requires Vulkan)\n"
-        "  --backend=cuda   CUDA cuSOLVER sparse Cholesky (requires CUDA)\n";
+        "Usage: nastran_solver [--backend=<cpu|vulkan|cuda>] [--cuda-single-precision] <input.bdf> [output.f06]\n"
+        "  --backend=cpu              Eigen sparse Cholesky CPU solver (default)\n"
+        "  --backend=vulkan           Vulkan PCG GPU solver (requires Vulkan)\n"
+        "  --backend=cuda             CUDA cuSOLVER sparse Cholesky (requires CUDA)\n"
+        "  --cuda-single-precision    Use float32 for CUDA solve (halves GPU memory usage)\n";
 }
 
 int main(int argc, char* argv[]) {
     // ── Argument parsing ─────────────────────────────────────────────────────
     BackendChoice backend_choice = BackendChoice::Auto;
+    bool cuda_single_precision = false;
     int  positional = 0;
     std::filesystem::path bdf_path;
     std::filesystem::path f06_path;
 
     for (int i = 1; i < argc; ++i) {
         std::string_view arg(argv[i]);
-        if (arg.starts_with("--backend=")) {
+        if (arg == "--cuda-single-precision") {
+            cuda_single_precision = true;
+        } else if (arg.starts_with("--backend=")) {
             std::string_view val = arg.substr(std::string_view("--backend=").size());
             if (val == "cpu")         backend_choice = BackendChoice::Cpu;
             else if (val == "vulkan") backend_choice = BackendChoice::Vulkan;
@@ -88,7 +95,7 @@ int main(int argc, char* argv[]) {
 
         if (backend_choice == BackendChoice::Cuda) {
 #ifdef HAVE_CUDA
-            auto cu = nastran::CudaSolverBackend::try_create();
+            auto cu = nastran::CudaSolverBackend::try_create(cuda_single_precision);
             if (cu.has_value()) {
                 backend = std::make_unique<nastran::CudaSolverBackend>(std::move(*cu));
             } else {
