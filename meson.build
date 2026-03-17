@@ -136,6 +136,9 @@ if have_cuda_compiler
   )
   _cudss_inc  = include_directories('/usr/include/libcudss/12')
 
+  _cublas_lib   = cxx.find_library('cublas',   required: false)
+  _cusparse_lib = cxx.find_library('cusparse', required: false)
+
   if _cudart_lib.found() and _cudss_lib.found()
     cuda_dep = declare_dependency(
       dependencies:        [_cudart_lib, _cudss_lib],
@@ -146,6 +149,18 @@ if have_cuda_compiler
     cuda_lib_deps     = [cuda_dep]
     have_cuda_backend = true
     message('CUDA sparse solver backend: enabled (cuDSS)')
+
+    # PCG backend requires cuBLAS and cuSPARSE (standard CUDA toolkit libraries).
+    if _cublas_lib.found() and _cusparse_lib.found()
+      cuda_pcg_dep = declare_dependency(
+        dependencies: [_cudart_lib, _cublas_lib, _cusparse_lib],
+      )
+      cuda_sources      += files('src/solver/cuda_pcg_solver_backend.cu')
+      cuda_lib_deps     += [cuda_pcg_dep]
+      message('CUDA PCG solver backend: enabled (cuBLAS + cuSPARSE)')
+    else
+      message('CUDA PCG solver backend: disabled (cublas or cusparse not found)')
+    endif
   else
     message('CUDA sparse solver backend: disabled (cudart/cudss not found)')
   endif
@@ -245,6 +260,7 @@ unit_test_sources = files(
   'tests/unit/test_elements.cpp',
   'tests/unit/test_types.cpp',
   'tests/unit/test_sparse_matrix.cpp',
+  'tests/unit/test_pcg_solver.cpp',
 )
 
 unit_tests = executable(

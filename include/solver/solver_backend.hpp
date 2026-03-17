@@ -42,4 +42,40 @@ public:
     }
 };
 
+/// CPU backend using Eigen's Preconditioned Conjugate Gradient with Incomplete
+/// Cholesky preconditioning. Memory footprint is O(nnz) — no fill-in from
+/// factorization — making it suitable for very large sparse systems that would
+/// exhaust memory with a direct solver.
+///
+/// Convergence tolerance and maximum iterations are configurable. Default
+/// tolerance of 1e-8 is tighter than typical engineering requirements (1e-6)
+/// to leave headroom when the matrix is mildly ill-conditioned.
+class EigenPCGSolverBackend final : public SolverBackend {
+public:
+    /// @param tolerance   Relative residual convergence threshold ||r||/||b||.
+    /// @param max_iters   Maximum CG iterations (0 = Eigen default: 2*n).
+    explicit EigenPCGSolverBackend(double tolerance = 1e-8, int max_iters = 0)
+        : tolerance_(tolerance), max_iters_(max_iters) {}
+
+    [[nodiscard]] std::vector<double> solve(
+        const SparseMatrixBuilder::CsrData& K,
+        const std::vector<double>& F) override;
+
+    [[nodiscard]] std::string_view name() const noexcept override {
+        return "Eigen PCG + IncompleteCholesky (CPU)";
+    }
+
+    /// Number of CG iterations used in the most recent solve().
+    [[nodiscard]] int last_iteration_count() const noexcept { return last_iters_; }
+
+    /// Estimated relative residual after the most recent solve().
+    [[nodiscard]] double last_estimated_error() const noexcept { return last_error_; }
+
+private:
+    double tolerance_;
+    int    max_iters_;
+    int    last_iters_{0};
+    double last_error_{0.0};
+};
+
 } // namespace nastran

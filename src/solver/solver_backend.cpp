@@ -3,6 +3,7 @@
 #include "core/types.hpp"
 #include <Eigen/Sparse>
 #include <Eigen/SparseCholesky>
+#include <Eigen/IterativeLinearSolvers>
 #include <format>
 
 namespace nastran {
@@ -55,6 +56,61 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
     throw SolverError("Back-substitution failed");
 
   return std::vector<double>(u.data(), u.data() + n);
+}
+
+
+std::vector<double>
+EigenPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K_csr,
+                              const std::vector<double>& F) {
+    const int n = K_csr.n;
+    if (n == 0)
+        throw SolverError("Stiffness matrix is empty — no free DOFs");
+    if (static_cast<int>(F.size()) != n)
+        throw SolverError(
+            std::format("Force vector size {} != matrix size {}", F.size(), n));
+
+    // Map CsrData into Eigen ColMajor sparse matrix (required by ConjugateGradient).
+    using ESMR = Eigen::SparseMatrix<double, Eigen::RowMajor>;
+    using ESM  = Eigen::SparseMatrix<double>;
+    Eigen::Map<const ESMR> K_row(n, n, K_csr.nnz,
+                                  K_csr.row_ptr.data(),
+                                  K_csr.col_ind.data(),
+                                  K_csr.values.data());
+    ESM K(K_row);
+
+    Eigen::Map<const Eigen::VectorXd> F_eigen(F.data(), n);
+
+    // ConjugateGradient with Incomplete Cholesky (zero fill-in) preconditioner.
+    // IncompleteCholesky typically reduces iteration counts by 5-10× vs Jacobi
+    // for FEM stiffness matrices, at the cost of O(nnz) factorization memory
+    // (same asymptotic order as the matrix itself — no fill-in by default).
+    using Precond = Eigen::IncompleteCholesky<double, Eigen::Lower | Eigen::Upper>;
+    Eigen::ConjugateGradient<ESM, Eigen::Lower | Eigen::Upper, Precond> cg;
+
+    if (max_iters_ > 0)
+        cg.setMaxIterations(max_iters_);
+    cg.setTolerance(tolerance_);
+
+    cg.compute(K);
+    if (cg.info() != Eigen::Success)
+        throw SolverError(
+            "PCG preconditioner (IncompleteCholesky) setup failed — "
+            "matrix may not be positive definite. Check boundary conditions.");
+
+    Eigen::VectorXd u = cg.solve(F_eigen);
+
+    last_iters_ = static_cast<int>(cg.iterations());
+    last_error_ = cg.error();
+
+    if (cg.info() == Eigen::NoConvergence)
+        throw SolverError(
+            std::format("PCG did not converge after {} iterations "
+                        "(estimated error {:.3e} > tolerance {:.3e}). "
+                        "Consider increasing max iterations or checking "
+                        "boundary conditions.",
+                        last_iters_, last_error_, tolerance_));
+
+    return std::vector<double>(u.data(), u.data() + n);
 }
 
 } // namespace nastran

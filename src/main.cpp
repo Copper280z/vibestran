@@ -19,6 +19,7 @@
 #endif
 #ifdef HAVE_CUDA
 #  include "solver/cuda_solver_backend.hpp"
+#  include "solver/cuda_pcg_solver_backend.hpp"
 #endif
 #include <chrono>
 #include <filesystem>
@@ -26,14 +27,16 @@
 #include <memory>
 #include <string_view>
 
-enum class BackendChoice { Auto, Cpu, Vulkan, Cuda };
+enum class BackendChoice { Auto, Cpu, CpuPCG, Vulkan, Cuda, CudaPCG };
 
 static void print_usage() {
     std::cerr <<
-        "Usage: nastran_solver [--backend=<cpu|vulkan|cuda>] [--cuda-single-precision] <input.bdf> [output.f06]\n"
+        "Usage: nastran_solver [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg>] [--cuda-single-precision] <input.bdf> [output.f06]\n"
         "  --backend=cpu              Eigen sparse Cholesky CPU solver (default)\n"
+        "  --backend=cpu-pcg          Eigen PCG + IncompleteCholesky CPU solver (low memory)\n"
         "  --backend=vulkan           Vulkan PCG GPU solver (requires Vulkan)\n"
-        "  --backend=cuda             CUDA cuSOLVER sparse Cholesky (requires CUDA)\n"
+        "  --backend=cuda             CUDA cuDSS sparse direct solver (requires CUDA)\n"
+        "  --backend=cuda-pcg         CUDA PCG + IC0/ILU0 GPU solver (low memory, requires CUDA)\n"
         "  --cuda-single-precision    Use float32 for CUDA solve (halves GPU memory usage)\n";
 }
 
@@ -51,11 +54,13 @@ int main(int argc, char* argv[]) {
             cuda_single_precision = true;
         } else if (arg.starts_with("--backend=")) {
             std::string_view val = arg.substr(std::string_view("--backend=").size());
-            if (val == "cpu")         backend_choice = BackendChoice::Cpu;
-            else if (val == "vulkan") backend_choice = BackendChoice::Vulkan;
-            else if (val == "cuda")   backend_choice = BackendChoice::Cuda;
+            if (val == "cpu")           backend_choice = BackendChoice::Cpu;
+            else if (val == "cpu-pcg")  backend_choice = BackendChoice::CpuPCG;
+            else if (val == "vulkan")   backend_choice = BackendChoice::Vulkan;
+            else if (val == "cuda")     backend_choice = BackendChoice::Cuda;
+            else if (val == "cuda-pcg") backend_choice = BackendChoice::CudaPCG;
             else {
-                std::cerr << "Unknown backend '" << val << "'. Valid: cpu, vulkan, cuda\n";
+                std::cerr << "Unknown backend '" << val << "'. Valid: cpu, cpu-pcg, vulkan, cuda, cuda-pcg\n";
                 print_usage();
                 return 1;
             }
@@ -93,7 +98,9 @@ int main(int argc, char* argv[]) {
         // ── Backend selection ─────────────────────────────────────────────────
         std::unique_ptr<nastran::SolverBackend> backend;
 
-        if (backend_choice == BackendChoice::Cuda) {
+        if (backend_choice == BackendChoice::CpuPCG) {
+            backend = std::make_unique<nastran::EigenPCGSolverBackend>();
+        } else if (backend_choice == BackendChoice::Cuda) {
 #ifdef HAVE_CUDA
             auto cu = nastran::CudaSolverBackend::try_create(cuda_single_precision);
             if (cu.has_value()) {
@@ -104,6 +111,19 @@ int main(int argc, char* argv[]) {
             }
 #else
             std::cerr << "CUDA backend was not compiled into this build\n";
+            return 1;
+#endif
+        } else if (backend_choice == BackendChoice::CudaPCG) {
+#ifdef HAVE_CUDA
+            auto cu = nastran::CudaPCGSolverBackend::try_create();
+            if (cu.has_value()) {
+                backend = std::make_unique<nastran::CudaPCGSolverBackend>(std::move(*cu));
+            } else {
+                std::cerr << "CUDA PCG backend requested but no CUDA device found\n";
+                return 1;
+            }
+#else
+            std::cerr << "CUDA PCG backend was not compiled into this build\n";
             return 1;
 #endif
         } else if (backend_choice == BackendChoice::Vulkan) {
