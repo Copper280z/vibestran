@@ -102,7 +102,7 @@ else
 endif
 
 # ── CUDA sparse solver backend (optional) ────────────────────────────────────
-# Requires: CUDA toolkit >= 11.0 with cuSOLVER and cuSPARSE.
+# Requires: CUDA toolkit >= 11.0 with cuDSS >= 0.7.
 # The CUDA compiler (nvcc) is registered via add_languages(); when it is absent
 # the entire block is skipped and the build proceeds without CUDA support.
 have_cuda_compiler = add_languages('cuda', required: false, native: false)
@@ -125,21 +125,29 @@ if have_cuda_compiler
   # system packages (headers in /usr/include, libs in /usr/lib), the module-based
   # detection fails.  Use find_library() + declare_dependency() instead so we
   # work with both installation styles.
-  _cudart_lib   = cxx.find_library('cudart',   required: false)
-  _cusolver_lib = cxx.find_library('cusolver', required: false)
-  _cusparse_lib = cxx.find_library('cusparse', required: false)
+  #
+  # cuDSS installs its library and headers into versioned subdirectories:
+  #   headers: /usr/include/libcudss/12/
+  #   library: /usr/lib/x86_64-linux-gnu/libcudss/12/
+  _cudart_lib = cxx.find_library('cudart', required: false)
+  _cudss_lib  = cxx.find_library('cudss',
+    required: false,
+    dirs: ['/usr/lib/x86_64-linux-gnu/libcudss/12'],
+  )
+  _cudss_inc  = include_directories('/usr/include/libcudss/12')
 
-  if _cudart_lib.found() and _cusolver_lib.found() and _cusparse_lib.found()
+  if _cudart_lib.found() and _cudss_lib.found()
     cuda_dep = declare_dependency(
-      dependencies: [_cudart_lib, _cusolver_lib, _cusparse_lib],
+      dependencies:        [_cudart_lib, _cudss_lib],
+      include_directories: _cudss_inc,
     )
     cuda_sources      = files('src/solver/cuda_solver_backend.cu')
     cuda_compile_args = ['-DHAVE_CUDA=1']
     cuda_lib_deps     = [cuda_dep]
     have_cuda_backend = true
-    message('CUDA sparse solver backend: enabled')
+    message('CUDA sparse solver backend: enabled (cuDSS)')
   else
-    message('CUDA sparse solver backend: disabled (cudart/cusolver/cusparse not found)')
+    message('CUDA sparse solver backend: disabled (cudart/cudss not found)')
   endif
 else
   message('CUDA sparse solver backend: disabled (no CUDA compiler / nvcc not in PATH)')

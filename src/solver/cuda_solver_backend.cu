@@ -1,17 +1,21 @@
 // src/solver/cuda_solver_backend.cu
-// CUDA sparse solver backend: cuSOLVER sparse Cholesky + QR fallback.
+// CUDA sparse solver backend using NVIDIA cuDSS (direct sparse solver library).
 //
 // Solver selection logic:
-//   1. Try cusolverSpDcsrlsvchol (device-side sparse Cholesky, AMD reordering).
-//      Optimal for SPD FEM stiffness matrices; fills in far less than QR.
-//   2. If Cholesky reports singularity (singularity != -1) or the residual
-//      is too large, retry with cusolverSpDcsrlsvqr (device-side sparse QR,
-//      AMD reordering) which handles non-SPD and mildly ill-conditioned
-//      matrices.
+//   1. Try CUDSS_MTYPE_SPD (Cholesky, AMD reordering).
+//      Optimal for SPD FEM stiffness matrices; less fill-in and workspace than
+//      LU.
+//   2. If Cholesky factorisation fails or the residual is too large, retry with
+//      CUDSS_MTYPE_GENERAL (LU with partial pivoting, AMD reordering) which
+//      handles non-SPD and mildly ill-conditioned matrices.
 //
-// Both paths allocate GPU memory, copy data host→device, run the
-// factorisation and solve on-device, then copy the solution device→host.
-// cuSOLVER manages its own internal scratch allocations.
+// Both paths allocate GPU memory, execute all cuDSS phases on-device
+// (ANALYSIS → FACTORIZATION → SOLVE), then copy the solution host←device.
+//
+// For large problems where cuDSS's internal workspace exceeds device memory,
+// single-precision mode (try_create(use_single_precision=true)) halves the
+// device memory footprint by downcasting inputs to float before the solve and
+// upcasting the result back to double.
 //
 // Note: this file is only compiled when the CUDA backend is enabled in
 // meson (have_cuda_backend=true), so HAVE_CUDA is guaranteed to be defined.
@@ -28,8 +32,7 @@
 #include "core/exceptions.hpp"
 
 #include <cuda_runtime.h>
-#include <cusolverSp.h>
-#include <cusparse.h>
+#include <cudss.h>
 
 #include <cmath>
 #include <iostream>
@@ -42,8 +45,7 @@ namespace nastran {
 // ──────────────────────────────────────────────────────────────
 
 struct CudaContext {
-  cusolverSpHandle_t cusolver = nullptr;
-  cusparseHandle_t cusparse = nullptr;
+  cudssHandle_t cudss = nullptr;
   std::string device_name;
   bool use_single_precision = false;
 };
@@ -56,17 +58,17 @@ template <typename T> struct DeviceBuffer {
   explicit DeviceBuffer(std::size_t count) {
     if (count == 0)
       return;
-    cudaError_t err = cudaMalloc(reinterpret_cast<void **>(&ptr), count * sizeof(T));
+    cudaError_t err =
+        cudaMalloc(reinterpret_cast<void **>(&ptr), count * sizeof(T));
     if (err != cudaSuccess)
-      throw SolverError(
-          "CUDA solver: cudaMalloc failed for " + std::to_string(count) +
-          " elements: " + cudaGetErrorString(err));
+      throw SolverError("CUDA solver: cudaMalloc failed for " +
+                        std::to_string(count) +
+                        " elements: " + cudaGetErrorString(err));
   }
   ~DeviceBuffer() {
     if (ptr)
       cudaFree(ptr);
   }
-  // Non-copyable, movable.
   DeviceBuffer(const DeviceBuffer &) = delete;
   DeviceBuffer &operator=(const DeviceBuffer &) = delete;
   DeviceBuffer(DeviceBuffer &&o) noexcept : ptr(o.ptr) { o.ptr = nullptr; }
@@ -80,25 +82,62 @@ template <typename T> struct DeviceBuffer {
     return *this;
   }
 
-  // Upload count elements from a host pointer.
   void upload(const T *host, std::size_t count) {
     cudaError_t err =
         cudaMemcpy(ptr, host, count * sizeof(T), cudaMemcpyHostToDevice);
     if (err != cudaSuccess)
-      throw SolverError(
-          std::string("CUDA solver: cudaMemcpy H→D failed: ") +
-          cudaGetErrorString(err));
+      throw SolverError(std::string("CUDA solver: cudaMemcpy H→D failed: ") +
+                        cudaGetErrorString(err));
   }
 
-  // Download count elements to a host pointer.
   void download(T *host, std::size_t count) const {
     cudaError_t err =
         cudaMemcpy(host, ptr, count * sizeof(T), cudaMemcpyDeviceToHost);
     if (err != cudaSuccess)
-      throw SolverError(
-          std::string("CUDA solver: cudaMemcpy D→H failed: ") +
-          cudaGetErrorString(err));
+      throw SolverError(std::string("CUDA solver: cudaMemcpy D→H failed: ") +
+                        cudaGetErrorString(err));
   }
+};
+
+// RAII wrappers for cuDSS objects.
+struct CuDSSConfig {
+  cudssConfig_t cfg = nullptr;
+  CuDSSConfig() {
+    if (cudssConfigCreate(&cfg) != CUDSS_STATUS_SUCCESS)
+      throw SolverError("CUDA solver: cudssConfigCreate failed");
+  }
+  ~CuDSSConfig() {
+    if (cfg)
+      cudssConfigDestroy(cfg);
+  }
+  CuDSSConfig(const CuDSSConfig &) = delete;
+  CuDSSConfig &operator=(const CuDSSConfig &) = delete;
+};
+
+struct CuDSSData {
+  cudssHandle_t handle;
+  cudssData_t data = nullptr;
+  explicit CuDSSData(cudssHandle_t h) : handle(h) {
+    if (cudssDataCreate(handle, &data) != CUDSS_STATUS_SUCCESS)
+      throw SolverError("CUDA solver: cudssDataCreate failed");
+  }
+  ~CuDSSData() {
+    if (data)
+      cudssDataDestroy(handle, data);
+  }
+  CuDSSData(const CuDSSData &) = delete;
+  CuDSSData &operator=(const CuDSSData &) = delete;
+};
+
+struct CuDSSMatrix {
+  cudssMatrix_t mat = nullptr;
+  CuDSSMatrix() = default;
+  ~CuDSSMatrix() {
+    if (mat)
+      cudssMatrixDestroy(mat);
+  }
+  CuDSSMatrix(const CuDSSMatrix &) = delete;
+  CuDSSMatrix &operator=(const CuDSSMatrix &) = delete;
 };
 
 // ── Constructor / destructor
@@ -110,10 +149,8 @@ CudaSolverBackend::CudaSolverBackend(std::unique_ptr<CudaContext> ctx) noexcept
 CudaSolverBackend::~CudaSolverBackend() {
   if (!ctx_)
     return;
-  if (ctx_->cusparse)
-    cusparseDestroy(ctx_->cusparse);
-  if (ctx_->cusolver)
-    cusolverSpDestroy(ctx_->cusolver);
+  if (ctx_->cudss)
+    cudssDestroy(ctx_->cudss);
 }
 
 CudaSolverBackend::CudaSolverBackend(CudaSolverBackend &&) noexcept = default;
@@ -129,7 +166,6 @@ CudaSolverBackend::try_create(bool use_single_precision) noexcept {
   if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0)
     return std::nullopt;
 
-  // Select device 0; a future extension could let the user pick.
   if (cudaSetDevice(0) != cudaSuccess)
     return std::nullopt;
 
@@ -140,13 +176,8 @@ CudaSolverBackend::try_create(bool use_single_precision) noexcept {
     ctx->device_name = props.name;
   ctx->use_single_precision = use_single_precision;
 
-  if (cusolverSpCreate(&ctx->cusolver) != CUSOLVER_STATUS_SUCCESS)
+  if (cudssCreate(&ctx->cudss) != CUDSS_STATUS_SUCCESS)
     return std::nullopt;
-
-  if (cusparseCreate(&ctx->cusparse) != CUSPARSE_STATUS_SUCCESS) {
-    cusolverSpDestroy(ctx->cusolver);
-    return std::nullopt;
-  }
 
   return CudaSolverBackend(std::move(ctx));
 }
@@ -155,7 +186,7 @@ CudaSolverBackend::try_create(bool use_single_precision) noexcept {
 // ─────────────────────────────────────────────────────────────────
 
 std::string_view CudaSolverBackend::name() const noexcept {
-  return "CUDA cuSOLVER sparse Cholesky";
+  return "CUDA cuDSS sparse direct solver";
 }
 
 bool CudaSolverBackend::last_solve_used_cholesky() const noexcept {
@@ -174,9 +205,6 @@ bool CudaSolverBackend::uses_single_precision() const noexcept {
 // ───────────────────────────────────────────────────────
 
 // Compute relative residual ||K*u - F||_2 / ||F||_2 on the CPU.
-// Used to detect garbage solutions from near-singular matrices that cuSOLVER's
-// Cholesky factorises without reporting singularity (e.g. SPSD matrices where
-// the near-zero pivot exceeds the factorisation tolerance).
 static double relative_residual(const SparseMatrixBuilder::CsrData &K,
                                 const std::vector<double> &u,
                                 const std::vector<double> &F) {
@@ -196,19 +224,194 @@ static double relative_residual(const SparseMatrixBuilder::CsrData &K,
   return std::sqrt(res_sq / rhs_sq);
 }
 
+// ── cudss_execute_phase: thin error-checking wrapper
+// ─────────────────────────────────────────────────────
+
+static cudssStatus_t cudss_execute(cudssHandle_t handle, cudssPhase_t phase,
+                                   cudssConfig_t cfg, cudssData_t data,
+                                   cudssMatrix_t A, cudssMatrix_t x,
+                                   cudssMatrix_t b) {
+  return cudssExecute(handle, phase, cfg, data, A, x, b);
+}
+
+// ── solve_cudss: run analysis + factorization + solve for a given matrix type
+// Returns false (without throwing) for recoverable factorisation failures so
+// the caller can retry with a different matrix type.
+// Throws SolverError for unrecoverable errors (bad status, alloc failure, etc.)
+template <typename Scalar>
+static bool solve_cudss(cudssHandle_t handle, const std::string &device_name,
+                        int n, int nnz, DeviceBuffer<Scalar> &d_values,
+                        DeviceBuffer<int> &d_row_ptr,
+                        DeviceBuffer<int> &d_col_ind, DeviceBuffer<Scalar> &d_F,
+                        DeviceBuffer<Scalar> &d_u, cudssMatrixType_t mtype,
+                        cudaDataType_t scalar_type, const std::string &label) {
+  // Reset solution buffer.
+  cudaMemset(d_u.ptr, 0, (std::size_t)n * sizeof(Scalar));
+
+  CuDSSConfig cfg;
+  CuDSSData solver_data(handle);
+
+  // Configure reordering: CUDSS_ALG_DEFAULT uses AMD-like nested dissection.
+  cudssAlgType_t reorder_alg = CUDSS_ALG_DEFAULT;
+  cudssConfigSet(cfg.cfg, CUDSS_CONFIG_REORDERING_ALG, &reorder_alg,
+                 sizeof(reorder_alg));
+
+  // Build the sparse matrix descriptor.
+  // Pass rowEnd=NULL: cuDSS treats rowStart as a standard n+1 CSR offsets
+  // array. For SPD/symmetric types, use MVIEW_UPPER — cuDSS reads only the
+  // upper triangle and ignores any lower-triangle entries present in the full
+  // matrix. For GENERAL, use MVIEW_FULL.
+  cudssMatrixViewType_t mview =
+      (mtype == CUDSS_MTYPE_GENERAL) ? CUDSS_MVIEW_FULL : CUDSS_MVIEW_UPPER;
+
+  CuDSSMatrix A_mat;
+  cudssStatus_t st = cudssMatrixCreateCsr(&A_mat.mat,
+                                          /*nrows=*/static_cast<int64_t>(n),
+                                          /*ncols=*/static_cast<int64_t>(n),
+                                          /*nnz=*/static_cast<int64_t>(nnz),
+                                          /*rowStart=*/d_row_ptr.ptr,
+                                          /*rowEnd=*/nullptr,
+                                          /*colIndices=*/d_col_ind.ptr,
+                                          /*values=*/d_values.ptr,
+                                          /*indexType=*/CUDA_R_32I,
+                                          /*valueType=*/scalar_type, mtype,
+                                          mview, CUDSS_BASE_ZERO);
+  if (st != CUDSS_STATUS_SUCCESS)
+    throw SolverError("CUDA solver: cudssMatrixCreateCsr failed, status=" +
+                      std::to_string(static_cast<int>(st)));
+
+  // RHS dense vector.
+  CuDSSMatrix b_mat;
+  st = cudssMatrixCreateDn(&b_mat.mat,
+                           /*nrows=*/static_cast<int64_t>(n),
+                           /*ncols=*/1,
+                           /*ld=*/static_cast<int64_t>(n), d_F.ptr, scalar_type,
+                           CUDSS_LAYOUT_COL_MAJOR);
+  if (st != CUDSS_STATUS_SUCCESS)
+    throw SolverError("CUDA solver: cudssMatrixCreateDn (rhs) failed, status=" +
+                      std::to_string(static_cast<int>(st)));
+
+  // Solution dense vector.
+  CuDSSMatrix x_mat;
+  st = cudssMatrixCreateDn(&x_mat.mat, static_cast<int64_t>(n), 1,
+                           static_cast<int64_t>(n), d_u.ptr, scalar_type,
+                           CUDSS_LAYOUT_COL_MAJOR);
+  if (st != CUDSS_STATUS_SUCCESS)
+    throw SolverError("CUDA solver: cudssMatrixCreateDn (sol) failed, status=" +
+                      std::to_string(static_cast<int>(st)));
+
+  constexpr double kMiB = 1024.0 * 1024.0;
+
+  // Helper: enable hybrid mode on cfg and re-run analysis.
+  // Returns the status of the re-run analysis.
+  auto enable_hybrid_and_reanalyse = [&]() -> cudssStatus_t {
+    int hybrid_mode = 1;
+    cudssConfigSet(cfg.cfg, CUDSS_CONFIG_HYBRID_MODE, &hybrid_mode,
+                   sizeof(hybrid_mode));
+    cudssStatus_t s =
+        cudss_execute(handle, CUDSS_PHASE_ANALYSIS, cfg.cfg, solver_data.data,
+                      A_mat.mat, x_mat.mat, b_mat.mat);
+    if (s == CUDSS_STATUS_SUCCESS) {
+      int64_t dev_mem_min = 0;
+      cudssDataGet(handle, solver_data.data,
+                   CUDSS_DATA_HYBRID_DEVICE_MEMORY_MIN, &dev_mem_min,
+                   sizeof(dev_mem_min), nullptr);
+      std::clog
+          << "[cuda] cuDSS hybrid mode active: min device memory required="
+          << dev_mem_min / kMiB << " MiB\n";
+    }
+    return s;
+  };
+
+  // ── Analysis pass 1 (no hybrid) ──────────────────────────────────────────
+  // Run analysis without hybrid first to obtain memory estimates cheaply.
+  // If it fails with ALLOC_FAILED the symbolic phase itself needs more memory
+  // than is available on device — enable hybrid and retry immediately.
+  // It's not clear that trying analysis without hybrid first is the right
+  // choice, it may be better to always use hybrid, since it will attempt to use
+  // all vram if possible.
+  st = cudss_execute(handle, CUDSS_PHASE_ANALYSIS, cfg.cfg, solver_data.data,
+                     A_mat.mat, x_mat.mat, b_mat.mat);
+  if (st == CUDSS_STATUS_ALLOC_FAILED) {
+    std::clog << "[cuda] cuDSS (" << label
+              << "): analysis alloc failed -- "
+                 "enabling hybrid mode and retrying\n";
+    st = enable_hybrid_and_reanalyse();
+    if (st != CUDSS_STATUS_SUCCESS)
+      throw SolverError(
+          "CUDA solver: cuDSS analysis failed even in hybrid mode (" + label +
+          "), status=" + std::to_string(static_cast<int>(st)) +
+          ". Retry with --cuda-single-precision to halve GPU memory usage.");
+  } else if (st != CUDSS_STATUS_SUCCESS) {
+    throw SolverError("CUDA solver: cuDSS analysis failed (" + label +
+                      "), status=" + std::to_string(static_cast<int>(st)));
+  } else {
+    // Analysis succeeded — check if factorisation peak would exceed device
+    // memory. Layout: [0]=device stable, [1]=device peak, [2]=host stable,
+    // [3]=host peak
+    int64_t mem_est[16] = {0};
+    cudssDataGet(handle, solver_data.data, CUDSS_DATA_MEMORY_ESTIMATES,
+                 &mem_est, sizeof(mem_est), nullptr);
+    std::clog << "[cuda] cuDSS memory estimates (" << label << "):"
+              << " device stable=" << mem_est[0] / kMiB << " MiB"
+              << " peak=" << mem_est[1] / kMiB << " MiB"
+              << ", host stable=" << mem_est[2] / kMiB << " MiB"
+              << " peak=" << mem_est[3] / kMiB << " MiB\n";
+
+    std::size_t free_bytes = 0, total_bytes = 0;
+    cudaMemGetInfo(&free_bytes, &total_bytes);
+    const int64_t threshold = static_cast<int64_t>(free_bytes * 0.85);
+    if (mem_est[1] > threshold) {
+      std::clog << "[cuda] cuDSS (" << label << "): device peak estimate "
+                << mem_est[1] / kMiB << " MiB exceeds 85% of free memory ("
+                << free_bytes / kMiB << " MiB) -- enabling hybrid mode\n";
+      st = enable_hybrid_and_reanalyse();
+      if (st != CUDSS_STATUS_SUCCESS)
+        throw SolverError("CUDA solver: cuDSS analysis (hybrid) failed (" +
+                          label +
+                          "), status=" + std::to_string(static_cast<int>(st)));
+    }
+  }
+
+  // ── Factorisation ─────────────────────────────────────────────────────────
+  st = cudss_execute(handle, CUDSS_PHASE_FACTORIZATION, cfg.cfg,
+                     solver_data.data, A_mat.mat, x_mat.mat, b_mat.mat);
+  if (st == CUDSS_STATUS_ALLOC_FAILED)
+    throw SolverError(
+        "CUDA solver: cuDSS factorisation alloc failed -- matrix too large for "
+        "device workspace (n=" +
+        std::to_string(n) + ", nnz=" + std::to_string(nnz) +
+        "). Retry with --cuda-single-precision to halve GPU memory usage.");
+  // Non-success for SPD factorisation likely means matrix is not positive
+  // definite; return false so the caller can retry with GENERAL type.
+  if (st != CUDSS_STATUS_SUCCESS) {
+    std::clog << "[cuda] cuDSS " << label
+              << " factorisation failed, status=" << static_cast<int>(st)
+              << " -- will retry with LU\n";
+    return false;
+  }
+
+  // ── Solve ─────────────────────────────────────────────────────────────────
+  st = cudss_execute(handle, CUDSS_PHASE_SOLVE, cfg.cfg, solver_data.data,
+                     A_mat.mat, x_mat.mat, b_mat.mat);
+  if (st != CUDSS_STATUS_SUCCESS)
+    throw SolverError("CUDA solver: cuDSS solve failed (" + label +
+                      "), status=" + std::to_string(static_cast<int>(st)));
+
+  (void)device_name; // used by caller in log messages
+  return true;
+}
+
 // ── solve_single_precision
 // ────────────────────────────────────────────────────
-// Float32 Cholesky path: downcasts inputs to float, runs cusolverSpScsrlsvchol
-// on-device, upcasts result back to double.  Halves device memory usage versus
-// the double path at the cost of ~7 significant digits.
+
 static std::vector<double>
-solve_single_precision(cusolverSpHandle_t cusolver, const std::string &device_name,
+solve_single_precision(cudssHandle_t handle, const std::string &device_name,
                        const SparseMatrixBuilder::CsrData &K,
                        const std::vector<double> &F) {
   const int n = K.n;
   const int nnz = K.nnz;
 
-  // Downcast CSR values and RHS to float.
   std::vector<float> values_f(nnz);
   std::vector<float> F_f(n);
   for (int i = 0; i < nnz; ++i)
@@ -216,12 +419,11 @@ solve_single_precision(cusolverSpHandle_t cusolver, const std::string &device_na
   for (int i = 0; i < n; ++i)
     F_f[i] = static_cast<float>(F[i]);
 
-  std::size_t alloc_bytes =
-      (std::size_t)nnz * sizeof(float)    // d_values
-      + (std::size_t)(n + 1) * sizeof(int) // d_row_ptr
-      + (std::size_t)nnz * sizeof(int)     // d_col_ind
-      + (std::size_t)n * sizeof(float)     // d_F
-      + (std::size_t)n * sizeof(float);    // d_u
+  std::size_t alloc_bytes = (std::size_t)nnz * sizeof(float)     // d_values
+                            + (std::size_t)(n + 1) * sizeof(int) // d_row_ptr
+                            + (std::size_t)nnz * sizeof(int)     // d_col_ind
+                            + (std::size_t)n * sizeof(float)     // d_F
+                            + (std::size_t)n * sizeof(float);    // d_u
   std::size_t free_bytes = 0, total_bytes = 0;
   cudaMemGetInfo(&free_bytes, &total_bytes);
   std::clog << "[cuda] single-precision device memory: allocating "
@@ -230,8 +432,8 @@ solve_single_precision(cusolverSpHandle_t cusolver, const std::string &device_na
             << ", total=" << total_bytes / (1024.0 * 1024.0) << " MiB)\n";
 
   DeviceBuffer<float> d_values(nnz);
-  DeviceBuffer<int>   d_row_ptr(n + 1);
-  DeviceBuffer<int>   d_col_ind(nnz);
+  DeviceBuffer<int> d_row_ptr(n + 1);
+  DeviceBuffer<int> d_col_ind(nnz);
   DeviceBuffer<float> d_F(n);
   DeviceBuffer<float> d_u(n);
 
@@ -240,49 +442,29 @@ solve_single_precision(cusolverSpHandle_t cusolver, const std::string &device_na
   d_col_ind.upload(K.col_ind.data(), nnz);
   d_F.upload(F_f.data(), n);
 
-  cusparseMatDescr_t descr = nullptr;
-  if (cusparseCreateMatDescr(&descr) != CUSPARSE_STATUS_SUCCESS)
-    throw SolverError("CUDA solver: cusparseCreateMatDescr failed");
-  cusparseSetMatType(descr, CUSPARSE_MATRIX_TYPE_GENERAL);
-  cusparseSetMatIndexBase(descr, CUSPARSE_INDEX_BASE_ZERO);
-  cusparseSetMatDiagType(descr, CUSPARSE_DIAG_TYPE_NON_UNIT);
-
-  int singularity = -1;
-  cusolverStatus_t status =
-      cusolverSpScsrlsvchol(cusolver, n, nnz, descr,
-                            d_values.ptr, d_row_ptr.ptr, d_col_ind.ptr,
-                            d_F.ptr,
-                            /*tol=*/1e-6f,
-                            /*reorder=*/1,
-                            d_u.ptr, &singularity);
-
-  cusparseDestroyMatDescr(descr);
-
-  if (status == CUSOLVER_STATUS_ALLOC_FAILED)
-    throw SolverError(
-        "CUDA solver: single-precision Cholesky internal alloc failed "
-        "(matrix too large for device workspace, n=" + std::to_string(n) +
-        ", nnz=" + std::to_string(nnz) + ")");
-  if (status != CUSOLVER_STATUS_SUCCESS)
-    throw SolverError(
-        "CUDA solver: cusolverSpScsrlsvchol failed with status " +
-        std::to_string(static_cast<int>(status)));
-  if (singularity != -1)
-    throw SolverError(
-        "CUDA solver: single-precision Cholesky reported singularity at row " +
-        std::to_string(singularity) +
-        " -- check boundary conditions (SPCs)");
+  bool ok = solve_cudss<float>(handle, device_name, n, nnz, d_values, d_row_ptr,
+                               d_col_ind, d_F, d_u, CUDSS_MTYPE_SPD, CUDA_R_32F,
+                               "SPD/float");
+  if (!ok) {
+    std::clog << "[cuda] single-precision SPD failed -- retrying with LU\n";
+    ok = solve_cudss<float>(handle, device_name, n, nnz, d_values, d_row_ptr,
+                            d_col_ind, d_F, d_u, CUDSS_MTYPE_GENERAL,
+                            CUDA_R_32F, "LU/float");
+    if (!ok)
+      throw SolverError(
+          "CUDA solver: single-precision LU factorisation failed -- "
+          "stiffness matrix may be singular. Check boundary conditions (SPCs)");
+  }
 
   std::vector<float> u_f(n);
   d_u.download(u_f.data(), n);
 
-  // Upcast result to double.
   std::vector<double> u(n);
   for (int i = 0; i < n; ++i)
     u[i] = static_cast<double>(u_f[i]);
 
-  std::clog << "[cuda] single-precision Cholesky solve: n=" << n
-            << ", nnz=" << nnz << ", device='" << device_name << "'\n";
+  std::clog << "[cuda] single-precision solve: n=" << n << ", nnz=" << nnz
+            << ", device='" << device_name << "'\n";
   return u;
 }
 
@@ -304,18 +486,17 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
 
   if (ctx_->use_single_precision) {
     last_cholesky_ = true;
-    return solve_single_precision(ctx_->cusolver, ctx_->device_name, K, F);
+    return solve_single_precision(ctx_->cudss, ctx_->device_name, K, F);
   }
 
-  // ── Upload CSR matrix and RHS to device ──────────────────────────────────
+  // ── Allocate and upload ───────────────────────────────────────────────────
   {
-    double alloc_mib =
-        ((std::size_t)nnz * sizeof(double)    // d_values
-         + (std::size_t)(n + 1) * sizeof(int) // d_row_ptr
-         + (std::size_t)nnz * sizeof(int)     // d_col_ind
-         + (std::size_t)n * sizeof(double)    // d_F
-         + (std::size_t)n * sizeof(double))   // d_u
-        / (1024.0 * 1024.0);
+    double alloc_mib = ((std::size_t)nnz * sizeof(double)    // d_values
+                        + (std::size_t)(n + 1) * sizeof(int) // d_row_ptr
+                        + (std::size_t)nnz * sizeof(int)     // d_col_ind
+                        + (std::size_t)n * sizeof(double)    // d_F
+                        + (std::size_t)n * sizeof(double))   // d_u
+                       / (1024.0 * 1024.0);
     std::size_t free_bytes = 0, total_bytes = 0;
     cudaMemGetInfo(&free_bytes, &total_bytes);
     std::clog << "[cuda] device memory: allocating " << alloc_mib << " MiB"
@@ -324,8 +505,8 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
   }
 
   DeviceBuffer<double> d_values(nnz);
-  DeviceBuffer<int>    d_row_ptr(n + 1);
-  DeviceBuffer<int>    d_col_ind(nnz);
+  DeviceBuffer<int> d_row_ptr(n + 1);
+  DeviceBuffer<int> d_col_ind(nnz);
   DeviceBuffer<double> d_F(n);
   DeviceBuffer<double> d_u(n);
 
@@ -334,129 +515,50 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
   d_col_ind.upload(K.col_ind.data(), nnz);
   d_F.upload(F.data(), n);
 
-  // Build cusparse matrix descriptor (general, zero-based indexing).
-  cusparseMatDescr_t descr = nullptr;
-  if (cusparseCreateMatDescr(&descr) != CUSPARSE_STATUS_SUCCESS)
-    throw SolverError("CUDA solver: cusparseCreateMatDescr failed");
-
-  cusparseSetMatType(descr, CUSPARSE_MATRIX_TYPE_GENERAL);
-  cusparseSetMatIndexBase(descr, CUSPARSE_INDEX_BASE_ZERO);
-  cusparseSetMatDiagType(descr, CUSPARSE_DIAG_TYPE_NON_UNIT);
-
+  // ── Path 1: Cholesky (SPD) ────────────────────────────────────────────────
   std::vector<double> u(n, 0.0);
-  int singularity = -1;
 
-  // ── Path 1: device-side sparse Cholesky ──────────────────────────────────
-  // reorder=1: AMD (Approximate Minimum Degree) reordering minimises fill-in.
-  // tol=1e-10: singularity threshold; singularity is set to first near-zero
-  //            pivot row if the matrix is (nearly) singular.
-  // All matrix/vector pointers are device pointers.
-  cusolverStatus_t status =
-      cusolverSpDcsrlsvchol(ctx_->cusolver, n, nnz, descr,
-                            d_values.ptr, d_row_ptr.ptr, d_col_ind.ptr,
-                            d_F.ptr,
-                            /*tol=*/1e-10,
-                            /*reorder=*/1,
-                            d_u.ptr, &singularity);
-
-  // CUSOLVER_STATUS_ALLOC_FAILED (2): cuSOLVER's internal workspace for the
-  // sparse Cholesky factorisation can be many times larger than the input data,
-  // and may exceed available device memory even when our explicit allocations
-  // succeed.  QR requires even more workspace, so falling back to QR would
-  // also fail.  Direct the user to --cuda-single-precision instead.
-  if (status == CUSOLVER_STATUS_ALLOC_FAILED) {
-    cusparseDestroyMatDescr(descr);
-    throw SolverError(
-        "CUDA solver: Cholesky internal alloc failed -- matrix too large for "
-        "device workspace (n=" + std::to_string(n) +
-        ", nnz=" + std::to_string(nnz) +
-        "). Retry with --cuda-single-precision to halve GPU memory usage.");
-  }
-  if (status != CUSOLVER_STATUS_SUCCESS) {
-    cusparseDestroyMatDescr(descr);
-    throw SolverError(
-        "CUDA solver: cusolverSpDcsrlsvchol failed with status " +
-        std::to_string(static_cast<int>(status)));
-  }
-
-  bool chol_ok = true;
-
+  bool chol_ok = solve_cudss<double>(ctx_->cudss, ctx_->device_name, n, nnz,
+                                     d_values, d_row_ptr, d_col_ind, d_F, d_u,
+                                     CUDSS_MTYPE_SPD, CUDA_R_64F, "SPD");
   if (chol_ok) {
-    // Download solution to validate residual.
     d_u.download(u.data(), n);
-
-    // cuSOLVER's Cholesky can silently "succeed" for near-singular SPSD
-    // matrices if the near-zero pivot exceeds the factorization tolerance.
-    // Validate the residual to catch these cases before returning a garbage
-    // solution.
-    chol_ok = (singularity == -1);
-    if (chol_ok) {
-      double rel_res = relative_residual(K, u, F);
-      if (rel_res > 1e-2) {
-        std::clog << "[cuda] Cholesky residual " << rel_res
-                  << " > 1e-2 -- retrying with sparse QR\n";
-        chol_ok = false;
-      }
+    double rel_res = relative_residual(K, u, F);
+    if (rel_res > 1e-2) {
+      std::clog << "[cuda] Cholesky residual " << rel_res
+                << " > 1e-2 -- retrying with LU\n";
+      chol_ok = false;
     }
   }
 
   if (chol_ok) {
     last_cholesky_ = true;
-    cusparseDestroyMatDescr(descr);
     std::clog << "[cuda] Cholesky solve: n=" << n << ", nnz=" << nnz
               << ", device='" << ctx_->device_name << "'\n";
     return u;
   }
 
-  // ── Path 2: device-side sparse QR fallback ───────────────────────────────
-  // cusolverSpDcsrlsvqr handles non-SPD and mildly ill-conditioned matrices.
-  // reorder=1: AMD reordering.
-  if (singularity != -1)
-    std::clog << "[cuda] Cholesky reported singularity at row " << singularity
-              << " -- retrying with sparse QR\n";
-
-  // Reset device solution buffer to zero before QR solve.
-  cudaMemset(d_u.ptr, 0, n * sizeof(double));
-  singularity = -1;
-
-  status =
-      cusolverSpDcsrlsvqr(ctx_->cusolver, n, nnz, descr,
-                          d_values.ptr, d_row_ptr.ptr, d_col_ind.ptr,
-                          d_F.ptr,
-                          /*tol=*/1e-10,
-                          /*reorder=*/1,
-                          d_u.ptr, &singularity);
-
-  cusparseDestroyMatDescr(descr);
-
-  if (status == CUSOLVER_STATUS_ALLOC_FAILED)
+  // ── Path 2: LU (GENERAL) fallback ────────────────────────────────────────
+  bool lu_ok = solve_cudss<double>(ctx_->cudss, ctx_->device_name, n, nnz,
+                                   d_values, d_row_ptr, d_col_ind, d_F, d_u,
+                                   CUDSS_MTYPE_GENERAL, CUDA_R_64F, "LU");
+  if (!lu_ok)
     throw SolverError(
-        "CUDA solver: QR internal alloc failed -- matrix too large for "
-        "cuSOLVER device workspace (n=" + std::to_string(n) +
-        ", nnz=" + std::to_string(nnz) + ")");
-  if (status != CUSOLVER_STATUS_SUCCESS)
-    throw SolverError(
-        "CUDA solver: cusolverSpDcsrlsvqr failed with status " +
-        std::to_string(static_cast<int>(status)));
-
-  if (singularity != -1)
-    throw SolverError("CUDA solver: stiffness matrix is singular at row " +
-                      std::to_string(singularity) +
-                      " -- check boundary conditions (SPCs)");
+        "CUDA solver: LU factorisation failed -- stiffness matrix may be "
+        "singular. Check boundary conditions (SPCs)");
 
   d_u.download(u.data(), n);
 
-  // QR succeeded; validate residual as a final sanity check.
-  double rel_res_qr = relative_residual(K, u, F);
-  if (rel_res_qr > 1e-6)
+  double rel_res_lu = relative_residual(K, u, F);
+  if (rel_res_lu > 1e-6)
     throw SolverError(
-        "CUDA solver: QR produced large residual " +
-        std::to_string(rel_res_qr) +
+        "CUDA solver: LU produced large residual " +
+        std::to_string(rel_res_lu) +
         " -- stiffness matrix is singular or very ill-conditioned. "
         "Check boundary conditions (SPCs)");
 
   last_cholesky_ = false;
-  std::clog << "[cuda] QR solve: n=" << n << ", nnz=" << nnz << ", device='"
+  std::clog << "[cuda] LU solve: n=" << n << ", nnz=" << nnz << ", device='"
             << ctx_->device_name << "'\n";
   return u;
 }

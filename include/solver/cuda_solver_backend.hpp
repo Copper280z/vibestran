@@ -1,16 +1,13 @@
 #pragma once
 // include/solver/cuda_solver_backend.hpp
-// CUDA sparse solver backend using NVIDIA cuSOLVER.
+// CUDA sparse solver backend using NVIDIA cuDSS (direct sparse solver library).
 //
-// Algorithm: Sparse Cholesky factorization (cusolverSpDcsrlsvchol) for SPD
-// FEM stiffness matrices, with automatic fallback to sparse QR
-// (cusolverSpDcsrlsvqr) if the matrix is detected as non-SPD or ill-conditioned.
-// Both solvers use AMD reordering to minimize fill-in.
+// Algorithm: Sparse Cholesky (CUDSS_MTYPE_SPD) for SPD FEM stiffness matrices,
+// with automatic fallback to sparse LU (CUDSS_MTYPE_GENERAL) if the matrix is
+// not positive definite or the Cholesky residual is too large.
+// Both phases run fully on-device via cudssExecute.
 //
-// Both paths allocate GPU memory, run the factorisation on-device, then copy
-// the solution back to the host.
-//
-// For large problems where cuSOLVER's internal workspace exceeds device memory,
+// For large problems where cuDSS's internal workspace exceeds device memory,
 // single-precision mode (try_create(use_single_precision=true)) halves the
 // device memory footprint by downcasting inputs to float before the solve and
 // upcasting the result back to double.
