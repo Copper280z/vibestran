@@ -301,6 +301,12 @@ def generate(n_target: int, load_case: str, out_path: str) -> None:
         wr(f"$ leaving all lateral DOFs elsewhere free for Poisson contraction.")
         wr(f"SPC1,1,23,{center_node_x0}")
 
+    elif load_case == "axial":
+        # Fully clamp the x=0 face.
+        wr("$ Fixed end (x=0): all T1,T2,T3 constrained.")
+        wr(f"SPC1,1,1,{fixed_face_first},THRU,{fixed_face_last}")
+        wr(f"SPC1,1,23,{fixed_face_first}")
+        wr(f"SPC1,1,3,{fixed_face_last}")
     else:  # axial or bending
         # Fully clamp the x=0 face.
         wr("$ Fixed end (x=0): all T1,T2,T3 constrained.")

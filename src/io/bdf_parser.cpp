@@ -154,6 +154,55 @@ Model BdfParser::parse_stream(std::istream &in) {
           cur_sc.label = kw.substr(eq + 1);
       } else if (kw.starts_with("TEMP(LOAD)") || kw.starts_with("TEMP(INIT)")) {
         // Not used in v1 but consume gracefully
+      } else if (kw.starts_with("DISPLACEMENT")) {
+        // Syntax: DISPLACEMENT[(PRINT[,PLOT])] = ALL|NONE|<set_id>
+        // PRINT → F06/CSV output; PLOT → OP2 output.
+        // No modifier is equivalent to PRINT (MSC Nastran default).
+        // NONE clears both flags.
+        size_t eq = kw.find('=');
+        if (eq != std::string::npos) {
+          std::string val = kw.substr(eq + 1);
+          size_t ns = val.find_first_not_of(" \t");
+          if (ns != std::string::npos) val = val.substr(ns);
+          if (val.starts_with("NONE")) {
+            cur_sc.disp_print = false;
+            cur_sc.disp_plot  = false;
+          } else {
+            // Parse modifier list between '(' and ')'
+            size_t lp = kw.find('(');
+            size_t rp = kw.find(')');
+            if (lp != std::string::npos && rp != std::string::npos && rp > lp) {
+              std::string mods = kw.substr(lp + 1, rp - lp - 1);
+              if (mods.find("PRINT") != std::string::npos) cur_sc.disp_print = true;
+              if (mods.find("PLOT")  != std::string::npos) cur_sc.disp_plot  = true;
+            } else {
+              // No modifier list → PRINT (text) output only
+              cur_sc.disp_print = true;
+            }
+          }
+        }
+      } else if (kw.starts_with("STRESS") || kw.starts_with("STRAIN")) {
+        // Syntax: STRESS[(PRINT[,PLOT])] = ALL|NONE|<set_id>
+        size_t eq = kw.find('=');
+        if (eq != std::string::npos) {
+          std::string val = kw.substr(eq + 1);
+          size_t ns = val.find_first_not_of(" \t");
+          if (ns != std::string::npos) val = val.substr(ns);
+          if (val.starts_with("NONE")) {
+            cur_sc.stress_print = false;
+            cur_sc.stress_plot  = false;
+          } else {
+            size_t lp = kw.find('(');
+            size_t rp = kw.find(')');
+            if (lp != std::string::npos && rp != std::string::npos && rp > lp) {
+              std::string mods = kw.substr(lp + 1, rp - lp - 1);
+              if (mods.find("PRINT") != std::string::npos) cur_sc.stress_print = true;
+              if (mods.find("PLOT")  != std::string::npos) cur_sc.stress_plot  = true;
+            } else {
+              cur_sc.stress_print = true;
+            }
+          }
+        }
       }
     }
     if (in_sc)

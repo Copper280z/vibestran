@@ -132,6 +132,15 @@ struct SubCase {
   LoadSetId load_set{0};
   SpcSetId spc_set{0};
   double t_ref{0}; // reference temperature for thermal load
+
+  // Output selection (case control deck).
+  // PRINT → text output (F06, CSV); PLOT → binary output (OP2).
+  // Both default to false; set by DISPLACEMENT/STRESS case control entries.
+  // No output card → no output.  NONE → clears both for that result type.
+  bool disp_print{false};   // DISPLACEMENT(PRINT)=ALL  or  DISPLACEMENT=ALL
+  bool disp_plot{false};    // DISPLACEMENT(PLOT)=ALL
+  bool stress_print{false}; // STRESS(PRINT)=ALL  or  STRESS=ALL
+  bool stress_plot{false};  // STRESS(PLOT)=ALL
 };
 
 struct AnalysisCase {

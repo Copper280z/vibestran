@@ -319,7 +319,8 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         elem_data.type == ElementType::CTRIA3) {
       // Plate stress recovery: σ = D * B * u (at centroid)
       PlateStress ps;
-      ps.eid = elem_data.id;
+      ps.eid   = elem_data.id;
+      ps.etype = elem_data.type;
 
       // For CQUAD4: evaluate B at xi=0, eta=0 (centroid)
       if (elem_data.type == ElementType::CQUAD4) {
@@ -430,7 +431,8 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
                elem_data.type == ElementType::CTETRA4 ||
                elem_data.type == ElementType::CTETRA10) {
       SolidStress ss;
-      ss.eid = elem_data.id;
+      ss.eid   = elem_data.id;
+      ss.etype = elem_data.type;
 
       const auto &psol_ = std::get<PSolid>(model.property(elem_data.pid));
       const Mat1 &mat_ = model.material(psol_.mid);

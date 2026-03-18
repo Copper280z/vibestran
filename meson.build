@@ -203,6 +203,8 @@ solver_sources = files(
   # I/O
   'src/io/bdf_parser.cpp',
   'src/io/results.cpp',
+  'src/io/op2_writer.cpp',
+  'src/io/csv_writer.cpp',
   # Solver
   'src/solver/solver_backend.cpp',
   'src/solver/linear_static.cpp',
@@ -261,6 +263,7 @@ unit_test_sources = files(
   'tests/unit/test_types.cpp',
   'tests/unit/test_sparse_matrix.cpp',
   'tests/unit/test_pcg_solver.cpp',
+  'tests/unit/test_output_writers.cpp',
 )
 
 unit_tests = executable(

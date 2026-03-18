@@ -1,14 +1,20 @@
 // src/main.cpp
-// Command-line driver: nastran_solver [--backend=<cpu|vulkan|cuda>] <input.bdf> [output.f06]
+// Command-line driver: nastran_solver [options] <input.bdf> [output.f06]
 //
 // Default backend is the Eigen CPU solver.  Use --backend to select a GPU solver
 // when available:
 //   --backend=cpu               Eigen sparse Cholesky (always available, default)
-//   --backend=vulkan            Vulkan PCG (requires Vulkan SDK; note: higher latency than CUDA)
-//   --backend=cuda              NVIDIA cuSOLVER sparse Cholesky (requires CUDA toolkit)
+//   --backend=cpu-pcg           Eigen PCG + IncompleteCholesky (low memory)
+//   --backend=cuda              NVIDIA cuSOLVER sparse Cholesky (requires CUDA)
+//   --backend=cuda-pcg          NVIDIA cuBLAS/cuSPARSE PCG (low memory, requires CUDA)
+//   --backend=vulkan            Vulkan PCG (requires Vulkan SDK)
 //   --cuda-single-precision     Use float32 instead of float64 for the CUDA solve.
-//                               Halves device memory usage; useful for very large problems
-//                               that exceed GPU memory in double precision.
+//
+// Output:
+//   <stem>.f06   F06 text results (always written)
+//   <stem>.op2   OP2 binary results (always written)
+//   <stem>.node.csv  Nodal results CSV  \  written when PARAM,CSVOUT,YES is in
+//   <stem>.elem.csv  Element results CSV/  the BDF, or when --csv is passed.
 
 #include "io/bdf_parser.hpp"
 #include "io/results.hpp"
@@ -31,19 +37,23 @@ enum class BackendChoice { Auto, Cpu, CpuPCG, Vulkan, Cuda, CudaPCG };
 
 static void print_usage() {
     std::cerr <<
-        "Usage: nastran_solver [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg>] [--cuda-single-precision] <input.bdf> [output.f06]\n"
+        "Usage: nastran_solver [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg>]\n"
+        "                      [--cuda-single-precision] [--csv]\n"
+        "                      <input.bdf> [output.f06]\n"
         "  --backend=cpu              Eigen sparse Cholesky CPU solver (default)\n"
         "  --backend=cpu-pcg          Eigen PCG + IncompleteCholesky CPU solver (low memory)\n"
         "  --backend=vulkan           Vulkan PCG GPU solver (requires Vulkan)\n"
         "  --backend=cuda             CUDA cuDSS sparse direct solver (requires CUDA)\n"
         "  --backend=cuda-pcg         CUDA PCG + IC0/ILU0 GPU solver (low memory, requires CUDA)\n"
-        "  --cuda-single-precision    Use float32 for CUDA solve (halves GPU memory usage)\n";
+        "  --cuda-single-precision    Use float32 for CUDA solve (halves GPU memory usage)\n"
+        "  --csv                      Write CSV output even if PARAM,CSVOUT is not in the BDF\n";
 }
 
 int main(int argc, char* argv[]) {
     // ── Argument parsing ─────────────────────────────────────────────────────
     BackendChoice backend_choice = BackendChoice::Auto;
     bool cuda_single_precision = false;
+    bool force_csv = false;
     int  positional = 0;
     std::filesystem::path bdf_path;
     std::filesystem::path f06_path;
@@ -52,6 +62,8 @@ int main(int argc, char* argv[]) {
         std::string_view arg(argv[i]);
         if (arg == "--cuda-single-precision") {
             cuda_single_precision = true;
+        } else if (arg == "--csv") {
+            force_csv = true;
         } else if (arg.starts_with("--backend=")) {
             std::string_view val = arg.substr(std::string_view("--backend=").size());
             if (val == "cpu")           backend_choice = BackendChoice::Cpu;
@@ -141,11 +153,6 @@ int main(int argc, char* argv[]) {
 #endif
         }
         // BackendChoice::Auto and BackendChoice::Cpu both default to Eigen CPU.
-        // (Auto no longer attempts to use Vulkan or CUDA automatically — the Vulkan
-        //  backend has higher dispatch latency that degrades throughput for many
-        //  FEM problem sizes.  Users who want GPU acceleration should select it
-        //  explicitly with --backend=cuda or --backend=vulkan.)
-
         if (!backend)
             backend = std::make_unique<nastran::EigenSolverBackend>();
 
@@ -157,8 +164,27 @@ int main(int argc, char* argv[]) {
         double elapsed = std::chrono::duration<double>(t1 - t0).count();
         std::cout << "Solution complete in " << elapsed << " s\n";
 
+        // ── Write F06 ─────────────────────────────────────────────────────────
         nastran::F06Writer::write(results, model, f06_path);
-        std::cout << "Results written: " << f06_path << "\n";
+        std::cout << "F06 written: " << f06_path << "\n";
+
+        // ── Write OP2 ─────────────────────────────────────────────────────────
+        auto op2_path = std::filesystem::path(f06_path).replace_extension(".op2");
+        nastran::Op2Writer::write(results, model, op2_path);
+        std::cout << "OP2 written: " << op2_path << "\n";
+
+        // ── Write CSV (if requested via --csv or PARAM,CSVOUT,YES) ────────────
+        bool write_csv = force_csv;
+        if (!write_csv) {
+            auto it = model.params.find("CSVOUT");
+            if (it != model.params.end() && it->second == "YES")
+                write_csv = true;
+        }
+        if (write_csv) {
+            auto csv_stem = std::filesystem::path(f06_path).replace_extension("");
+            nastran::CsvWriter::write(results, model, csv_stem);
+            std::cout << "CSV written: " << csv_stem.string() << ".node.csv / .elem.csv\n";
+        }
 
     } catch (const nastran::ParseError& e) {
         std::cerr << "Parse error: " << e.what() << "\n";

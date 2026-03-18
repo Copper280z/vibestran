@@ -48,10 +48,21 @@ Optional backends are detected automatically at configure time.
 ## Usage
 
 ```
-nastran_solver [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg>] [--cuda-single-precision] <input.bdf> [output.f06]
+nastran_solver [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg>]
+               [--cuda-single-precision] [--csv]
+               <input.bdf> [output.f06]
 ```
 
 If no output path is given, it defaults to `<input>.f06`.
+
+### Output files
+
+| File | Format | Written when |
+|---|---|---|
+| `<stem>.f06` | F06 text | Always |
+| `<stem>.op2` | OP2 binary | Set via case control deck |
+| `<stem>.node.csv` | Nodal results CSV | `--csv` flag or `PARAM,CSVOUT,YES` in BDF |
+| `<stem>.elem.csv` | Element results CSV | `--csv` flag or `PARAM,CSVOUT,YES` in BDF |
 
 ## Solver Backends
 
