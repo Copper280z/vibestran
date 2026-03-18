@@ -1,0 +1,5 @@
+option('use_suitesparse',
+  type        : 'feature',
+  value       : 'auto',
+  description : 'Use SuiteSparse CHOLMOD for multithreaded Cholesky factorization',
+)

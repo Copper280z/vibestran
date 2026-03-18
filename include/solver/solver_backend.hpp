@@ -28,9 +28,10 @@ public:
 
     /// Human-readable backend name (for logging)
     [[nodiscard]] virtual std::string_view name() const noexcept = 0;
+
 };
 
-/// CPU backend using Eigen's sparse Cholesky (SimplicialLLT)
+/// CPU backend using Eigen's sparse Cholesky (SimplicialLLT or CHOLMOD)
 class EigenSolverBackend final : public SolverBackend {
 public:
     [[nodiscard]] std::vector<double> solve(
@@ -38,7 +39,11 @@ public:
         const std::vector<double>& F) override;
 
     [[nodiscard]] std::string_view name() const noexcept override {
+#ifdef EIGEN_CHOLMOD_SUPPORT
+        return "SuiteSparse CHOLMOD (CPU)";
+#else
         return "Eigen SimplicialLLT (CPU)";
+#endif
     }
 };
 

@@ -72,6 +72,11 @@ TEST(EigenSolverBackend, NameIsNonEmpty) {
 
 TEST(EigenSolverBackend, NameIdentifiesEigenBackend) {
     EigenSolverBackend backend;
-    // The name should reference "Eigen" so log output is meaningful
-    EXPECT_NE(backend.name().find("Eigen"), std::string_view::npos);
+    // The name must identify the underlying factorization so log output is
+    // meaningful.  When SuiteSparse is available the name is "SuiteSparse
+    // CHOLMOD (CPU)"; otherwise "Eigen SimplicialLLT (CPU)".
+    const auto n = backend.name();
+    const bool is_cholmod = n.find("CHOLMOD") != std::string_view::npos;
+    const bool is_eigen   = n.find("Eigen")   != std::string_view::npos;
+    EXPECT_TRUE(is_cholmod || is_eigen) << "Unexpected backend name: " << n;
 }

@@ -1,9 +1,13 @@
 // src/solver/solver_backend.cpp
 #include "solver/solver_backend.hpp"
 #include "core/types.hpp"
+#include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <Eigen/SparseCholesky>
 #include <Eigen/IterativeLinearSolvers>
+#ifdef EIGEN_CHOLMOD_SUPPORT
+#include <Eigen/CholmodSupport>
+#endif
 #include <format>
 
 namespace nastran {
@@ -34,7 +38,21 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
   // Map force vector
   Eigen::Map<const Eigen::VectorXd> F_eigen(F.data(), n);
 
-  // Solve with SimplicialLLT (sparse Cholesky, positive-definite symmetric)
+  // Factorize and solve.
+  // When SuiteSparse is available, use CholmodDecomposition: it employs
+  // supernodal Cholesky with OpenMP parallelism and better AMD+METIS
+  // reordering.  Otherwise fall back to SimplicialLLT, with an LDLT retry
+  // for near-singular systems.
+#ifdef EIGEN_CHOLMOD_SUPPORT
+  Eigen::CholmodDecomposition<ESM> solver;
+  solver.compute(K);
+  if (solver.info() != Eigen::Success)
+    throw SolverError(
+        "Stiffness matrix factorization failed (CHOLMOD) — check boundary conditions");
+  Eigen::VectorXd u = solver.solve(F_eigen);
+  if (solver.info() != Eigen::Success)
+    throw SolverError("Back-substitution failed (CHOLMOD)");
+#else
   Eigen::SimplicialLLT<ESM> solver;
   solver.compute(K);
 
@@ -54,6 +72,7 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
   Eigen::VectorXd u = solver.solve(F_eigen);
   if (solver.info() != Eigen::Success)
     throw SolverError("Back-substitution failed");
+#endif
 
   return std::vector<double>(u.data(), u.data() + n);
 }

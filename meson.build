@@ -56,9 +56,36 @@ else
   message('Using system Eigen3')
 endif
 
+# ── SuiteSparse CHOLMOD backend (optional) ───────────────────────────────────
+# When present, Eigen's CholmodDecomposition replaces SimplicialLLT, providing
+# multithreaded supernodal Cholesky and better AMD+METIS reordering.
+# Ubuntu's libsuitesparse-dev does not ship a cholmod.pc, so we use
+# find_library() + manual include path rather than dependency().
+_ss_opt      = get_option('use_suitesparse')
+_ss_required = _ss_opt.enabled()
+_cholmod_lib = cxx.find_library('cholmod', required : _ss_required)
+_cholmod_inc = include_directories('/usr/include/suitesparse', is_system : true)
+
+have_cholmod     = _cholmod_lib.found()
+cholmod_args     = []
+cholmod_lib_deps = []
+cholmod_incdirs  = []
+if have_cholmod
+  cholmod_args     = ['-DEIGEN_CHOLMOD_SUPPORT']
+  cholmod_lib_deps = [declare_dependency(
+    dependencies        : _cholmod_lib,
+    include_directories : _cholmod_inc,
+  )]
+  cholmod_incdirs  = [_cholmod_inc]
+  message('SuiteSparse CHOLMOD backend: enabled')
+else
+  message('SuiteSparse CHOLMOD backend: disabled (install libsuitesparse-dev to enable)')
+endif
+
 # ── Thread / parallel execution support ──────────────────────────────────────
-thread_dep = dependency('threads')
-tbb_dep    = dependency('tbb')
+thread_dep  = dependency('threads')
+tbb_dep     = dependency('tbb')
+openmp_dep  = dependency('openmp', required : false)
 
 # ── Vulkan compute backend (optional) ────────────────────────────────────────
 vulkan_dep = dependency('vulkan', required : false)
@@ -220,11 +247,17 @@ src_inc = include_directories('src/solver') # for internal vulkan_pipelines.hpp
 
 # ── Library (solver logic, no main) ──────────────────────────────────────────
 solver_lib_deps = [eigen_dep, thread_dep, tbb_dep]
+if openmp_dep.found()
+  solver_lib_deps += openmp_dep
+endif
 if have_vulkan_backend
   solver_lib_deps += vulkan_dep
 endif
 if have_cuda_backend
   solver_lib_deps += cuda_lib_deps
+endif
+if have_cholmod
+  solver_lib_deps += cholmod_lib_deps
 endif
 
 solver_lib = static_library(
@@ -232,7 +265,7 @@ solver_lib = static_library(
   [solver_sources, spirv_hdrs],
   include_directories : [inc, src_inc],
   dependencies        : solver_lib_deps,
-  cpp_args            : vulkan_compile_args + cuda_compile_args,
+  cpp_args            : vulkan_compile_args + cuda_compile_args + cholmod_args,
   install             : false,
 )
 
@@ -240,7 +273,7 @@ solver_lib_dep = declare_dependency(
   link_with           : solver_lib,
   include_directories : [inc, src_inc],
   dependencies        : solver_lib_deps,
-  compile_args        : vulkan_compile_args + cuda_compile_args,
+  compile_args        : vulkan_compile_args + cuda_compile_args + cholmod_args,
 )
 
 # ── Executable ───────────────────────────────────────────────────────────────
@@ -327,11 +360,12 @@ endif
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 summary({
-  'Build type'     : get_option('buildtype'),
-  'C++ std'        : 'C++20',
-  'Eigen'          : eigen_dep.found(),
-  'Vulkan backend' : have_vulkan_backend,
-  'CUDA backend'   : have_cuda_backend,
-  'Solver lib'     : solver_lib.name(),
-  'Executable'     : nastran_exe.name(),
+  'Build type'        : get_option('buildtype'),
+  'C++ std'           : 'C++20',
+  'Eigen'             : eigen_dep.found(),
+  'CHOLMOD backend'   : have_cholmod,
+  'Vulkan backend'    : have_vulkan_backend,
+  'CUDA backend'      : have_cuda_backend,
+  'Solver lib'        : solver_lib.name(),
+  'Executable'        : nastran_exe.name(),
 }, section : 'NastranSolver')
