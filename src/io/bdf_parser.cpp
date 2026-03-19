@@ -4,9 +4,9 @@
 // case control section, and bulk data section.
 
 #include "io/bdf_parser.hpp"
+#include "core/coord_sys.hpp"
 #include <algorithm>
 #include <cctype>
-#include <charconv>
 #include <format>
 #include <fstream>
 #include <sstream>
@@ -141,7 +141,13 @@ Model BdfParser::parse_stream(std::istream &in) {
             cur_sc.load_set = LoadSetId(std::stoi(kw.substr(eq + 1)));
           } catch (...) {
           }
-      } else if (kw.starts_with("SPC")) {
+      } else if (kw.starts_with("MPC") && kw.find('=') != std::string::npos
+                 && !kw.starts_with("MPCADD")) {
+        size_t eq = kw.find('=');
+        try {
+          cur_sc.mpc_set = MpcSetId(std::stoi(kw.substr(eq + 1)));
+        } catch (...) {}
+      } else if (kw.starts_with("SPC") && !kw.starts_with("SPCADD")) {
         size_t eq = kw.find('=');
         if (eq != std::string::npos)
           try {
@@ -270,6 +276,14 @@ Model BdfParser::parse_stream(std::istream &in) {
     else
       card.fields = split_small_field(l);
 
+    // For free-format lines, the trailing field may be a continuation marker
+    // (e.g., "+", "+BC") — strip it so card processors don't see it as data.
+    if (is_free && !card.fields.empty()) {
+      const std::string &last = card.fields.back();
+      if (!last.empty() && last[0] == '+')
+        card.fields.pop_back();
+    }
+
     // Accumulate continuations
     int j = i + 1;
     while (j < enddata_line) {
@@ -288,6 +302,13 @@ Model BdfParser::parse_stream(std::istream &in) {
         cont_fields = split_large_field(next, "");
       else
         cont_fields = split_small_field(next);
+
+      // For free-format continuations, strip trailing continuation marker
+      if (next.find(',') != std::string::npos && !cont_fields.empty()) {
+        const std::string &clast = cont_fields.back();
+        if (!clast.empty() && clast[0] == '+')
+          cont_fields.pop_back();
+      }
 
       // Skip the continuation marker (field 0) and append fields 1-8
       for (size_t k = 1; k < cont_fields.size() && k <= 8; ++k)
@@ -345,6 +366,24 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_spc(ctx, card.fields);
       else if (kw == "SPC1")
         process_spc1(ctx, card.fields);
+      else if (kw == "MPC")
+        process_mpc(ctx, card.fields);
+      else if (kw == "MPCADD")
+        process_mpcadd(ctx, card.fields);
+      else if (kw == "CORD2R")
+        process_cord2x(ctx, card.fields, CoordType::Rectangular);
+      else if (kw == "CORD2C")
+        process_cord2x(ctx, card.fields, CoordType::Cylindrical);
+      else if (kw == "CORD2S")
+        process_cord2x(ctx, card.fields, CoordType::Spherical);
+      else if (kw == "CORD1R")
+        process_cord1x(ctx, card.fields, CoordType::Rectangular);
+      else if (kw == "CORD1C")
+        process_cord1x(ctx, card.fields, CoordType::Cylindrical);
+      else if (kw == "RBE2")
+        process_rbe2(ctx, card.fields);
+      else if (kw == "RBE3")
+        process_rbe3(ctx, card.fields);
       else if (kw == "PARAM")
         process_param(ctx, card.fields);
       // Silently ignore unrecognized cards
@@ -376,6 +415,9 @@ Model BdfParser::parse_stream(std::istream &in) {
       }
     }
   }
+
+  // Post-parse: resolve coordinate systems and transform node positions to basic
+  ctx.model.resolve_coordinates();
 
   return ctx.model;
 }
@@ -748,6 +790,188 @@ void BdfParser::process_param(ParseContext &ctx,
   std::string name = f[1];
   std::transform(name.begin(), name.end(), name.begin(), ::toupper);
   ctx.model.params[name] = f[2];
+}
+
+// ── Coordinate system processors ──────────────────────────────────────────────
+
+void BdfParser::process_cord2x(ParseContext &ctx,
+                                const std::vector<std::string> &f,
+                                CoordType ctype) {
+  // CORD2R/CORD2C/CORD2S, CID, RID, A1, A2, A3, B1, B2, B3, C1, C2, C3
+  CoordSys cs;
+  cs.id   = CoordId(parse_int(f[1], ctx.line_num));
+  cs.rid  = CoordId(f[2].empty() ? 0 : parse_int(f[2], ctx.line_num));
+  cs.type = ctype;
+  // Defining points in RID frame
+  cs.pt_a = Vec3(parse_double(f[3], ctx.line_num),
+                 parse_double(f[4], ctx.line_num),
+                 parse_double(f[5], ctx.line_num));
+  cs.pt_b = Vec3(parse_double(f[6], ctx.line_num),
+                 parse_double(f[7], ctx.line_num),
+                 parse_double(f[8], ctx.line_num));
+  cs.pt_c = Vec3(parse_double(f[9], ctx.line_num),
+                 parse_double(f[10], ctx.line_num),
+                 parse_double(f[11], ctx.line_num));
+  ctx.model.coord_systems[cs.id] = cs;
+}
+
+void BdfParser::process_cord1x(ParseContext &ctx,
+                                const std::vector<std::string> &f,
+                                CoordType ctype) {
+  // CORD1R/CORD1C, CID, G1, G2, G3
+  // G1=origin node, G2=Z-axis node, G3=XZ-plane node (all in basic)
+  CoordSys cs;
+  cs.id   = CoordId(parse_int(f[1], ctx.line_num));
+  cs.rid  = CoordId{0};
+  cs.type = ctype;
+  cs.is_cord1   = true;
+  cs.def_node_a = parse_int(f[2], ctx.line_num);
+  cs.def_node_b = parse_int(f[3], ctx.line_num);
+  cs.def_node_c = parse_int(f[4], ctx.line_num);
+  ctx.model.coord_systems[cs.id] = cs;
+}
+
+// ── MPC processors ────────────────────────────────────────────────────────────
+
+void BdfParser::process_mpc(ParseContext &ctx,
+                             const std::vector<std::string> &f) {
+  // MPC, SID, G1, C1, A1, G2, C2, A2, ...  (continuation cards add more terms)
+  // Each group of 3 fields (G, C, A) is one term.
+  int sid = parse_int(f[1], ctx.line_num);
+  Mpc mpc;
+  mpc.sid = MpcSetId(sid);
+
+  // Fields start at index 2; groups of 3
+  for (size_t i = 2; i + 2 < f.size(); i += 3) {
+    if (f[i].empty())
+      break;
+    MpcTerm term;
+    term.node  = NodeId(parse_int(f[i],     ctx.line_num));
+    term.dof   = parse_int(f[i + 1], ctx.line_num);
+    term.coeff = parse_double(f[i + 2], ctx.line_num);
+    mpc.terms.push_back(term);
+  }
+
+  if (!mpc.terms.empty())
+    ctx.model.mpcs.push_back(std::move(mpc));
+}
+
+void BdfParser::process_mpcadd(ParseContext &ctx,
+                                const std::vector<std::string> &f) {
+  // MPCADD, SID, SID1, SID2, ...
+  // Merges multiple MPC sets into one.  We expand by re-labelling all terms
+  // from each source set to the target SID.
+  int target_sid = parse_int(f[1], ctx.line_num);
+
+  for (size_t i = 2; i < f.size(); ++i) {
+    if (f[i].empty())
+      continue;
+    int src_sid = parse_int(f[i], ctx.line_num);
+    if (src_sid == target_sid)
+      continue; // avoid infinite loop
+
+    // Collect MPCs with src_sid and re-label to target_sid
+    std::vector<Mpc> new_mpcs;
+    for (const auto &mpc : ctx.model.mpcs) {
+      if (mpc.sid.value == src_sid) {
+        Mpc copy = mpc;
+        copy.sid = MpcSetId(target_sid);
+        new_mpcs.push_back(std::move(copy));
+      }
+    }
+    for (auto &m : new_mpcs)
+      ctx.model.mpcs.push_back(std::move(m));
+  }
+}
+
+// ── Rigid element processors ──────────────────────────────────────────────────
+
+void BdfParser::process_rbe2(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  // RBE2, EID, GN, CM, GM1, GM2, ..., ALPHA
+  Rbe2 rbe;
+  rbe.eid = ElementId(parse_int(f[1], ctx.line_num));
+  rbe.gn  = NodeId(parse_int(f[2], ctx.line_num));
+  rbe.cm  = DofSet::from_int(parse_int(f[3], ctx.line_num));
+
+  for (size_t i = 4; i < f.size(); ++i) {
+    if (f[i].empty())
+      continue;
+    // Last field may be ALPHA (a real number) — skip if looks like float
+    // Simple check: if it contains a '.' or 'E' or 'e', it's ALPHA
+    const std::string &fld = f[i];
+    bool is_real = fld.find('.') != std::string::npos ||
+                   fld.find('E') != std::string::npos ||
+                   fld.find('e') != std::string::npos;
+    if (is_real)
+      break; // ALPHA field — done
+    rbe.gm.push_back(NodeId(parse_int(fld, ctx.line_num)));
+  }
+
+  ctx.model.rbe2s.push_back(std::move(rbe));
+}
+
+void BdfParser::process_rbe3(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  // RBE3, EID, blank, REFGRID, REFC, WT1, C1, G1,1, G1,2, ..., WT2, C2, ...
+  // The structure is: EID, (blank), REFGRID, REFC, then repeating weight groups:
+  //   each group: weight, component_set, node1, node2, ...
+  // Groups are separated by the next real-number weight field.
+  Rbe3 rbe;
+  rbe.eid      = ElementId(parse_int(f[1], ctx.line_num));
+  // f[2] is blank (SPEC/reserved)
+  rbe.ref_node = NodeId(parse_int(f[3], ctx.line_num));
+  rbe.refc     = DofSet::from_int(parse_int(f[4], ctx.line_num));
+
+  // Parse weight groups starting at field 5
+  // A weight group starts with a real weight, then an integer component set,
+  // then one or more integer node IDs.
+  size_t i = 5;
+  while (i < f.size()) {
+    if (f[i].empty()) { ++i; continue; }
+
+    // Try to parse as real weight
+    double w = 0.0;
+    try {
+      w = parse_double(f[i], ctx.line_num);
+    } catch (...) {
+      ++i;
+      continue;
+    }
+    ++i;
+
+    if (i >= f.size() || f[i].empty()) break;
+    int comp_int = parse_int(f[i], ctx.line_num);
+    ++i;
+
+    Rbe3WeightGroup wg;
+    wg.weight    = w;
+    wg.component = DofSet::from_int(comp_int);
+
+    // Collect node IDs until next real field or end
+    while (i < f.size()) {
+      if (f[i].empty()) { ++i; continue; }
+      const std::string &fld = f[i];
+      bool is_real = fld.find('.') != std::string::npos ||
+                     fld.find('E') != std::string::npos ||
+                     fld.find('e') != std::string::npos;
+      if (is_real)
+        break; // start of next weight group
+      // Check if it's an integer
+      try {
+        int nid = parse_int(fld, ctx.line_num);
+        wg.nodes.push_back(NodeId(nid));
+      } catch (...) {
+        break;
+      }
+      ++i;
+    }
+
+    if (!wg.nodes.empty())
+      rbe.weight_groups.push_back(std::move(wg));
+  }
+
+  ctx.model.rbe3s.push_back(std::move(rbe));
 }
 
 } // namespace nastran

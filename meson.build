@@ -222,11 +222,14 @@ solver_sources = files(
   'src/core/model.cpp',
   'src/core/dof_map.cpp',
   'src/core/sparse_matrix.cpp',
+  'src/core/coord_sys.cpp',
+  'src/core/mpc_handler.cpp',
   # Elements
   'src/elements/cquad4.cpp',
   'src/elements/ctria3.cpp',
   'src/elements/solid_elements.cpp',
   'src/elements/element_factory.cpp',
+  'src/elements/rbe_constraints.cpp',
   # I/O
   'src/io/bdf_parser.cpp',
   'src/io/results.cpp',
@@ -297,6 +300,8 @@ unit_test_sources = files(
   'tests/unit/test_sparse_matrix.cpp',
   'tests/unit/test_pcg_solver.cpp',
   'tests/unit/test_output_writers.cpp',
+  'tests/unit/test_coord_sys.cpp',
+  'tests/unit/test_mpc_handler.cpp',
 )
 
 unit_tests = executable(

@@ -75,6 +75,14 @@ struct SpcSetId {
   constexpr auto operator<=>(const SpcSetId &) const noexcept = default;
 };
 
+/// MPC set ID
+struct MpcSetId {
+  int value{0};
+  constexpr explicit MpcSetId(int v) noexcept : value(v) {}
+  constexpr bool operator==(const MpcSetId &) const noexcept = default;
+  constexpr auto operator<=>(const MpcSetId &) const noexcept = default;
+};
+
 // ── DOF encoding ─────────────────────────────────────────────────────────────
 
 /// Nastran DOF component (1-6: T1,T2,T3,R1,R2,R3)
@@ -206,6 +214,16 @@ template <> struct hash<nastran::PropertyId> {
 };
 template <> struct hash<nastran::MaterialId> {
   size_t operator()(nastran::MaterialId id) const noexcept {
+    return hash<int>{}(id.value);
+  }
+};
+template <> struct hash<nastran::CoordId> {
+  size_t operator()(nastran::CoordId id) const noexcept {
+    return hash<int>{}(id.value);
+  }
+};
+template <> struct hash<nastran::MpcSetId> {
+  size_t operator()(nastran::MpcSetId id) const noexcept {
     return hash<int>{}(id.value);
   }
 };

@@ -4,6 +4,7 @@
 // This is a pure data structure layer — no computation here.
 
 #include "core/types.hpp"
+#include "core/coord_sys.hpp"
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -123,6 +124,50 @@ struct Spc {
   double value{0}; // enforced displacement (0 = fixed)
 };
 
+// ── Multi-point constraints
+// ─────────────────────────────────────────────────
+
+/// One term in an MPC equation: coeff * u[node, dof]
+struct MpcTerm {
+  NodeId node{0};
+  int dof{0};    // 1-based DOF (1-6)
+  double coeff{0.0};
+};
+
+/// One MPC equation: sum_i coeff_i * u[node_i, dof_i] = 0
+/// The term with the largest |coeff| is chosen as the dependent DOF
+/// during elimination.
+struct Mpc {
+  MpcSetId sid{0};
+  std::vector<MpcTerm> terms;
+};
+
+// ── Rigid elements
+// ──────────────────────────────────────────────────────────
+
+/// RBE2 — rigid body element with independent node GN and dependent nodes GM
+struct Rbe2 {
+  ElementId eid{0};
+  NodeId gn{0};       // independent node
+  DofSet cm;          // constrained DOFs (on dependent nodes)
+  std::vector<NodeId> gm; // dependent nodes
+};
+
+/// One weight group in an RBE3
+struct Rbe3WeightGroup {
+  double weight{1.0};
+  DofSet component;         // active DOF components for this group
+  std::vector<NodeId> nodes;
+};
+
+/// RBE3 — interpolation constraint element
+struct Rbe3 {
+  ElementId eid{0};
+  NodeId ref_node{0};   // reference (dependent) node
+  DofSet refc;          // constrained DOFs on reference node
+  std::vector<Rbe3WeightGroup> weight_groups;
+};
+
 // ── Analysis case
 // ─────────────────────────────────────────────────────────────
 
@@ -131,6 +176,7 @@ struct SubCase {
   std::string label;
   LoadSetId load_set{0};
   SpcSetId spc_set{0};
+  MpcSetId mpc_set{0}; // 0 = no MPCs
   double t_ref{0}; // reference temperature for thermal load
 
   // Output selection (case control deck).
@@ -170,6 +216,16 @@ public:
 
   // SPCs
   std::vector<Spc> spcs;
+
+  // MPCs
+  std::vector<Mpc> mpcs;
+
+  // Rigid elements
+  std::vector<Rbe2> rbe2s;
+  std::vector<Rbe3> rbe3s;
+
+  // Coordinate systems (CoordId{0} = basic, never stored here)
+  std::unordered_map<CoordId, CoordSys> coord_systems;
 
   // Analysis
   AnalysisCase analysis;
@@ -220,6 +276,22 @@ public:
     }
     return result;
   }
+
+  /// Retrieve all MPCs for a given set
+  std::vector<const Mpc *> mpcs_for_set(MpcSetId sid) const {
+    std::vector<const Mpc *> result;
+    for (const auto &mpc : mpcs) {
+      if (mpc.sid == sid)
+        result.push_back(&mpc);
+    }
+    return result;
+  }
+
+  /// After parsing, transform all GridPoint positions from their CP frame to
+  /// basic Cartesian.  Also updates GridPoint.cp to CoordId::basic() after
+  /// transformation so position is always in basic once called.
+  /// Must be called after all GRID and CORDxx cards have been parsed.
+  void resolve_coordinates();
 
   /// Validate consistency of the model (throws on error)
   void validate() const;

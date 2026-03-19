@@ -709,3 +709,213 @@ TEST(Integration, HexaEasVsSriBendingNearlyIncompressible) {
         << "EAS tip displacement should be physically plausible. "
         << "Expected order: " << expected_shear_disp << ", got: " << u5_eas;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Test 9: CORD2R — load in rotated local CID
+//
+// A single CQUAD4 plate loaded in a local rectangular CS rotated 90° about Z.
+// Force (0,1,0) in local CID → (−1,0,0) in basic after 90° rotation.
+// Verify displacement direction is correct.
+//
+// CS 10: A=(0,0,0), B=(0,0,1), C=(0,1,0)
+//   Z = (0,0,1), temp_X = (0,1,0), Y = Z×X_temp... see build_axes logic.
+//   Y = ez × (C-A) norm = (0,0,1) × (0,1,0) = (-1,0,0)
+//   X = Y × Z = (-1,0,0) × (0,0,1) = (0,1,0)... wait, let me compute:
+//   ez = (0,0,1), ac = (0,1,0)
+//   ey_tmp = ez × ac = (0*0-1*1, 1*0-0*0, 0*1-0*0) = (-1,0,0)
+//   ey = (-1,0,0)
+//   ex = ey × ez = (-1,0,0) × (0,0,1) = (0*1-0*0, 0*0-(-1)*1, (-1)*0-0*0) = (0,1,0)
+// So local X=(0,1,0), local Y=(-1,0,0), local Z=(0,0,1).
+// Force (1,0,0) in CID 10 → basic: T3 * (1,0,0) = ex = (0,1,0).
+// Force (0,1,0) in CID 10 → basic: ey = (-1,0,0).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+TEST(Integration, LoadInLocalCID) {
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,10.0,0.0,0.0
+GRID,3,,10.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+MAT1,1,1.0E6,,0.3
+PSHELL,1,1,0.1
+CQUAD4,1,1,1,2,3,4
+SPC1,1,1,1
+SPC1,1,1,4
+SPC1,1,2,1
+$ CS 10: local X = (0,1,0), local Y = (-1,0,0), local Z = (0,0,1)
+$ A=(0,0,0), B=(0,0,1), C=(0,1,0)
+CORD2R,10,0, 0.0,0.0,0.0, 0.0,0.0,1.0, 0.0,1.0,0.0
+$ Force 500 N in local +X (CID=10) at nodes 2 and 3 → basic +Y = (0,1,0)
+FORCE,1,2,10,500.0,1.0,0.0,0.0
+FORCE,1,3,10,500.0,1.0,0.0,0.0
+ENDDATA
+)";
+
+    SolverResults res = run_analysis(bdf);
+
+    // Force applied in local CID 10 +X = basic +Y direction
+    // Plate loaded in y: u_y at nodes 2,3 should be positive
+    double u2y = get_disp(res, 2, 1);
+    double u3y = get_disp(res, 3, 1);
+    EXPECT_GT(u2y, 0.0) << "y-displacement should be positive (force in +y basic)";
+    EXPECT_GT(u3y, 0.0) << "y-displacement should be positive";
+
+    // No x-displacement (force was in y)
+    double u2x = get_disp(res, 2, 0);
+    // Due to Poisson, some x-displacement allowed; but x force should be nearly zero
+    // The x-disp should be small compared to y-disp
+    EXPECT_LT(std::abs(u2x), std::abs(u2y))
+        << "x-disp should be smaller than y-disp";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Test 10: RBE2 two-bar connection
+//
+// Two collinear CQUAD4 bars separated by a gap at their interface nodes.
+// An RBE2 connects the interface nodes (node 4 of bar 1, node 1 of bar 2)
+// with CM=123456 (all DOFs), GN = bar1 node 4.
+//
+// Bar 1: nodes 1,2,3,4 (0≤x≤5), bar 2: nodes 5,6,7,8 (5≤x≤10)
+// Left edge (nodes 1,4) fully fixed.
+// RBE2: EID=100, GN=4, CM=1, GM=[8]  (simpler: just T1 coupling)
+// Total length 10, F=1000 N axial, δ=FL/(EA)=1000*10/(1e6*0.1)=0.1
+//
+// Simplified test: single element bar, RBE2 coupling two nodes.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+TEST(Integration, RBE2TwoBarConnection) {
+    // Bar: nodes 1,2,3,4. Left edge fixed, right edge has RBE2 forcing node3≡node4.
+    // Then we apply forces at both nodes 3 and 4 (since RBE2 makes them equivalent,
+    // this is like applying double force at one end).
+    //
+    // Actually simpler: 1 CQUAD4 plate, RBE2 constrains node2 T1 = node3 T1
+    // (both on right edge). Apply F at node2 only. With RBE2, node3 also moves
+    // the same as node2 in T1.
+    //
+    // Geometry: 10x1 plate, E=1e6, nu=0.3, t=0.1
+    // Fix nodes 1 and 4 in T1 and T2.
+    // RBE2: GN=2, CM=1 (T1 only), GM=[3]
+    // Force at node2: F=500 N in +x.
+    // Expected: u_node2 = u_node3 in T1 (from RBE2)
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,10.0,0.0,0.0
+GRID,3,,10.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+MAT1,1,1.0E6,,0.3
+PSHELL,1,1,0.1
+CQUAD4,1,1,1,2,3,4
+SPC1,1,1,1
+SPC1,1,1,4
+SPC1,1,2,1
+$ RBE2: EID=100, GN=2, CM=1 (T1), GM=[3]
+RBE2, 100, 2, 1, 3
+FORCE,1,2,0,500.0,1.0,0.0,0.0
+FORCE,1,3,0,500.0,1.0,0.0,0.0
+ENDDATA
+)";
+
+    SolverResults res = run_analysis(bdf);
+
+    // With RBE2 making node3's T1 = node2's T1:
+    // Both nodes should have the same T1 displacement
+    double u2 = get_disp(res, 2, 0);
+    double u3 = get_disp(res, 3, 0);
+
+    EXPECT_GT(u2, 0.0) << "Node 2 T1 should be positive";
+    EXPECT_NEAR(u2, u3, 1e-6 * std::abs(u2))
+        << "RBE2 should enforce u2_T1 = u3_T1; u2=" << u2 << ", u3=" << u3;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Test 11: RBE3 load distribution
+//
+// Reference node (node 5) connected to 4 surrounding nodes (1,2,3,4) equally.
+// Apply vertical force F at reference node. Verify each surrounding node
+// receives F/4 as reaction (from equilibrium, not directly from RBE3 MPC).
+//
+// Actually: with RBE3, reference node motion = weighted average of independent
+// node motions. We apply force at the reference node.
+// The "correct" behavior: RBE3 distributes the load to the independent nodes.
+//
+// Simpler test: use 4 spring-like single-element cases.
+// For this implementation, verify the RBE3 MPC reduces DOF count correctly.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+TEST(Integration, RBE3LoadDistribution) {
+    // CQUAD4 with 4 corners; 2 corners fully fixed, 2 corners free in T1 only.
+    // Node 5 (not part of any element) is the RBE3 reference: T1 constrained to
+    // the weighted average of nodes 1-4 T1s.  All other DOFs of node 5 are SPC'd.
+    //
+    // RBE3 equation (equal weights):  u5_T1 = (u1_T1 + u2_T1 + u3_T1 + u4_T1) / 4
+    //
+    // Since nodes 1 and 2 have T1 = 0 (SPC), and nodes 3 and 4 are free in T1,
+    // the stiffness matrix has 2 free DOFs (T1 at nodes 3 and 4) plus u5_T1
+    // constrained by RBE3.  By symmetry, u3_T1 = u4_T1 after applying a T1 load
+    // at node 5 (distributed equally to nodes 3 and 4 by the equal-weight RBE3).
+    // Therefore u5_T1 = (0 + 0 + u3 + u4)/4 = u3/2.
+    //
+    // Verification: solve, then check u5_T1 == (u3_T1 + u4_T1) / 4
+    // (i.e. the RBE3 averaging constraint is satisfied after recovery).
+
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,1.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+GRID,5,,0.5,0.5,0.0
+MAT1,1,1.0E6,,0.3
+PSHELL,1,1,0.1
+CQUAD4,1,1,1,2,3,4
+$ Fix nodes 1 and 2 fully; fix nodes 3 and 4 in all DOFs except T1
+SPC1,1,123456,1
+SPC1,1,123456,2
+SPC1,1,23456,3
+SPC1,1,23456,4
+$ Fix all DOFs of reference node except T1, which is controlled by RBE3
+SPC1,1,23456,5
+$ RBE3: ref=5, REFC=1(T1), equal weights, independent nodes 1-4 component=1
+RBE3, 200,,  5,  1,  1.0,  1,  1, 2, 3,+
++,  4
+$ Force on reference node T1 (distributed to independent nodes via RBE3)
+FORCE,1,5,0,100.0,1.0,0.0,0.0
+ENDDATA
+)";
+
+    EXPECT_NO_THROW({
+        SolverResults res = run_analysis(bdf);
+        double u1x = get_disp(res, 1, 0);
+        double u2x = get_disp(res, 2, 0);
+        double u3x = get_disp(res, 3, 0);
+        double u4x = get_disp(res, 4, 0);
+        double u5x = get_disp(res, 5, 0);
+        // Core RBE3 verification: the reference node T1 must equal the weighted
+        // average of the four independent node T1s (all weights = 1.0).
+        double expected_u5 = (u1x + u2x + u3x + u4x) / 4.0;
+        EXPECT_NEAR(u5x, expected_u5, 1e-8)
+            << "RBE3 reference node T1 must equal the weighted average of "
+               "independent node T1s";
+        // Independent nodes with non-zero displacement should move in +X
+        // (same direction as the applied force after RBE3 distribution)
+        EXPECT_GT(u3x, 0.0) << "node 3 should displace in +T1 direction";
+        EXPECT_GT(u4x, 0.0) << "node 4 should displace in +T1 direction";
+    });
+}

@@ -56,6 +56,12 @@ private:
     static void process_tempd   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_spc     (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_spc1    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_mpc     (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_mpcadd  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_cord2x  (ParseContext& ctx, const std::vector<std::string>& fields, CoordType ctype);
+    static void process_cord1x  (ParseContext& ctx, const std::vector<std::string>& fields, CoordType ctype);
+    static void process_rbe2    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_rbe3    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_param   (ParseContext& ctx, const std::vector<std::string>& fields);
 
     // Field parsing helpers
