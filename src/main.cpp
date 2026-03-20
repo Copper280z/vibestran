@@ -23,6 +23,7 @@
 //   <stem>.elem.csv  Element results CSV/  the BDF, or when --csv is passed.
 
 #include "io/bdf_parser.hpp"
+#include "io/inp_parser.hpp"
 #include "io/results.hpp"
 #include "solver/linear_static.hpp"
 #include "solver/solver_backend.hpp"
@@ -33,6 +34,8 @@
 #include "solver/cuda_pcg_solver_backend.hpp"
 #include "solver/cuda_solver_backend.hpp"
 #endif
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <iostream>
@@ -45,7 +48,7 @@ static void print_usage() {
   std::cerr << "Usage: nastran_solver "
                "[--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg>]\n"
                "                      [--cuda-single-precision] [--csv]\n"
-               "                      <input.bdf> [output.f06]\n"
+               "                      <input.bdf|input.inp> [output.f06]\n"
                "  --backend=cpu              Eigen sparse Cholesky CPU solver "
                "(default)\n"
                "  --backend=cpu-pcg          Eigen PCG + IncompleteCholesky "
@@ -123,7 +126,12 @@ int main(int argc, char *argv[]) {
     auto t0 = std::chrono::steady_clock::now();
 
     std::cout << "Reading: " << bdf_path << "\n";
-    nastran::Model model = nastran::BdfParser::parse_file(bdf_path);
+    std::string ext = bdf_path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    nastran::Model model = (ext == ".inp")
+        ? nastran::InpParser::parse_file(bdf_path)
+        : nastran::BdfParser::parse_file(bdf_path);
 
     std::cout << "  Nodes:    " << model.nodes.size() << "\n";
     std::cout << "  Elements: " << model.elements.size() << "\n";

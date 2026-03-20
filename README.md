@@ -8,8 +8,8 @@ A Nastran-compatible finite element solver written in modern C++20.
 nastran_solver/
 ├── include/
 │   ├── core/           # Matrix, DOF, Mesh data structures
-│   ├── elements/       # Element formulations (CQUAD4, CTRIA3, CHEXA, CTETRA)
-│   ├── io/             # BDF parser, F06 writer
+│   ├── elements/       # Element formulations (CQUAD4, CTRIA3, CHEXA, CTETRA, CPENTA)
+│   ├── io/             # BDF/INP parsers, F06/OP2/CSV writers
 │   ├── solver/         # Solver backends and linear static analysis
 │   └── utils/          # Logging, error handling
 ├── src/                # Implementations
@@ -27,11 +27,13 @@ nastran_solver/
 
 ## Supported Features
 
-- **Elements**: CQUAD4, CTRIA3, CHEXA8, CTETRA4
+- **Elements**: CQUAD4, CTRIA3, CHEXA8, CHEXA20, CTETRA4, CTETRA10, CPENTA6
 - **Materials**: MAT1 (isotropic)
 - **Properties**: PSHELL, PSOLID
 - **Loads**: FORCE, MOMENT, TEMP (thermal)
-- **Constraints**: SPC, SPC1
+- **Constraints**: SPC, SPC1, MPC, RBE2, RBE3
+- **Coordinate systems**: CORD1R/C/S, CORD2R/C/S
+- **Input formats**: Nastran BDF (`.bdf`) and CalculiX/Abaqus (`.inp`, experimental)
 - **Solution**: SOL 101 (Linear Static)
 
 ## Building
@@ -50,10 +52,25 @@ Optional backends are detected automatically at configure time.
 ```
 nastran_solver [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg>]
                [--cuda-single-precision] [--csv]
-               <input.bdf> [output.f06]
+               <input.bdf|input.inp> [output.f06]
 ```
 
-If no output path is given, it defaults to `<input>.f06`.
+Both Nastran BDF (`.bdf`) and CalculiX/Abaqus (`.inp`) input files are supported.
+The format is detected by file extension. If no output path is given, it defaults
+to `<input>.f06`.
+
+### CalculiX/Abaqus `.inp` support (experimental)
+
+The `.inp` parser accepts standard CalculiX input files and maps them to the same
+internal model used by the BDF parser. Supported keywords include `*NODE`,
+`*ELEMENT`, `*MATERIAL`/`*ELASTIC`/`*DENSITY`/`*EXPANSION`, `*SOLID SECTION`,
+`*SHELL SECTION`, `*BOUNDARY`, `*CLOAD`, `*TEMPERATURE`, `*STEP`/`*STATIC`/`*END STEP`,
+and output request keywords (`*NODE FILE`, `*EL FILE`, `*NODE PRINT`, `*EL PRINT`).
+
+Supported element types: C3D8, C3D4, C3D10, C3D6, S4, S3 (and their R variants).
+C3D20 is not supported due to midside node ordering differences.
+
+See `include/io/inp_parser.hpp` for full details on design decisions and limitations.
 
 ### Output files
 

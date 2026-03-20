@@ -232,6 +232,7 @@ solver_sources = files(
   'src/elements/rbe_constraints.cpp',
   # I/O
   'src/io/bdf_parser.cpp',
+  'src/io/inp_parser.cpp',
   'src/io/results.cpp',
   'src/io/op2_writer.cpp',
   'src/io/csv_writer.cpp',
@@ -302,6 +303,7 @@ unit_test_sources = files(
   'tests/unit/test_output_writers.cpp',
   'tests/unit/test_coord_sys.cpp',
   'tests/unit/test_mpc_handler.cpp',
+  'tests/unit/test_inp_parser.cpp',
 )
 
 unit_tests = executable(
