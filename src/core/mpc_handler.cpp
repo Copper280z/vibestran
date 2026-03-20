@@ -155,6 +155,12 @@ void MpcHandler::build(std::span<const Mpc* const> mpcs, DofMap& dof_map) {
                            [](const auto& p) { return p.first == CONSTRAINED_DOF; }),
             elim.terms.end());
     }
+
+    // Build O(1) lookup from dep eq → elimination index
+    dep_to_elim_.clear();
+    dep_to_elim_.reserve(eliminations_.size());
+    for (int i = 0; i < static_cast<int>(eliminations_.size()); ++i)
+        dep_to_elim_[eliminations_[i].dep] = i;
 }
 
 EqIndex MpcHandler::reduced_index(EqIndex full) const {
@@ -167,11 +173,10 @@ std::vector<std::pair<EqIndex, double>>
 MpcHandler::t_column(EqIndex full_eq) const {
     if (full_eq == CONSTRAINED_DOF)
         return {};
-    // Check if it's a dep DOF
-    auto it = std::find_if(eliminations_.begin(), eliminations_.end(),
-                           [full_eq](const MpcElimination& e){ return e.dep == full_eq; });
-    if (it != eliminations_.end())
-        return it->terms; // u_dep = sum c_j * u_j (j in reduced space)
+    // Check if it's a dep DOF (O(1) lookup)
+    auto it = dep_to_elim_.find(full_eq);
+    if (it != dep_to_elim_.end())
+        return eliminations_[it->second].terms;
     // Free non-dep DOF
     EqIndex r = reduced_index(full_eq);
     if (r == CONSTRAINED_DOF)
@@ -185,20 +190,31 @@ void MpcHandler::apply_to_stiffness(std::span<const EqIndex> gdofs_full,
                                      SparseMatrixBuilder& K_builder) const {
     int ndof = static_cast<int>(gdofs_full.size());
 
-    if (!has_constraints()) {
-        // No MPCs: direct passthrough (identity mapping)
-        std::vector<int32_t> gd32(static_cast<size_t>(ndof));
-        for (int i = 0; i < ndof; ++i) {
-            EqIndex full = gdofs_full[i];
-            gd32[static_cast<size_t>(i)] =
-                (full == CONSTRAINED_DOF || full < 0 ||
-                 full >= static_cast<EqIndex>(index_map_.size()))
-                    ? CONSTRAINED_DOF
-                    : index_map_[static_cast<size_t>(full)];
+    // Fast path: if no element DOF is a dependent MPC DOF, use direct assembly
+    // with simple index remapping (avoids dense T^T*Ke*T transformation).
+    {
+        bool any_dep = false;
+        if (has_constraints()) {
+            for (int i = 0; i < ndof && !any_dep; ++i) {
+                EqIndex full = gdofs_full[i];
+                if (full != CONSTRAINED_DOF && dep_to_elim_.count(full))
+                    any_dep = true;
+            }
         }
-        K_builder.add_element_stiffness(
-            gd32, std::vector<double>(ke.begin(), ke.end()));
-        return;
+        if (!any_dep) {
+            std::vector<int32_t> gd32(static_cast<size_t>(ndof));
+            for (int i = 0; i < ndof; ++i) {
+                EqIndex full = gdofs_full[i];
+                gd32[static_cast<size_t>(i)] =
+                    (full == CONSTRAINED_DOF || full < 0 ||
+                     full >= static_cast<EqIndex>(index_map_.size()))
+                        ? CONSTRAINED_DOF
+                        : index_map_[static_cast<size_t>(full)];
+            }
+            K_builder.add_element_stiffness(
+                gd32, std::vector<double>(ke.begin(), ke.end()));
+            return;
+        }
     }
 
     // Build compact T: collect unique active reduced column indices.
@@ -266,6 +282,27 @@ void MpcHandler::apply_to_stiffness(std::span<const EqIndex> gdofs_full,
 void MpcHandler::apply_to_force(std::span<const EqIndex> gdofs_full,
                                  std::span<const double> fe,
                                  std::vector<double>& F) const {
+    // Fast path: if no element DOF is dependent, use direct index mapping
+    bool any_dep = false;
+    if (has_constraints()) {
+        for (size_t i = 0; i < gdofs_full.size() && !any_dep; ++i) {
+            EqIndex full = gdofs_full[i];
+            if (full != CONSTRAINED_DOF && dep_to_elim_.count(full))
+                any_dep = true;
+        }
+    }
+    if (!any_dep) {
+        for (size_t i = 0; i < gdofs_full.size(); ++i) {
+            EqIndex full = gdofs_full[i];
+            if (full == CONSTRAINED_DOF || full < 0 ||
+                full >= static_cast<EqIndex>(index_map_.size()))
+                continue;
+            EqIndex r = index_map_[static_cast<size_t>(full)];
+            if (r >= 0 && r < static_cast<EqIndex>(F.size()))
+                F[static_cast<size_t>(r)] += fe[i];
+        }
+        return;
+    }
     for (size_t i = 0; i < gdofs_full.size(); ++i) {
         for (const auto& [r, c] : t_column(gdofs_full[i])) {
             if (r >= 0 && r < static_cast<EqIndex>(F.size()))

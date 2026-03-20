@@ -50,6 +50,7 @@ private:
     static void process_ctria3  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_chexa   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_ctetra  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_cpenta  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_force   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_moment  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_temp    (ParseContext& ctx, const std::vector<std::string>& fields);

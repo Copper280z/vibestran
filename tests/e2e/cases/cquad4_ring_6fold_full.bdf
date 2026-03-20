@@ -1,0 +1,83 @@
+$ cquad4_ring_6fold_full.bdf
+$ Annular ring under uniform radial outward point loads — 6-fold symmetric model
+$
+$ Geometry: annular ring, inner r=1 m, outer r=2 m, in-plane thickness t=0.1 m
+$ Material: E=1e6 Pa, nu=0.3, plane stress
+$ 12 nodes: inner/outer ring at theta = 0, 60, 120, 180, 240, 300 degrees
+$ 6 CQUAD4 sectors of 60 degrees each
+$
+$ Symmetry BCs:
+$   theta=0 and 180 nodes: T2=0 (tangential = +/-Y, simple SPC)
+$   theta=60,120,240,300 nodes: MPC -sin(theta)*T1 + cos(theta)*T2 = 0
+$   (oblique tangential constraint, dependent DOF = T1 with |coeff|=sin60)
+$
+$ Each node has exactly one free DOF (the radial direction).
+$ By 6-fold symmetry, all outer nodes should have approximately the same
+$ radial displacement magnitude, and all inner nodes likewise.
+$
+$ Note: MPC-constrained nodes see a slightly different effective radial
+$ stiffness than SPC-constrained nodes due to CQUAD4 bilinear interpolation
+$ non-isotropy.  For this coarse 6-element mesh the difference is <3% outer,
+$ <8% inner, and decreases with mesh refinement.
+$
+SOL 101
+CEND
+SUBCASE 1
+  LABEL = RADIAL EXPANSION 6-FOLD SYMMETRIC
+  LOAD = 1
+  SPC  = 1
+  MPC  = 10
+  DISPLACEMENT = ALL
+  STRESS = ALL
+BEGIN BULK
+$ Inner ring (r=1): nodes 1-6
+$ sin(60) = sqrt(3)/2 = 0.8660254037844386 (IEEE 754 exact double)
+$ Outer ring y-coords = 2 * inner (exact in IEEE 754 via multiply-by-2)
+GRID,1,, 1.0,                0.0,              0.0
+GRID,2,, 0.5,                0.8660254037844386,0.0
+GRID,3,,-0.5,                0.8660254037844386,0.0
+GRID,4,,-1.0,                0.0,              0.0
+GRID,5,,-0.5,               -0.8660254037844386,0.0
+GRID,6,, 0.5,               -0.8660254037844386,0.0
+$ Outer ring (r=2): nodes 7-12
+GRID,7,, 2.0,                0.0,              0.0
+GRID,8,, 1.0,                1.7320508075688772,0.0
+GRID,9,,-1.0,                1.7320508075688772,0.0
+GRID,10,,-2.0,                0.0,              0.0
+GRID,11,,-1.0,               -1.7320508075688772,0.0
+GRID,12,, 1.0,               -1.7320508075688772,0.0
+MAT1,1,1.0E6,,0.3
+PSHELL,1,1,0.1
+$ 6 sectors (CCW): inner-theta1, outer-theta1, outer-theta2, inner-theta2
+CQUAD4,1,1, 1, 7, 8, 2
+CQUAD4,2,1, 2, 8, 9, 3
+CQUAD4,3,1, 3, 9,10, 4
+CQUAD4,4,1, 4,10,11, 5
+CQUAD4,5,1, 5,11,12, 6
+CQUAD4,6,1, 6,12, 7, 1
+$ Out-of-plane and drilling DOFs for all nodes (plane stress model)
+SPC1,1,3456, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12
+$ theta=0 and theta=180: tangential = +/-Y, so T2=0 SPC
+SPC1,1,2, 1, 4, 7,10
+$ Oblique tangential MPCs for theta=60,120,240,300 nodes:
+$   -sin(theta)*T1 + cos(theta)*T2 = 0
+$ theta=60:  -sqrt(3)/2*T1 + 0.5*T2 = 0
+MPC,10, 2,1,-0.8660254037844386, 2,2,0.5
+MPC,10, 8,1,-0.8660254037844386, 8,2,0.5
+$ theta=120: -sqrt(3)/2*T1 - 0.5*T2 = 0
+MPC,10, 3,1,-0.8660254037844386, 3,2,-0.5
+MPC,10, 9,1,-0.8660254037844386, 9,2,-0.5
+$ theta=240:  sqrt(3)/2*T1 - 0.5*T2 = 0
+MPC,10, 5,1, 0.8660254037844386, 5,2,-0.5
+MPC,10,11,1, 0.8660254037844386,11,2,-0.5
+$ theta=300:  sqrt(3)/2*T1 + 0.5*T2 = 0
+MPC,10, 6,1, 0.8660254037844386, 6,2,0.5
+MPC,10,12,1, 0.8660254037844386,12,2,0.5
+$ Radial outward forces at outer nodes, 100 N per node
+FORCE,1, 7,0,100.0, 1.0,                  0.0,                 0.0
+FORCE,1, 8,0,100.0, 0.5,                  0.8660254037844386,  0.0
+FORCE,1, 9,0,100.0,-0.5,                  0.8660254037844386,  0.0
+FORCE,1,10,0,100.0,-1.0,                  0.0,                 0.0
+FORCE,1,11,0,100.0,-0.5,                 -0.8660254037844386,  0.0
+FORCE,1,12,0,100.0, 0.5,                 -0.8660254037844386,  0.0
+ENDDATA

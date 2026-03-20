@@ -68,6 +68,7 @@ enum class ElementType {
   CHEXA20,
   CTETRA4,
   CTETRA10,
+  CPENTA6,
 };
 
 struct ElementData {
@@ -177,6 +178,7 @@ struct SubCase {
   LoadSetId load_set{0};
   SpcSetId spc_set{0};
   MpcSetId mpc_set{0}; // 0 = no MPCs
+  int temp_load_set{0}; // TEMPERATURE(LOAD) / TEMP(LOAD) set ID
   double t_ref{0}; // reference temperature for thermal load
 
   // Output selection (case control deck).
@@ -226,6 +228,9 @@ public:
 
   // Coordinate systems (CoordId{0} = basic, never stored here)
   std::unordered_map<CoordId, CoordSys> coord_systems;
+
+  // Default temperatures per set (TEMPD cards): set_id → temperature
+  std::unordered_map<int, double> tempd;
 
   // Analysis
   AnalysisCase analysis;

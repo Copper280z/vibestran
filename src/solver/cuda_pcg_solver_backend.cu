@@ -774,12 +774,14 @@ static std::vector<double> solve_pcg(
         Tr::dot(cublas, n, d_p.ptr, d_Ap.ptr, &pAp_T);
         const double pAp = static_cast<double>(pAp_T);
 
-        if (pAp <= 0.0)
-            throw SolverError(
-                "CUDA PCG: non-positive p·Ap=" + std::to_string(pAp) +
-                " at iteration " + std::to_string(iter) +
-                " -- matrix may not be positive definite. "
-                "Check boundary conditions (SPCs).");
+        if (pAp <= 0.0) {
+            std::clog << "[cuda-pcg] non-positive p·Ap=" << pAp
+                      << " at iteration " << iter
+                      << " -- matrix may not be positive definite or"
+                      << " preconditioner is ill-conditioned; stopping.\n";
+            iter = max_iters; // trigger the non-convergence path
+            break;
+        }
 
         const T alpha     = static_cast<T>(rz / pAp);
         const T neg_alpha = -alpha;

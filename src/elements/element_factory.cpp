@@ -46,6 +46,13 @@ std::unique_ptr<ElementBase> make_element(const ElementData& data, const Model& 
             std::array<NodeId,4> nids{data.nodes[0],data.nodes[1],data.nodes[2],data.nodes[3]};
             return std::make_unique<CTetra4>(data.id, data.pid, nids, model);
         }
+        case ElementType::CPENTA6: {
+            if (data.nodes.size() != 6)
+                throw SolverError(std::format("CPENTA6 {} needs 6 nodes, got {}", data.id.value, data.nodes.size()));
+            std::array<NodeId,6> nids{data.nodes[0],data.nodes[1],data.nodes[2],
+                                       data.nodes[3],data.nodes[4],data.nodes[5]};
+            return std::make_unique<CPenta6>(data.id, data.pid, nids, model);
+        }
         case ElementType::CTETRA10: {
             if (data.nodes.size() != 10)
                 throw SolverError(std::format("CTETRA10 {} needs 10 nodes, got {}", data.id.value, data.nodes.size()));

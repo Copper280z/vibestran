@@ -361,6 +361,9 @@ static int write_oes1x_solid(std::ostream& f,
     } else if (etype == ElementType::CTETRA10) {
         etype_id = 99;
         ngrids   = 10;
+    } else if (etype == ElementType::CPENTA6) {
+        etype_id = 91;
+        ngrids   = 6;
     } else {
         etype_id = 67;  // CHEXA8
         ngrids   = 8;
@@ -581,7 +584,7 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
 
     // ── OES1X tables for solid elements ──────────────────────────────────────
     for (ElementType etype : {ElementType::CTETRA4, ElementType::CTETRA10,
-                              ElementType::CHEXA8}) {
+                              ElementType::CHEXA8, ElementType::CPENTA6}) {
         bool any = false;
         for (const auto& sc : results.subcases) {
             bool dd, ds;

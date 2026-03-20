@@ -135,6 +135,7 @@ void F06Writer::write(const SolverResults& results, const Model& model,
             write_solid_stress_table(sc, out, ElementType::CHEXA8);
             write_solid_stress_table(sc, out, ElementType::CTETRA4);
             write_solid_stress_table(sc, out, ElementType::CTETRA10);
+            write_solid_stress_table(sc, out, ElementType::CPENTA6);
         }
     }
     out << "\n\n                     * * * END OF JOB * * *\n\n";
@@ -244,6 +245,9 @@ void F06Writer::write_solid_stress_table(const SubCaseResults& sc,
     } else if (etype == ElementType::CTETRA10) {
         title  = "T E T R A H E D R O N   E L E M E N T S   ( C T E T R A 1 0 )";
         ngrids = 10;
+    } else if (etype == ElementType::CPENTA6) {
+        title  = "P E N T A H E D R O N   E L E M E N T S   ( C P E N T A )";
+        ngrids = 6;
     }
 
     out << "\n                         S T R E S S E S   I N   " << title << "\n\n";

@@ -1,0 +1,63 @@
+$ cquad4_ring_60deg_slice.bdf
+$ Annular ring — single 60 degree sector slice using CORD2C cylindrical coords
+$
+$ Geometry: same ring as cquad4_ring_6fold_full.bdf (inner r=1, outer r=2, t=0.1)
+$ Material: E=1e6 Pa, nu=0.3, plane stress
+$ 4 nodes: inner and outer at theta=0 and theta=60, defined in CORD2C
+$ 1 CQUAD4 element: the single 60 degree sector
+$
+$ Nodes are positioned using CORD2C (cylindrical coordinate system):
+$   CORD2C id=10: standard alignment, origin at (0,0,0)
+$   Node coords: (r, theta_deg, z) resolves to same basic x,y as full model
+$
+$ Symmetry BCs:
+$   theta=0 cut face:  T2=0 in basic frame (tangential = +Y) — simple SPC
+$   theta=60 cut face: MPC -sin60*T1 + cos60*T2 = 0 (non-90 degree oblique)
+$
+$ Forces are halved (50 N instead of 100 N) because each node sits on a
+$ sector boundary, sharing stiffness with two sectors in the full ring.
+$ The slice has only one sector's stiffness, so force must be halved to
+$ maintain the same displacement: u = F_half / K_half = F_full / K_full.
+$
+$ Verification: displacements at shared nodes (1,2,7,8) should match the
+$ full ring model to within ~1% (CQUAD4 discretization non-isotropy).
+$
+SOL 101
+CEND
+SUBCASE 1
+  LABEL = 60 DEG SLICE WITH CORD2C NODES
+  LOAD = 1
+  SPC  = 1
+  MPC  = 10
+  DISPLACEMENT = ALL
+  STRESS = ALL
+BEGIN BULK
+$ CORD2C id=10: standard cylindrical CS
+$   A = origin (0,0,0), B = point on z-axis (0,0,1), C = point in xz-plane (1,0,0)
+CORD2C,10,0,0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.0,0.0
+$ Inner ring nodes (r=1) in cylindrical coords (r, theta_deg, z)
+$ Node 1: r=1, theta=0   -> basic (1.0, 0.0, 0)
+$ Node 2: r=1, theta=60  -> basic (0.5, 0.866025, 0)
+GRID,1,10,1.0, 0.0,0.0
+GRID,2,10,1.0,60.0,0.0
+$ Outer ring nodes (r=2) in cylindrical coords
+$ Node 7: r=2, theta=0   -> basic (2.0, 0.0, 0)
+$ Node 8: r=2, theta=60  -> basic (1.0, 1.732051, 0)
+GRID,7,10,2.0, 0.0,0.0
+GRID,8,10,2.0,60.0,0.0
+MAT1,1,1.0E6,,0.3
+PSHELL,1,1,0.1
+$ Single 60 degree sector (CCW node order): inner-0, outer-0, outer-60, inner-60
+CQUAD4,1,1,1,7,8,2
+$ Out-of-plane and drilling DOFs (plane stress model)
+SPC1,1,3456,1,2,7,8
+$ theta=0 cut face: tangential = +Y in basic -> T2=0
+SPC1,1,2,1,7
+$ theta=60 cut face: tangential = (-sin60, cos60, 0) = (-0.866, 0.5, 0)
+$   Constraint: -0.866*T1 + 0.5*T2 = 0  (T1 is dependent, |coeff|=0.866>0.5)
+MPC,10,2,1,-0.8660254037844386,2,2,0.5
+MPC,10,8,1,-0.8660254037844386,8,2,0.5
+$ Radial outward forces at outer nodes (halved: 50 N, see header comment)
+FORCE,1,7,0,50.0, 1.0,                 0.0,                0.0
+FORCE,1,8,0,50.0, 0.5,                 0.8660254037844386, 0.0
+ENDDATA

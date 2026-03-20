@@ -403,6 +403,209 @@ std::vector<EqIndex> CTetra4::global_dof_indices(const DofMap& dof_map) const {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// CPENTA6
+// ═══════════════════════════════════════════════════════════════════════════════
+
+CPenta6::CPenta6(ElementId eid, PropertyId pid,
+                 std::array<NodeId, 6> node_ids,
+                 const Model& model)
+    : eid_(eid), pid_(pid), nodes_(node_ids), model_(model) {}
+
+const PSolid& CPenta6::psolid() const {
+    const auto& prop = model_.property(pid_);
+    if (!std::holds_alternative<PSolid>(prop))
+        throw SolverError(std::format("CPENTA6 {}: property {} is not PSOLID", eid_.value, pid_.value));
+    return std::get<PSolid>(prop);
+}
+
+const Mat1& CPenta6::material() const {
+    return model_.material(psolid().mid);
+}
+
+Eigen::Matrix<double,6,6> CPenta6::constitutive_D() const {
+    const Mat1& m = material();
+    return isotropic_D(m.E, m.nu);
+}
+
+std::array<Vec3, 6> CPenta6::node_coords() const {
+    std::array<Vec3, 6> c;
+    for (int i = 0; i < 6; ++i)
+        c[i] = model_.node(nodes_[i]).position;
+    return c;
+}
+
+// Shape functions for 6-node pentahedron (wedge).
+// Natural coordinates: L1, L2 (triangular), zeta ∈ [-1,1] (axial).
+// L3 = 1 - L1 - L2.
+// Nodes 0-2 on bottom face (zeta=-1), nodes 3-5 on top face (zeta=+1).
+CPenta6::ShapeData6 CPenta6::shape_functions(double L1, double L2, double zeta) noexcept {
+    double L3 = 1.0 - L1 - L2;
+    double zm = (1.0 - zeta) * 0.5;
+    double zp = (1.0 + zeta) * 0.5;
+
+    ShapeData6 s;
+    s.N[0] = L1 * zm;
+    s.N[1] = L2 * zm;
+    s.N[2] = L3 * zm;
+    s.N[3] = L1 * zp;
+    s.N[4] = L2 * zp;
+    s.N[5] = L3 * zp;
+
+    // dN/dL1
+    s.dNdL1[0] =  zm;
+    s.dNdL1[1] =  0.0;
+    s.dNdL1[2] = -zm;
+    s.dNdL1[3] =  zp;
+    s.dNdL1[4] =  0.0;
+    s.dNdL1[5] = -zp;
+
+    // dN/dL2
+    s.dNdL2[0] =  0.0;
+    s.dNdL2[1] =  zm;
+    s.dNdL2[2] = -zm;
+    s.dNdL2[3] =  0.0;
+    s.dNdL2[4] =  zp;
+    s.dNdL2[5] = -zp;
+
+    // dN/dzeta
+    s.dNdzeta[0] = -L1 * 0.5;
+    s.dNdzeta[1] = -L2 * 0.5;
+    s.dNdzeta[2] = -L3 * 0.5;
+    s.dNdzeta[3] =  L1 * 0.5;
+    s.dNdzeta[4] =  L2 * 0.5;
+    s.dNdzeta[5] =  L3 * 0.5;
+
+    return s;
+}
+
+LocalKe CPenta6::stiffness_matrix() const {
+    LocalKe Ke = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+    auto coords = node_coords();
+    Eigen::Matrix<double,6,6> D = constitutive_D();
+
+    // 6-point Gauss quadrature: 3 triangle points × 2 axial points
+    // Triangle 3-point rule: weights = 1/6 each (includes reference triangle area 1/2)
+    const double tri_pts[3][2] = {
+        {2.0/3.0, 1.0/6.0},
+        {1.0/6.0, 2.0/3.0},
+        {1.0/6.0, 1.0/6.0}
+    };
+    const double tri_w = 1.0 / 6.0;
+
+    // Axial 2-point Gauss: zeta = ±1/√3, weight = 1
+    const double ax_pts[2] = {-1.0/std::sqrt(3.0), 1.0/std::sqrt(3.0)};
+
+    for (int ti = 0; ti < 3; ++ti)
+    for (int ai = 0; ai < 2; ++ai) {
+        double L1 = tri_pts[ti][0], L2 = tri_pts[ti][1];
+        double zeta = ax_pts[ai];
+        double w = tri_w; // axial weight is 1.0
+
+        auto sd = shape_functions(L1, L2, zeta);
+
+        // Jacobian [3x3]
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 6; ++n) {
+            J(0,0) += sd.dNdL1[n]*coords[n].x; J(0,1) += sd.dNdL1[n]*coords[n].y; J(0,2) += sd.dNdL1[n]*coords[n].z;
+            J(1,0) += sd.dNdL2[n]*coords[n].x; J(1,1) += sd.dNdL2[n]*coords[n].y; J(1,2) += sd.dNdL2[n]*coords[n].z;
+            J(2,0) += sd.dNdzeta[n]*coords[n].x; J(2,1) += sd.dNdzeta[n]*coords[n].y; J(2,2) += sd.dNdzeta[n]*coords[n].z;
+        }
+        double detJ = J.determinant();
+        if (detJ <= 0)
+            throw SolverError(std::format("CPENTA6 {}: non-positive Jacobian det={:.6g}", eid_.value, detJ));
+        Eigen::Matrix3d Jinv = J.inverse();
+
+        // B matrix [6 x 18]
+        Eigen::MatrixXd B(6, NUM_DOFS);
+        B.setZero();
+        for (int n = 0; n < 6; ++n) {
+            double dnx = Jinv(0,0)*sd.dNdL1[n] + Jinv(0,1)*sd.dNdL2[n] + Jinv(0,2)*sd.dNdzeta[n];
+            double dny = Jinv(1,0)*sd.dNdL1[n] + Jinv(1,1)*sd.dNdL2[n] + Jinv(1,2)*sd.dNdzeta[n];
+            double dnz = Jinv(2,0)*sd.dNdL1[n] + Jinv(2,1)*sd.dNdL2[n] + Jinv(2,2)*sd.dNdzeta[n];
+            int c0 = 3*n;
+            B(0,c0+0) = dnx;
+            B(1,c0+1) = dny;
+            B(2,c0+2) = dnz;
+            B(3,c0+0) = dny; B(3,c0+1) = dnx;
+            B(4,c0+1) = dnz; B(4,c0+2) = dny;
+            B(5,c0+0) = dnz; B(5,c0+2) = dnx;
+        }
+
+        Ke += B.transpose() * D * B * detJ * w;
+    }
+
+    return Ke;
+}
+
+LocalFe CPenta6::thermal_load(std::span<const double> temperatures, double t_ref) const {
+    LocalFe fe = LocalFe::Zero(NUM_DOFS);
+    const double alpha = material().A;
+    if (alpha == 0.0) return fe;
+
+    auto coords = node_coords();
+    Eigen::Matrix<double,6,6> D = constitutive_D();
+
+    const double tri_pts[3][2] = {
+        {2.0/3.0, 1.0/6.0},
+        {1.0/6.0, 2.0/3.0},
+        {1.0/6.0, 1.0/6.0}
+    };
+    const double tri_w = 1.0 / 6.0;
+    const double ax_pts[2] = {-1.0/std::sqrt(3.0), 1.0/std::sqrt(3.0)};
+
+    for (int ti = 0; ti < 3; ++ti)
+    for (int ai = 0; ai < 2; ++ai) {
+        double L1 = tri_pts[ti][0], L2 = tri_pts[ti][1];
+        double zeta = ax_pts[ai];
+        double w = tri_w;
+
+        auto sd = shape_functions(L1, L2, zeta);
+
+        double T = 0;
+        for (int n = 0; n < 6; ++n) T += sd.N[n] * temperatures[n];
+        double dT = T - t_ref;
+        if (std::abs(dT) < 1e-15) continue;
+
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 6; ++n) {
+            J(0,0) += sd.dNdL1[n]*coords[n].x; J(0,1) += sd.dNdL1[n]*coords[n].y; J(0,2) += sd.dNdL1[n]*coords[n].z;
+            J(1,0) += sd.dNdL2[n]*coords[n].x; J(1,1) += sd.dNdL2[n]*coords[n].y; J(1,2) += sd.dNdL2[n]*coords[n].z;
+            J(2,0) += sd.dNdzeta[n]*coords[n].x; J(2,1) += sd.dNdzeta[n]*coords[n].y; J(2,2) += sd.dNdzeta[n]*coords[n].z;
+        }
+        double detJ = J.determinant();
+        Eigen::Matrix3d Jinv = J.inverse();
+
+        Eigen::MatrixXd B(6, NUM_DOFS);
+        B.setZero();
+        for (int n = 0; n < 6; ++n) {
+            double dnx = Jinv(0,0)*sd.dNdL1[n] + Jinv(0,1)*sd.dNdL2[n] + Jinv(0,2)*sd.dNdzeta[n];
+            double dny = Jinv(1,0)*sd.dNdL1[n] + Jinv(1,1)*sd.dNdL2[n] + Jinv(1,2)*sd.dNdzeta[n];
+            double dnz = Jinv(2,0)*sd.dNdL1[n] + Jinv(2,1)*sd.dNdL2[n] + Jinv(2,2)*sd.dNdzeta[n];
+            int c0 = 3*n;
+            B(0,c0+0)=dnx; B(1,c0+1)=dny; B(2,c0+2)=dnz;
+            B(3,c0+0)=dny; B(3,c0+1)=dnx;
+            B(4,c0+1)=dnz; B(4,c0+2)=dny;
+            B(5,c0+0)=dnz; B(5,c0+2)=dnx;
+        }
+
+        Eigen::Matrix<double,6,1> eps_th;
+        eps_th << alpha*dT, alpha*dT, alpha*dT, 0, 0, 0;
+        fe += B.transpose() * D * eps_th * detJ * w;
+    }
+    return fe;
+}
+
+std::vector<EqIndex> CPenta6::global_dof_indices(const DofMap& dof_map) const {
+    std::vector<EqIndex> result;
+    result.reserve(NUM_DOFS);
+    static constexpr int solid_dofs[3] = {0,1,2};
+    for (NodeId nid : nodes_)
+        for (int d : solid_dofs)
+            result.push_back(dof_map.eq_index(nid, d));
+    return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // CTETRA10
 // ═══════════════════════════════════════════════════════════════════════════════
 

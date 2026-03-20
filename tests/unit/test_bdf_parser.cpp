@@ -513,3 +513,200 @@ ENDDATA
     const PShell& ps = std::get<PShell>(m.properties.at(PropertyId{1}));
     EXPECT_EQ(ps.shell_form, ShellFormulation::MITC4);
 }
+
+// ── Fixed-width (small-field) format tests ──────────────────────────────────
+// These test the more common BDF style seen in production, where cards use
+// fixed 8-character columns and continuation lines have blank first fields.
+
+TEST(BdfParser, BlankLabelContinuation_CHEXA) {
+    // CHEXA with 8 nodes: first 6 on parent line, last 2 on blank-label continuation
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  SPC = 1
+BEGIN BULK
+GRID           1              0.      0.      0.
+GRID           2              1.      0.      0.
+GRID           3              1.      1.      0.
+GRID           4              0.      1.      0.
+GRID           5              0.      0.      1.
+GRID           6              1.      0.      1.
+GRID           7              1.      1.      1.
+GRID           8              0.      1.      1.
+MAT1           1 2.0E+07              .3
+PSOLID         1       1
+CHEXA          1       1       1       2       3       4       5       6
+               7       8
+SPC1           1  123456       1       2       3       4       5       6
+               7       8
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.elements.size(), 1u);
+    EXPECT_EQ(m.elements[0].type, ElementType::CHEXA8);
+    ASSERT_EQ(m.elements[0].nodes.size(), 8u);
+    EXPECT_EQ(m.elements[0].nodes[6].value, 7);
+    EXPECT_EQ(m.elements[0].nodes[7].value, 8);
+    // SPC1 with blank-label continuation should have all 8 nodes
+    EXPECT_EQ(m.spcs.size(), 8u);
+}
+
+TEST(BdfParser, BlankLabelContinuation_SPC1_Long) {
+    // SPC1 with multiple blank-label continuation lines (production-style)
+    const std::string bdf = R"(
+BEGIN BULK
+GRID           1              0.      0.      0.
+GRID           2              1.      0.      0.
+GRID           3              2.      0.      0.
+GRID           4              3.      0.      0.
+GRID           5              4.      0.      0.
+GRID           6              5.      0.      0.
+GRID           7              6.      0.      0.
+GRID           8              7.      0.      0.
+GRID           9              8.      0.      0.
+GRID          10              9.      0.      0.
+GRID          11             10.      0.      0.
+GRID          12             11.      0.      0.
+GRID          13             12.      0.      0.
+GRID          14             13.      0.      0.
+GRID          15             14.      0.      0.
+GRID          16             15.      0.      0.
+GRID          17             16.      0.      0.
+SPC1           1     123       1       2       3       4       5       6
+               7       8       9      10      11      12      13      14
+              15      16      17
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    EXPECT_EQ(m.spcs.size(), 17u);
+}
+
+TEST(BdfParser, FixedWidth_CPENTA6) {
+    // CPENTA with 6 nodes in fixed-width format (no continuation needed)
+    const std::string bdf = R"(
+BEGIN BULK
+GRID           1              0.      0.      0.
+GRID           2              1.      0.      0.
+GRID           3              .5  .86603      0.
+GRID           4              0.      0.      1.
+GRID           5              1.      0.      1.
+GRID           6              .5  .86603      1.
+MAT1           1 2.0E+07              .3
+PSOLID         1       1
+CPENTA         1       1       1       2       3       4       5       6
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.elements.size(), 1u);
+    EXPECT_EQ(m.elements[0].type, ElementType::CPENTA6);
+    ASSERT_EQ(m.elements[0].nodes.size(), 6u);
+    for (int i = 0; i < 6; ++i)
+        EXPECT_EQ(m.elements[0].nodes[i].value, i + 1);
+}
+
+TEST(BdfParser, FixedWidth_CORD2C_WithBlankContinuation) {
+    // CORD2C spanning two lines with blank-label continuation (production-style)
+    const std::string bdf = R"(
+BEGIN BULK
+CORD2C         2              0.      0.      0.      1.      0.      0.
+              0.      1.      0.
+GRID           1       2     .01      0.      0.       2
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.coord_systems.count(CoordId{2}), 1u);
+    EXPECT_EQ(m.coord_systems.at(CoordId{2}).type, CoordType::Cylindrical);
+    // Node 1: CP was 2 (cylindrical) but resolve_coordinates() transforms to
+    // basic and clears CP to 0. CD should remain 2.
+    ASSERT_EQ(m.nodes.count(NodeId{1}), 1u);
+    EXPECT_EQ(m.nodes.at(NodeId{1}).cp.value, 0); // resolved to basic
+    EXPECT_EQ(m.nodes.at(NodeId{1}).cd.value, 2);
+    // CORD2C 2 has z-axis along basic X (A=origin, B=(1,0,0)).
+    // For cylindrical (r=0.01, θ=0°, z=0), the r-direction at θ=0 is in the
+    // local x-direction (defined by C=(0,1,0) projected onto the plane perp to
+    // local z). So basic position = (z=0, r*cos0=0.01, 0) → (0, 0.01, 0).
+    EXPECT_NEAR(m.nodes.at(NodeId{1}).position.x, 0.0, 1e-10);
+    EXPECT_NEAR(m.nodes.at(NodeId{1}).position.y, 0.01, 1e-10);
+    EXPECT_NEAR(m.nodes.at(NodeId{1}).position.z, 0.0, 1e-10);
+}
+
+TEST(BdfParser, TemperatureLoadCaseControl) {
+    // TEMPERATURE(LOAD) = N should be parsed into SubCase.temp_load_set
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  SPC = 1
+  TEMPERATURE(LOAD) = 3
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.analysis.subcases.size(), 1u);
+    EXPECT_EQ(m.analysis.subcases[0].temp_load_set, 3);
+}
+
+TEST(BdfParser, TempLoadCaseControl) {
+    // TEMP(LOAD) = N (short form) should also work
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  SPC = 1
+  TEMP(LOAD) = 5
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.analysis.subcases.size(), 1u);
+    EXPECT_EQ(m.analysis.subcases[0].temp_load_set, 5);
+}
+
+TEST(BdfParser, FixedWidth_GRID_NastranReals) {
+    // Nastran-style real numbers in fixed-width GRID: no leading zero, trailing dot,
+    // adjacent values without spaces (packed fields). Exact doublet.bdf column layout.
+    //                1234567812345678123456781234567812345678123456781234567812345678
+    const std::string bdf =
+        "BEGIN BULK\n"
+        "GRID           1       012.39486      0.1.968863\n"
+        "ENDDATA\n";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.nodes.size(), 1u);
+    auto& n = m.nodes.at(NodeId{1});
+    EXPECT_EQ(n.cp.value, 0);
+    EXPECT_NEAR(n.position.x, 12.39486, 1e-4);
+    EXPECT_NEAR(n.position.y, 0.0, 1e-12);
+    EXPECT_NEAR(n.position.z, 1.968863, 1e-5);
+}
+
+TEST(BdfParser, FixedWidth_MAT1_WithAlpha) {
+    // MAT1 with thermal expansion and TREF in fixed-width format
+    const std::string bdf = R"(
+BEGIN BULK
+MAT1           1  81700.            .243    2.93.0000065     20.
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.materials.size(), 1u);
+    const Mat1& mat = m.materials.at(MaterialId{1});
+    EXPECT_NEAR(mat.E, 81700.0, 1e-6);
+    EXPECT_NEAR(mat.nu, 0.243, 1e-6);
+    EXPECT_NEAR(mat.rho, 2.93, 1e-6);
+    EXPECT_NEAR(mat.A, 0.0000065, 1e-10);
+    EXPECT_NEAR(mat.ref_temp, 20.0, 1e-6);
+}
+
+TEST(BdfParser, TEMPD_StoredInModel) {
+    // TEMPD cards should populate model.tempd map
+    const std::string bdf = R"(
+BEGIN BULK
+TEMPD          1     20.
+TEMPD          2     60.
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.tempd.size(), 2u);
+    EXPECT_NEAR(m.tempd.at(1), 20.0, 1e-12);
+    EXPECT_NEAR(m.tempd.at(2), 60.0, 1e-12);
+}

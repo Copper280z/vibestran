@@ -46,9 +46,20 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
 #ifdef EIGEN_CHOLMOD_SUPPORT
   Eigen::CholmodDecomposition<ESM> solver;
   solver.compute(K);
-  if (solver.info() != Eigen::Success)
-    throw SolverError(
-        "Stiffness matrix factorization failed (CHOLMOD) — check boundary conditions");
+  if (solver.info() != Eigen::Success) {
+    // Cholesky failed (matrix not numerically PD) — fall back to LDLT which
+    // handles near-singular and mildly indefinite systems.
+    Eigen::SimplicialLDLT<ESM> ldlt;
+    ldlt.compute(K);
+    if (ldlt.info() != Eigen::Success)
+      throw SolverError(
+          "Stiffness matrix factorization failed (CHOLMOD + LDLT fallback) — "
+          "check boundary conditions (SPCs)");
+    Eigen::VectorXd u = ldlt.solve(F_eigen);
+    if (ldlt.info() != Eigen::Success)
+      throw SolverError("Back-substitution failed (LDLT fallback)");
+    return std::vector<double>(u.data(), u.data() + n);
+  }
   Eigen::VectorXd u = solver.solve(F_eigen);
   if (solver.info() != Eigen::Success)
     throw SolverError("Back-substitution failed (CHOLMOD)");

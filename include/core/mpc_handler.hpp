@@ -98,6 +98,9 @@ private:
 
     std::vector<MpcElimination> eliminations_;
 
+    /// O(1) lookup: pre-MPC eq index → index in eliminations_ (-1 if not dep)
+    std::unordered_map<EqIndex, int> dep_to_elim_;
+
     /// Compute the T-column for a given pre-MPC eq index:
     /// Returns {(reduced_eq, coeff)} pairs.
     /// For free non-dep DOFs: one entry (reduced_eq, 1.0).

@@ -6,7 +6,7 @@
 //     Header: # node_id, subcase_id, T1, T2, T3, R1, R2, R3
 //
 //   <stem>.elem.csv  – one row per (subcase, element)
-//     Header: # elem_id, subcase_id, elem_type, sx, sy, sxy, sz, syz, szx,
+//     Header: # elem_id, subcase_id, sx, sy, sxy, sz, syz, szx,
 //               mx, my, mxy, von_mises
 //     Fields not applicable to an element type are written as 0.0.
 
@@ -16,18 +16,6 @@
 #include <format>
 
 namespace nastran {
-
-static const char* etype_name(ElementType et) {
-    switch (et) {
-        case ElementType::CQUAD4:   return "CQUAD4";
-        case ElementType::CTRIA3:   return "CTRIA3";
-        case ElementType::CHEXA8:   return "CHEXA8";
-        case ElementType::CHEXA20:  return "CHEXA20";
-        case ElementType::CTETRA4:  return "CTETRA4";
-        case ElementType::CTETRA10: return "CTETRA10";
-        default:                    return "UNKNOWN";
-    }
-}
 
 void CsvWriter::write(const SolverResults& results, const Model& model,
                       const std::filesystem::path& stem) {
@@ -76,7 +64,7 @@ void CsvWriter::write(const SolverResults& results, const Model& model,
         if (!ef)
             throw SolverError(std::format("Cannot write CSV: {}", elem_path));
 
-        ef << "# elem_id, subcase_id, elem_type, sx, sy, sxy, sz, syz, szx,"
+        ef << "# elem_id, subcase_id, sx, sy, sxy, sz, syz, szx,"
               " mx, my, mxy, von_mises\n";
         ef << std::scientific << std::setprecision(8);
 
@@ -87,7 +75,6 @@ void CsvWriter::write(const SolverResults& results, const Model& model,
 
             for (const auto& ps : sc.plate_stresses) {
                 ef << ps.eid.value << ", " << sc.id << ", "
-                   << etype_name(ps.etype) << ", "
                    << ps.sx  << ", " << ps.sy  << ", " << ps.sxy << ", "
                    << 0.0    << ", " << 0.0    << ", " << 0.0    << ", "
                    << ps.mx  << ", " << ps.my  << ", " << ps.mxy << ", "
@@ -96,7 +83,6 @@ void CsvWriter::write(const SolverResults& results, const Model& model,
 
             for (const auto& ss : sc.solid_stresses) {
                 ef << ss.eid.value << ", " << sc.id << ", "
-                   << etype_name(ss.etype) << ", "
                    << ss.sx  << ", " << ss.sy  << ", " << ss.sxy << ", "
                    << ss.sz  << ", " << ss.syz << ", " << ss.szx << ", "
                    << 0.0    << ", " << 0.0    << ", " << 0.0    << ", "

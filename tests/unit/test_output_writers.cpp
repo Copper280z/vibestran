@@ -362,7 +362,7 @@ TEST(CsvWriter, NodeCsvDataRow) {
     EXPECT_NE(node_csv.find("5, 1"), std::string::npos);
 }
 
-TEST(CsvWriter, ElemCsvContainsElementTypeAndId) {
+TEST(CsvWriter, ElemCsvContainsId) {
     SolverResults res;
     SubCaseResults sc;
     sc.id = 1;
@@ -371,10 +371,11 @@ TEST(CsvWriter, ElemCsvContainsElementTypeAndId) {
     Model m = make_empty_model_sc1();
     auto [node_csv, elem_csv] = run_csv_writer(res, m);
     EXPECT_NE(elem_csv.find("42"), std::string::npos);
-    EXPECT_NE(elem_csv.find("CQUAD4"), std::string::npos);
+    // No element type strings in CSV output
+    EXPECT_EQ(elem_csv.find("CQUAD4"), std::string::npos);
 }
 
-TEST(CsvWriter, ElemCsvCtria3Type) {
+TEST(CsvWriter, ElemCsvNoElementTypeString) {
     SolverResults res;
     SubCaseResults sc;
     sc.id = 1;
@@ -382,7 +383,8 @@ TEST(CsvWriter, ElemCsvCtria3Type) {
     res.subcases.push_back(sc);
     Model m = make_empty_model_sc1();
     auto [node_csv, elem_csv] = run_csv_writer(res, m);
-    EXPECT_NE(elem_csv.find("CTRIA3"), std::string::npos);
+    EXPECT_NE(elem_csv.find("99"), std::string::npos);
+    EXPECT_EQ(elem_csv.find("CTRIA3"), std::string::npos);
 }
 
 TEST(CsvWriter, NodeCsvOutputFlagSuppressesDisplacement) {

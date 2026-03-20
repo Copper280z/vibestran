@@ -27,7 +27,7 @@ if cxx.get_id() == 'gcc' or cxx.get_id() == 'clang'
   extra_args += ['-Wno-unused-parameter', '-Wfatal-errors']
   # Enable AVX2 for release builds (benefits Eigen)
   if get_option('buildtype') == 'release'
-    extra_args += ['-march=native', '-ffast-math']
+    extra_args += ['-march=native', '-ffast-math', '-fno-finite-math-only']
   endif
 elif cxx.get_id() == 'msvc'
   extra_args += ['/wd4100', '/EHsc']

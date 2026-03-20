@@ -106,12 +106,24 @@ DofMap LinearStaticSolver::build_dof_map(const Model &model,
   dmap.build(model.nodes, 6);
 
   // Apply SPCs
+  // For nodes with CD≠0 (non-basic displacement coordinate system),
+  // translational SPC DOFs refer to CD-frame directions, not basic axes.
+  // Skip those here; they are converted to MPCs in build_mpc_system().
   {
     std::vector<std::pair<NodeId, int>> spc_constraints;
-    for (const Spc *spc : model.spcs_for_set(sc.spc_set))
-      for (int d = 0; d < 6; ++d)
-        if (spc->dofs.has(d + 1))
-          spc_constraints.emplace_back(spc->node, d);
+    for (const Spc *spc : model.spcs_for_set(sc.spc_set)) {
+      auto node_it = model.nodes.find(spc->node);
+      bool has_cd = (node_it != model.nodes.end() &&
+                     node_it->second.cd.value != 0);
+      for (int d = 0; d < 6; ++d) {
+        if (!spc->dofs.has(d + 1))
+          continue;
+        // Skip translational DOFs for CD≠0 nodes — handled as MPCs
+        if (has_cd && d < 3)
+          continue;
+        spc_constraints.emplace_back(spc->node, d);
+      }
+    }
     dmap.constrain_batch(spc_constraints);
   }
 
@@ -148,60 +160,121 @@ void LinearStaticSolver::build_mpc_system(const Model &model,
   // Collect MPCs from all sources into one vector
   std::vector<Mpc> all_mpcs;
 
-  // 1. CD-frame SPCs: for nodes with CD≠basic, each SPC DOF in CD frame
-  //    becomes an MPC: the CD-frame DOF = 0 (sum of CD-axis projections = 0).
-  //    T_cd[d-1, :] · [u1 u2 u3] = 0  →  expressed as MPC terms.
-  for (const auto &[nid, gp] : model.nodes) {
-    if (gp.cd == CoordId{0})
-      continue; // basic frame, no conversion needed
-
-    auto cs_it = model.coord_systems.find(gp.cd);
-    if (cs_it == model.coord_systems.end())
-      continue; // unknown CD — skip
-
-    const CoordSys &cs = cs_it->second;
-    // rotation_matrix at the node's basic position gives T3:
-    // v_basic = T3 * v_local  →  v_local = T3^T * v_basic
-    Mat3 T3 = rotation_matrix(cs, gp.position);
-    // T3^T: row d of T3^T = column d of T3 = T3[:, d]
-    // T3^T (row d) = T3(0,d), T3(1,d), T3(2,d)  (column d of T3 in basic)
-
-    // For each SPC on this node that has CD ≠ 0, expand to MPC
+  // 1. CD-frame SPCs: for nodes with CD≠basic, translational SPC DOFs refer
+  //    to CD-frame directions.  Each CD-frame constraint becomes either:
+  //    (a) a direct basic SPC (when the constraint aligns with a basic axis), or
+  //    (b) an MPC: T3[:,d]^T · [u1,u2,u3] = 0.
+  //
+  //    When a node has multiple CD-frame SPCs, we use Gaussian elimination
+  //    with column pivoting to produce independent MPCs with unique dependent
+  //    DOFs, avoiding conflicts in the MPC handler.
+  {
+    // Pre-build node→SPC lookup
+    std::unordered_map<NodeId, DofSet> node_spc_dofs;
     for (const Spc *spc : model.spcs_for_set(sc.spc_set)) {
-      if (spc->node != nid || spc->value != 0.0)
-        continue; // only zero-displacement SPCs
-
-      for (int d = 0; d < 3; ++d) { // translation DOFs only (0-based)
-        if (!spc->dofs.has(d + 1))
-          continue;
-        // Remove the direct SPC on this DOF (it was already applied in dof_map)
-        // and replace with MPC: T3^T[d, :] · [u_basic_T1, u_basic_T2, u_basic_T3] = 0
-        // i.e.: T3(0,d)*u1 + T3(1,d)*u2 + T3(2,d)*u3 = 0
-        Mpc mpc;
-        mpc.sid = MpcSetId{0};
-        for (int j = 0; j < 3; ++j) {
-          double coeff = T3(j, d); // T3^T[d,j] = T3[j,d]
-          if (std::abs(coeff) > 1e-14)
-            mpc.terms.push_back({nid, j + 1, coeff});
-        }
-        if (!mpc.terms.empty())
-          all_mpcs.push_back(std::move(mpc));
-      }
-      // Rotational DOFs (d = 3..5): same rotation applies
-      for (int d = 3; d < 6; ++d) {
-        if (!spc->dofs.has(d + 1))
-          continue;
-        Mpc mpc;
-        mpc.sid = MpcSetId{0};
-        for (int j = 0; j < 3; ++j) {
-          double coeff = T3(j, d - 3);
-          if (std::abs(coeff) > 1e-14)
-            mpc.terms.push_back({nid, j + 4, coeff}); // DOF 4,5,6 = R1,R2,R3
-        }
-        if (!mpc.terms.empty())
-          all_mpcs.push_back(std::move(mpc));
-      }
+      if (spc->value != 0.0) continue;
+      node_spc_dofs[spc->node].mask |= spc->dofs.mask;
     }
+
+    std::vector<std::pair<NodeId, int>> direct_constraints;
+
+    for (const auto &[nid, gp] : model.nodes) {
+      if (gp.cd == CoordId{0})
+        continue;
+      auto spc_it = node_spc_dofs.find(nid);
+      if (spc_it == node_spc_dofs.end())
+        continue;
+
+      auto cs_it = model.coord_systems.find(gp.cd);
+      if (cs_it == model.coord_systems.end())
+        continue;
+
+      const CoordSys &cs = cs_it->second;
+      Mat3 T3 = rotation_matrix(cs, gp.position);
+      DofSet dofs = spc_it->second;
+
+      // Collect constrained translational CD-frame DOFs
+      int cd_dofs[3];
+      int n_trans = 0;
+      for (int d = 0; d < 3; ++d)
+        if (dofs.has(d + 1))
+          cd_dofs[n_trans++] = d;
+
+      if (n_trans == 3) {
+        // All translational DOFs constrained → constrain all basic
+        for (int j = 0; j < 3; ++j)
+          direct_constraints.emplace_back(nid, j);
+      } else if (n_trans > 0) {
+        // Build constraint matrix A[i][j] = T3(j, cd_dofs[i])
+        // Each row is a CD direction expressed in basic coordinates.
+        // Gaussian elimination with column pivoting produces independent
+        // equations with unique dominant basic DOFs.
+        double A[3][3] = {};
+        int col_perm[3] = {0, 1, 2};
+
+        for (int i = 0; i < n_trans; ++i)
+          for (int j = 0; j < 3; ++j)
+            A[i][j] = T3(j, cd_dofs[i]);
+
+        for (int row = 0; row < n_trans; ++row) {
+          // Partial column pivoting: find largest |A[row][col]| for col >= row
+          int best_col = row;
+          double best_val = std::abs(A[row][row]);
+          for (int col = row + 1; col < 3; ++col) {
+            if (std::abs(A[row][col]) > best_val) {
+              best_val = std::abs(A[row][col]);
+              best_col = col;
+            }
+          }
+          if (best_col != row) {
+            for (int i = 0; i < n_trans; ++i)
+              std::swap(A[i][row], A[i][best_col]);
+            std::swap(col_perm[row], col_perm[best_col]);
+          }
+          // Eliminate rows below the pivot
+          if (std::abs(A[row][row]) < 1e-14) continue;
+          for (int i = row + 1; i < n_trans; ++i) {
+            double factor = A[i][row] / A[row][row];
+            for (int j = row; j < 3; ++j)
+              A[i][j] -= factor * A[row][j];
+          }
+        }
+
+        // Generate either direct SPCs or MPCs from the triangular system
+        for (int row = 0; row < n_trans; ++row) {
+          if (std::abs(A[row][row]) < 1e-14) continue;
+
+          // Count non-zero entries in this row (from diagonal onward)
+          int nnz = 0;
+          for (int col = row; col < 3; ++col)
+            if (std::abs(A[row][col]) > 1e-14) nnz++;
+
+          if (nnz == 1) {
+            // Single non-zero → direct basic SPC (constraint aligns with axis)
+            direct_constraints.emplace_back(nid, col_perm[row]);
+          } else {
+            // Multiple terms → MPC
+            Mpc mpc;
+            mpc.sid = MpcSetId{0};
+            for (int col = row; col < 3; ++col) {
+              if (std::abs(A[row][col]) > 1e-14)
+                mpc.terms.push_back({nid, col_perm[col] + 1, A[row][col]});
+            }
+            if (!mpc.terms.empty())
+              all_mpcs.push_back(std::move(mpc));
+          }
+        }
+      }
+
+      // Rotational DOFs: solid-only nodes already have all rotations
+      // constrained in build_dof_map, so CD-frame rotation SPCs are
+      // automatically satisfied.  For future shell support, rotational
+      // CD-frame SPCs would need similar treatment here.
+    }
+
+    // Apply any direct basic constraints identified above
+    if (!direct_constraints.empty())
+      dof_map.constrain_batch(direct_constraints);
   }
 
   // 2. RBE2/RBE3
@@ -211,34 +284,6 @@ void LinearStaticSolver::build_mpc_system(const Model &model,
     expand_rbe3(rbe3, model, all_mpcs);
 
   // 3. Explicit MPCs from active MPC set
-  if (sc.mpc_set.value != 0) {
-    for (const Mpc *mpc : model.mpcs_for_set(sc.mpc_set))
-      all_mpcs.push_back(*mpc);
-  }
-
-  // Build handler: if there are CD-frame SPCs, we already constrained those
-  // DOFs via the direct SPC mechanism AND now we're also adding MPCs.
-  // For CD SPCs, the intent is different: the SPC constrains a CD-frame DOF,
-  // not a basic-frame DOF.  The direct SPC in dof_map constrains the wrong DOF.
-  // However, for simplicity in this implementation, we only add CD-frame MPC
-  // conversion for nodes where the SPC DOF is not aligned with basic axes.
-  // This is a future enhancement; for now, use basic-frame SPCs directly.
-  //
-  // For RBE2/RBE3 and explicit MPCs, the all_mpcs vector is correct.
-  // Clear the CD-frame mpcs (they were added above but the direct SPC is also
-  // already in dof_map, so we'd double-constrain). For correctness: only use
-  // MPC for CD-SPCs when CD≠basic AND we undo the direct SPC.
-  //
-  // For this implementation: skip CD-frame SPC-to-MPC conversion and use
-  // direct SPCs for all nodes. Full CD-frame support is a future enhancement.
-  // Clear the CD-frame MPC entries added above.
-  all_mpcs.clear();
-
-  // Re-add only RBE2/RBE3 and explicit MPCs
-  for (const auto &rbe2 : model.rbe2s)
-    expand_rbe2(rbe2, model, all_mpcs);
-  for (const auto &rbe3 : model.rbe3s)
-    expand_rbe3(rbe3, model, all_mpcs);
   if (sc.mpc_set.value != 0) {
     for (const Mpc *mpc : model.mpcs_for_set(sc.mpc_set))
       all_mpcs.push_back(*mpc);
@@ -332,13 +377,30 @@ void LinearStaticSolver::apply_thermal_loads(
     const Model &model, const SubCase &sc,
     const MpcHandler &mpc_handler,
     SparseMatrixBuilder & /*K_builder*/, std::vector<double> &F) {
-  // Build nodal temperature map
+  // Build nodal temperature map from TEMP cards and/or TEMPD defaults.
+  // TEMPERATURE(LOAD) selects the temperature set; if not specified, fall back
+  // to the structural load set for backward compatibility.
   std::unordered_map<NodeId, double> nodal_temps;
-  double t_ref = sc.t_ref;
-  for (const Load *lp : model.loads_for_set(sc.load_set)) {
+
+  int temp_set = sc.temp_load_set;
+  if (temp_set == 0) temp_set = sc.load_set.value; // backward compat
+
+  // Individual TEMP cards for this set
+  for (const Load *lp : model.loads_for_set(LoadSetId(temp_set))) {
     if (const TempLoad *tl = std::get_if<TempLoad>(lp))
       nodal_temps[tl->node] = tl->temperature;
   }
+
+  // TEMPD (default temperature for all nodes not covered by individual TEMP cards)
+  auto tempd_it = model.tempd.find(temp_set);
+  if (tempd_it != model.tempd.end()) {
+    double T_default = tempd_it->second;
+    for (const auto& [nid, _] : model.nodes) {
+      if (nodal_temps.find(nid) == nodal_temps.end())
+        nodal_temps[nid] = T_default;
+    }
+  }
+
   if (nodal_temps.empty())
     return;
 
@@ -348,14 +410,23 @@ void LinearStaticSolver::apply_thermal_loads(
     auto node_ids = elem->node_ids();
     const int nn = static_cast<int>(node_ids.size());
 
+    // Reference temperature from the element's material (MAT1 TREF field)
+    const auto& prop = model.property(elem_data.pid);
+    MaterialId mid{0};
+    if (std::holds_alternative<PShell>(prop))
+      mid = std::get<PShell>(prop).mid1;
+    else if (std::holds_alternative<PSolid>(prop))
+      mid = std::get<PSolid>(prop).mid;
+    double elem_t_ref = (mid.value != 0) ? model.material(mid).ref_temp : 0.0;
+
     std::vector<double> temps(static_cast<size_t>(nn));
     for (int i = 0; i < nn; ++i) {
       auto it = nodal_temps.find(node_ids[i]);
       temps[static_cast<size_t>(i)] =
-          (it != nodal_temps.end()) ? it->second : t_ref;
+          (it != nodal_temps.end()) ? it->second : elem_t_ref;
     }
 
-    LocalFe fe = elem->thermal_load(temps, t_ref);
+    LocalFe fe = elem->thermal_load(temps, elem_t_ref);
     auto gdofs = elem->global_dof_indices(dof_map);
     std::vector<double> fe_vec(fe.data(), fe.data() + fe.size());
 
@@ -418,9 +489,19 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
 
   // ── Build nodal temperature map for thermal stress correction ────────────
   std::unordered_map<NodeId, double> nodal_temps_rec;
-  for (const Load *lp : model.loads_for_set(sc.load_set)) {
+  int temp_set_rec = sc.temp_load_set;
+  if (temp_set_rec == 0) temp_set_rec = sc.load_set.value;
+  for (const Load *lp : model.loads_for_set(LoadSetId(temp_set_rec))) {
     if (const TempLoad *tl = std::get_if<TempLoad>(lp))
       nodal_temps_rec[tl->node] = tl->temperature;
+  }
+  auto tempd_rec_it = model.tempd.find(temp_set_rec);
+  if (tempd_rec_it != model.tempd.end()) {
+    double T_default = tempd_rec_it->second;
+    for (const auto& [nid, _] : model.nodes) {
+      if (nodal_temps_rec.find(nid) == nodal_temps_rec.end())
+        nodal_temps_rec[nid] = T_default;
+    }
   }
 
   // ── Recover element stresses ──────────────────────────────────────────────
@@ -486,10 +567,10 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         double T_avg4 = 0.0;
         for (int n = 0; n < 4; ++n) {
           auto it = nodal_temps_rec.find(elem_data.nodes[n]);
-          T_avg4 += (it != nodal_temps_rec.end()) ? it->second : sc.t_ref;
+          T_avg4 += (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
         }
         T_avg4 /= 4.0;
-        double dT4 = T_avg4 - sc.t_ref;
+        double dT4 = T_avg4 - mat_.ref_temp;
         double alpha4 = mat_.A;
         Eigen::Vector3d eps_th4{alpha4 * dT4, alpha4 * dT4, 0.0};
 
@@ -531,10 +612,10 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         double T_avg3 = 0.0;
         for (int n = 0; n < 3; ++n) {
           auto it = nodal_temps_rec.find(elem_data.nodes[n]);
-          T_avg3 += (it != nodal_temps_rec.end()) ? it->second : sc.t_ref;
+          T_avg3 += (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
         }
         T_avg3 /= 3.0;
-        double dT3 = T_avg3 - sc.t_ref;
+        double dT3 = T_avg3 - mat_.ref_temp;
         double alpha3 = mat_.A;
         Eigen::Vector3d eps_th3{alpha3 * dT3, alpha3 * dT3, 0.0};
 
@@ -547,7 +628,8 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
       res.plate_stresses.push_back(ps);
     } else if (elem_data.type == ElementType::CHEXA8 ||
                elem_data.type == ElementType::CTETRA4 ||
-               elem_data.type == ElementType::CTETRA10) {
+               elem_data.type == ElementType::CTETRA10 ||
+               elem_data.type == ElementType::CPENTA6) {
       SolidStress ss;
       ss.eid   = elem_data.id;
       ss.etype = elem_data.type;
@@ -607,10 +689,10 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         double T10=0;
         for (int i=0; i<10; ++i) {
           auto it=nodal_temps_rec.find(elem_data.nodes[i]);
-          T10 += (it!=nodal_temps_rec.end()) ? it->second : sc.t_ref;
+          T10 += (it!=nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
         }
         T10 /= 10.0;
-        double dT10 = T10 - sc.t_ref;
+        double dT10 = T10 - mat_.ref_temp;
         Eigen::Matrix<double,6,1> eps_th10;
         eps_th10 << mat_.A*dT10, mat_.A*dT10, mat_.A*dT10, 0, 0, 0;
         sigma = D_ * (B10 * ue - eps_th10);
@@ -658,13 +740,50 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         double T_avg_tet = 0.0;
         for (int i = 0; i < 4; ++i) {
           auto it = nodal_temps_rec.find(elem_data.nodes[i]);
-          T_avg_tet += (it != nodal_temps_rec.end()) ? it->second : sc.t_ref;
+          T_avg_tet += (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
         }
         T_avg_tet /= 4.0;
-        double dT_tet = T_avg_tet - sc.t_ref;
+        double dT_tet = T_avg_tet - mat_.ref_temp;
         Eigen::Matrix<double, 6, 1> eps_th_tet;
         eps_th_tet << mat_.A*dT_tet, mat_.A*dT_tet, mat_.A*dT_tet, 0, 0, 0;
         sigma = D_ * (B * ue - eps_th_tet);
+      } else if (elem_data.type == ElementType::CPENTA6) {
+        // Centroid stress recovery: L1=1/3, L2=1/3, zeta=0
+        auto sd = CPenta6::shape_functions(1.0/3.0, 1.0/3.0, 0.0);
+        auto nc = [&]() -> std::array<Vec3, 6> {
+          std::array<Vec3, 6> c;
+          for (int i = 0; i < 6; ++i)
+            c[i] = model.node(elem_data.nodes[i]).position;
+          return c;
+        }();
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 6; ++n) {
+          J(0,0) += sd.dNdL1[n]*nc[n].x; J(0,1) += sd.dNdL1[n]*nc[n].y; J(0,2) += sd.dNdL1[n]*nc[n].z;
+          J(1,0) += sd.dNdL2[n]*nc[n].x; J(1,1) += sd.dNdL2[n]*nc[n].y; J(1,2) += sd.dNdL2[n]*nc[n].z;
+          J(2,0) += sd.dNdzeta[n]*nc[n].x; J(2,1) += sd.dNdzeta[n]*nc[n].y; J(2,2) += sd.dNdzeta[n]*nc[n].z;
+        }
+        Eigen::Matrix3d Jinv = J.inverse();
+        Eigen::MatrixXd B(6, 18); B.setZero();
+        for (int n = 0; n < 6; ++n) {
+          double dnx = Jinv(0,0)*sd.dNdL1[n]+Jinv(0,1)*sd.dNdL2[n]+Jinv(0,2)*sd.dNdzeta[n];
+          double dny = Jinv(1,0)*sd.dNdL1[n]+Jinv(1,1)*sd.dNdL2[n]+Jinv(1,2)*sd.dNdzeta[n];
+          double dnz = Jinv(2,0)*sd.dNdL1[n]+Jinv(2,1)*sd.dNdL2[n]+Jinv(2,2)*sd.dNdzeta[n];
+          int c0 = 3*n;
+          B(0,c0)=dnx; B(1,c0+1)=dny; B(2,c0+2)=dnz;
+          B(3,c0)=dny; B(3,c0+1)=dnx;
+          B(4,c0+1)=dnz; B(4,c0+2)=dny;
+          B(5,c0)=dnz; B(5,c0+2)=dnx;
+        }
+        double T_avg_penta = 0.0;
+        for (int i = 0; i < 6; ++i) {
+          auto it = nodal_temps_rec.find(elem_data.nodes[i]);
+          T_avg_penta += (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
+        }
+        T_avg_penta /= 6.0;
+        double dT_penta = T_avg_penta - mat_.ref_temp;
+        Eigen::Matrix<double,6,1> eps_th_penta;
+        eps_th_penta << mat_.A*dT_penta, mat_.A*dT_penta, mat_.A*dT_penta, 0, 0, 0;
+        sigma = D_ * (B * ue - eps_th_penta);
       } else {
         auto sd = CHexa8::shape_functions(0, 0, 0);
         auto nc = [&]() -> std::array<Vec3, 8> {
@@ -705,10 +824,10 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         double T_avg_hex = 0.0;
         for (int i = 0; i < 8; ++i) {
           auto it = nodal_temps_rec.find(elem_data.nodes[i]);
-          T_avg_hex += (it != nodal_temps_rec.end()) ? it->second : sc.t_ref;
+          T_avg_hex += (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
         }
         T_avg_hex /= 8.0;
-        double dT_hex = T_avg_hex - sc.t_ref;
+        double dT_hex = T_avg_hex - mat_.ref_temp;
         Eigen::Matrix<double, 6, 1> eps_th_hex;
         eps_th_hex << mat_.A*dT_hex, mat_.A*dT_hex, mat_.A*dT_hex, 0, 0, 0;
         sigma = D_ * (B * ue - eps_th_hex);

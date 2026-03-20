@@ -524,9 +524,9 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
   if (chol_ok) {
     d_u.download(u.data(), n);
     double rel_res = relative_residual(K, u, F);
-    if (rel_res > 1e-2) {
+    if (!std::isfinite(rel_res) || rel_res > 1e-2) {
       std::clog << "[cuda] Cholesky residual " << rel_res
-                << " > 1e-2 -- retrying with LU\n";
+                << " -- retrying with LU\n";
       chol_ok = false;
     }
   }

@@ -158,8 +158,12 @@ Model BdfParser::parse_stream(std::istream &in) {
         size_t eq = kw.find('=');
         if (eq != std::string::npos)
           cur_sc.label = kw.substr(eq + 1);
-      } else if (kw.starts_with("TEMP(LOAD)") || kw.starts_with("TEMP(INIT)")) {
-        // Not used in v1 but consume gracefully
+      } else if (kw.starts_with("TEMP(LOAD)") || kw.starts_with("TEMPERATURE(LOAD)")) {
+        size_t eq = kw.find('=');
+        if (eq != std::string::npos)
+          try { cur_sc.temp_load_set = std::stoi(kw.substr(eq + 1)); } catch (...) {}
+      } else if (kw.starts_with("TEMP(INIT)") || kw.starts_with("TEMPERATURE(INIT)")) {
+        // Not used yet but consume gracefully
       } else if (kw.starts_with("DISPLACEMENT")) {
         // Syntax: DISPLACEMENT[(PRINT[,PLOT])] = ALL|NONE|<set_id>
         // PRINT → F06/CSV output; PLOT → OP2 output.
@@ -247,6 +251,26 @@ Model BdfParser::parse_stream(std::istream &in) {
         if (!std::isspace((unsigned char)l[i]))
           return false;
       return true;
+    }
+    // Blank-label continuation: first 8 columns are all whitespace but the
+    // line has non-whitespace content beyond that (standard Nastran small-field
+    // continuation without an explicit '+' marker).
+    if (std::isspace((unsigned char)c0)) {
+      // Check that cols 0-7 are all whitespace
+      size_t kw_end = std::min(l.size(), size_t(8));
+      bool kw_blank = true;
+      for (size_t i = 0; i < kw_end; ++i) {
+        if (!std::isspace((unsigned char)l[i])) {
+          kw_blank = false;
+          break;
+        }
+      }
+      if (kw_blank) {
+        // Must have non-whitespace content after the keyword field
+        for (size_t i = kw_end; i < l.size(); ++i)
+          if (!std::isspace((unsigned char)l[i]))
+            return true;
+      }
     }
     return false;
   };
@@ -354,6 +378,8 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_chexa(ctx, card.fields);
       else if (kw == "CTETRA")
         process_ctetra(ctx, card.fields);
+      else if (kw == "CPENTA")
+        process_cpenta(ctx, card.fields);
       else if (kw == "FORCE")
         process_force(ctx, card.fields);
       else if (kw == "MOMENT")
@@ -670,6 +696,24 @@ void BdfParser::process_ctetra(ParseContext &ctx,
   ctx.model.elements.push_back(std::move(e));
 }
 
+void BdfParser::process_cpenta(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  // CPENTA, EID, PID, G1..G6 (6-node) or G1..G15 (15-node, may span continuations)
+  ElementData e;
+  e.id = ElementId(parse_int(f[1], ctx.line_num));
+  e.pid = PropertyId(parse_int(f[2], ctx.line_num));
+  for (int i = 3; i < static_cast<int>(f.size()); ++i)
+    if (!f[i].empty())
+      e.nodes.push_back(NodeId(parse_int(f[i], ctx.line_num)));
+
+  if (e.nodes.size() == 6)
+    e.type = ElementType::CPENTA6;
+  else
+    throw ParseError(std::format("Line {}: CPENTA has {} nodes; expected 6",
+                                 ctx.line_num, e.nodes.size()));
+  ctx.model.elements.push_back(std::move(e));
+}
+
 void BdfParser::process_force(ParseContext &ctx,
                               const std::vector<std::string> &f) {
   // FORCE, SID, G, CID, F, N1, N2, N3
@@ -721,6 +765,7 @@ void BdfParser::process_tempd(ParseContext &ctx,
   int sid = parse_int(f[1], ctx.line_num);
   double T = parse_double(f[2], ctx.line_num);
   ctx.tempd_map[sid] = T;
+  ctx.model.tempd[sid] = T;
 }
 
 void BdfParser::process_spc(ParseContext &ctx,
