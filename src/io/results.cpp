@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <sstream>
 #include <cmath>
+#include <numbers>
 #include <format>
 #include <algorithm>
 
@@ -19,7 +20,7 @@ void compute_principal_2d(double sx, double sy, double sxy,
     major     = avg + R;
     minor     = avg - R;
     // angle of major principal axis from x in degrees
-    angle_deg = 0.5 * std::atan2(2.0 * sxy, sx - sy) * (180.0 / M_PI);
+    angle_deg = 0.5 * std::atan2(2.0 * sxy, sx - sy) * (180.0 / std::numbers::pi);
 }
 
 // Jacobi eigenvalue algorithm for 3×3 symmetric matrix.

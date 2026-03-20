@@ -16,7 +16,9 @@ project('nastran_solver', 'cpp',
   ]
 )
 
-fs = import('fs')
+fs     = import('fs')
+python = import('python').find_installation('python3')
+bin2h  = files('tools/bin2h.py')
 
 # ── Compiler setup ────────────────────────────────────────────────────────────
 cxx = meson.get_compiler('cpp')
@@ -46,12 +48,13 @@ eigen_dep = dependency('eigen3',
 )
 
 if not eigen_dep.found()
-  # NOT CURRENTLY IMPLEMENTED
-  # Use bundled Eigen headers in third_party/eigen
-  # eigen_inc = include_directories('third_party/eigen')
-  # eigen_dep = declare_dependency(include_directories : eigen_inc)
-  message('Using bundled Eigen from third_party/')
-  error('Bundled Eigen not currently implemented')
+  if fs.is_dir('third_party/eigen/Eigen')
+    message('Using bundled Eigen from third_party/')
+    eigen_dep = declare_dependency(include_directories : include_directories('third_party/eigen'))
+  else
+    error('Eigen3 not found. Install libeigen3-dev (Linux), eigen (Homebrew), ' +
+          'or run: meson subprojects download eigen3')
+  endif
 else
   message('Using system Eigen3')
 endif
@@ -64,7 +67,31 @@ endif
 _ss_opt      = get_option('use_suitesparse')
 _ss_required = _ss_opt.enabled()
 _cholmod_lib = cxx.find_library('cholmod', required : _ss_required)
-_cholmod_inc = include_directories('/usr/include/suitesparse', is_system : true)
+
+# Build a list of candidate SuiteSparse header directories by platform
+_ss_candidates = []
+if host_machine.system() == 'linux'
+  _ss_candidates = ['/usr/include/suitesparse', '/usr/local/include/suitesparse']
+elif host_machine.system() == 'darwin'
+  _ss_candidates = [
+    '/opt/homebrew/include/suitesparse',   # Apple Silicon
+    '/usr/local/include/suitesparse',      # Intel Mac
+  ]
+# On Windows, vcpkg/conda typically put suitesparse headers on the standard
+# include path or a user-specified dir; skip explicit path and rely on the
+# compiler's default search.
+endif
+
+_ss_inc_dir = ''
+foreach c : _ss_candidates
+  if fs.is_dir(c)
+    _ss_inc_dir = c
+    break
+  endif
+endforeach
+
+_have_ss_inc = _ss_inc_dir != ''
+_cholmod_inc = _have_ss_inc ? include_directories(_ss_inc_dir, is_system : true) : []
 
 have_cholmod     = _cholmod_lib.found()
 cholmod_args     = []
@@ -76,7 +103,7 @@ if have_cholmod
     dependencies        : _cholmod_lib,
     include_directories : _cholmod_inc,
   )]
-  cholmod_incdirs  = [_cholmod_inc]
+  cholmod_incdirs = _have_ss_inc ? [_cholmod_inc] : []
   message('SuiteSparse CHOLMOD backend: enabled')
 else
   message('SuiteSparse CHOLMOD backend: disabled (install libsuitesparse-dev to enable)')
@@ -84,18 +111,24 @@ endif
 
 # ── Thread / parallel execution support ──────────────────────────────────────
 thread_dep  = dependency('threads')
-tbb_dep     = dependency('tbb')
+tbb_dep     = dependency('tbb', required : false)
+if not tbb_dep.found()
+  message('TBB not found; parallel execution handled by OpenMP and Eigen internals')
+endif
 openmp_dep  = dependency('openmp', required : false)
+if not openmp_dep.found() and host_machine.system() == 'darwin'
+  message('OpenMP not found. For parallelism with AppleClang: brew install libomp')
+  message('Then reconfigure with -Dcpp_args=-I/opt/homebrew/opt/libomp/include etc.')
+endif
 
 # ── Vulkan compute backend (optional) ────────────────────────────────────────
 vulkan_dep = dependency('vulkan', required : false)
 glslc      = find_program('glslc', required : false)
-xxd        = find_program('xxd',   required : false)
 
 vulkan_sources = []
 vulkan_compile_args = []
 spirv_hdrs = []
-have_vulkan_backend = vulkan_dep.found() and glslc.found() and xxd.found()
+have_vulkan_backend = vulkan_dep.found() and glslc.found()
 
 if have_vulkan_backend
   shader_names = ['spmv', 'dot_reduce', 'axpby', 'jacobi_precond',
@@ -109,7 +142,7 @@ if have_vulkan_backend
     hdr = custom_target(name + '_hdr',
       input   : spv,
       output  : name + '_spv.h',
-      command : [xxd, '-i', '-n', name + '_spv', '@INPUT@', '@OUTPUT@'],
+      command : [python, bin2h, name + '_spv', '@INPUT@', '@OUTPUT@'],
     )
     spirv_hdrs += hdr
   endforeach
@@ -125,7 +158,7 @@ if have_vulkan_backend
   vulkan_compile_args = ['-DHAVE_VULKAN=1']
   message('Vulkan compute backend: enabled')
 else
-  message('Vulkan compute backend: disabled (need vulkan, glslc, and xxd)')
+  message('Vulkan compute backend: disabled (need vulkan and glslc)')
 endif
 
 # ── CUDA sparse solver backend (optional) ────────────────────────────────────
@@ -156,12 +189,40 @@ if have_cuda_compiler
   # cuDSS installs its library and headers into versioned subdirectories:
   #   headers: /usr/include/libcudss/12/
   #   library: /usr/lib/x86_64-linux-gnu/libcudss/12/
+  # Build platform-specific cuDSS search paths
+  _cudss_lib_dirs = []
+  _cudss_inc_candidates = []
+  if host_machine.system() == 'linux'
+    _cudss_lib_dirs = [
+      '/usr/lib/x86_64-linux-gnu/libcudss/12',
+      '/usr/lib/aarch64-linux-gnu/libcudss/12',
+      '/usr/local/cuda/lib64',
+    ]
+    _cudss_inc_candidates = ['/usr/include/libcudss/12', '/usr/local/cuda/include']
+  elif host_machine.system() == 'windows'
+    # CUDA_PATH is set by the NVIDIA installer; fall back to the conventional default
+    _cuda_root = run_command('cmd', '/c', 'echo %CUDA_PATH%', check: false).stdout().strip()
+    if _cuda_root == '' or _cuda_root == '%CUDA_PATH%'
+      _cuda_root = 'C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.0'
+    endif
+    _cudss_lib_dirs = [_cuda_root / 'lib/x64']
+    _cudss_inc_candidates = [_cuda_root / 'include']
+  elif host_machine.system() == 'darwin'
+    _cudss_lib_dirs = ['/usr/local/cuda/lib']
+    _cudss_inc_candidates = ['/usr/local/cuda/include']
+  endif
+
   _cudart_lib = cxx.find_library('cudart', required: false)
-  _cudss_lib  = cxx.find_library('cudss',
-    required: false,
-    dirs: ['/usr/lib/x86_64-linux-gnu/libcudss/12'],
-  )
-  _cudss_inc  = include_directories('/usr/include/libcudss/12')
+  _cudss_lib  = cxx.find_library('cudss', required: false, dirs: _cudss_lib_dirs)
+
+  _cudss_inc_dir = ''
+  foreach c : _cudss_inc_candidates
+    if fs.is_dir(c)
+      _cudss_inc_dir = c
+      break
+    endif
+  endforeach
+  _cudss_inc = _cudss_inc_dir != '' ? include_directories(_cudss_inc_dir) : []
 
   _cublas_lib   = cxx.find_library('cublas',   required: false)
   _cusparse_lib = cxx.find_library('cusparse', required: false)
@@ -250,7 +311,10 @@ inc     = include_directories('include')
 src_inc = include_directories('src/solver') # for internal vulkan_pipelines.hpp
 
 # ── Library (solver logic, no main) ──────────────────────────────────────────
-solver_lib_deps = [eigen_dep, thread_dep, tbb_dep]
+solver_lib_deps = [eigen_dep, thread_dep]
+if tbb_dep.found()
+  solver_lib_deps += tbb_dep
+endif
 if openmp_dep.found()
   solver_lib_deps += openmp_dep
 endif
