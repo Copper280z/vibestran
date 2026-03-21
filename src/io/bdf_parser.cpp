@@ -11,7 +11,7 @@
 #include <fstream>
 #include <sstream>
 
-namespace nastran {
+namespace vibetran {
 
 // ── ParseContext
 // ──────────────────────────────────────────────────────────────
@@ -1021,4 +1021,4 @@ void BdfParser::process_rbe3(ParseContext &ctx,
   ctx.model.rbe3s.push_back(std::move(rbe));
 }
 
-} // namespace nastran
+} // namespace vibetran

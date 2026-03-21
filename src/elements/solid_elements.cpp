@@ -7,7 +7,7 @@
 #include <cmath>
 #include <format>
 
-namespace nastran {
+namespace vibetran {
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -1351,4 +1351,4 @@ std::vector<EqIndex> CPenta6Eas::global_dof_indices(const DofMap& dof_map) const
     return result;
 }
 
-} // namespace nastran
+} // namespace vibetran

@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <unordered_set>
 
-namespace nastran {
+namespace vibetran {
 
 void Model::validate() const {
     // Check all element nodes exist
@@ -148,4 +148,4 @@ void Model::resolve_coordinates() {
     }
 }
 
-} // namespace nastran
+} // namespace vibetran

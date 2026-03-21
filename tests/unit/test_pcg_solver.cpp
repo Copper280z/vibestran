@@ -23,7 +23,7 @@
 #include "solver/cuda_pcg_solver_backend.hpp"
 #endif
 
-using namespace nastran;
+using namespace vibetran;
 
 // ── Shared helper ─────────────────────────────────────────────────────────────
 

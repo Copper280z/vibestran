@@ -25,7 +25,7 @@
 #include <cmath>
 #include <sstream>
 
-using namespace nastran;
+using namespace vibetran;
 
 // Helper: run a full analysis from BDF string
 static SolverResults run_analysis(const std::string& bdf) {

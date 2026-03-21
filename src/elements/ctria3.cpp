@@ -9,7 +9,7 @@
 #include <cmath>
 #include <format>
 
-namespace nastran {
+namespace vibetran {
 
 CTria3::CTria3(ElementId eid, PropertyId pid,
                std::array<NodeId, 3> node_ids,
@@ -211,4 +211,4 @@ std::vector<EqIndex> CTria3::global_dof_indices(const DofMap& dof_map) const {
     return result;
 }
 
-} // namespace nastran
+} // namespace vibetran

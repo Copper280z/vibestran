@@ -13,7 +13,7 @@
 #include <cmath>
 #include <numbers>
 
-using namespace nastran;
+using namespace vibetran;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

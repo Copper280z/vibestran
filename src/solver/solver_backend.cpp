@@ -13,7 +13,7 @@
 #endif
 #include <format>
 
-namespace nastran {
+namespace vibetran {
 
 std::vector<double>
 EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
@@ -160,4 +160,4 @@ EigenPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K_csr,
     return std::vector<double>(u.data(), u.data() + n);
 }
 
-} // namespace nastran
+} // namespace vibetran

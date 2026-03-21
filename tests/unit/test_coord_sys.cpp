@@ -7,7 +7,7 @@
 #include <cmath>
 #include <numbers>
 
-using namespace nastran;
+using namespace vibetran;
 
 static constexpr double pi = std::numbers::pi;
 

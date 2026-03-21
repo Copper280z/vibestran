@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace nastran {
+namespace vibetran {
 
 class SolverError : public std::runtime_error {
 public:
@@ -21,4 +21,4 @@ public:
     explicit ParseError(const std::string& msg) : std::runtime_error(msg) {}
 };
 
-} // namespace nastran
+} // namespace vibetran

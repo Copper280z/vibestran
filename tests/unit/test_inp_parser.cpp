@@ -8,7 +8,7 @@
 #include "solver/linear_static.hpp"
 #include "solver/solver_backend.hpp"
 
-using namespace nastran;
+using namespace vibetran;
 
 // ── Node parsing ─────────────────────────────────────────────────────────────
 

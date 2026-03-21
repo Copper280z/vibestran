@@ -68,7 +68,7 @@ static void log_mem(const char* label, std::size_t extra_bytes = 0) {
 
 } // anonymous namespace
 
-namespace nastran {
+namespace vibetran {
 
 // ── RAII device buffer ────────────────────────────────────────────────────────
 
@@ -974,4 +974,4 @@ CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
         ctx_->last_iters, ctx_->last_rel_res);
 }
 
-} // namespace nastran
+} // namespace vibetran

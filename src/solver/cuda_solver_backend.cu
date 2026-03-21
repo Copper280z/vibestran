@@ -39,7 +39,7 @@
 #include <string>
 #include <vector>
 
-namespace nastran {
+namespace vibetran {
 
 // ── RAII helpers
 // ──────────────────────────────────────────────────────────────
@@ -563,4 +563,4 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
   return u;
 }
 
-} // namespace nastran
+} // namespace vibetran

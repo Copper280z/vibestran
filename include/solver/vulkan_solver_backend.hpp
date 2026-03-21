@@ -23,7 +23,7 @@
 #include <memory>
 #include <optional>
 
-namespace nastran {
+namespace vibetran {
 
 struct VulkanSolverConfig {
   int max_iterations = 10000;
@@ -95,6 +95,6 @@ private:
   std::unique_ptr<Pipelines> pipelines_;
 };
 
-} // namespace nastran
+} // namespace vibetran
 
 #endif // HAVE_VULKAN

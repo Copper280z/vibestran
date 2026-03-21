@@ -7,7 +7,7 @@
 #include "core/model.hpp"
 #include <set>
 
-using namespace nastran;
+using namespace vibetran;
 
 // Helper: build a simple 2-node model
 static std::unordered_map<NodeId, GridPoint> two_nodes() {

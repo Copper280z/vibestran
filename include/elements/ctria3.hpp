@@ -15,7 +15,7 @@
 #include "elements/element_base.hpp"
 #include <array>
 
-namespace nastran {
+namespace vibetran {
 
 class CTria3 : public ElementBase {
 public:
@@ -59,4 +59,4 @@ private:
     Eigen::MatrixXd bending_stiffness() const;
 };
 
-} // namespace nastran
+} // namespace vibetran

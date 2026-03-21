@@ -21,7 +21,7 @@
 #include <memory>
 #include <optional>
 
-namespace nastran {
+namespace vibetran {
 
 // Opaque RAII wrapper around cuSOLVER/cuSPARSE handles.
 // Defined in cuda_solver_backend.cu to keep CUDA headers out of this file.
@@ -68,6 +68,6 @@ private:
     bool last_cholesky_{true};
 };
 
-} // namespace nastran
+} // namespace vibetran
 
 #endif // HAVE_CUDA

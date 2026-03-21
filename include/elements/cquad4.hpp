@@ -14,7 +14,7 @@
 #include "elements/element_base.hpp"
 #include <array>
 
-namespace nastran {
+namespace vibetran {
 
 class CQuad4 : public ElementBase {
 public:
@@ -113,4 +113,4 @@ private:
     const PShell& pshell() const;
 };
 
-} // namespace nastran
+} // namespace vibetran

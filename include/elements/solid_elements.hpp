@@ -15,7 +15,7 @@
 #include "elements/element_base.hpp"
 #include <array>
 
-namespace nastran {
+namespace vibetran {
 
 // ── CHEXA8 ───────────────────────────────────────────────────────────────────
 
@@ -278,4 +278,4 @@ private:
     const PSolid& psolid() const;
 };
 
-} // namespace nastran
+} // namespace vibetran

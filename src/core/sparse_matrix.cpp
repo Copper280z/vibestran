@@ -9,7 +9,7 @@
 #endif
 #include <stdexcept>
 
-namespace nastran {
+namespace vibetran {
 
 // cppcheck-suppress unusedFunction -- called from linear_static.cpp
 void SparseMatrixBuilder::add_element_stiffness(
@@ -127,4 +127,4 @@ SparseMatrixBuilder::CsrData SparseMatrixBuilder::build_csr() {
   return csr;
 }
 
-} // namespace nastran
+} // namespace vibetran

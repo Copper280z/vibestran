@@ -18,7 +18,7 @@
 #include "solver/solver_backend.hpp"
 #include <memory>
 
-namespace nastran {
+namespace vibetran {
 
 class LinearStaticSolver {
 public:
@@ -67,4 +67,4 @@ private:
                                    const std::vector<double>& u_free);
 };
 
-} // namespace nastran
+} // namespace vibetran

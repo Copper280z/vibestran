@@ -12,7 +12,7 @@
 #include <vector>
 #include <string_view>
 
-namespace nastran {
+namespace vibetran {
 
 /// Abstract interface for linear system solvers: K * u = F
 class SolverBackend {
@@ -86,4 +86,4 @@ private:
     double last_error_{0.0};
 };
 
-} // namespace nastran
+} // namespace vibetran

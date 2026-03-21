@@ -17,7 +17,7 @@
 #include <iostream>
 #include <numbers>
 
-namespace nastran {
+namespace vibetran {
 
 LinearStaticSolver::LinearStaticSolver(std::unique_ptr<SolverBackend> backend)
     : backend_(std::move(backend)) {}
@@ -848,4 +848,4 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
   return res;
 }
 
-} // namespace nastran
+} // namespace vibetran

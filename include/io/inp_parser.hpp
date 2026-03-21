@@ -89,7 +89,7 @@
 #include <istream>
 #include <string>
 
-namespace nastran {
+namespace vibetran {
 
 class InpParser {
 public:
@@ -107,4 +107,4 @@ public:
     struct ParseContext;
 };
 
-} // namespace nastran
+} // namespace vibetran

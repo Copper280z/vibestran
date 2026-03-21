@@ -1,4 +1,4 @@
-# meson.build — NastranSolver build system
+# meson.build — Vibetran build system
 # Requires: Meson >= 1.0, C++20 compiler, Eigen3
 # Optional: Vulkan SDK (vulkan headers + loader) and glslc for GPU acceleration
 # Usage:
@@ -6,7 +6,7 @@
 #   cd build && meson compile
 #   meson test
 
-project('nastran_solver', 'cpp',
+project('vibetran', 'cpp',
   version : '0.1.0',
   default_options : [
     'cpp_std=c++20',
@@ -353,7 +353,7 @@ if have_accelerate
 endif
 
 solver_lib = static_library(
-  'nastransolver',
+  'vibetran',
   [solver_sources, spirv_hdrs],
   include_directories : [inc, src_inc],
   dependencies        : solver_lib_deps,
@@ -369,8 +369,8 @@ solver_lib_dep = declare_dependency(
 )
 
 # ── Executable ───────────────────────────────────────────────────────────────
-nastran_exe = executable(
-  'nastran_solver',
+vibetran_exe = executable(
+  'vibetran',
   'src/main.cpp',
   dependencies : solver_lib_dep,
   install      : true,
@@ -463,5 +463,5 @@ summary({
   'Vulkan backend'    : have_vulkan_backend,
   'CUDA backend'      : have_cuda_backend,
   'Solver lib'        : solver_lib.name(),
-  'Executable'        : nastran_exe.name(),
-}, section : 'NastranSolver')
+  'Executable'        : vibetran_exe.name(),
+}, section : 'Vibetran')

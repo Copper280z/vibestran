@@ -1,5 +1,5 @@
 // src/main.cpp
-// Command-line driver: nastran_solver [options] <input.bdf> [output.f06]
+// Command-line driver: vibetran [options] <input.bdf> [output.f06]
 //
 // Default backend is the Eigen CPU solver.  Use --backend to select a GPU
 // solver when available:
@@ -12,7 +12,7 @@
 //
 // Thread control (CPU backends):
 //   Set OMP_NUM_THREADS before running to limit parallelism, e.g.:
-//     OMP_NUM_THREADS=8 nastran_solver input.bdf
+//     OMP_NUM_THREADS=8 vibetran input.bdf
 //   On hyperthreaded CPUs, setting this to the physical core count often
 //   improves performance.
 //
@@ -45,7 +45,7 @@
 enum class BackendChoice { Auto, Cpu, CpuPCG, Vulkan, Cuda, CudaPCG };
 
 static void print_usage() {
-  std::cerr << "Usage: nastran_solver "
+  std::cerr << "Usage: vibetran "
                "[--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg>]\n"
                "                      [--cuda-single-precision] [--csv]\n"
                "                      <input.bdf|input.inp> [output.f06]\n"
@@ -64,7 +64,7 @@ static void print_usage() {
                "  --csv                      Write CSV output even if "
                "PARAM,CSVOUT is not in the BDF\n"
                "  OMP_NUM_THREADS=N          Limit CPU solver threads, e.g.:\n"
-               "                             OMP_NUM_THREADS=8 nastran_solver "
+               "                             OMP_NUM_THREADS=8 vibetran "
                "input.bdf\n";
 }
 
@@ -129,9 +129,9 @@ int main(int argc, char *argv[]) {
     std::string ext = bdf_path.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](unsigned char c) { return std::tolower(c); });
-    nastran::Model model = (ext == ".inp")
-        ? nastran::InpParser::parse_file(bdf_path)
-        : nastran::BdfParser::parse_file(bdf_path);
+    vibetran::Model model = (ext == ".inp")
+        ? vibetran::InpParser::parse_file(bdf_path)
+        : vibetran::BdfParser::parse_file(bdf_path);
 
     std::cout << "  Nodes:    " << model.nodes.size() << "\n";
     std::cout << "  Elements: " << model.elements.size() << "\n";
@@ -139,15 +139,15 @@ int main(int argc, char *argv[]) {
     std::cout << "  Subcases: " << model.analysis.subcases.size() << "\n";
 
     // ── Backend selection ─────────────────────────────────────────────────
-    std::unique_ptr<nastran::SolverBackend> backend;
+    std::unique_ptr<vibetran::SolverBackend> backend;
 
     if (backend_choice == BackendChoice::CpuPCG) {
-      backend = std::make_unique<nastran::EigenPCGSolverBackend>();
+      backend = std::make_unique<vibetran::EigenPCGSolverBackend>();
     } else if (backend_choice == BackendChoice::Cuda) {
 #ifdef HAVE_CUDA
-      auto cu = nastran::CudaSolverBackend::try_create(cuda_single_precision);
+      auto cu = vibetran::CudaSolverBackend::try_create(cuda_single_precision);
       if (cu.has_value()) {
-        backend = std::make_unique<nastran::CudaSolverBackend>(std::move(*cu));
+        backend = std::make_unique<vibetran::CudaSolverBackend>(std::move(*cu));
       } else {
         std::cerr << "CUDA backend requested but no CUDA device found\n";
         return 1;
@@ -159,10 +159,10 @@ int main(int argc, char *argv[]) {
     } else if (backend_choice == BackendChoice::CudaPCG) {
 #ifdef HAVE_CUDA
       auto cu =
-          nastran::CudaPCGSolverBackend::try_create(cuda_single_precision);
+          vibetran::CudaPCGSolverBackend::try_create(cuda_single_precision);
       if (cu.has_value()) {
         backend =
-            std::make_unique<nastran::CudaPCGSolverBackend>(std::move(*cu));
+            std::make_unique<vibetran::CudaPCGSolverBackend>(std::move(*cu));
       } else {
         std::cerr << "CUDA PCG backend requested but no CUDA device found\n";
         return 1;
@@ -173,10 +173,10 @@ int main(int argc, char *argv[]) {
 #endif
     } else if (backend_choice == BackendChoice::Vulkan) {
 #ifdef HAVE_VULKAN
-      auto vk = nastran::VulkanSolverBackend::try_create();
+      auto vk = vibetran::VulkanSolverBackend::try_create();
       if (vk.has_value()) {
         backend =
-            std::make_unique<nastran::VulkanSolverBackend>(std::move(*vk));
+            std::make_unique<vibetran::VulkanSolverBackend>(std::move(*vk));
       } else {
         std::cerr << "Vulkan backend requested but Vulkan is unavailable\n";
         return 1;
@@ -188,23 +188,23 @@ int main(int argc, char *argv[]) {
     }
     // BackendChoice::Auto and BackendChoice::Cpu both default to Eigen CPU.
     if (!backend)
-      backend = std::make_unique<nastran::EigenSolverBackend>();
+      backend = std::make_unique<vibetran::EigenSolverBackend>();
 
     std::cout << "Solving with: " << backend->name() << "\n";
-    nastran::LinearStaticSolver solver(std::move(backend));
-    nastran::SolverResults results = solver.solve(model);
+    vibetran::LinearStaticSolver solver(std::move(backend));
+    vibetran::SolverResults results = solver.solve(model);
 
     auto t1 = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(t1 - t0).count();
     std::cout << "Solution complete in " << elapsed << " s\n";
 
     // ── Write F06 ─────────────────────────────────────────────────────────
-    nastran::F06Writer::write(results, model, f06_path);
+    vibetran::F06Writer::write(results, model, f06_path);
     std::cout << "F06 written: " << f06_path << "\n";
 
     // ── Write OP2 ─────────────────────────────────────────────────────────
     auto op2_path = std::filesystem::path(f06_path).replace_extension(".op2");
-    nastran::Op2Writer::write(results, model, op2_path);
+    vibetran::Op2Writer::write(results, model, op2_path);
     std::cout << "OP2 written: " << op2_path << "\n";
 
     // ── Write CSV (if requested via --csv or PARAM,CSVOUT,YES) ────────────
@@ -216,15 +216,15 @@ int main(int argc, char *argv[]) {
     }
     if (write_csv) {
       auto csv_stem = std::filesystem::path(f06_path).replace_extension("");
-      nastran::CsvWriter::write(results, model, csv_stem);
+      vibetran::CsvWriter::write(results, model, csv_stem);
       std::cout << "CSV written: " << csv_stem.string()
                 << ".node.csv / .elem.csv\n";
     }
 
-  } catch (const nastran::ParseError &e) {
+  } catch (const vibetran::ParseError &e) {
     std::cerr << "Parse error: " << e.what() << "\n";
     return 2;
-  } catch (const nastran::SolverError &e) {
+  } catch (const vibetran::SolverError &e) {
     std::cerr << "Solver error: " << e.what() << "\n";
     return 3;
   } catch (const std::exception &e) {

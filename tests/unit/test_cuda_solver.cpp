@@ -17,7 +17,7 @@
 #include "solver/cuda_solver_backend.hpp"
 #endif
 
-using namespace nastran;
+using namespace vibetran;
 
 #ifndef HAVE_CUDA
 // All tests in this file are no-ops when CUDA was not compiled in.

@@ -11,7 +11,7 @@
 #include <sstream>
 #include <unordered_map>
 
-namespace nastran {
+namespace vibetran {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -846,4 +846,4 @@ Model InpParser::parse_stream(std::istream& in) {
     return parse_inp(in);
 }
 
-} // namespace nastran
+} // namespace vibetran

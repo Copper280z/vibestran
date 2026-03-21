@@ -9,7 +9,7 @@
 #include <ostream>
 #include <unordered_map>
 
-namespace nastran {
+namespace vibetran {
 
 // ── Result data ───────────────────────────────────────────────────────────────
 
@@ -118,4 +118,4 @@ public:
                     const std::filesystem::path &stem);
 };
 
-} // namespace nastran
+} // namespace vibetran

@@ -11,7 +11,7 @@
 #include <vector>
 #include <vulkan/vulkan.h>
 
-namespace nastran {
+namespace vibetran {
 
 // IDs used to index into the pipeline array.
 // float32 pipelines (indices 0-3) and float64 pipelines (indices 4-7).
@@ -87,6 +87,6 @@ void cmd_axpby_d(VkCommandBuffer cmd, const Pipelines& pl,
 void cmd_jacobi_d(VkCommandBuffer cmd, const Pipelines& pl,
                   VkDescriptorSet ds, uint32_t n);
 
-} // namespace nastran
+} // namespace vibetran
 
 #endif // HAVE_VULKAN

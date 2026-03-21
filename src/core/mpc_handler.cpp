@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace nastran {
+namespace vibetran {
 
 void MpcHandler::build(std::span<const Mpc* const> mpcs, DofMap& dof_map) {
     // Save pre-MPC dof_map
@@ -331,4 +331,4 @@ void MpcHandler::recover_dependent_dofs(std::vector<double>& u_free_full,
     }
 }
 
-} // namespace nastran
+} // namespace vibetran

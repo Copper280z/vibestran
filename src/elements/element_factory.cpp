@@ -5,7 +5,7 @@
 #include "elements/solid_elements.hpp"
 #include <format>
 
-namespace nastran {
+namespace vibetran {
 
 std::unique_ptr<ElementBase> make_element(const ElementData& data, const Model& model) {
     switch (data.type) {
@@ -72,4 +72,4 @@ std::unique_ptr<ElementBase> make_element(const ElementData& data, const Model& 
     }
 }
 
-} // namespace nastran
+} // namespace vibetran

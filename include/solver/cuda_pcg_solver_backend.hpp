@@ -30,7 +30,7 @@
 #include <memory>
 #include <optional>
 
-namespace nastran {
+namespace vibetran {
 
 // Opaque RAII context (defined in cuda_pcg_solver_backend.cu).
 struct CudaPCGContext;
@@ -79,6 +79,6 @@ private:
     std::unique_ptr<CudaPCGContext> ctx_;
 };
 
-} // namespace nastran
+} // namespace vibetran
 
 #endif // HAVE_CUDA

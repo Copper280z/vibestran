@@ -21,7 +21,7 @@
 #include <string>
 #include <istream>
 
-namespace nastran {
+namespace vibetran {
 
 class BdfParser {
 public:
@@ -76,4 +76,4 @@ private:
     static std::vector<std::string> split_free_field (const std::string& line);
 };
 
-} // namespace nastran
+} // namespace vibetran

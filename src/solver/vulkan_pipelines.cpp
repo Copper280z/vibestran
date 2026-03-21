@@ -19,7 +19,7 @@
 #include "axpby_d_spv.h"
 #include "jacobi_precond_d_spv.h"
 
-namespace nastran {
+namespace vibetran {
 
 // ── Pipelines destructor ──────────────────────────────────────────────────────
 
@@ -270,6 +270,6 @@ void cmd_jacobi_d(VkCommandBuffer cmd, const Pipelines& pl,
     vkCmdDispatch(cmd, (n + 255) / 256, 1, 1);
 }
 
-} // namespace nastran
+} // namespace vibetran
 
 #endif // HAVE_VULKAN

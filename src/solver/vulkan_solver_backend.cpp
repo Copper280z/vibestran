@@ -11,7 +11,7 @@
 #include <format>
 #include <iostream>
 
-namespace nastran {
+namespace vibetran {
 
 // ── Constructor / destructor ──────────────────────────────────────────────────
 
@@ -207,6 +207,6 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
     }
 }
 
-} // namespace nastran
+} // namespace vibetran
 
 #endif // HAVE_VULKAN

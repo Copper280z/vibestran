@@ -8,7 +8,7 @@
 #include <format>
 #include <algorithm>
 
-namespace nastran {
+namespace vibetran {
 
 // ── Principal stress helpers ──────────────────────────────────────────────────
 
@@ -273,4 +273,4 @@ void F06Writer::write_solid_stress_table(const SubCaseResults& sc,
     }
 }
 
-} // namespace nastran
+} // namespace vibetran

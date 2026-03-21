@@ -7,7 +7,7 @@
 #include "core/types.hpp"
 #include <cmath>
 
-using namespace nastran;
+using namespace vibetran;
 
 // ── CoordId::basic (only used in tests) ──────────────────────────────────────
 

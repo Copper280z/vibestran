@@ -8,7 +8,7 @@
 #include <gtest/gtest.h>
 #include <cmath>
 
-using namespace nastran;
+using namespace vibetran;
 
 // ── Helper: build a minimal model with n nodes (all shell) ───────────────────
 static Model make_model_n_nodes(int n) {

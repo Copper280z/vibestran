@@ -5,7 +5,7 @@
 #include "io/bdf_parser.hpp"
 #include "core/model.hpp"
 
-using namespace nastran;
+using namespace vibetran;
 
 // ── Numeric format parsing ────────────────────────────────────────────────────
 
