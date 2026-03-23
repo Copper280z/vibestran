@@ -43,14 +43,15 @@ add_project_arguments(extra_args, language : 'cpp')
 # ── Eigen dependency ──────────────────────────────────────────────────────────
 # First try pkg-config, then fall back to third_party/ bundled headers
 eigen_dep = dependency('eigen3',
-  required : false,
-  fallback : ['eigen3', 'eigen_dep'],
+  required     : false,
+  fallback     : ['eigen3', 'eigen_dep'],
+  include_type : 'system',   # use -isystem so GCC suppresses third-party warnings
 )
 
 if not eigen_dep.found()
   if fs.is_dir('third_party/eigen/Eigen')
     message('Using bundled Eigen from third_party/')
-    eigen_dep = declare_dependency(include_directories : include_directories('third_party/eigen'))
+    eigen_dep = declare_dependency(include_directories : include_directories('third_party/eigen', is_system: true))
   else
     error('Eigen3 not found. Install libeigen3-dev (Linux), eigen (Homebrew), ' +
           'or run: meson subprojects download eigen3')
@@ -214,6 +215,17 @@ if have_cuda_compiler
   # compatibility.  Set --std=c++20 so other C++20 features (span, optional,
   # string_view) are available in host code.
   add_project_arguments('--std=c++20', language: 'cuda')
+
+  # Suppress NVCC hd_warnings from Eigen headers: Eigen's __host__ __device__
+  # math functions call constexpr __host__-only std:: functions. These are
+  # harmless — Eigen guards the GPU paths correctly — but generate thousands of
+  # lines of noise.  #pragma hd_warning_disable cannot appear at file scope or
+  # before includes (NVCC requires it immediately before a function declaration),
+  # so -diag-suppress is the only viable option for third-party headers.
+  add_project_arguments('-diag-suppress=20011,20013,20014,20015', language: 'cuda')
+  # GCC (host compiler) warns about Eigen's NVCC-specific #pragma diag_suppress
+  # directives inside DisableStupidWarnings.h; suppress at the host level.
+  add_project_arguments('-Xcompiler=-Wno-unknown-pragmas', language: 'cuda')
 
   # Eigen sets EIGEN_DEFAULT_ALIGN_BYTES based on the target architecture.
   # With -march=native on AVX2 hosts this is 32; without it, 16.  Both the
