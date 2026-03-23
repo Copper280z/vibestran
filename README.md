@@ -29,7 +29,8 @@ vibetran/
 ├── src/                # Implementations
 ├── tests/
 │   ├── unit/           # Unit tests per module
-│   └── integration/    # End-to-end analysis cases
+│   ├── integration/    # Integration tests with hand-calculated solutions
+│   └── e2e/            # End-to-end analysis cases (BDF + expected JSON, run against vibetran binary)
 └── third_party/        # Eigen (header-only)
 ```
 
@@ -49,7 +50,27 @@ vibetran/
 - **Constraints**: SPC, SPC1, MPC, RBE2, RBE3
 - **Coordinate systems**: CORD1R/C/S, CORD2R/C/S
 - **Input formats**: Nastran BDF (`.bdf`) and CalculiX/Abaqus (`.inp`, experimental)
-- **Solution**: SOL 101 (Linear Static)
+- **Solutions**: SOL 101 (Linear Static), SOL 103 (Normal Modes / Modal Analysis)
+
+## SOL 103 — Normal Modes (Modal Analysis)
+
+Compute natural frequencies and mode shapes using a generalized eigensolver. Activated
+by `SOL 103` in the BDF case control deck.
+
+```
+vibetran model.bdf
+```
+
+Eigensolvers are selected via `--backend`:
+
+| Backend | Eigensolver | Notes |
+|---|---|---|
+| `cpu` (default) | Spectra shift-and-invert | Sparse, memory-efficient |
+| `cuda` / `cuda-pcg` | Implicitly Restarted Lanczos (IRL) with Rayleigh-Ritz refinement | GPU-accelerated; requires CUDA + cuDSS |
+
+The CUDA eigensolver uses cuDSS for the shift-and-invert linear solves inside the
+Lanczos iteration, then applies a Rayleigh-Ritz post-refinement step to improve
+accuracy of the converged eigenpairs.
 
 ## Building
 
@@ -119,7 +140,8 @@ vibetran --backend=cpu-pcg model.bdf
 ### CUDA — cuDSS
 
 Uses [NVIDIA cuDSS](https://developer.nvidia.com/cudss) for GPU-resident sparse
-direct solve. Requires CUDA toolkit ≥ 11 and cuDSS ≥ 0.7.
+direct solve. Requires CUDA toolkit ≥ 11 and cuDSS ≥ 0.7. Also used as the
+shift-and-invert linear solver inside the IRL eigensolver for SOL 103.
 
 **Solver strategy:**
 1. Sparse Cholesky (`CUDSS_MTYPE_SPD`) — optimal for SPD FEM stiffness matrices
