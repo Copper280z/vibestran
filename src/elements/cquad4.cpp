@@ -58,16 +58,14 @@ static ShellFrame compute_shell_frame(const std::array<Vec3,4>& g) {
     // For a rigid-body rotation ω_global, the transverse displacement at local (x,0,0) is:
     //   w = -(e2·ω_global)*x  →  ∂w/∂x = -(e2·ω_global)  →  DOF3 = -(e2·ω_global)
     // Similarly: ∂w/∂y = (e1·ω_global) → DOF4 = (e1·ω_global)
-    // Therefore T_rot maps global ω to local DOFs as:
-    //   [DOF3, DOF4, DOF5] = M * R * ω_global,   M = [[0,-1,0],[1,0,0],[0,0,1]]
-    Eigen::Matrix3d M;
-    M << 0, -1, 0,
-         1,  0, 0,
-         0,  0, 1;
+    // Therefore T_rot rows are: [-e2, e1, e3] (row 0 of M*R = -row1(R), etc.)
     fr.T.setZero();
     for (int n = 0; n < 4; ++n) {
-        fr.T.template block<3,3>(6*n,   6*n)   = R;       // translations
-        fr.T.template block<3,3>(6*n+3, 6*n+3) = M * R;  // rotations (slope convention)
+        fr.T.template block<3,3>(6*n,   6*n)   = R;  // translations
+        auto Tr = fr.T.template block<3,3>(6*n+3, 6*n+3);
+        Tr.row(0) = -R.row(1);  // DOF3 = -(e2·ω)
+        Tr.row(1) =  R.row(0);  // DOF4 = +(e1·ω)
+        Tr.row(2) =  R.row(2);  // DOF5 = drilling
     }
     return fr;
 }

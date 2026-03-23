@@ -68,15 +68,14 @@ static TriaFrame compute_tria_frame(const std::array<Vec3, 3>& g, ElementId eid)
     // Same slope-convention rotation correction as CQUAD4:
     // DOF3 = θx = slope-in-x, DOF4 = θy = slope-in-y (γ_xz = ∂w/∂x - θx = 0 for no shear).
     // Zero-shear condition gives: DOF3 = -(e2·ω_global), DOF4 = (e1·ω_global).
-    // T_rot = M * R,  M = [[0,-1,0],[1,0,0],[0,0,1]].
-    Eigen::Matrix3d M;
-    M << 0, -1, 0,
-         1,  0, 0,
-         0,  0, 1;
+    // T_rot rows: [-e2, e1, e3]  (avoids constructing and multiplying M).
     fr.T.setZero();
     for (int n = 0; n < 3; ++n) {
         fr.T.template block<3, 3>(6 * n,     6 * n)     = R;
-        fr.T.template block<3, 3>(6 * n + 3, 6 * n + 3) = M * R;
+        auto Tr = fr.T.template block<3, 3>(6 * n + 3, 6 * n + 3);
+        Tr.row(0) = -R.row(1);  // DOF3 = -(e2·ω)
+        Tr.row(1) =  R.row(0);  // DOF4 = +(e1·ω)
+        Tr.row(2) =  R.row(2);  // DOF5 = drilling
     }
     return fr;
 }
