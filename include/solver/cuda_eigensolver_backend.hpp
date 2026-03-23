@@ -1,6 +1,7 @@
 #pragma once
 // include/solver/cuda_eigensolver_backend.hpp
-// CUDA modal (eigensolver) backend using shift-and-invert Lanczos.
+// CUDA modal (eigensolver) backend using implicitly restarted shift-and-invert
+// Lanczos (IRL), similar to ARPACK's IRLM / Spectra's compute() loop.
 //
 // Algorithm summary:
 //   1. Form shift matrix C = K - sigma*M on CPU (Eigen sparse arithmetic).
@@ -15,8 +16,11 @@
 //      Full re-orthogonalization via cuBLAS dgemv against all prior vectors.
 //        beta_k = ||r||_M           (cuSPARSE SpMV for M*r, then cuBLAS dot)
 //        v_{k+1} = r / beta_k
-//   4. Build ncv×ncv symmetric tridiagonal T; solve its eigenvalue problem on
-//      CPU with Eigen::SelfAdjointEigenSolver (tiny matrix).
+//   4. Implicit restart loop:
+//      a. Solve the ncv×ncv tridiagonal T on CPU; check convergence.
+//      b. If not converged, apply p = ncv - k implicit QR shifts to T,
+//         compress V and W on GPU via cuBLAS dgemm, update residual,
+//         re-expand Lanczos from step k to ncv.
 //   5. Select nd Ritz pairs with largest |nu|, convert nu -> lambda, return
 //      sorted ascending by lambda.
 //

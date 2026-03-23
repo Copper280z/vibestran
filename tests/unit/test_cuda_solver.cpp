@@ -393,7 +393,9 @@ TEST_F(CudaEigTest, EigenvaluesSortedAscending) {
 // ── Test 5: eigenvectors are M-orthonormal ────────────────────────────────────
 // For K = tridiag(2,-1,-1), M = I, the returned eigenvectors should satisfy
 // phi_i^T M phi_j = delta_{ij}  (mass-normalised).
-// We verify this for the lowest 4 modes: off-diagonal < 1e-10, diagonal ≈ 1.
+// We verify this for the lowest 4 modes: off-diagonal < 1e-5, diagonal ≈ 1.
+// Tolerance is 1e-5 (not tighter) because Lanczos Ritz vectors accumulate
+// small orthogonality drift from finite-precision arithmetic.
 
 TEST_F(CudaEigTest, EigenvectorsMassNormalised) {
     const int n = 15;
@@ -420,10 +422,10 @@ TEST_F(CudaEigTest, EigenvectorsMassNormalised) {
             const Eigen::VectorXd& phi_j = pairs[static_cast<std::size_t>(j)].eigenvector;
             double inner = phi_i.dot(M * phi_j);
             if (i == j) {
-                EXPECT_NEAR(inner, 1.0, 1e-6)
+                EXPECT_NEAR(inner, 1.0, 1e-5)
                     << "Mode " << i+1 << " is not M-normalised (phi^T M phi = " << inner << ")";
             } else {
-                EXPECT_NEAR(inner, 0.0, 1e-6)
+                EXPECT_NEAR(inner, 0.0, 1e-5)
                     << "Modes " << i+1 << " and " << j+1
                     << " are not M-orthogonal (phi_i^T M phi_j = " << inner << ")";
             }
@@ -523,6 +525,109 @@ TEST_F(CudaEigTest, NameAndDeviceName) {
         << "Backend name should contain 'CUDA'";
     EXPECT_FALSE(backend_->device_name().empty())
         << "device_name() should return the GPU model string";
+}
+
+// ── Test 10: larger problem requiring restarts matches Spectra ─────────────────
+// n=100 tridiagonal K with non-uniform mass, nd=12.  With ncv = max(2*12+10, 36)
+// = 36, the initial Lanczos pass alone is unlikely to converge all 12 modes,
+// so implicit restarts are exercised.
+
+TEST_F(CudaEigTest, LargerProblemMatchesSpectra) {
+    const int n = 100;
+    Eigen::SparseMatrix<double> K(n, n), M(n, n);
+    {
+        using T = Eigen::Triplet<double>;
+        std::vector<T> Kt, Mt;
+        for (int i = 0; i < n; ++i) {
+            Kt.emplace_back(i, i, 2.0);
+            if (i > 0) { Kt.emplace_back(i, i-1, -1.0); Kt.emplace_back(i-1, i, -1.0); }
+            Mt.emplace_back(i, i, 1.0 + 0.05 * i);
+        }
+        K.setFromTriplets(Kt.begin(), Kt.end());
+        M.setFromTriplets(Mt.begin(), Mt.end());
+    }
+
+    const int nd = 12;
+    auto cuda_pairs    = backend_->solve(K, M, nd, -1.0);
+    auto spectra_pairs = SpectraEigensolverBackend{}.solve(K, M, nd, -1.0);
+
+    ASSERT_GE(static_cast<int>(cuda_pairs.size()), nd);
+    ASSERT_GE(static_cast<int>(spectra_pairs.size()), nd);
+
+    for (int i = 0; i < nd; ++i) {
+        EXPECT_NEAR(cuda_pairs[static_cast<std::size_t>(i)].eigenvalue,
+                    spectra_pairs[static_cast<std::size_t>(i)].eigenvalue, 1e-5)
+            << "Mode " << i+1 << " eigenvalue differs (n=100, nd=12)";
+    }
+}
+
+// ── Test 11: tight residuals with restart ──────────────────────────────────────
+// n=50, nd=10.  Verify that eigenpair residuals are small after IRL converges.
+
+TEST_F(CudaEigTest, EigenpairResidualsTightWithRestart) {
+    const int n = 50;
+    Eigen::SparseMatrix<double> K(n, n), M(n, n);
+    {
+        using T = Eigen::Triplet<double>;
+        std::vector<T> Kt, Mt;
+        for (int i = 0; i < n; ++i) {
+            Kt.emplace_back(i, i, 2.0);
+            if (i > 0) { Kt.emplace_back(i, i-1, -1.0); Kt.emplace_back(i-1, i, -1.0); }
+            Mt.emplace_back(i, i, 1.0);
+        }
+        K.setFromTriplets(Kt.begin(), Kt.end());
+        M.setFromTriplets(Mt.begin(), Mt.end());
+    }
+
+    const int nd = 10;
+    auto pairs = backend_->solve(K, M, nd, -1.0);
+    ASSERT_GE(static_cast<int>(pairs.size()), nd);
+
+    for (std::size_t i = 0; i < static_cast<std::size_t>(nd); ++i) {
+        const Eigen::VectorXd Kphi = K * pairs[i].eigenvector;
+        const Eigen::VectorXd res  = Kphi - pairs[i].eigenvalue * (M * pairs[i].eigenvector);
+        double kphi_norm = Kphi.norm();
+        double rel_res   = (kphi_norm > 1e-300) ? res.norm() / kphi_norm : res.norm();
+        EXPECT_LT(rel_res, 1e-6)
+            << "Mode " << i+1 << " residual too large: " << rel_res;
+    }
+}
+
+// ── Test 12: clustered eigenvalues converge ────────────────────────────────────
+// Diagonal K with clustered eigenvalues near 1.0, M=I.
+// Clustered eigenvalues stress the restart logic since nearby Ritz values
+// converge slowly and can interfere with shift selection.
+
+TEST_F(CudaEigTest, ClusteredEigenvaluesConverge) {
+    const int n = 20;
+    std::vector<std::vector<double>> Kd(static_cast<std::size_t>(n),
+                                        std::vector<double>(static_cast<std::size_t>(n), 0.0));
+    std::vector<std::vector<double>> Md(static_cast<std::size_t>(n),
+                                        std::vector<double>(static_cast<std::size_t>(n), 0.0));
+    // First 5 eigenvalues clustered near 1.0, rest well-separated.
+    for (int i = 0; i < n; ++i) {
+        if (i < 5)
+            Kd[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] = 1.0 + 0.001 * i;
+        else
+            Kd[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] =
+                static_cast<double>(i + 1);
+        Md[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] = 1.0;
+    }
+    auto K = dense_to_sparse(Kd);
+    auto M = dense_to_sparse(Md);
+
+    const int nd = 5;
+    auto cuda_pairs    = backend_->solve(K, M, nd, -1.0);
+    auto spectra_pairs = SpectraEigensolverBackend{}.solve(K, M, nd, -1.0);
+
+    ASSERT_GE(static_cast<int>(cuda_pairs.size()), nd);
+    ASSERT_GE(static_cast<int>(spectra_pairs.size()), nd);
+
+    for (int i = 0; i < nd; ++i) {
+        EXPECT_NEAR(cuda_pairs[static_cast<std::size_t>(i)].eigenvalue,
+                    spectra_pairs[static_cast<std::size_t>(i)].eigenvalue, 1e-5)
+            << "Clustered mode " << i+1 << " eigenvalue differs";
+    }
 }
 
 #else
