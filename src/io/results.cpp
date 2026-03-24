@@ -10,6 +10,32 @@
 
 namespace vibestran {
 
+namespace {
+
+constexpr int kF06PageWidth = 132;
+
+std::string center_text(std::string_view text, int width = kF06PageWidth) {
+    if (static_cast<int>(text.size()) >= width) return std::string(text);
+    const int pad = (width - static_cast<int>(text.size())) / 2;
+    return std::string(static_cast<std::size_t>(pad), ' ') + std::string(text);
+}
+
+std::string page_line(std::string_view text) {
+    return center_text(text) + "\n";
+}
+
+std::string banner_line(std::string_view left, std::string_view right,
+                        int width = kF06PageWidth) {
+    if (static_cast<int>(left.size() + right.size() + 1) >= width)
+        return std::string(left) + " " + std::string(right) + "\n";
+
+    const int gap = width - static_cast<int>(left.size()) - static_cast<int>(right.size());
+    return std::string(left) + std::string(static_cast<std::size_t>(gap), ' ')
+         + std::string(right) + "\n";
+}
+
+} // namespace
+
 // ── Principal stress helpers ──────────────────────────────────────────────────
 
 void compute_principal_2d(double sx, double sy, double sxy,
@@ -125,9 +151,9 @@ void F06Writer::write(const SolverResults& results, const Model& model,
             }
         }
 
-        out << "\n1                                             SUBCASE " << sc.id << "\n";
+        out << "\n OUTPUT FOR SUBCASE" << std::setw(9) << sc.id << "\n";
         if (!sc.label.empty())
-            out << "                                              " << sc.label << "\n";
+            out << " " << sc.label << "\n";
 
         if (do_disp)   write_displacement_table(sc, out);
         if (do_stress) {
@@ -148,10 +174,9 @@ void F06Writer::write_header(std::ostream& out) {
     char date_buf[32];
     std::strftime(date_buf, sizeof(date_buf), "%B %e, %Y", std::localtime(&t));
 
-    out << "1                                             V I B E S T R A N"
-        << "                                                          " << date_buf << "\n";
-    out << "0                                                                         \n";
-    out << "         S O L   1 0 1   L I N E A R   S T A T I C   A N A L Y S I S\n";
+    out << "1" << banner_line("V I B E S T R A N", date_buf, kF06PageWidth - 1);
+    out << "0" << std::string(static_cast<std::size_t>(kF06PageWidth - 1), ' ') << "\n";
+    out << page_line("S O L   1 0 1   L I N E A R   S T A T I C   A N A L Y S I S");
     out << "\n";
 }
 
@@ -159,13 +184,25 @@ void F06Writer::write_displacement_table(const SubCaseResults& sc,
                                          std::ostream& out) {
     if (sc.displacements.empty()) return;
 
-    out << "\n                                             D I S P L A C E M E N T   V E C T O R\n\n";
-    out << "      POINT ID.   TYPE          T1             T2             T3             R1             R2             R3\n";
+    out << "\n";
+    out << "                                                       D I S P L A C E M E N T S\n";
+    out << "                                              (in global coordinate system at each grid)\n";
+    out << "           GRID     COORD      T1            T2            T3            R1            R2            R3\n";
+    out << "                     SYS\n";
 
     for (const auto& nd : sc.displacements) {
-        out << std::setw(12) << nd.node.value << "        G   ";
-        for (int i = 0; i < 6; ++i)
-            out << std::setw(15) << std::setprecision(6) << std::scientific << nd.d[i];
+        out << std::setw(15) << nd.node.value;
+        out << std::setw(9) << 0; // global coordinate system
+        out << std::uppercase;
+        for (int i = 0; i < 6; ++i) {
+            const double v = nd.d[i];
+            if (v == 0.0) {
+                out << "  0.0         ";
+            } else {
+                out << std::setw(14) << std::setprecision(6) << std::scientific << v;
+            }
+        }
+        out << std::nouppercase;
         out << "\n";
     }
 }
@@ -306,10 +343,9 @@ void F06Writer::write_modal_header(std::ostream& out) {
     char date_buf[32];
     std::strftime(date_buf, sizeof(date_buf), "%B %e, %Y", std::localtime(&t));
 
-    out << "1                                             V I B E S T R A N"
-        << "                                                          " << date_buf << "\n";
-    out << "0                                                                         \n";
-    out << "         S O L   1 0 3   N O R M A L   M O D E S   A N A L Y S I S\n";
+    out << "1" << banner_line("V I B E S T R A N", date_buf, kF06PageWidth - 1);
+    out << "0" << std::string(static_cast<std::size_t>(kF06PageWidth - 1), ' ') << "\n";
+    out << page_line("S O L   1 0 3   N O R M A L   M O D E S   A N A L Y S I S");
     out << "\n";
 }
 

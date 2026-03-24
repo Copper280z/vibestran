@@ -24,7 +24,9 @@
 #include "solver/eigensolver_backend.hpp"
 #include "solver/solver_backend.hpp"
 #include "io/results.hpp"
+#include <array>
 #include <cmath>
+#include <filesystem>
 #include <numbers>
 #include <sstream>
 
@@ -33,6 +35,27 @@ using namespace vibestran;
 // Helper: run a modal analysis from BDF string
 static ModalSolverResults run_modal(const std::string& bdf) {
     Model model = BdfParser::parse_string(bdf);
+    ModalSolver solver(std::make_unique<SpectraEigensolverBackend>());
+    return solver.solve(model);
+}
+
+static std::filesystem::path integration_data_path(const std::string& name) {
+    const std::array<std::filesystem::path, 3> candidates{
+        std::filesystem::path(__FILE__).parent_path() / "data" / name,
+        std::filesystem::path("tests") / "integration" / "data" / name,
+        std::filesystem::path("..") / "tests" / "integration" / "data" / name,
+    };
+
+    for (const auto& candidate : candidates) {
+        if (std::filesystem::exists(candidate))
+            return candidate;
+    }
+
+    throw std::runtime_error("integration test data file not found: " + name);
+}
+
+static ModalSolverResults run_modal_file(const std::string& filename) {
+    Model model = BdfParser::parse_file(integration_data_path(filename));
     ModalSolver solver(std::make_unique<SpectraEigensolverBackend>());
     return solver.solve(model);
 }
@@ -1678,4 +1701,229 @@ TEST(Modal, DisplacementPlotProducesF06EigenvectorOutput) {
         << "F06 must contain eigenvector table when DISPLACEMENT(PLOT)=ALL";
     EXPECT_NE(f06_text.find("R E A L   E I G E N V A L U E S"), std::string::npos)
         << "F06 must contain eigenvalue table";
+}
+
+// ── Test 6: VIC MITC4+ short-deck modal regression ───────────────────────────
+// File-backed regression using a small Mecway/MYSTRAN reference model.
+// This catches spurious drill-dominated mode clustering in the low-frequency
+// spectrum. Frequencies below are from vic_mitc4+_short_mystran.F06.
+
+TEST(Modal, VicMitc4ShortRegression) {
+    ModalSolverResults res = run_modal_file("vic_mitc4+_short.dat");
+    ASSERT_FALSE(res.subcases.empty());
+    const auto& modes = res.subcases[0].modes;
+
+    const std::array<double, 14> ref_hz{
+        1665.676, 2671.479,  5255.342,  8866.435, 10733.39, 12664.33,
+       15962.85, 16496.14, 20328.33, 21465.91, 22692.58, 30986.94,
+       32547.32, 34201.53,
+    };
+
+    ASSERT_GE(modes.size(), ref_hz.size());
+    for (std::size_t i = 0; i < ref_hz.size(); ++i) {
+        EXPECT_NEAR(modes[i].cycles_per_sec, ref_hz[i], 0.06 * ref_hz[i])
+            << "Mode " << (i + 1) << " frequency regressed from MYSTRAN reference";
+    }
+
+    // Guard explicitly against the previous failure mode where many low modes
+    // collapsed into an artificial drilling cluster near mode 2.
+    EXPECT_GT(modes[2].cycles_per_sec, 1.5 * modes[1].cycles_per_sec)
+        << "Mode 3 is too close to mode 2; likely low-frequency drill-mode contamination";
+    EXPECT_GT(modes[3].cycles_per_sec, 1.5 * modes[1].cycles_per_sec)
+        << "Mode 4 is too close to mode 2; likely low-frequency drill-mode contamination";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Test: Mixed element normals — 2×2 CQUAD4 cantilever
+//
+// Geometry: 3×3 node grid in XY plane; y=0 edge clamped; forces at free corners.
+//
+//   7(0,2)---8(1,2)---9(2,2)  <- free end (loads here)
+//   | Elem2  | Elem4  |
+//   4(0,1)---5(1,1)---6(2,1)
+//   | Elem1  | Elem3  |
+//   1(0,0)---2(1,0)---3(2,0)  <- fixed end (all 6 DOF)
+//
+// Elements 1 & 2 (left, x=0..1): CCW from +Z  => normal = +Z
+// Elements 3 & 4 (right, x=1..2): CW from +Z  => normal = -Z
+//
+// Loading: 100 N in +Z (global) at both free outer corners (nodes 7 and 9).
+//
+// Forces are in the global coordinate system; the element normal direction must
+// have no effect on the structural response. Both strips must deflect in +Z.
+// If there is a bug in normal-direction handling the right strip (inverted
+// normals) will deflect in -Z or by a wrong magnitude.
+//
+// Symmetry check: since the geometry and loading are both left-right symmetric,
+//   u_z(7) = u_z(9) and u_z(4) = u_z(6) to numerical precision.
+//
+// Beam theory estimate for each 1 m-wide strip, L=2 m, t=0.1 m, E=1e6:
+//   I  = w*t³/12 = 1×0.001/12 = 8.333e-5 m⁴
+//   EI = 83.33 N·m²
+//   δ  = F*L³/(3*EI) = 100*8/250 ≈ 3.2 m (tip, full-width load)
+//
+// With a point load at only one free corner the FEM tip deflection will be
+// somewhat less; a loose lower bound of 0.5 m confirms non-trivial bending.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+TEST(Integration, MixedNormalsCantilever) {
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LABEL = MIXED NORMALS CANTILEVER
+  LOAD = 1
+  SPC = 1
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,2.0,0.0,0.0
+GRID,4,,0.0,1.0,0.0
+GRID,5,,1.0,1.0,0.0
+GRID,6,,2.0,1.0,0.0
+GRID,7,,0.0,2.0,0.0
+GRID,8,,1.0,2.0,0.0
+GRID,9,,2.0,2.0,0.0
+MAT1,1,1.0E6,,0.3
+PSHELL,1,1,0.1
+$ Left column (CCW from +Z => normal = +Z)
+CQUAD4,1,1,1,2,5,4
+CQUAD4,2,1,4,5,8,7
+$ Right column (CW from +Z => normal = -Z)
+CQUAD4,3,1,2,5,6,3
+CQUAD4,4,1,5,8,9,6
+$ Clamp y=0 edge
+SPC1,1,123456,1
+SPC1,1,123456,2
+SPC1,1,123456,3
+$ Both forces in +Z (global) — normal direction must not affect response
+FORCE,1,7,0,100.0,0.0,0.0,1.0
+FORCE,1,9,0,100.0,0.0,0.0,1.0
+ENDDATA
+)";
+
+    SolverResults res = run_analysis(bdf);
+
+    const double uz7 = get_disp(res, 7, 2);  // z-disp at left free corner
+    const double uz9 = get_disp(res, 9, 2);  // z-disp at right free corner
+    const double uz4 = get_disp(res, 4, 2);  // z-disp at left midspan
+    const double uz6 = get_disp(res, 6, 2);  // z-disp at right midspan
+
+    // --- Both strips must deflect in +Z (the force direction) ---
+    EXPECT_GT(uz7, 0.0) << "Left free corner must deflect in +Z";
+    EXPECT_GT(uz9, 0.0) << "Right free corner must deflect in +Z — inverted normal must not flip response";
+    EXPECT_GT(uz4, 0.0) << "Left midspan must deflect in +Z";
+    EXPECT_GT(uz6, 0.0) << "Right midspan must deflect in +Z — inverted normal must not flip response";
+
+    // --- Non-trivial magnitude ---
+    EXPECT_GT(uz7, 0.5) << "Left tip deflection too small; expected significant bending";
+    EXPECT_GT(uz9, 0.5) << "Right tip deflection too small; expected significant bending";
+
+    // --- Left-right symmetry: geometry and loading are mirror-symmetric ---
+    // Any deviation reveals a normal-direction handling bug.
+    const double tol = 1e-3 * std::abs(uz7);  // 0.1 % of tip deflection
+    EXPECT_NEAR(uz7, uz9, tol)
+        << "Symmetry violated at free corners: uz7=" << uz7 << " uz9=" << uz9;
+    EXPECT_NEAR(uz4, uz6, tol)
+        << "Symmetry violated at midspan: uz4=" << uz4 << " uz6=" << uz6;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Test: Closed square tube cantilever — MITC4 drilling stabilization
+//
+// Geometry: 1 m long, 20 mm × 20 mm thin-walled square tube, t = 0.5 mm.
+// Mesh:     8 axial divisions, 2 shell elements per face around the perimeter
+//           (64 CQUAD4 elements total; 8 nodes per section so midside wall
+//           nodes are present).
+//
+// This is a regression for an overly stiff response caused by scaling the
+// artificial drilling stiffness from the membrane diagonal. That made thin
+// closed-shell beams orders of magnitude too stiff. The corrected MITC4
+// regularization keeps the free-end deflection near the Euler-Bernoulli
+// reference instead of collapsing to a few millimetres.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+TEST(Integration, ClosedTubeCantileverBending) {
+    constexpr int NX = 8;
+    constexpr int NC = 2;
+    constexpr int NPER = 4 * NC;
+    constexpr double L = 1.0;
+    constexpr double W = 0.02;
+    constexpr double T = 0.0005;
+    constexpr double E = 7.0e10;
+    constexpr double nu = 0.33;
+    constexpr double rho = 2700.0;
+    constexpr double alpha = 2.3e-5;
+    constexpr double total_force = 100.0;
+
+    auto node_id = [](int ix, int ic) { return ix * NPER + ic + 1; };
+    auto yz_pos = [=](int ic) -> std::pair<double, double> {
+        const double dw = W / NC;
+        const int face = ic / NC;
+        const int pos  = ic % NC;
+        if (face == 0) return {pos * dw, 0.0};
+        if (face == 1) return {W, pos * dw};
+        if (face == 2) return {W - pos * dw, W};
+        return {0.0, W - pos * dw};
+    };
+
+    std::ostringstream bdf;
+    bdf << "SOL 101\n"
+        << "CEND\n"
+        << "SUBCASE 1\n"
+        << "  LOAD = 1\n"
+        << "  SPC  = 1\n"
+        << "BEGIN BULK\n"
+        << "MAT1,1," << E << ",," << nu << "," << rho << "," << alpha << ",0.0\n"
+        << "PSHELL,1,1," << T << "\n";
+
+    for (int ix = 0; ix <= NX; ++ix) {
+        const double x = L * static_cast<double>(ix) / NX;
+        for (int ic = 0; ic < NPER; ++ic) {
+            const auto [y, z] = yz_pos(ic);
+            bdf << "GRID," << node_id(ix, ic) << ",," << x << "," << y << ","
+                << z << "\n";
+        }
+    }
+
+    int eid = 1;
+    for (int ix = 0; ix < NX; ++ix) {
+        for (int ic = 0; ic < NPER; ++ic) {
+            const int ic_next = (ic + 1) % NPER;
+            bdf << "CQUAD4," << eid++ << ",1,"
+                << node_id(ix, ic) << ","
+                << node_id(ix, ic_next) << ","
+                << node_id(ix + 1, ic_next) << ","
+                << node_id(ix + 1, ic) << "\n";
+        }
+    }
+
+    bdf << "SPC1,1,123456,1,THRU," << NPER << "\n";
+    const double nodal_force = total_force / NPER;
+    for (int ic = 0; ic < NPER; ++ic)
+        bdf << "FORCE,1," << node_id(NX, ic) << ",0," << nodal_force
+            << ",0.0,0.0,1.0\n";
+    bdf << "ENDDATA\n";
+
+    SolverResults res = run_analysis(bdf.str());
+
+    double tip_sum = 0.0;
+    double tip_min = std::numeric_limits<double>::infinity();
+    for (int ic = 0; ic < NPER; ++ic) {
+        const double uz = get_disp(res, node_id(NX, ic), 2);
+        tip_sum += uz;
+        tip_min = std::min(tip_min, uz);
+    }
+    const double tip_avg = tip_sum / NPER;
+
+    const double Wi = W - 2.0 * T;
+    const double I = (std::pow(W, 4) - std::pow(Wi, 4)) / 12.0;
+    const double eb_tip = total_force * std::pow(L, 3) / (3.0 * E * I);
+
+    EXPECT_GT(tip_min, 0.15)
+        << "Closed tube should show substantial +Z tip motion; response is too "
+           "stiff and likely over-constrained";
+    EXPECT_NEAR(tip_avg, eb_tip, 0.15 * eb_tip)
+        << "Closed thin-walled tube tip deflection should stay close to beam "
+           "theory; large underprediction indicates shell over-stiffening";
 }

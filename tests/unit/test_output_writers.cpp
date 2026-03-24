@@ -178,9 +178,26 @@ TEST(F06Writer, DisplacementTable) {
     std::ostringstream oss;
     F06Writer::write(res, m, oss);
     std::string out = oss.str();
-    EXPECT_NE(out.find("D I S P L A C E M E N T"), std::string::npos);
+    EXPECT_NE(out.find("D I S P L A C E M E N T S"), std::string::npos);
+    EXPECT_NE(out.find("(in global coordinate system at each grid)"), std::string::npos);
+    EXPECT_NE(out.find("GRID     COORD"), std::string::npos);
     // Node 5 should appear
     EXPECT_NE(out.find("5"), std::string::npos);
+}
+
+TEST(F06Writer, StaticSubcaseHeaderMatchesParserFormat) {
+    SolverResults res;
+    SubCaseResults sc = make_sc_with_disps();
+    sc.label = "CQUAD4 CANTILEVER BENDING";
+    res.subcases.push_back(sc);
+    Model m = make_empty_model_sc1();
+
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+    const std::string out = oss.str();
+
+    EXPECT_NE(out.find("OUTPUT FOR SUBCASE        1"), std::string::npos);
+    EXPECT_NE(out.find("\n CQUAD4 CANTILEVER BENDING\n"), std::string::npos);
 }
 
 TEST(F06Writer, Quad4StressTablePresent) {

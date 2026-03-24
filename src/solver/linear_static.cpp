@@ -558,13 +558,28 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
             c[i] = model.node(elem_data.nodes[i]).position;
           return c;
         }();
+        // Build local shell frame so the Jacobian is computed in the element
+        // plane.  Using raw global X,Y fails for elements whose normal is not
+        // along Z (e.g. side-wall elements in the XZ plane have constant Y,
+        // which makes the global-XY Jacobian singular → NaN stresses).
+        Vec3 v12 = node_c[1] - node_c[0];
+        Vec3 v14 = node_c[3] - node_c[0];
+        Vec3 e3_rec = v12.cross(v14).normalized();
+        Vec3 e1_rec = v12.normalized();
+        Vec3 e2_rec = e3_rec.cross(e1_rec);
+        std::array<double, 4> xl_rec{}, yl_rec{};
+        for (int n = 0; n < 4; ++n) {
+          xl_rec[n] = node_c[n].dot(e1_rec);
+          yl_rec[n] = node_c[n].dot(e2_rec);
+        }
+
         auto sd = CQuad4::shape_functions(0.0, 0.0);
         Eigen::Matrix2d J = Eigen::Matrix2d::Zero();
         for (int n = 0; n < 4; ++n) {
-          J(0, 0) += sd.dNdxi[n] * node_c[n].x;
-          J(0, 1) += sd.dNdxi[n] * node_c[n].y;
-          J(1, 0) += sd.dNdeta[n] * node_c[n].x;
-          J(1, 1) += sd.dNdeta[n] * node_c[n].y;
+          J(0, 0) += sd.dNdxi[n] * xl_rec[n];
+          J(0, 1) += sd.dNdxi[n] * yl_rec[n];
+          J(1, 0) += sd.dNdeta[n] * xl_rec[n];
+          J(1, 1) += sd.dNdeta[n] * yl_rec[n];
         }
         Eigen::Matrix2d Jinv = J.inverse();
         Eigen::MatrixXd dNdx(2, 4);
@@ -580,10 +595,13 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
           Bm(2, 2 * n) = dNdx(1, n);
           Bm(2, 2 * n + 1) = dNdx(0, n);
         }
+        // Project global displacements onto the local element axes so that
+        // u_mem contains the in-plane components regardless of orientation.
         Eigen::VectorXd u_mem(8);
         for (int n = 0; n < 4; ++n) {
-          u_mem(2 * n) = ue(6 * n);
-          u_mem(2 * n + 1) = ue(6 * n + 1);
+          Vec3 u_glob(ue(6 * n), ue(6 * n + 1), ue(6 * n + 2));
+          u_mem(2 * n)     = u_glob.dot(e1_rec);
+          u_mem(2 * n + 1) = u_glob.dot(e2_rec);
         }
         const auto &pshell_ = std::get<PShell>(model.property(elem_data.pid));
         const Mat1 &mat_ = model.material(pshell_.mid1);
@@ -614,9 +632,22 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
             c[i] = model.node(elem_data.nodes[i]).position;
           return c;
         }();
-        double x1 = node_c[0].x, y1 = node_c[0].y;
-        double x2 = node_c[1].x, y2 = node_c[1].y;
-        double x3 = node_c[2].x, y3 = node_c[2].y;
+        // Build local shell frame — same fix as CQUAD4: using global X,Y
+        // fails for elements not in the XY plane (e.g. XZ-plane elements
+        // have constant Y → A2 = 0 → NaN).
+        Vec3 v12_t = node_c[1] - node_c[0];
+        Vec3 v13_t = node_c[2] - node_c[0];
+        Vec3 e3_t  = v12_t.cross(v13_t).normalized();
+        Vec3 e1_t  = v12_t.normalized();
+        Vec3 e2_t  = e3_t.cross(e1_t);
+        std::array<double, 3> xl_t{}, yl_t{};
+        for (int n = 0; n < 3; ++n) {
+          xl_t[n] = node_c[n].dot(e1_t);
+          yl_t[n] = node_c[n].dot(e2_t);
+        }
+        double x1 = xl_t[0], y1 = yl_t[0];
+        double x2 = xl_t[1], y2 = yl_t[1];
+        double x3 = xl_t[2], y3 = yl_t[2];
         double A2 = (x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1);
         double b1 = y2 - y3, b2 = y3 - y1, b3 = y1 - y2;
         double d1 = x3 - x2, d2 = x1 - x3, d3 = x2 - x1;
@@ -634,8 +665,9 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         Dm_ << c_, c_ * nu_, 0, c_ * nu_, c_, 0, 0, 0, c_ * (1 - nu_) / 2;
         Eigen::VectorXd u_mem(6);
         for (int n = 0; n < 3; ++n) {
-          u_mem(2 * n) = ue(6 * n);
-          u_mem(2 * n + 1) = ue(6 * n + 1);
+          Vec3 u_glob(ue(6 * n), ue(6 * n + 1), ue(6 * n + 2));
+          u_mem(2 * n)     = u_glob.dot(e1_t);
+          u_mem(2 * n + 1) = u_glob.dot(e2_t);
         }
         double T_avg3 = 0.0;
         for (int n = 0; n < 3; ++n) {

@@ -72,10 +72,12 @@ private:
 };
 
 // ── CQuad4Mitc4 ──────────────────────────────────────────────────────────────
-// CQUAD4 with MITC4 (Assumed Natural Strain) transverse shear.
+// CQUAD4 with MITC4+ (Assumed Natural Strain) transverse shear.
 // Membrane and bending formulations identical to CQuad4.
-// Transverse shear uses 4 tying points at edge midpoints (Bathe & Dvorkin 1985),
-// eliminating shear locking in thin-plate applications.
+// Transverse shear uses 5 tying points: 4 edge midpoints plus the element
+// center (Ko, Lee & Bathe 2017), improving accuracy for distorted meshes.
+// Reference: Ko Y., Lee P-S., Bathe K.J. (2017) "A new MITC4+ shell element."
+//            Computers and Structures, 182:404-418.
 
 class CQuad4Mitc4 : public ElementBase {
 public:

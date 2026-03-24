@@ -1044,6 +1044,33 @@ TEST(MassMatrix, CQuad4TotalMass) {
       << "CQuad4 translational mass should equal rho*t*A";
 }
 
+TEST(MassMatrix, CQuad4DrillingInertiaIsTiny) {
+  Model m = make_shell_model_rho();
+  add_grid(m, 1, 0, 0);
+  add_grid(m, 2, 1, 0);
+  add_grid(m, 3, 1, 1);
+  add_grid(m, 4, 0, 1);
+  std::array<NodeId, 4> nodes{NodeId{1}, NodeId{2}, NodeId{3}, NodeId{4}};
+  CQuad4 elem(ElementId{1}, PropertyId{1}, nodes, m);
+
+  LocalKe Me = elem.mass_matrix();
+  double max_bending_rot = 0.0;
+  double max_drill = 0.0;
+  for (int i = 0; i < 4; ++i) {
+    max_bending_rot =
+        std::max(max_bending_rot, std::abs(Me(6 * i + 3, 6 * i + 3)));
+    max_bending_rot =
+        std::max(max_bending_rot, std::abs(Me(6 * i + 4, 6 * i + 4)));
+    max_drill = std::max(max_drill, std::abs(Me(6 * i + 5, 6 * i + 5)));
+  }
+
+  EXPECT_GT(max_bending_rot, 0.0);
+  EXPECT_LT(max_drill, 1e-3 * max_bending_rot)
+      << "Artificial drilling inertia should stay tiny relative to physical "
+         "shell rotational inertia so drill modes do not pollute the low "
+         "modal spectrum";
+}
+
 TEST(MassMatrix, CTria3Symmetry) {
   Model m = make_shell_model_rho();
   add_grid(m, 1, 0, 0);
