@@ -1,0 +1,61 @@
+$ cquad4_mixed_normals_cantilever.bdf
+$
+$ 2x2 CQUAD4 grid — mixed element normals, cantilever loading
+$
+$ Geometry (XY plane, z=0):
+$
+$   7(0,2)---8(1,2)---9(2,2)   <- free end (loads applied here)
+$   |  Elem2  |  Elem4  |
+$   4(0,1)---5(1,1)---6(2,1)
+$   |  Elem1  |  Elem3  |
+$   1(0,0)---2(1,0)---3(2,0)   <- fixed end
+$
+$ Left column (x=0..1, elements 1 and 2): node order CCW from +Z => normal = +Z
+$ Right column (x=1..2, elements 3 and 4): node order CW from +Z  => normal = -Z
+$
+$ Fixed: all 6 DOF on y=0 edge (nodes 1, 2, 3)
+$ Load:  100 N in +Z at node 7 (left outer free corner)
+$        100 N in -Z at node 9 (right outer free corner)
+$
+$ Expected: BOTH strips deflect in +Z (the force direction).
+$ Element normal direction must not affect structural response.
+$ Symmetry: u_z(7) = u_z(9), u_z(4) = u_z(6).
+$
+SOL 101
+CEND
+SUBCASE 1
+  LABEL = MIXED NORMALS CANTILEVER
+  LOAD = 1
+  SPC = 1
+  DISPLACEMENT = ALL
+  STRESS = ALL
+BEGIN BULK
+PARAM,CSVOUT,YES
+$ --- Nodes ---
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,2.0,0.0,0.0
+GRID,4,,0.0,1.0,0.0
+GRID,5,,1.0,1.0,0.0
+GRID,6,,2.0,1.0,0.0
+GRID,7,,0.0,2.0,0.0
+GRID,8,,1.0,2.0,0.0
+GRID,9,,2.0,2.0,0.0
+$ --- Material ---
+MAT1,1,1.0E6,,0.3
+$ --- Shell property ---
+PSHELL,1,1,0.1
+$ --- Left column: CCW from +Z => normal = +Z ---
+CQUAD4,1,1,1,2,5,4
+CQUAD4,2,1,4,5,8,7
+$ --- Right column: CW from +Z => normal = -Z ---
+CQUAD4,3,1,2,5,6,3
+CQUAD4,4,1,5,8,9,6
+$ --- Boundary conditions: clamp y=0 edge ---
+SPC1,1,123456,1
+SPC1,1,123456,2
+SPC1,1,123456,3
+$ --- Loads: both forces in +Z (global); normal direction must not affect response ---
+FORCE,1,7,0,100.0,0.0,0.0,1.0
+FORCE,1,9,0,100.0,0.0,0.0,1.0
+ENDDATA

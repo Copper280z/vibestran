@@ -1,0 +1,52 @@
+{
+  "description": "2x2 CQUAD4 cantilever with mixed element normals: left column CCW (+Z normal), right column CW (-Z normal). Both columns loaded 100 N in +Z (global). Element normal direction must not affect structural response — both strips must deflect identically in +Z.",
+  "checks": [
+    {
+      "comment": "Fixed edge nodes must not move",
+      "type": "node_displacement", "subcase": 1, "node_id": 1, "dof": "T3",
+      "expected": 0.0, "abs_tol": 1e-10
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 2, "dof": "T3",
+      "expected": 0.0, "abs_tol": 1e-10
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 3, "dof": "T3",
+      "expected": 0.0, "abs_tol": 1e-10
+    },
+    {
+      "comment": "Midspan left (node 4) deflects in +Z",
+      "type": "node_displacement", "subcase": 1, "node_id": 4, "dof": "T3",
+      "expected": 8.052253e-01, "rel_tol": 1e-4
+    },
+    {
+      "comment": "Midspan right (node 6) must equal node 4 — inverted normal must not affect response",
+      "type": "node_displacement", "subcase": 1, "node_id": 6, "dof": "T3",
+      "expected": 8.052253e-01, "rel_tol": 1e-4
+    },
+    {
+      "comment": "Free tip left (node 7) deflects in +Z",
+      "type": "node_displacement", "subcase": 1, "node_id": 7, "dof": "T3",
+      "expected": 2.798270e+00, "rel_tol": 1e-4
+    },
+    {
+      "comment": "Free tip right (node 9) must equal node 7 — key mixed-normals symmetry check",
+      "type": "node_displacement", "subcase": 1, "node_id": 9, "dof": "T3",
+      "expected": 2.798270e+00, "rel_tol": 1e-4
+    },
+    {
+      "comment": "Centre free node (node 8) deflects in +Z",
+      "type": "node_displacement", "subcase": 1, "node_id": 8, "dof": "T3",
+      "expected": 2.707892e+00, "rel_tol": 1e-4
+    },
+    {
+      "comment": "No in-plane displacement: membrane and bending are decoupled for a flat plate",
+      "type": "node_displacement", "subcase": 1, "node_id": 7, "dof": "T1",
+      "expected": 0.0, "abs_tol": 1e-8
+    },
+    {
+      "type": "node_displacement", "subcase": 1, "node_id": 9, "dof": "T1",
+      "expected": 0.0, "abs_tol": 1e-8
+    }
+  ]
+}
