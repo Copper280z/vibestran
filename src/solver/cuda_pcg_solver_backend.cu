@@ -254,6 +254,18 @@ __global__ static void axpby_kernel(
     if (i < n) y[i] = alpha * x[i] + beta * y[i];
 }
 
+template<typename T>
+__global__ static void subtract_diag_product_kernel(
+    T* __restrict__ y,
+    const T* __restrict__ diag,
+    const T* __restrict__ x,
+    int n)
+{
+    int i = static_cast<int>(blockIdx.x) * blockDim.x +
+            static_cast<int>(threadIdx.x);
+    if (i < n) y[i] -= diag[i] * x[i];
+}
+
 static constexpr int kBlock = 256;
 
 template<typename T>
@@ -264,6 +276,73 @@ static void launch_jacobi(const T* r, const T* d_inv, T* z, int n) {
 template<typename T>
 static void launch_axpby(const T* x, T a, T b, T* y, int n) {
     axpby_kernel<T><<<(n + kBlock - 1) / kBlock, kBlock>>>(x, a, b, y, n);
+}
+
+template<typename T>
+static void launch_subtract_diag_product(T* y, const T* diag, const T* x, int n) {
+    subtract_diag_product_kernel<T><<<(n + kBlock - 1) / kBlock, kBlock>>>(
+        y, diag, x, n);
+}
+
+template<typename T>
+struct HostCsr {
+    std::vector<int> row_ptr;
+    std::vector<int> col_ind;
+    std::vector<T>   values;
+    int nnz = 0;
+};
+
+template<typename T>
+static HostCsr<T> expand_symmetric_host_csr(
+    int n,
+    const std::vector<int>& row_ptr,
+    const std::vector<int>& col_ind,
+    const std::vector<T>& values)
+{
+    HostCsr<T> full;
+    full.row_ptr.assign(static_cast<std::size_t>(n + 1), 0);
+
+    int offdiag = 0;
+    for (int row = 0; row < n; ++row) {
+        for (int idx = row_ptr[static_cast<std::size_t>(row)];
+             idx < row_ptr[static_cast<std::size_t>(row + 1)]; ++idx) {
+            ++full.row_ptr[static_cast<std::size_t>(row + 1)];
+            if (col_ind[static_cast<std::size_t>(idx)] != row) {
+                ++full.row_ptr[static_cast<std::size_t>(
+                    col_ind[static_cast<std::size_t>(idx)] + 1)];
+                ++offdiag;
+            }
+        }
+    }
+
+    for (int i = 0; i < n; ++i)
+        full.row_ptr[static_cast<std::size_t>(i + 1)] +=
+            full.row_ptr[static_cast<std::size_t>(i)];
+
+    full.nnz = static_cast<int>(values.size()) + offdiag;
+    full.col_ind.resize(static_cast<std::size_t>(full.nnz));
+    full.values.resize(static_cast<std::size_t>(full.nnz));
+
+    std::vector<int> cursor(full.row_ptr.begin(), full.row_ptr.begin() + n);
+    for (int row = 0; row < n; ++row) {
+        for (int idx = row_ptr[static_cast<std::size_t>(row)];
+             idx < row_ptr[static_cast<std::size_t>(row + 1)]; ++idx) {
+            const int col = col_ind[static_cast<std::size_t>(idx)];
+            const T value = values[static_cast<std::size_t>(idx)];
+
+            int out = cursor[static_cast<std::size_t>(row)]++;
+            full.col_ind[static_cast<std::size_t>(out)] = col;
+            full.values[static_cast<std::size_t>(out)] = value;
+
+            if (col != row) {
+                out = cursor[static_cast<std::size_t>(col)]++;
+                full.col_ind[static_cast<std::size_t>(out)] = row;
+                full.values[static_cast<std::size_t>(out)] = value;
+            }
+        }
+    }
+
+    return full;
 }
 
 // ── Preconditioner type ───────────────────────────────────────────────────────
@@ -601,6 +680,8 @@ static std::vector<double> solve_pcg(
     const std::vector<int>& h_col_ind,
     const std::vector<T>& h_F,
     const std::vector<T>& h_diag_inv,
+    const std::vector<T>& h_diag,
+    bool lower_only,
     double tolerance,
     int max_iters,
     int& out_iters,
@@ -658,10 +739,15 @@ static std::vector<double> solve_pcg(
     d_u.zero(n);
 
     PCGDeviceBuffer<T> d_diag_inv(n);
+    PCGDeviceBuffer<T> d_diag(n);
     d_diag_inv.upload(h_diag_inv.data(), n);
+    d_diag.upload(h_diag.data(), n);
 
     // ── Preconditioner setup (IC0 → ILU0 → Jacobi) ───────────────────────────
     PrecondKind precond_kind = PrecondKind::Jacobi;
+    std::unique_ptr<PCGDeviceBuffer<T>> d_ilu_values;
+    std::unique_ptr<PCGDeviceBuffer<int>> d_ilu_row_ptr;
+    std::unique_ptr<PCGDeviceBuffer<int>> d_ilu_col_ind;
     std::unique_ptr<TriangPrecond<T>> tp;
 
     {
@@ -673,9 +759,27 @@ static std::vector<double> solve_pcg(
             tp = std::move(try_tp);
         } else {
             auto try_ilu = std::make_unique<TriangPrecond<T>>();
-            if (setup_ilu0<T>(cusparse, n, nnz,
-                              d_row_ptr.ptr, d_col_ind.ptr, d_values.ptr,
-                              d_r.ptr, d_z.ptr, *try_ilu)) {
+            bool ilu_ok = false;
+            if (lower_only) {
+                HostCsr<T> full_host =
+                    expand_symmetric_host_csr(n, h_row_ptr, h_col_ind, h_values);
+                d_ilu_values = std::make_unique<PCGDeviceBuffer<T>>(full_host.nnz);
+                d_ilu_row_ptr = std::make_unique<PCGDeviceBuffer<int>>(n + 1);
+                d_ilu_col_ind =
+                    std::make_unique<PCGDeviceBuffer<int>>(full_host.nnz);
+                d_ilu_values->upload(full_host.values.data(), full_host.nnz);
+                d_ilu_row_ptr->upload(full_host.row_ptr.data(), n + 1);
+                d_ilu_col_ind->upload(full_host.col_ind.data(), full_host.nnz);
+                ilu_ok = setup_ilu0<T>(cusparse, n, full_host.nnz,
+                                       d_ilu_row_ptr->ptr, d_ilu_col_ind->ptr,
+                                       d_ilu_values->ptr, d_r.ptr, d_z.ptr,
+                                       *try_ilu);
+            } else {
+                ilu_ok = setup_ilu0<T>(cusparse, n, nnz,
+                                       d_row_ptr.ptr, d_col_ind.ptr, d_values.ptr,
+                                       d_r.ptr, d_z.ptr, *try_ilu);
+            }
+            if (ilu_ok) {
                 precond_kind = PrecondKind::ILU0;
                 tp = std::move(try_ilu);
             } else {
@@ -712,14 +816,44 @@ static std::vector<double> solve_pcg(
 
     const T one{1};
     const T zero{0};
+    const T one_accum{1};
 
     std::size_t spmv_sz = 0;
     cusparseSpMV_bufferSize(cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE,
         &one, mat_K, vec_p, &zero, vec_Ap,
         Tr::cuda_dtype, CUSPARSE_SPMV_ALG_DEFAULT, &spmv_sz);
+    if (lower_only) {
+        std::size_t spmv_trans_sz = 0;
+        cusparseSpMV_bufferSize(cusparse, CUSPARSE_OPERATION_TRANSPOSE,
+            &one, mat_K, vec_p, &one_accum, vec_Ap,
+            Tr::cuda_dtype, CUSPARSE_SPMV_ALG_DEFAULT, &spmv_trans_sz);
+        if (spmv_trans_sz > spmv_sz)
+            spmv_sz = spmv_trans_sz;
+    }
     vibestran::log_debug("[cuda-pcg] SpMV scratch=" + std::to_string(spmv_sz / kMiB) + " MiB");
     log_mem("after all PCG allocs");
     PCGDeviceBuffer<char> d_spmv_buf(spmv_sz > 0 ? spmv_sz : 1);
+
+    auto apply_matrix = [&]() {
+        cusparseStatus_t cs = cusparseSpMV(
+            cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE,
+            &one, mat_K, vec_p, &zero, vec_Ap,
+            Tr::cuda_dtype, CUSPARSE_SPMV_ALG_DEFAULT, d_spmv_buf.ptr);
+        if (cs != CUSPARSE_STATUS_SUCCESS)
+            throw SolverError("CUDA PCG: cusparseSpMV failed");
+
+        if (!lower_only)
+            return;
+
+        cs = cusparseSpMV(
+            cusparse, CUSPARSE_OPERATION_TRANSPOSE,
+            &one, mat_K, vec_p, &one_accum, vec_Ap,
+            Tr::cuda_dtype, CUSPARSE_SPMV_ALG_DEFAULT, d_spmv_buf.ptr);
+        if (cs != CUSPARSE_STATUS_SUCCESS)
+            throw SolverError("CUDA PCG: cusparseSpMV transpose failed");
+
+        launch_subtract_diag_product<T>(d_Ap.ptr, d_diag.ptr, d_p.ptr, n);
+    };
 
     // ── Apply-preconditioner helper ───────────────────────────────────────────
     auto apply_precond = [&]() {
@@ -769,13 +903,12 @@ static std::vector<double> solve_pcg(
         cusparseDnVecSetValues(vec_p,  d_p.ptr);
         cusparseDnVecSetValues(vec_Ap, d_Ap.ptr);
 
-        cusparseStatus_t cs = cusparseSpMV(
-            cusparse, CUSPARSE_OPERATION_NON_TRANSPOSE,
-            &one, mat_K, vec_p, &zero, vec_Ap,
-            Tr::cuda_dtype, CUSPARSE_SPMV_ALG_DEFAULT, d_spmv_buf.ptr);
-        if (cs != CUSPARSE_STATUS_SUCCESS)
-            throw SolverError("CUDA PCG: cusparseSpMV failed at iteration " +
+        try {
+            apply_matrix();
+        } catch (const SolverError& e) {
+            throw SolverError(std::string(e.what()) + " at iteration " +
                               std::to_string(iter));
+        }
 
         T pAp_T{0};
         Tr::dot(cublas, n, d_p.ptr, d_Ap.ptr, &pAp_T);
@@ -939,6 +1072,7 @@ CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
                              const std::vector<double>& F) {
     const int n   = K.n;
     const int nnz = K.nnz;
+    const bool lower_only = K.stores_lower_triangle_only();
 
     if (n == 0)
         throw SolverError("CUDA PCG: stiffness matrix is empty -- no free DOFs");
@@ -949,7 +1083,9 @@ CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
 
     // Build Jacobi diagonal (host, for fallback preconditioner and zero detection).
     std::vector<double> diag_inv_d(n, 1.0);
+    std::vector<double> diag_d(n, 0.0);
     for (int i = 0; i < n; ++i) {
+        bool found_diag = false;
         for (int j = K.row_ptr[i]; j < K.row_ptr[i + 1]; ++j) {
             if (K.col_ind[j] == i) {
                 double kii = K.values[j];
@@ -957,28 +1093,37 @@ CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
                     throw SolverError(
                         "CUDA PCG: zero diagonal at row " + std::to_string(i) +
                         " -- matrix is singular. Check boundary conditions.");
+                diag_d[static_cast<std::size_t>(i)] = kii;
                 diag_inv_d[i] = 1.0 / kii;
+                found_diag = true;
                 break;
             }
         }
+        if (!found_diag)
+            throw SolverError(
+                "CUDA PCG: missing diagonal at row " + std::to_string(i) +
+                " -- matrix is singular. Check boundary conditions.");
     }
 
     if (ctx_->use_single_precision) {
-        std::vector<float> vals_f(nnz), F_f(n), diag_inv_f(n);
+        std::vector<float> vals_f(nnz), F_f(n), diag_inv_f(n), diag_f(n);
         for (int i = 0; i < nnz; ++i) vals_f[i]     = static_cast<float>(K.values[i]);
         for (int i = 0; i < n;   ++i) F_f[i]         = static_cast<float>(F[i]);
         for (int i = 0; i < n;   ++i) diag_inv_f[i]  = static_cast<float>(diag_inv_d[i]);
+        for (int i = 0; i < n;   ++i) diag_f[i]      = static_cast<float>(diag_d[i]);
 
         return solve_pcg<float>(
             ctx_->cublas, ctx_->cusparse, ctx_->device_name,
-            n, nnz, vals_f, K.row_ptr, K.col_ind, F_f, diag_inv_f,
+            n, nnz, vals_f, K.row_ptr, K.col_ind, F_f, diag_inv_f, diag_f,
+            lower_only,
             ctx_->tolerance, ctx_->max_iters,
             ctx_->last_iters, ctx_->last_rel_res);
     }
 
     return solve_pcg<double>(
         ctx_->cublas, ctx_->cusparse, ctx_->device_name,
-        n, nnz, K.values, K.row_ptr, K.col_ind, F, diag_inv_d,
+        n, nnz, K.values, K.row_ptr, K.col_ind, F, diag_inv_d, diag_d,
+        lower_only,
         ctx_->tolerance, ctx_->max_iters,
         ctx_->last_iters, ctx_->last_rel_res);
 }

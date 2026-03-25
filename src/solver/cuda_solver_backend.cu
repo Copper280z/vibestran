@@ -209,15 +209,13 @@ static double relative_residual(const SparseMatrixBuilder::CsrData &K,
                                 const std::vector<double> &u,
                                 const std::vector<double> &F) {
   const int n = K.n;
+  const std::vector<double> Ku = K.multiply(u);
   double res_sq = 0.0;
   double rhs_sq = 0.0;
   for (int row = 0; row < n; ++row) {
-    double row_val = 0.0;
-    for (int idx = K.row_ptr[row]; idx < K.row_ptr[row + 1]; ++idx)
-      row_val += K.values[idx] * u[K.col_ind[idx]];
-    double diff = row_val - F[row];
+    double diff = Ku[static_cast<size_t>(row)] - F[static_cast<size_t>(row)];
     res_sq += diff * diff;
-    rhs_sq += F[row] * F[row];
+    rhs_sq += F[static_cast<size_t>(row)] * F[static_cast<size_t>(row)];
   }
   if (rhs_sq == 0.0)
     return (res_sq == 0.0) ? 0.0 : 1.0;
@@ -244,6 +242,7 @@ static bool solve_cudss(cudssHandle_t handle, const std::string &device_name,
                         DeviceBuffer<int> &d_row_ptr,
                         DeviceBuffer<int> &d_col_ind, DeviceBuffer<Scalar> &d_F,
                         DeviceBuffer<Scalar> &d_u, cudssMatrixType_t mtype,
+                        cudssMatrixViewType_t mview,
                         cudaDataType_t scalar_type, const std::string &label) {
   // Reset solution buffer.
   cudaMemset(d_u.ptr, 0, (std::size_t)n * sizeof(Scalar));
@@ -258,12 +257,8 @@ static bool solve_cudss(cudssHandle_t handle, const std::string &device_name,
 
   // Build the sparse matrix descriptor.
   // Pass rowEnd=NULL: cuDSS treats rowStart as a standard n+1 CSR offsets
-  // array. For SPD/symmetric types, use MVIEW_UPPER — cuDSS reads only the
-  // upper triangle and ignores any lower-triangle entries present in the full
-  // matrix. For GENERAL, use MVIEW_FULL.
-  cudssMatrixViewType_t mview =
-      (mtype == CUDSS_MTYPE_GENERAL) ? CUDSS_MVIEW_FULL : CUDSS_MVIEW_UPPER;
-
+  // array. The caller selects the matrix view so SPD solves can consume the
+  // compact lower-triangular symmetric storage directly.
   CuDSSMatrix A_mat;
   cudssStatus_t st = cudssMatrixCreateCsr(&A_mat.mat,
                                           /*nrows=*/static_cast<int64_t>(n),
@@ -410,19 +405,32 @@ static bool solve_cudss(cudssHandle_t handle, const std::string &device_name,
 // ── solve_single_precision
 // ────────────────────────────────────────────────────
 
-static std::vector<double>
+struct CudaSolveResult {
+  std::vector<double> solution;
+  bool used_cholesky = true;
+};
+
+static CudaSolveResult
 solve_single_precision(cudssHandle_t handle, const std::string &device_name,
                        const SparseMatrixBuilder::CsrData &K,
                        const std::vector<double> &F) {
-  const int n = K.n;
-  const int nnz = K.nnz;
+  const SparseMatrixBuilder::CsrData *K_spd = &K;
+  SparseMatrixBuilder::CsrData lower_csr;
+  if (!K.stores_lower_triangle_only()) {
+    lower_csr = K.lower_triangle();
+    K_spd = &lower_csr;
+  }
+
+  const int n = K_spd->n;
+  const int nnz = K_spd->nnz;
 
   std::vector<float> values_f(nnz);
   std::vector<float> F_f(n);
   for (int i = 0; i < nnz; ++i)
-    values_f[i] = static_cast<float>(K.values[i]);
+    values_f[static_cast<size_t>(i)] =
+        static_cast<float>(K_spd->values[static_cast<size_t>(i)]);
   for (int i = 0; i < n; ++i)
-    F_f[i] = static_cast<float>(F[i]);
+    F_f[static_cast<size_t>(i)] = static_cast<float>(F[static_cast<size_t>(i)]);
 
   std::size_t alloc_bytes = (std::size_t)nnz * sizeof(float)     // d_values
                             + (std::size_t)(n + 1) * sizeof(int) // d_row_ptr
@@ -444,35 +452,60 @@ solve_single_precision(cudssHandle_t handle, const std::string &device_name,
   DeviceBuffer<float> d_u(n);
 
   d_values.upload(values_f.data(), nnz);
-  d_row_ptr.upload(K.row_ptr.data(), n + 1);
-  d_col_ind.upload(K.col_ind.data(), nnz);
+  d_row_ptr.upload(K_spd->row_ptr.data(), n + 1);
+  d_col_ind.upload(K_spd->col_ind.data(), nnz);
   d_F.upload(F_f.data(), n);
 
   bool ok = solve_cudss<float>(handle, device_name, n, nnz, d_values, d_row_ptr,
-                               d_col_ind, d_F, d_u, CUDSS_MTYPE_SPD, CUDA_R_32F,
-                               "SPD/float");
+                               d_col_ind, d_F, d_u, CUDSS_MTYPE_SPD,
+                               CUDSS_MVIEW_LOWER, CUDA_R_32F, "SPD/float");
+  bool used_cholesky = ok;
   if (!ok) {
     vibestran::log_debug("[cuda] single-precision SPD failed -- retrying with LU");
-    ok = solve_cudss<float>(handle, device_name, n, nnz, d_values, d_row_ptr,
-                            d_col_ind, d_F, d_u, CUDSS_MTYPE_GENERAL,
+    const SparseMatrixBuilder::CsrData *K_lu = &K;
+    SparseMatrixBuilder::CsrData expanded_csr;
+    if (K.stores_lower_triangle_only()) {
+      expanded_csr = K.expanded_symmetric();
+      K_lu = &expanded_csr;
+    }
+
+    std::vector<float> values_lu(static_cast<size_t>(K_lu->nnz));
+    for (int i = 0; i < K_lu->nnz; ++i)
+      values_lu[static_cast<size_t>(i)] =
+          static_cast<float>(K_lu->values[static_cast<size_t>(i)]);
+
+    DeviceBuffer<float> d_values_lu(K_lu->nnz);
+    DeviceBuffer<int> d_row_ptr_lu(K_lu->n + 1);
+    DeviceBuffer<int> d_col_ind_lu(K_lu->nnz);
+    d_values_lu.upload(values_lu.data(), K_lu->nnz);
+    d_row_ptr_lu.upload(K_lu->row_ptr.data(), K_lu->n + 1);
+    d_col_ind_lu.upload(K_lu->col_ind.data(), K_lu->nnz);
+
+    ok = solve_cudss<float>(handle, device_name, K_lu->n, K_lu->nnz,
+                            d_values_lu, d_row_ptr_lu, d_col_ind_lu, d_F, d_u,
+                            CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL,
                             CUDA_R_32F, "LU/float");
     if (!ok)
       throw SolverError(
           "CUDA solver: single-precision LU factorisation failed -- "
           "stiffness matrix may be singular. Check boundary conditions (SPCs)");
+    used_cholesky = false;
   }
 
   std::vector<float> u_f(n);
   d_u.download(u_f.data(), n);
 
-  std::vector<double> u(n);
+  std::vector<double> u(static_cast<size_t>(n));
   for (int i = 0; i < n; ++i)
-    u[i] = static_cast<double>(u_f[i]);
+    u[static_cast<size_t>(i)] = static_cast<double>(u_f[static_cast<size_t>(i)]);
 
   vibestran::log_info("[cuda] single-precision solve: n=" + std::to_string(n) +
-                     ", nnz=" + std::to_string(nnz) +
+                     ", nnz=" + std::to_string(K_spd->nnz) +
                      ", device='" + device_name + "'");
-  return u;
+  CudaSolveResult result;
+  result.solution = std::move(u);
+  result.used_cholesky = used_cholesky;
+  return result;
 }
 
 // ── solve
@@ -482,7 +515,6 @@ std::vector<double>
 CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
                          const std::vector<double> &F) {
   const int n = K.n;
-  const int nnz = K.nnz;
 
   if (n == 0)
     throw SolverError("CUDA solver: stiffness matrix is empty -- no free DOFs");
@@ -491,9 +523,20 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
                       std::to_string(F.size()) + " != matrix size " +
                       std::to_string(n));
 
+  const SparseMatrixBuilder::CsrData *K_spd = &K;
+  SparseMatrixBuilder::CsrData lower_csr;
+  if (!K.stores_lower_triangle_only()) {
+    lower_csr = K.lower_triangle();
+    K_spd = &lower_csr;
+  }
+
+  const int nnz = K_spd->nnz;
+
   if (ctx_->use_single_precision) {
-    last_cholesky_ = true;
-    return solve_single_precision(ctx_->cudss, ctx_->device_name, K, F);
+    CudaSolveResult result =
+        solve_single_precision(ctx_->cudss, ctx_->device_name, K, F);
+    last_cholesky_ = result.used_cholesky;
+    return result.solution;
   }
 
   // ── Allocate and upload ───────────────────────────────────────────────────
@@ -518,9 +561,9 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
   DeviceBuffer<double> d_F(n);
   DeviceBuffer<double> d_u(n);
 
-  d_values.upload(K.values.data(), nnz);
-  d_row_ptr.upload(K.row_ptr.data(), n + 1);
-  d_col_ind.upload(K.col_ind.data(), nnz);
+  d_values.upload(K_spd->values.data(), nnz);
+  d_row_ptr.upload(K_spd->row_ptr.data(), n + 1);
+  d_col_ind.upload(K_spd->col_ind.data(), nnz);
   d_F.upload(F.data(), n);
 
   // ── Path 1: Cholesky (SPD) ────────────────────────────────────────────────
@@ -528,7 +571,8 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
 
   bool chol_ok = solve_cudss<double>(ctx_->cudss, ctx_->device_name, n, nnz,
                                      d_values, d_row_ptr, d_col_ind, d_F, d_u,
-                                     CUDSS_MTYPE_SPD, CUDA_R_64F, "SPD");
+                                     CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER,
+                                     CUDA_R_64F, "SPD");
   if (chol_ok) {
     d_u.download(u.data(), n);
     double rel_res = relative_residual(K, u, F);
@@ -548,9 +592,24 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
   }
 
   // ── Path 2: LU (GENERAL) fallback ────────────────────────────────────────
-  bool lu_ok = solve_cudss<double>(ctx_->cudss, ctx_->device_name, n, nnz,
-                                   d_values, d_row_ptr, d_col_ind, d_F, d_u,
-                                   CUDSS_MTYPE_GENERAL, CUDA_R_64F, "LU");
+  const SparseMatrixBuilder::CsrData *K_lu = &K;
+  SparseMatrixBuilder::CsrData expanded_csr;
+  if (K.stores_lower_triangle_only()) {
+    expanded_csr = K.expanded_symmetric();
+    K_lu = &expanded_csr;
+  }
+
+  DeviceBuffer<double> d_values_lu(K_lu->nnz);
+  DeviceBuffer<int> d_row_ptr_lu(K_lu->n + 1);
+  DeviceBuffer<int> d_col_ind_lu(K_lu->nnz);
+  d_values_lu.upload(K_lu->values.data(), K_lu->nnz);
+  d_row_ptr_lu.upload(K_lu->row_ptr.data(), K_lu->n + 1);
+  d_col_ind_lu.upload(K_lu->col_ind.data(), K_lu->nnz);
+
+  bool lu_ok = solve_cudss<double>(ctx_->cudss, ctx_->device_name, K_lu->n,
+                                   K_lu->nnz, d_values_lu, d_row_ptr_lu,
+                                   d_col_ind_lu, d_F, d_u, CUDSS_MTYPE_GENERAL,
+                                   CUDSS_MVIEW_FULL, CUDA_R_64F, "LU");
   if (!lu_ok)
     throw SolverError(
         "CUDA solver: LU factorisation failed -- stiffness matrix may be "
@@ -567,8 +626,8 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
         "Check boundary conditions (SPCs)");
 
   last_cholesky_ = false;
-  vibestran::log_info("[cuda] LU solve: n=" + std::to_string(n) +
-                     ", nnz=" + std::to_string(nnz) +
+  vibestran::log_info("[cuda] LU solve: n=" + std::to_string(K_lu->n) +
+                     ", nnz=" + std::to_string(K_lu->nnz) +
                      ", device='" + ctx_->device_name + "'");
   return u;
 }

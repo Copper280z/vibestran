@@ -79,6 +79,11 @@ public:
     /// Expand lower-triangular symmetric storage to a full symmetric CSR.
     /// Returns a copy unchanged when this matrix is already full.
     [[nodiscard]] CsrData expanded_symmetric() const;
+
+    /// Extract the lower triangle into symmetric-lower CSR storage.
+    /// Returns a copy unchanged when this matrix already stores only the lower
+    /// triangle.
+    [[nodiscard]] CsrData lower_triangle() const;
   };
 
   [[nodiscard]] CsrData build_csr();

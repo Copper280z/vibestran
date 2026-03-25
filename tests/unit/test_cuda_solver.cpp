@@ -43,12 +43,13 @@ protected:
 // ── CSR builder helpers ───────────────────────────────────────────────────────
 
 /// Build CSR from a dense symmetric matrix.
-static SparseMatrixBuilder::CsrData dense_to_csr(const std::vector<std::vector<double>>& A) {
+static SparseMatrixBuilder::CsrData dense_to_csr(
+    const std::vector<std::vector<double>>& A, bool lower_only = false) {
     int n = static_cast<int>(A.size());
     SparseMatrixBuilder builder(n);
     for (int i = 0; i < n; ++i)
         for (int j = 0; j < n; ++j)
-            if (A[i][j] != 0.0)
+            if (A[i][j] != 0.0 && (!lower_only || j <= i))
                 builder.add(i, j, A[i][j]);
     return builder.build_csr();
 }
@@ -99,6 +100,31 @@ TEST_F(CudaTest, TridiagonalSystemAgreesWithEigen) {
 
     EXPECT_TRUE(backend_->last_solve_used_cholesky())
         << "Tridiagonal SPD matrix should use Cholesky path";
+}
+
+TEST_F(CudaTest, LowerTriangularTridiagonalAgreesWithEigen) {
+    const int n = 6;
+    std::vector<std::vector<double>> Kd(n, std::vector<double>(n, 0.0));
+    for (int i = 0; i < n; ++i) {
+        Kd[i][i] = 3.0;
+        if (i > 0) {
+            Kd[i][i - 1] = -1.0;
+            Kd[i - 1][i] = -1.0;
+        }
+    }
+    std::vector<double> F(n, 1.0);
+    auto csr = dense_to_csr(Kd, true);
+    ASSERT_TRUE(csr.stores_lower_triangle_only());
+
+    auto u_cuda = backend_->solve(csr, F);
+
+    EigenSolverBackend eigen;
+    auto u_eigen = eigen.solve(csr, F);
+
+    ASSERT_EQ(static_cast<int>(u_cuda.size()), n);
+    for (int i = 0; i < n; ++i)
+        EXPECT_NEAR(u_cuda[i], u_eigen[i], 1e-10)
+            << "Lower-triangular CUDA solve differs at component " << i;
 }
 
 // ── Test 3: larger tridiagonal n=200 — double precision accuracy ──────────────
@@ -271,14 +297,15 @@ protected:
 
 /// Build an Eigen::SparseMatrix<double> from a dense symmetric matrix.
 static Eigen::SparseMatrix<double> dense_to_sparse(
-    const std::vector<std::vector<double>>& A)
+    const std::vector<std::vector<double>>& A, bool lower_only = false)
 {
     int n = static_cast<int>(A.size());
     using T = Eigen::Triplet<double>;
     std::vector<T> trips;
     for (int i = 0; i < n; ++i)
         for (int j = 0; j < n; ++j)
-            if (A[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] != 0.0)
+            if (A[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] != 0.0 &&
+                (!lower_only || j <= i))
                 trips.emplace_back(i, j,
                     A[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)]);
     Eigen::SparseMatrix<double> mat(n, n);
@@ -328,6 +355,36 @@ TEST_F(CudaEigTest, DiagonalGEVPScaledMass) {
     EXPECT_NEAR(pairs[0].eigenvalue, 1.0, 1e-6);
     EXPECT_NEAR(pairs[1].eigenvalue, 4.0, 1e-6);
     EXPECT_NEAR(pairs[2].eigenvalue, 9.0, 1e-6);
+}
+
+TEST_F(CudaEigTest, LowerTriangularMatricesMatchSpectra) {
+    const int n = 12;
+    std::vector<std::vector<double>> Kd(static_cast<std::size_t>(n),
+                                        std::vector<double>(static_cast<std::size_t>(n), 0.0));
+    std::vector<std::vector<double>> Md(static_cast<std::size_t>(n),
+                                        std::vector<double>(static_cast<std::size_t>(n), 0.0));
+    for (int i = 0; i < n; ++i) {
+        Kd[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] = 2.0;
+        Md[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] = 1.0 + 0.05 * i;
+        if (i > 0) {
+            Kd[static_cast<std::size_t>(i)][static_cast<std::size_t>(i - 1)] = -1.0;
+            Kd[static_cast<std::size_t>(i - 1)][static_cast<std::size_t>(i)] = -1.0;
+        }
+    }
+
+    auto K = dense_to_sparse(Kd, true);
+    auto M = dense_to_sparse(Md, true);
+
+    auto cuda_pairs = backend_->solve(K, M, 4, -1.0);
+    auto spectra_pairs = SpectraEigensolverBackend{}.solve(K, M, 4, -1.0);
+
+    ASSERT_GE(static_cast<int>(cuda_pairs.size()), 4);
+    ASSERT_GE(static_cast<int>(spectra_pairs.size()), 4);
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_NEAR(cuda_pairs[static_cast<std::size_t>(i)].eigenvalue,
+                    spectra_pairs[static_cast<std::size_t>(i)].eigenvalue, 1e-5)
+            << "Lower-triangular eigenvalue mismatch at mode " << i + 1;
+    }
 }
 
 // ── Test 3: tridiagonal GEVP against SpectraEigensolverBackend ────────────────

@@ -52,22 +52,18 @@ public:
                double tolerance = 1e-8,
                int max_iters = 0) noexcept;
 
-    /// Solve K*u = F using PCG with Jacobi preconditioning on the GPU.
+    /// Solve K*u = F using PCG with IC0 → ILU0 → Jacobi preconditioning.
     /// Throws SolverError if the system does not converge or on GPU errors.
     [[nodiscard]] std::vector<double> solve(
         const SparseMatrixBuilder::CsrData& K,
         const std::vector<double>& F) override;
 
     [[nodiscard]] std::string_view name() const noexcept override;
-    // cppcheck-suppress unusedFunction -- queried via SolverBackend in linear_static.cpp
-    [[nodiscard]] bool requires_full_symmetric_csr() const noexcept override {
-        return true;
-    }
 
     // ── Diagnostics (valid after each solve()) ─────────────────────────────
 
     /// Number of PCG iterations used in the most recent solve().
-    [[nodiscard]] int last_iteration_count() const noexcept;
+    [[nodiscard]] int last_iteration_count() const noexcept override;
 
     /// Relative residual achieved in the most recent solve().
     [[nodiscard]] double last_relative_residual() const noexcept;

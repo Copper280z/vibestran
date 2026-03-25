@@ -27,11 +27,17 @@ using namespace vibestran;
 
 // ── Shared helper ─────────────────────────────────────────────────────────────
 
-static SparseMatrixBuilder::CsrData make_tridiagonal(int n, double diag, double off) {
+static SparseMatrixBuilder::CsrData make_tridiagonal(int n, double diag,
+                                                     double off,
+                                                     bool lower_only = false) {
     SparseMatrixBuilder b(n);
     for (int i = 0; i < n; ++i) {
         b.add(i, i, diag);
-        if (i > 0)     { b.add(i, i - 1, off); b.add(i - 1, i, off); }
+        if (i > 0) {
+            b.add(i, i - 1, off);
+            if (!lower_only)
+                b.add(i - 1, i, off);
+        }
     }
     return b.build_csr();
 }
@@ -265,6 +271,24 @@ TEST_F(CudaPCGTest, TridiagonalAgreesWithEigen) {
     for (int i = 0; i < n; ++i)
         EXPECT_NEAR(u_cuda[i], u_eigen[i], 1e-6)
             << "CUDA PCG component " << i << " disagrees with Eigen";
+}
+
+TEST_F(CudaPCGTest, LowerTriangularTridiagonalAgreesWithEigen) {
+    const int n = 8;
+    auto csr = make_tridiagonal(n, 3.0, -1.0, true);
+    ASSERT_TRUE(csr.stores_lower_triangle_only());
+    std::vector<double> F(n, 1.0);
+
+    auto u_cuda = backend_->solve(csr, F);
+
+    EigenSolverBackend eigen;
+    auto u_eigen = eigen.solve(csr, F);
+
+    ASSERT_EQ(static_cast<int>(u_cuda.size()), n);
+    for (int i = 0; i < n; ++i)
+        EXPECT_NEAR(u_cuda[i], u_eigen[i], 1e-6)
+            << "CUDA PCG lower-triangular component " << i
+            << " disagrees with Eigen";
 }
 
 // ── Test 11: larger n=200 tridiagonal — residual below tolerance ──────────────

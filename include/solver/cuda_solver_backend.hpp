@@ -42,21 +42,17 @@ public:
     [[nodiscard]] static std::optional<CudaSolverBackend>
     try_create(bool use_single_precision = false) noexcept;
 
-    /// Solve K*u = F using cuSOLVER sparse Cholesky (with QR fallback).
+    /// Solve K*u = F using cuDSS sparse Cholesky (with LU fallback).
     /// Throws SolverError on failure.
     [[nodiscard]] std::vector<double> solve(
         const SparseMatrixBuilder::CsrData& K,
         const std::vector<double>& F) override;
 
     [[nodiscard]] std::string_view name() const noexcept override;
-    // cppcheck-suppress unusedFunction -- queried via SolverBackend in linear_static.cpp
-    [[nodiscard]] bool requires_full_symmetric_csr() const noexcept override {
-        return true;
-    }
 
     // ── Diagnostics (valid after each solve()) ─────────────────────────────
 
-    /// Returns true if the most recent solve used sparse Cholesky (false = QR fallback).
+    /// Returns true if the most recent solve used sparse Cholesky (false = LU fallback).
     [[nodiscard]] bool last_solve_used_cholesky() const noexcept;
 
     /// Returns true if this backend was created with single-precision mode enabled.

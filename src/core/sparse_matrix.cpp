@@ -234,4 +234,43 @@ SparseMatrixBuilder::CsrData SparseMatrixBuilder::CsrData::expanded_symmetric() 
   return full;
 }
 
+SparseMatrixBuilder::CsrData SparseMatrixBuilder::CsrData::lower_triangle() const {
+  if (stores_lower_triangle_only())
+    return *this;
+
+  CsrData lower;
+  lower.n = n;
+  lower.symmetry = SymmetryStorage::Lower;
+  lower.row_ptr.assign(static_cast<size_t>(n + 1), 0);
+
+  int lower_nnz = 0;
+  for (int row = 0; row < n; ++row) {
+    for (int idx = row_ptr[static_cast<size_t>(row)];
+         idx < row_ptr[static_cast<size_t>(row + 1)]; ++idx) {
+      if (col_ind[static_cast<size_t>(idx)] <= row)
+        ++lower_nnz;
+    }
+    lower.row_ptr[static_cast<size_t>(row + 1)] = lower_nnz;
+  }
+
+  lower.nnz = lower_nnz;
+  lower.col_ind.resize(static_cast<size_t>(lower_nnz));
+  lower.values.resize(static_cast<size_t>(lower_nnz));
+
+  int out = 0;
+  for (int row = 0; row < n; ++row) {
+    for (int idx = row_ptr[static_cast<size_t>(row)];
+         idx < row_ptr[static_cast<size_t>(row + 1)]; ++idx) {
+      const int col = col_ind[static_cast<size_t>(idx)];
+      if (col > row)
+        continue;
+      lower.col_ind[static_cast<size_t>(out)] = col;
+      lower.values[static_cast<size_t>(out)] = values[static_cast<size_t>(idx)];
+      ++out;
+    }
+  }
+
+  return lower;
+}
+
 } // namespace vibestran

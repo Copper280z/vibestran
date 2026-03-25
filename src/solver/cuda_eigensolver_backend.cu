@@ -210,6 +210,22 @@ struct CsrDev {
   int n = 0, nnz = 0;
 };
 
+__global__ static void subtract_diag_product_kernel(double *y,
+                                                    const double *diag,
+                                                    const double *x, int n) {
+  int i = static_cast<int>(blockIdx.x) * blockDim.x +
+          static_cast<int>(threadIdx.x);
+  if (i < n)
+    y[i] -= diag[i] * x[i];
+}
+
+static void launch_subtract_diag_product(double *y, const double *diag,
+                                         const double *x, int n) {
+  constexpr int kBlock = 256;
+  subtract_diag_product_kernel<<<(n + kBlock - 1) / kBlock, kBlock>>>(y, diag,
+                                                                       x, n);
+}
+
 static CsrDev upload(const Eigen::SparseMatrix<double, Eigen::RowMajor> &m) {
   CsrDev d;
   d.n = static_cast<int>(m.rows());
@@ -221,6 +237,54 @@ static CsrDev upload(const Eigen::SparseMatrix<double, Eigen::RowMajor> &m) {
   d.rptr.upload(m.outerIndexPtr(), static_cast<std::size_t>(d.n + 1));
   d.cind.upload(m.innerIndexPtr(), static_cast<std::size_t>(d.nnz));
   return d;
+}
+
+static Eigen::SparseMatrix<double, Eigen::RowMajor>
+lower_triangle_only(const Eigen::SparseMatrix<double> &input) {
+  using RmSp = Eigen::SparseMatrix<double, Eigen::RowMajor>;
+
+  RmSp row(input);
+  row.makeCompressed();
+
+  RmSp lower(row.template triangularView<Eigen::Lower>());
+  lower.makeCompressed();
+  return lower;
+}
+
+static Eigen::SparseMatrix<double, Eigen::RowMajor>
+expand_symmetric(const Eigen::SparseMatrix<double, Eigen::RowMajor> &lower) {
+  using RmSp = Eigen::SparseMatrix<double, Eigen::RowMajor>;
+  using Triplet = Eigen::Triplet<double>;
+
+  std::vector<Triplet> triplets;
+  triplets.reserve(static_cast<std::size_t>(lower.nonZeros() * 2));
+  for (int row = 0; row < lower.outerSize(); ++row) {
+    for (RmSp::InnerIterator it(lower, row); it; ++it) {
+      triplets.emplace_back(row, it.col(), it.value());
+      if (it.col() != row)
+        triplets.emplace_back(it.col(), row, it.value());
+    }
+  }
+
+  RmSp full(lower.rows(), lower.cols());
+  full.setFromTriplets(triplets.begin(), triplets.end());
+  full.makeCompressed();
+  return full;
+}
+
+static std::vector<double>
+extract_diagonal(const Eigen::SparseMatrix<double, Eigen::RowMajor> &m) {
+  std::vector<double> diag(static_cast<std::size_t>(m.rows()), 0.0);
+  for (int row = 0; row < m.outerSize(); ++row) {
+    for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(m, row);
+         it; ++it) {
+      if (it.col() == row) {
+        diag[static_cast<std::size_t>(row)] = it.value();
+        break;
+      }
+    }
+  }
+  return diag;
 }
 
 // ── IRL helper: apply one implicit QR shift to a symmetric tridiagonal T ─────
@@ -475,17 +539,21 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
 
   // ── 1. Build C = K - sigma*M and upload K, M, C ──────────────────────────
   using RmSp = Eigen::SparseMatrix<double, Eigen::RowMajor>;
-  RmSp K_rm(K), M_rm(M);
+  RmSp K_rm = lower_triangle_only(K);
+  RmSp M_rm = lower_triangle_only(M);
   K_rm.makeCompressed();
   M_rm.makeCompressed();
 
   RmSp C_rm = K_rm - sigma * M_rm;
   C_rm.makeCompressed();
+  std::vector<double> M_diag = extract_diagonal(M_rm);
 
   CsrDev d_C = upload(C_rm);
   CsrDev d_M = upload(M_rm);
+  EigDevBuf<double> d_M_diag(static_cast<std::size_t>(n));
+  d_M_diag.upload(M_diag.data(), static_cast<std::size_t>(n));
+  std::unique_ptr<CsrDev> d_C_full;
 
-  const int C_nnz = d_C.nnz;
   const int M_nnz = d_M.nnz;
 
   // ── 2. cuDSS: factorize C (SPD first, LU fallback) ───────────────────────
@@ -528,15 +596,13 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
   // Helper: attempt analysis + factorization with a given matrix type.
   // On success, moves the three descriptors into cudss_A_mat / _b_mat / _x_mat
   // so they remain alive through all subsequent SOLVE calls.
-  auto try_factorize = [&](cudssMatrixType_t mtype) -> bool {
-    cudssMatrixViewType_t mview =
-        (mtype == CUDSS_MTYPE_GENERAL) ? CUDSS_MVIEW_FULL : CUDSS_MVIEW_UPPER;
-
+  auto try_factorize = [&](const CsrDev &A_dev, cudssMatrixType_t mtype,
+                           cudssMatrixViewType_t mview) -> bool {
     EigCuDSSMat A_mat, b_mat, x_mat;
     if (cudssMatrixCreateCsr(
             &A_mat.mat, static_cast<int64_t>(n), static_cast<int64_t>(n),
-            static_cast<int64_t>(C_nnz), d_C.rptr.ptr, nullptr, d_C.cind.ptr,
-            d_C.vals.ptr, CUDA_R_32I, CUDA_R_64F, mtype, mview,
+            static_cast<int64_t>(A_dev.nnz), A_dev.rptr.ptr, nullptr,
+            A_dev.cind.ptr, A_dev.vals.ptr, CUDA_R_32I, CUDA_R_64F, mtype, mview,
             CUDSS_BASE_ZERO) != CUDSS_STATUS_SUCCESS)
       return false;
 
@@ -566,10 +632,11 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
     return true;
   };
 
-  if (!try_factorize(CUDSS_MTYPE_SPD)) {
+  if (!try_factorize(d_C, CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER)) {
     log_debug("[cuda-eig] SPD factorization failed -- retrying with LU");
+    d_C_full = std::make_unique<CsrDev>(upload(expand_symmetric(C_rm)));
     p_data = std::make_unique<EigCuDSSData>(ctx_->cudss); // fresh data for LU
-    if (!try_factorize(CUDSS_MTYPE_GENERAL))
+    if (!try_factorize(*d_C_full, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL))
       throw SolverError("CUDA eigensolver: failed to factorize C = K - sigma*M "
                         "(n=" +
                         std::to_string(n) + ", sigma=" + std::to_string(sigma) +
@@ -604,6 +671,7 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
 
   // Query SpMV buffer size using the first-column pointers as placeholders.
   const double sp1 = 1.0, sp0 = 0.0;
+  const double sp1_accum = 1.0;
   DnVecD sv_tmp, sw_tmp;
   ck(cusparseCreateDnVec(&sv_tmp.d, static_cast<int64_t>(n), d_V.ptr,
                          CUDA_R_64F),
@@ -617,6 +685,16 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
                              &sp1, sp_M.d, sv_tmp.d, &sp0, sw_tmp.d, CUDA_R_64F,
                              CUSPARSE_SPMV_ALG_DEFAULT, &spmv_sz),
      "cusparseSpMV_bufferSize");
+  {
+    std::size_t spmv_trans_sz = 0;
+    ck(cusparseSpMV_bufferSize(ctx_->cusparse, CUSPARSE_OPERATION_TRANSPOSE,
+                               &sp1, sp_M.d, sv_tmp.d, &sp1_accum, sw_tmp.d,
+                               CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT,
+                               &spmv_trans_sz),
+       "cusparseSpMV_bufferSize(transpose)");
+    if (spmv_trans_sz > spmv_sz)
+      spmv_sz = spmv_trans_sz;
+  }
 
   EigDevBuf<char> d_spbuf(std::max(spmv_sz, std::size_t{1}));
 
@@ -634,12 +712,17 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
                     sp_M.d, sp_v.d, &sp0, sp_w.d, CUDA_R_64F,
                     CUSPARSE_SPMV_ALG_DEFAULT, d_spbuf.ptr),
        "cusparseSpMV");
+    ck(cusparseSpMV(ctx_->cusparse, CUSPARSE_OPERATION_TRANSPOSE, &sp1,
+                    sp_M.d, sp_v.d, &sp1_accum, sp_w.d, CUDA_R_64F,
+                    CUSPARSE_SPMV_ALG_DEFAULT, d_spbuf.ptr),
+       "cusparseSpMV(transpose)");
+    launch_subtract_diag_product(w, d_M_diag.ptr, v, n);
   };
 
   // ── 4. Initial Lanczos vector (constant, M-normalized on CPU) ────────────
   {
     Eigen::VectorXd v0 = Eigen::VectorXd::Ones(n);
-    double nm2 = v0.dot(M_rm * v0);
+    double nm2 = v0.dot(M_rm.selfadjointView<Eigen::Lower>() * v0);
     if (nm2 <= 0.0)
       throw SolverError(
           "CUDA eigensolver: mass matrix M is not positive definite");
@@ -988,7 +1071,7 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
       //     Solve L Z_orth^T = Z^T (forward substitution), then transpose.
       Eigen::MatrixXd MZ(n, nd_rr);
       for (int i = 0; i < nd_rr; ++i)
-        MZ.col(i) = M_rm * Z.col(i);
+        MZ.col(i) = M_rm.selfadjointView<Eigen::Lower>() * Z.col(i);
       Eigen::MatrixXd G = Z.transpose() * MZ;
 
       Eigen::LLT<Eigen::MatrixXd> llt(G);
@@ -1005,7 +1088,7 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
       // (c) K_sub = Z_orth^T K Z_orth
       Eigen::MatrixXd KZ(n, nd_rr);
       for (int i = 0; i < nd_rr; ++i)
-        KZ.col(i) = K_rm * Z_orth.col(i);
+        KZ.col(i) = K_rm.selfadjointView<Eigen::Lower>() * Z_orth.col(i);
       Eigen::MatrixXd K_sub = Z_orth.transpose() * KZ;
       K_sub = 0.5 * (K_sub + K_sub.transpose()); // enforce symmetry
 

@@ -142,6 +142,41 @@ TEST(SparseMatrixBuilder, LowerTriangleMatvecMatchesExpandedSymmetric) {
     EXPECT_EQ(y_lower, y_full);
 }
 
+TEST(SparseMatrixBuilder, LowerTriangleExtractsSymmetricStorageFromFullCsr) {
+    SparseMatrixBuilder builder(3);
+    builder.add(0, 0, 4.0);
+    builder.add(0, 1, -1.0);
+    builder.add(1, 0, -1.0);
+    builder.add(1, 1, 3.0);
+    builder.add(1, 2, -2.0);
+    builder.add(2, 1, -2.0);
+    builder.add(2, 2, 5.0);
+
+    auto full = builder.build_csr();
+    auto lower = full.lower_triangle();
+
+    EXPECT_FALSE(full.stores_lower_triangle_only());
+    EXPECT_TRUE(lower.stores_lower_triangle_only());
+    EXPECT_EQ(lower.n, 3);
+    EXPECT_EQ(lower.nnz, 5);
+    ASSERT_EQ(lower.row_ptr.size(), 4u);
+    EXPECT_EQ(lower.row_ptr[0], 0);
+    EXPECT_EQ(lower.row_ptr[1], 1);
+    EXPECT_EQ(lower.row_ptr[2], 3);
+    EXPECT_EQ(lower.row_ptr[3], 5);
+
+    EXPECT_EQ(lower.col_ind[0], 0);
+    EXPECT_DOUBLE_EQ(lower.values[0], 4.0);
+    EXPECT_EQ(lower.col_ind[1], 0);
+    EXPECT_DOUBLE_EQ(lower.values[1], -1.0);
+    EXPECT_EQ(lower.col_ind[2], 1);
+    EXPECT_DOUBLE_EQ(lower.values[2], 3.0);
+    EXPECT_EQ(lower.col_ind[3], 1);
+    EXPECT_DOUBLE_EQ(lower.values[3], -2.0);
+    EXPECT_EQ(lower.col_ind[4], 2);
+    EXPECT_DOUBLE_EQ(lower.values[4], 5.0);
+}
+
 TEST(SparseMatrixBuilder, SizeReturnsConstructorArg) {
     SparseMatrixBuilder builder(42);
     EXPECT_EQ(builder.size(), 42);
