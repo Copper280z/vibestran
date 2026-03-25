@@ -211,8 +211,7 @@ void MpcHandler::apply_to_stiffness(std::span<const EqIndex> gdofs_full,
                         ? CONSTRAINED_DOF
                         : index_map_[static_cast<size_t>(full)];
             }
-            K_builder.add_element_stiffness(
-                gd32, std::vector<double>(ke.begin(), ke.end()));
+            K_builder.add_element_stiffness(gd32, ke);
             return;
         }
     }

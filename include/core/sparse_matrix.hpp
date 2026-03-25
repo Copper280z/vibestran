@@ -11,6 +11,7 @@
 //     assembly with atomic accumulation on GPU.
 
 #include <cstdint>
+#include <cstddef>
 #include <span>
 #include <vector>
 
@@ -23,12 +24,19 @@ struct Triplet {
   double value;
 };
 
+enum class SymmetryStorage {
+  Full,
+  Lower,
+};
+
 /// Builds a global stiffness matrix by accumulating element contributions.
 /// After all elements are assembled, call finalize() to produce the CSR form.
 class SparseMatrixBuilder {
 public:
-  explicit SparseMatrixBuilder(int size) : size_(size) {
-    triplets_.reserve(size * 50); // rough estimate
+  explicit SparseMatrixBuilder(int size) : size_(size) {}
+
+  SparseMatrixBuilder(int size, size_t reserve_triplets) : size_(size) {
+    triplets_.reserve(reserve_triplets);
   }
 
   /// Add a value to position (row, col) — duplicates are summed on finalize
@@ -58,9 +66,29 @@ public:
     std::vector<double> values; // size = nnz
     int n;
     int nnz;
+    SymmetryStorage symmetry{SymmetryStorage::Full};
+
+    [[nodiscard]] bool stores_lower_triangle_only() const noexcept {
+      return symmetry == SymmetryStorage::Lower;
+    }
+
+    /// Multiply by x, interpreting lower-triangular storage as a symmetric
+    /// matrix L + L^T - diag(L).
+    [[nodiscard]] std::vector<double> multiply(std::span<const double> x) const;
+
+    /// Expand lower-triangular symmetric storage to a full symmetric CSR.
+    /// Returns a copy unchanged when this matrix is already full.
+    [[nodiscard]] CsrData expanded_symmetric() const;
   };
 
   [[nodiscard]] CsrData build_csr();
+
+  /// Reserve storage for approximately this many triplets.
+  // cppcheck-suppress unusedFunction -- called by solver assembly setup
+  void reserve_triplets(size_t count) { triplets_.reserve(count); }
+
+  /// Move another builder's triplets into this one.
+  void merge_from(SparseMatrixBuilder&& other);
 
   /// The raw triplet list (useful for testing / inspection)
   [[nodiscard]] const std::vector<Triplet> &triplets() const noexcept {

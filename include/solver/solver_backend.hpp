@@ -37,6 +37,12 @@ public:
     /// the backend is a direct solver or the estimate is unavailable.
     [[nodiscard]] virtual double last_estimated_error() const noexcept { return -1.0; }
 
+    /// Returns true when this backend still requires a full symmetric CSR
+    /// matrix rather than lower-triangular symmetric storage.
+    [[nodiscard]] virtual bool requires_full_symmetric_csr() const noexcept {
+        return false;
+    }
+
 };
 
 /// CPU backend using Eigen's sparse Cholesky.

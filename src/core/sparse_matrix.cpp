@@ -2,6 +2,7 @@
 #include "core/sparse_matrix.hpp"
 #include "core/dof_map.hpp"
 #include <algorithm>
+#include <iterator>
 #include <numeric>
 #ifdef HAVE_TBB
 #include <tbb/parallel_for.h>
@@ -24,6 +25,8 @@ void SparseMatrixBuilder::add_element_stiffness(
     for (int j = 0; j < n; ++j) {
       if (global_dofs[j] == CONSTRAINED_DOF)
         continue;
+      if (global_dofs[i] < global_dofs[j])
+        continue;
       double v = ke[static_cast<size_t>(i * n + j)];
       if (v != 0.0)
         triplets_.push_back({global_dofs[i], global_dofs[j], v});
@@ -45,8 +48,26 @@ void SparseMatrixBuilder::add_element_force(
   }
 }
 
+void SparseMatrixBuilder::merge_from(SparseMatrixBuilder&& other) {
+  if (size_ != other.size_)
+    throw std::invalid_argument("SparseMatrixBuilder size mismatch in merge");
+
+  triplets_.insert(triplets_.end(),
+                   std::make_move_iterator(other.triplets_.begin()),
+                   std::make_move_iterator(other.triplets_.end()));
+  other.triplets_.clear();
+  other.triplets_.shrink_to_fit();
+}
+
 SparseMatrixBuilder::CsrData SparseMatrixBuilder::build_csr() {
   const auto n_trips = static_cast<int>(triplets_.size());
+  bool lower_only = true;
+  for (const auto &t : triplets_) {
+    if (t.row < t.col) {
+      lower_only = false;
+      break;
+    }
+  }
 
   // Pass 1: histogram of row indices → row-bucket boundaries.
   // Two O(n) sequential passes over compact data instead of one O(n log n)
@@ -123,8 +144,94 @@ SparseMatrixBuilder::CsrData SparseMatrixBuilder::build_csr() {
   csr.nnz = out;
   csr.col_ind.resize(static_cast<size_t>(out));
   csr.values.resize(static_cast<size_t>(out));
+  csr.symmetry = lower_only ? SymmetryStorage::Lower : SymmetryStorage::Full;
 
   return csr;
+}
+
+std::vector<double>
+SparseMatrixBuilder::CsrData::multiply(std::span<const double> x) const {
+  if (static_cast<int>(x.size()) != n)
+    throw std::invalid_argument("CSR matvec size mismatch");
+
+  std::vector<double> y(static_cast<size_t>(n), 0.0);
+  if (stores_lower_triangle_only()) {
+    for (int row = 0; row < n; ++row) {
+      for (int idx = row_ptr[static_cast<size_t>(row)];
+           idx < row_ptr[static_cast<size_t>(row + 1)]; ++idx) {
+        const int col = col_ind[static_cast<size_t>(idx)];
+        const double value = values[static_cast<size_t>(idx)];
+        y[static_cast<size_t>(row)] += value * x[static_cast<size_t>(col)];
+        if (col != row)
+          y[static_cast<size_t>(col)] += value * x[static_cast<size_t>(row)];
+      }
+    }
+    return y;
+  }
+
+  for (int row = 0; row < n; ++row) {
+    for (int idx = row_ptr[static_cast<size_t>(row)];
+         idx < row_ptr[static_cast<size_t>(row + 1)]; ++idx) {
+      y[static_cast<size_t>(row)] +=
+          values[static_cast<size_t>(idx)] *
+          x[static_cast<size_t>(col_ind[static_cast<size_t>(idx)])];
+    }
+  }
+  return y;
+}
+
+SparseMatrixBuilder::CsrData SparseMatrixBuilder::CsrData::expanded_symmetric() const {
+  if (!stores_lower_triangle_only())
+    return *this;
+
+  CsrData full;
+  full.n = n;
+  full.symmetry = SymmetryStorage::Full;
+
+  int offdiag = 0;
+  for (int row = 0; row < n; ++row) {
+    for (int idx = row_ptr[static_cast<size_t>(row)];
+         idx < row_ptr[static_cast<size_t>(row + 1)]; ++idx) {
+      if (col_ind[static_cast<size_t>(idx)] != row)
+        ++offdiag;
+    }
+  }
+
+  full.nnz = nnz + offdiag;
+  full.row_ptr.assign(static_cast<size_t>(n + 1), 0);
+  for (int row = 0; row < n; ++row) {
+    for (int idx = row_ptr[static_cast<size_t>(row)];
+         idx < row_ptr[static_cast<size_t>(row + 1)]; ++idx) {
+      const int col = col_ind[static_cast<size_t>(idx)];
+      ++full.row_ptr[static_cast<size_t>(row + 1)];
+      if (col != row)
+        ++full.row_ptr[static_cast<size_t>(col + 1)];
+    }
+  }
+  std::partial_sum(full.row_ptr.begin(), full.row_ptr.end(), full.row_ptr.begin());
+
+  full.col_ind.resize(static_cast<size_t>(full.nnz));
+  full.values.resize(static_cast<size_t>(full.nnz));
+  std::vector<int> cursor(full.row_ptr.begin(), full.row_ptr.begin() + n);
+  for (int row = 0; row < n; ++row) {
+    for (int idx = row_ptr[static_cast<size_t>(row)];
+         idx < row_ptr[static_cast<size_t>(row + 1)]; ++idx) {
+      const int col = col_ind[static_cast<size_t>(idx)];
+      const double value = values[static_cast<size_t>(idx)];
+
+      int out = cursor[static_cast<size_t>(row)]++;
+      full.col_ind[static_cast<size_t>(out)] = col;
+      full.values[static_cast<size_t>(out)] = value;
+
+      if (col != row) {
+        out = cursor[static_cast<size_t>(col)]++;
+        full.col_ind[static_cast<size_t>(out)] = row;
+        full.values[static_cast<size_t>(out)] = value;
+      }
+    }
+  }
+
+  return full;
 }
 
 } // namespace vibestran

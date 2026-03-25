@@ -38,6 +38,7 @@
 #include "solver/linear_static.hpp"
 #include "solver/modal.hpp"
 #include "solver/solver_backend.hpp"
+#include <Eigen/Core>
 #ifdef HAVE_VULKAN
 #include "solver/vulkan_solver_backend.hpp"
 #endif
@@ -51,12 +52,38 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <spdlog/spdlog.h>
 #include <string_view>
 
 enum class BackendChoice { Auto, Cpu, CpuPCG, Vulkan, Cuda, CudaPCG };
+
+static void configure_eigen_threads() {
+  int eigen_threads = Eigen::nbThreads();
+  const char *omp_threads_env = std::getenv("OMP_NUM_THREADS");
+  if (omp_threads_env != nullptr && omp_threads_env[0] != '\0') {
+    char *end = nullptr;
+    long parsed = std::strtol(omp_threads_env, &end, 10);
+    if (end != omp_threads_env && *end == '\0' && parsed > 0 &&
+        parsed <= std::numeric_limits<int>::max()) {
+      eigen_threads = static_cast<int>(parsed);
+    } else {
+      spdlog::warn("Ignoring invalid OMP_NUM_THREADS='{}'", omp_threads_env);
+    }
+  }
+
+  Eigen::setNbThreads(eigen_threads);
+  if (omp_threads_env != nullptr && omp_threads_env[0] != '\0') {
+    spdlog::info("Eigen CPU threads: {} (from OMP_NUM_THREADS={})",
+                 Eigen::nbThreads(), omp_threads_env);
+  } else {
+    spdlog::info("Eigen CPU threads: {} (OpenMP default)",
+                 Eigen::nbThreads());
+  }
+}
 
 static void print_usage() {
   spdlog::error("Usage: vibestran "
@@ -85,7 +112,7 @@ static void print_usage() {
                 "input.bdf\n");
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, const char *argv[]) {
   // ── Argument parsing ─────────────────────────────────────────────────────
   BackendChoice backend_choice = BackendChoice::Auto;
   bool cuda_single_precision = false;
@@ -144,6 +171,7 @@ int main(int argc, char *argv[]) {
 
   // Initialise logger (and optional file sink) before any logging.
   vibestran::init_logger(log_file_path);
+  configure_eigen_threads();
 
   if (f06_path.empty())
     f06_path = std::filesystem::path(bdf_path).replace_extension(".f06");

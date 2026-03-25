@@ -11,6 +11,7 @@
 #include "elements/element_factory.hpp"
 #include "elements/rbe_constraints.hpp"
 #include "elements/solid_elements.hpp"
+#include "assembly_parallel.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <chrono>
@@ -74,7 +75,14 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   const auto t5b = Clock::now();
   spdlog::debug("[subcase {}] build_csr: {:.3f} ms  ({} nnz)", sc.id, Ms(t5b - t5).count(), csr.nnz);
 
-  std::vector<double> u_reduced = backend_->solve(csr, F);
+  const SparseMatrixBuilder::CsrData* solve_csr = &csr;
+  SparseMatrixBuilder::CsrData expanded_csr;
+  if (backend_->requires_full_symmetric_csr()) {
+    expanded_csr = csr.expanded_symmetric();
+    solve_csr = &expanded_csr;
+  }
+
+  std::vector<double> u_reduced = backend_->solve(*solve_csr, F);
   const auto t6 = Clock::now();
   spdlog::debug("[subcase {}] linear solve: {:.3f} ms", sc.id, Ms(t6 - t5b).count());
 
@@ -90,18 +98,11 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   // For direct solvers this should be near machine epsilon; for PCG backends
   // it reflects the iterative convergence quality.
   {
+    const std::vector<double> Ku = csr.multiply(u_reduced);
     double r_norm_sq = 0.0;
     double f_norm_sq = 0.0;
-    const auto& rp = csr.row_ptr;
-    const auto& ci = csr.col_ind;
-    const auto& cv = csr.values;
     for (int row = 0; row < n; ++row) {
-      double ku = 0.0;
-      for (int idx = rp[static_cast<size_t>(row)];
-           idx < rp[static_cast<size_t>(row + 1)]; ++idx)
-        ku += cv[static_cast<size_t>(idx)] *
-              u_reduced[static_cast<size_t>(ci[static_cast<size_t>(idx)])];
-      const double ri = ku - F[static_cast<size_t>(row)];
+      const double ri = Ku[static_cast<size_t>(row)] - F[static_cast<size_t>(row)];
       r_norm_sq += ri * ri;
       f_norm_sq += F[static_cast<size_t>(row)] * F[static_cast<size_t>(row)];
     }
@@ -329,20 +330,10 @@ void LinearStaticSolver::assemble(const Model &model, const SubCase & /*sc*/,
                                   const MpcHandler &mpc_handler,
                                   SparseMatrixBuilder &K_builder,
                                   std::vector<double> & /*F*/) {
-  const DofMap &dof_map = mpc_handler.full_dof_map();
-  for (const auto &elem_data : model.elements) {
-    auto elem = make_element(elem_data, model);
-    LocalKe Ke = elem->stiffness_matrix();
-    auto gdofs = elem->global_dof_indices(dof_map);
-
-    const int nd = static_cast<int>(gdofs.size());
-    std::vector<double> ke_row(static_cast<size_t>(nd * nd));
-    for (int r = 0; r < nd; ++r)
-      for (int c = 0; c < nd; ++c)
-        ke_row[static_cast<size_t>(r * nd + c)] = Ke(r, c);
-
-    mpc_handler.apply_to_stiffness(gdofs, ke_row, K_builder);
-  }
+  K_builder.reserve_triplets(detail::estimate_triplet_capacity(model));
+  detail::assemble_element_matrix(
+      model, mpc_handler, K_builder,
+      [](const ElementBase &elem) { return elem.stiffness_matrix(); });
 }
 
 void LinearStaticSolver::apply_point_loads(const Model &model,

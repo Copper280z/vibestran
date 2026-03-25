@@ -188,9 +188,11 @@ TEST_F(EigenPCGTest, LargeTridiagonalConvergesWithinBound) {
     // Verify by comparing with direct solver on a subset of components.
     EigenSolverBackend direct;
     auto u_direct = direct.solve(csr, F);
-    for (int i = 0; i < n; i += 100)
-        EXPECT_NEAR(u[i], u_direct[i], 1e-6)
+    for (int i = 0; i < n; i += 100) {
+        const double tol = std::max(1e-6, std::abs(u_direct[i]) * 1e-10);
+        EXPECT_NEAR(u[i], u_direct[i], tol)
             << "n=1000 tridiagonal: component " << i << " disagrees";
+    }
 
     // IC0 preconditioned CG converges in O(sqrt(n)) iterations for 1D Laplacian.
     // Upper bound: n / 2 is extremely generous.

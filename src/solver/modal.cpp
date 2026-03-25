@@ -7,6 +7,7 @@
 #include "core/mpc_handler.hpp"
 #include "elements/element_factory.hpp"
 #include "elements/rbe_constraints.hpp"
+#include "assembly_parallel.hpp"
 
 #include <Eigen/Sparse>
 #include <algorithm>
@@ -67,6 +68,9 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
     // ── 3. Assemble K and M ───────────────────────────────────────────────────
     SparseMatrixBuilder K_builder(n);
     SparseMatrixBuilder M_builder(n);
+    const size_t matrix_triplet_capacity = detail::estimate_triplet_capacity(model);
+    K_builder.reserve_triplets(matrix_triplet_capacity);
+    M_builder.reserve_triplets(matrix_triplet_capacity);
 
     assemble_stiffness(model, mpc_handler, K_builder);
     assemble_mass(model, mpc_handler, M_builder, wtmass);
@@ -77,14 +81,15 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
     auto to_eigen = [](const SparseMatrixBuilder::CsrData& csr)
         -> Eigen::SparseMatrix<double>
     {
-        using Triplet = Eigen::Triplet<double>;
-        std::vector<Triplet> triplets;
-        triplets.reserve(static_cast<size_t>(csr.nnz));
-        for (int row = 0; row < csr.n; ++row)
-            for (int idx = csr.row_ptr[row]; idx < csr.row_ptr[row + 1]; ++idx)
-                triplets.emplace_back(row, csr.col_ind[idx], csr.values[idx]);
-        Eigen::SparseMatrix<double> mat(csr.n, csr.n);
-        mat.setFromTriplets(triplets.begin(), triplets.end());
+        using ESMR = Eigen::SparseMatrix<double, Eigen::RowMajor>;
+        using ESM = Eigen::SparseMatrix<double>;
+
+        Eigen::Map<const ESMR> mat_row(csr.n, csr.n, csr.nnz,
+                                       csr.row_ptr.data(),
+                                       csr.col_ind.data(),
+                                       csr.values.data());
+        ESM mat(mat_row);
+        mat.makeCompressed();
         return mat;
     };
 
@@ -115,9 +120,11 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
     // Near-zero rigid-body modes (λ ≈ 0) produce ||K*φ|| ≈ 0; the residual is
     // reported as the absolute norm ||K*φ - λM*φ|| for those modes instead.
     for (int i = 0; i < static_cast<int>(pairs.size()); ++i) {
-        const Eigen::VectorXd Kphi = K_eigen * pairs[i].eigenvector;
-        const Eigen::VectorXd res  = Kphi - pairs[i].eigenvalue *
-                                            (M_eigen * pairs[i].eigenvector);
+        const Eigen::VectorXd Kphi =
+            K_eigen.selfadjointView<Eigen::Lower>() * pairs[i].eigenvector;
+        const Eigen::VectorXd Mphi =
+            M_eigen.selfadjointView<Eigen::Lower>() * pairs[i].eigenvector;
+        const Eigen::VectorXd res  = Kphi - pairs[i].eigenvalue * Mphi;
         const double kphi_norm = Kphi.norm();
         const double rel_res   = (kphi_norm > 1e-300)
             ? res.norm() / kphi_norm : res.norm();
@@ -148,7 +155,8 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
         mr.cycles_per_sec   = mr.radians_per_sec / (2.0 * std::numbers::pi);
 
         // Compute generalised mass: φᵀ M φ (should be ≈1 for mass-normalised)
-        mr.gen_mass = ep.eigenvector.transpose() * M_eigen * ep.eigenvector;
+        mr.gen_mass = ep.eigenvector.dot(
+            M_eigen.selfadjointView<Eigen::Lower>() * ep.eigenvector);
 
         // Normalise if needed (Spectra mass-normalises, but apply NORM=MAX)
         Eigen::VectorXd phi = ep.eigenvector;
@@ -329,20 +337,9 @@ void ModalSolver::build_mpc_system(const Model& model, const SubCase& sc,
 void ModalSolver::assemble_stiffness(const Model& model,
                                      const MpcHandler& mpc_handler,
                                      SparseMatrixBuilder& K_builder) {
-    const DofMap& dof_map = mpc_handler.full_dof_map();
-    for (const auto& elem_data : model.elements) {
-        auto elem  = make_element(elem_data, model);
-        LocalKe Ke = elem->stiffness_matrix();
-        auto gdofs = elem->global_dof_indices(dof_map);
-
-        const int nd = static_cast<int>(gdofs.size());
-        std::vector<double> ke_row(static_cast<size_t>(nd * nd));
-        for (int r = 0; r < nd; ++r)
-            for (int c = 0; c < nd; ++c)
-                ke_row[static_cast<size_t>(r * nd + c)] = Ke(r, c);
-
-        mpc_handler.apply_to_stiffness(gdofs, ke_row, K_builder);
-    }
+    detail::assemble_element_matrix(
+        model, mpc_handler, K_builder,
+        [](const ElementBase& elem) { return elem.stiffness_matrix(); });
 }
 
 // ── Assemble mass ─────────────────────────────────────────────────────────────
@@ -351,21 +348,14 @@ void ModalSolver::assemble_mass(const Model& model,
                                 const MpcHandler& mpc_handler,
                                 SparseMatrixBuilder& M_builder,
                                 double wtmass) {
-    const DofMap& dof_map = mpc_handler.full_dof_map();
-    for (const auto& elem_data : model.elements) {
-        auto elem  = make_element(elem_data, model);
-        LocalKe Me = elem->mass_matrix();
-        if (wtmass != 1.0) Me *= wtmass;
-        auto gdofs = elem->global_dof_indices(dof_map);
-
-        const int nd = static_cast<int>(gdofs.size());
-        std::vector<double> me_row(static_cast<size_t>(nd * nd));
-        for (int r = 0; r < nd; ++r)
-            for (int c = 0; c < nd; ++c)
-                me_row[static_cast<size_t>(r * nd + c)] = Me(r, c);
-
-        mpc_handler.apply_to_stiffness(gdofs, me_row, M_builder);
-    }
+    detail::assemble_element_matrix(
+        model, mpc_handler, M_builder,
+        [wtmass](const ElementBase& elem) {
+            LocalKe mass = elem.mass_matrix();
+            if (wtmass != 1.0)
+                mass *= wtmass;
+            return mass;
+        });
 }
 
 // ── Mode shape recovery ───────────────────────────────────────────────────────

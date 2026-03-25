@@ -49,6 +49,10 @@ public:
         const std::vector<double>& F) override;
 
     [[nodiscard]] std::string_view name() const noexcept override;
+    // cppcheck-suppress unusedFunction -- queried via SolverBackend in linear_static.cpp
+    [[nodiscard]] bool requires_full_symmetric_csr() const noexcept override {
+        return true;
+    }
 
     // ── Diagnostics (valid after each solve()) ─────────────────────────────
 
