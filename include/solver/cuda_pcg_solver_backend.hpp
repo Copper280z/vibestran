@@ -17,9 +17,12 @@
 // backend suitable for very large systems (millions of DOFs) that would exhaust
 // device memory with cuDSS sparse Cholesky.
 //
-// Convergence: relative preconditioned residual ||r||/||b|| < tolerance.
-// Default tolerance 1e-8 is stricter than typical engineering requirements to
-// leave headroom for mildly ill-conditioned systems.
+// Convergence: relative residual ||r||_2 / ||b||_2 < tolerance.
+// The default tolerance is chosen automatically by precision:
+//   - float64: 1e-8
+//   - float32: 1e-6
+// This avoids wasting iterations by pushing float32 solves past their useful
+// precision floor.
 //
 // Use try_create() to construct — returns nullopt when no CUDA device is
 // present so the caller can fall back without exception handling.
@@ -45,11 +48,12 @@ public:
 
     /// Factory — returns nullopt when no CUDA device is available.
     /// @param use_single_precision  Perform the solve in float32 (halves VRAM usage).
-    /// @param tolerance             Relative residual convergence threshold.
+    /// @param tolerance             Relative residual convergence threshold
+    ///                               (<=0 selects a precision-specific default).
     /// @param max_iters             Maximum PCG iterations (0 = default: 10000).
     [[nodiscard]] static std::optional<CudaPCGSolverBackend>
     try_create(bool use_single_precision = false,
-               double tolerance = 1e-8,
+               double tolerance = 0.0,
                int max_iters = 0) noexcept;
 
     /// Solve K*u = F using PCG with IC0 → ILU0 → Jacobi preconditioning.
@@ -65,8 +69,11 @@ public:
     /// Number of PCG iterations used in the most recent solve().
     [[nodiscard]] int last_iteration_count() const noexcept override;
 
-    /// Relative residual achieved in the most recent solve().
+    /// Relative residual ||r||_2 / ||b||_2 achieved in the most recent solve().
     [[nodiscard]] double last_relative_residual() const noexcept;
+
+    /// Alias for last_relative_residual() to satisfy SolverBackend diagnostics.
+    [[nodiscard]] double last_estimated_error() const noexcept override;
 
     /// GPU device name reported by the CUDA runtime.
     [[nodiscard]] std::string_view device_name() const noexcept;

@@ -12,3 +12,4 @@
 - Exceptions should only be used for unrecoverable errors. Any time an exception is thrown you must include as much information as possible, so the developer can debug the exception. We expect that exceptions should not happen in production.
 - All tests must be relevant and useful for proving the correctness of the business logic or mathematical model. Tests that only check superficial or obvious cases are both insufficient and unacceptable. 
 - It can be acceptable to edit the criteria of a test that's failing, if you believe it is appropriate, make sure to document your reasoning in the commit message.
+- All commit messages should provide a detailed description of changes.

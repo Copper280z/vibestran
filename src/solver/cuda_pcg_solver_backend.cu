@@ -7,7 +7,8 @@
 //   arithmetic use float32, halving VRAM for every allocation (matrix, IC0/ILU0
 //   factor copy, SpSV scratch, PCG vectors). Input K and F are downcast to
 //   float32 before the solve; the result is upcast back to double64. Achievable
-//   accuracy is limited by float32 roundoff (~1e-7).
+//   accuracy is limited by float32 roundoff (~1e-7), so float32 should use a
+//   looser default convergence tolerance than float64.
 //
 // Preconditioner selection (tried in order):
 //   1. IC0 (Incomplete Cholesky, zero fill-in) via cusparseTcsric02.
@@ -26,7 +27,7 @@
 //     u += alpha*p, r -= alpha*Ap
 //     z = M^{-1}r
 //     rz_new = r·z
-//     if sqrt(rz_new/rz0) < tol: done
+//     if ||r||_2 / ||b||_2 < tol: done
 //     p = z + (rz_new/rz)*p
 //     rz = rz_new
 //
@@ -232,13 +233,13 @@ template<> struct ScalarTraits<float> {
 template<typename T>
 __global__ static void jacobi_kernel(
     const T* __restrict__ r,
-    const T* __restrict__ d_inv,
+    const T* __restrict__ diag,
     T* __restrict__ z,
     int n)
 {
     int i = static_cast<int>(blockIdx.x) * blockDim.x +
             static_cast<int>(threadIdx.x);
-    if (i < n) z[i] = r[i] * d_inv[i];
+    if (i < n) z[i] = r[i] / diag[i];
 }
 
 template<typename T>
@@ -269,8 +270,8 @@ __global__ static void subtract_diag_product_kernel(
 static constexpr int kBlock = 256;
 
 template<typename T>
-static void launch_jacobi(const T* r, const T* d_inv, T* z, int n) {
-    jacobi_kernel<T><<<(n + kBlock - 1) / kBlock, kBlock>>>(r, d_inv, z, n);
+static void launch_jacobi(const T* r, const T* diag, T* z, int n) {
+    jacobi_kernel<T><<<(n + kBlock - 1) / kBlock, kBlock>>>(r, diag, z, n);
 }
 
 template<typename T>
@@ -356,7 +357,6 @@ enum class PrecondKind { IC0, ILU0, Jacobi };
 template<typename T>
 struct TriangPrecond {
     PCGDeviceBuffer<T>    d_M_vals;     // in-place IC0 or ILU0 factored values
-    PCGDeviceBuffer<char> d_factor_buf; // scratch for csric02 / csrilu02
 
     cusparseSpMatDescr_t mat_L = nullptr;
     cusparseSpMatDescr_t mat_U = nullptr; // ILU0 only; null for IC0
@@ -434,11 +434,11 @@ static bool setup_ic0(
     vibestran::log_debug("[cuda-pcg] IC0 factor scratch=" +
                         std::to_string(static_cast<std::size_t>(buf_size) / kMiB) + " MiB");
 
-    tp.d_factor_buf = PCGDeviceBuffer<char>(buf_size > 0 ? buf_size : 1);
+    PCGDeviceBuffer<char> d_factor_buf(buf_size > 0 ? buf_size : 1);
 
     Tr::csric02_analysis(cusparse, n, nnz, descr,
         tp.d_M_vals.ptr, d_row_ptr, d_col_ind, info,
-        CUSPARSE_SOLVE_POLICY_NO_LEVEL, tp.d_factor_buf.ptr);
+        CUSPARSE_SOLVE_POLICY_NO_LEVEL, d_factor_buf.ptr);
 
     int structural_zero = -1;
     cusparseXcsric02_zeroPivot(cusparse, info, &structural_zero);
@@ -452,7 +452,7 @@ static bool setup_ic0(
 
     cs = Tr::csric02(cusparse, n, nnz, descr,
         tp.d_M_vals.ptr, d_row_ptr, d_col_ind, info,
-        CUSPARSE_SOLVE_POLICY_NO_LEVEL, tp.d_factor_buf.ptr);
+        CUSPARSE_SOLVE_POLICY_NO_LEVEL, d_factor_buf.ptr);
 
     int numerical_zero = -1;
     cusparseXcsric02_zeroPivot(cusparse, info, &numerical_zero);
@@ -565,11 +565,11 @@ static bool setup_ilu0(
     vibestran::log_debug("[cuda-pcg] ILU0 factor scratch=" +
                         std::to_string(static_cast<std::size_t>(buf_size) / kMiB) + " MiB");
 
-    tp.d_factor_buf = PCGDeviceBuffer<char>(buf_size > 0 ? buf_size : 1);
+    PCGDeviceBuffer<char> d_factor_buf(buf_size > 0 ? buf_size : 1);
 
     Tr::csrilu02_analysis(cusparse, n, nnz, descr,
         tp.d_M_vals.ptr, d_row_ptr, d_col_ind, info,
-        CUSPARSE_SOLVE_POLICY_NO_LEVEL, tp.d_factor_buf.ptr);
+        CUSPARSE_SOLVE_POLICY_NO_LEVEL, d_factor_buf.ptr);
 
     int structural_zero = -1;
     cusparseXcsrilu02_zeroPivot(cusparse, info, &structural_zero);
@@ -583,7 +583,7 @@ static bool setup_ilu0(
 
     cs = Tr::csrilu02(cusparse, n, nnz, descr,
         tp.d_M_vals.ptr, d_row_ptr, d_col_ind, info,
-        CUSPARSE_SOLVE_POLICY_NO_LEVEL, tp.d_factor_buf.ptr);
+        CUSPARSE_SOLVE_POLICY_NO_LEVEL, d_factor_buf.ptr);
 
     int numerical_zero = -1;
     cusparseXcsrilu02_zeroPivot(cusparse, info, &numerical_zero);
@@ -679,7 +679,6 @@ static std::vector<double> solve_pcg(
     const std::vector<int>& h_row_ptr,
     const std::vector<int>& h_col_ind,
     const std::vector<T>& h_F,
-    const std::vector<T>& h_diag_inv,
     const std::vector<T>& h_diag,
     bool lower_only,
     double tolerance,
@@ -694,7 +693,7 @@ static std::vector<double> solve_pcg(
     const std::size_t bytes_matrix  = static_cast<std::size_t>(nnz) * sizeof(T)
                                     + static_cast<std::size_t>(n + 1) * sizeof(int)
                                     + static_cast<std::size_t>(nnz) * sizeof(int);
-    const std::size_t bytes_vectors = 7UL * static_cast<std::size_t>(n) * sizeof(T);
+    const std::size_t bytes_vectors = 6UL * static_cast<std::size_t>(n) * sizeof(T);
     const std::size_t bytes_precond = static_cast<std::size_t>(nnz) * sizeof(T)
                                     + static_cast<std::size_t>(n) * sizeof(T);
     const std::size_t bytes_estimate = bytes_matrix + bytes_vectors + bytes_precond;
@@ -725,22 +724,18 @@ static std::vector<double> solve_pcg(
     PCGDeviceBuffer<T>   d_values(nnz);
     PCGDeviceBuffer<int> d_row_ptr(n + 1);
     PCGDeviceBuffer<int> d_col_ind(nnz);
-    PCGDeviceBuffer<T>   d_F(n);
     PCGDeviceBuffer<T>   d_u(n);
     PCGDeviceBuffer<T>   d_r(n);
     PCGDeviceBuffer<T>   d_z(n);
     PCGDeviceBuffer<T>   d_p(n);
     PCGDeviceBuffer<T>   d_Ap(n);
+    PCGDeviceBuffer<T>   d_diag(n);
 
     d_values.upload(h_values.data(),   nnz);
     d_row_ptr.upload(h_row_ptr.data(), n + 1);
     d_col_ind.upload(h_col_ind.data(), nnz);
-    d_F.upload(h_F.data(), n);
+    d_r.upload(h_F.data(), n);
     d_u.zero(n);
-
-    PCGDeviceBuffer<T> d_diag_inv(n);
-    PCGDeviceBuffer<T> d_diag(n);
-    d_diag_inv.upload(h_diag_inv.data(), n);
     d_diag.upload(h_diag.data(), n);
 
     // ── Preconditioner setup (IC0 → ILU0 → Jacobi) ───────────────────────────
@@ -871,14 +866,19 @@ static std::vector<double> solve_pcg(
                     Tr::cuda_dtype, CUSPARSE_SPSV_ALG_DEFAULT, tp->sv_UT);
             }
         } else {
-            launch_jacobi<T>(d_r.ptr, d_diag_inv.ptr, d_z.ptr, n);
+            launch_jacobi<T>(d_r.ptr, d_diag.ptr, d_z.ptr, n);
         }
     };
 
     // ── PCG initialisation ────────────────────────────────────────────────────
-    cudaMemcpy(d_r.ptr, d_F.ptr,
-               static_cast<std::size_t>(n) * sizeof(T),
-               cudaMemcpyDeviceToDevice);
+    T rr0_T{0};
+    Tr::dot(cublas, n, d_r.ptr, d_r.ptr, &rr0_T);
+    const double norm_b = std::sqrt(std::abs(static_cast<double>(rr0_T)));
+    if (norm_b < 1e-300) {
+        out_iters   = 0;
+        out_rel_res = 0.0;
+        return std::vector<double>(n, 0.0);
+    }
 
     apply_precond();
 
@@ -889,20 +889,15 @@ static std::vector<double> solve_pcg(
     T rz_T{0};
     Tr::dot(cublas, n, d_r.ptr, d_z.ptr, &rz_T);
     double rz  = static_cast<double>(rz_T);
-    const double rz0 = rz;
-
-    if (rz0 == 0.0) {
-        out_iters   = 0;
-        out_rel_res = 0.0;
-        return std::vector<double>(n, 0.0);
-    }
+    if (rz <= 0.0)
+        throw SolverError("CUDA PCG: non-positive initial r*z=" +
+                          std::to_string(rz) +
+                          " -- preconditioner is not SPD or matrix is singular");
 
     // ── PCG iteration ─────────────────────────────────────────────────────────
     int iter = 0;
+    double rel = 1.0;
     for (; iter < max_iters; ++iter) {
-        cusparseDnVecSetValues(vec_p,  d_p.ptr);
-        cusparseDnVecSetValues(vec_Ap, d_Ap.ptr);
-
         try {
             apply_matrix();
         } catch (const SolverError& e) {
@@ -936,7 +931,9 @@ static std::vector<double> solve_pcg(
         Tr::dot(cublas, n, d_r.ptr, d_z.ptr, &rz_new_T);
         const double rz_new = static_cast<double>(rz_new_T);
 
-        const double rel = std::sqrt(std::abs(rz_new) / rz0);
+        T rr_T{0};
+        Tr::dot(cublas, n, d_r.ptr, d_r.ptr, &rr_T);
+        rel = std::sqrt(std::abs(static_cast<double>(rr_T))) / norm_b;
         if (rel < tolerance) {
             rz = rz_new;
             ++iter;
@@ -952,7 +949,7 @@ static std::vector<double> solve_pcg(
     cudaDeviceSynchronize();
 
     out_iters   = iter;
-    out_rel_res = std::sqrt(std::abs(rz) / rz0);
+    out_rel_res = rel;
 
     if (iter >= max_iters)
         throw SolverError(
@@ -987,7 +984,7 @@ struct CudaPCGContext {
     cublasHandle_t   cublas   = nullptr;
     cusparseHandle_t cusparse = nullptr;
     std::string      device_name;
-    double           tolerance          = 1e-8;
+    double           tolerance          = 0.0;
     int              max_iters          = 10000;
     bool             use_single_precision = false;
 
@@ -1028,7 +1025,9 @@ CudaPCGSolverBackend::try_create(bool use_single_precision,
         ctx->device_name = props.name;
 
     ctx->use_single_precision = use_single_precision;
-    ctx->tolerance = tolerance;
+    ctx->tolerance = tolerance > 0.0
+        ? tolerance
+        : (use_single_precision ? 1e-6 : 1e-8);
     ctx->max_iters = (max_iters > 0) ? max_iters : 10000;
 
     if (cublasCreate(&ctx->cublas) != CUBLAS_STATUS_SUCCESS)
@@ -1057,6 +1056,10 @@ double CudaPCGSolverBackend::last_relative_residual() const noexcept {
     return ctx_->last_rel_res;
 }
 
+double CudaPCGSolverBackend::last_estimated_error() const noexcept {
+    return ctx_->last_rel_res;
+}
+
 std::string_view CudaPCGSolverBackend::device_name() const noexcept {
     return ctx_->device_name;
 }
@@ -1082,7 +1085,6 @@ CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
                           std::to_string(n));
 
     // Build Jacobi diagonal (host, for fallback preconditioner and zero detection).
-    std::vector<double> diag_inv_d(n, 1.0);
     std::vector<double> diag_d(n, 0.0);
     for (int i = 0; i < n; ++i) {
         bool found_diag = false;
@@ -1094,7 +1096,6 @@ CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
                         "CUDA PCG: zero diagonal at row " + std::to_string(i) +
                         " -- matrix is singular. Check boundary conditions.");
                 diag_d[static_cast<std::size_t>(i)] = kii;
-                diag_inv_d[i] = 1.0 / kii;
                 found_diag = true;
                 break;
             }
@@ -1106,15 +1107,17 @@ CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
     }
 
     if (ctx_->use_single_precision) {
-        std::vector<float> vals_f(nnz), F_f(n), diag_inv_f(n), diag_f(n);
-        for (int i = 0; i < nnz; ++i) vals_f[i]     = static_cast<float>(K.values[i]);
-        for (int i = 0; i < n;   ++i) F_f[i]         = static_cast<float>(F[i]);
-        for (int i = 0; i < n;   ++i) diag_inv_f[i]  = static_cast<float>(diag_inv_d[i]);
-        for (int i = 0; i < n;   ++i) diag_f[i]      = static_cast<float>(diag_d[i]);
+        std::vector<float> vals_f(nnz), F_f(n), diag_f(n);
+        for (int i = 0; i < nnz; ++i)
+            vals_f[static_cast<std::size_t>(i)] = static_cast<float>(K.values[static_cast<std::size_t>(i)]);
+        for (int i = 0; i < n; ++i) {
+            F_f[static_cast<std::size_t>(i)] = static_cast<float>(F[static_cast<std::size_t>(i)]);
+            diag_f[static_cast<std::size_t>(i)] = static_cast<float>(diag_d[static_cast<std::size_t>(i)]);
+        }
 
         return solve_pcg<float>(
             ctx_->cublas, ctx_->cusparse, ctx_->device_name,
-            n, nnz, vals_f, K.row_ptr, K.col_ind, F_f, diag_inv_f, diag_f,
+            n, nnz, vals_f, K.row_ptr, K.col_ind, F_f, diag_f,
             lower_only,
             ctx_->tolerance, ctx_->max_iters,
             ctx_->last_iters, ctx_->last_rel_res);
@@ -1122,7 +1125,7 @@ CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
 
     return solve_pcg<double>(
         ctx_->cublas, ctx_->cusparse, ctx_->device_name,
-        n, nnz, K.values, K.row_ptr, K.col_ind, F, diag_inv_d, diag_d,
+        n, nnz, K.values, K.row_ptr, K.col_ind, F, diag_d,
         lower_only,
         ctx_->tolerance, ctx_->max_iters,
         ctx_->last_iters, ctx_->last_rel_res);
