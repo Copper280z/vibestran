@@ -5,13 +5,59 @@
 
 #include "io/bdf_parser.hpp"
 #include "core/coord_sys.hpp"
+#include "core/logger.hpp"
 #include <algorithm>
 #include <cctype>
 #include <format>
 #include <fstream>
+#include <set>
 #include <sstream>
 
 namespace vibestran {
+
+namespace {
+
+[[nodiscard]] std::string extract_case_control_keyword(std::string_view line) {
+  const size_t end = line.find_first_of(" =(,\t");
+  std::string keyword(line.substr(0, end));
+  while (!keyword.empty() &&
+         std::isspace(static_cast<unsigned char>(keyword.back()))) {
+    keyword.pop_back();
+  }
+  return keyword;
+}
+
+[[nodiscard]] std::string join_keywords(const std::set<std::string> &keywords) {
+  std::string joined;
+  bool first = true;
+  for (const auto &keyword : keywords) {
+    if (!first)
+      joined += ", ";
+    joined += keyword;
+    first = false;
+  }
+  return joined;
+}
+
+void log_unsupported_cards(const std::set<std::string> &case_control_keywords,
+                           const std::set<std::string> &bulk_keywords) {
+  if (case_control_keywords.empty() && bulk_keywords.empty())
+    return;
+
+  std::string message =
+      "Unsupported BDF cards were ignored (unique keywords only):";
+  if (!case_control_keywords.empty()) {
+    message +=
+        std::format("\n  Case control: {}", join_keywords(case_control_keywords));
+  }
+  if (!bulk_keywords.empty()) {
+    message += std::format("\n  Bulk data: {}", join_keywords(bulk_keywords));
+  }
+
+  log_warn(message);
+}
+
+} // namespace
 
 // ── ParseContext
 // ──────────────────────────────────────────────────────────────
@@ -22,6 +68,11 @@ struct BdfParser::ParseContext {
 
   // Collected TEMPD (default temperature) per set
   std::unordered_map<int, double> tempd_map;
+
+  // Unsupported cards are deduplicated by normalized keyword and reported once
+  // at the end of parsing through the logger.
+  std::set<std::string> unsupported_case_control_keywords;
+  std::set<std::string> unsupported_bulk_keywords;
 };
 
 // ── Public entry points
@@ -113,6 +164,7 @@ Model BdfParser::parse_stream(std::istream &in) {
       if (first == std::string::npos)
         continue;
       std::string kw = upper.substr(first);
+      bool handled = true;
 
       if (kw.starts_with("SUBCASE")) {
         if (in_sc)
@@ -240,6 +292,18 @@ Model BdfParser::parse_stream(std::istream &in) {
             }
           }
         }
+      } else if (kw == "CEND" || kw == "SOL" || kw.starts_with("SOL ") ||
+                 kw.starts_with("BEGIN BULK") ||
+                 kw.starts_with("BEGIN  BULK")) {
+        // Deck control markers are not case-control requests.
+      } else {
+        handled = false;
+      }
+
+      if (!handled) {
+        std::string unsupported = extract_case_control_keyword(kw);
+        if (!unsupported.empty())
+          ctx.unsupported_case_control_keywords.insert(std::move(unsupported));
       }
     }
     if (in_sc)
@@ -405,6 +469,7 @@ Model BdfParser::parse_stream(std::istream &in) {
 
     ctx.line_num = card.first_line;
     try {
+      bool handled = true;
       if (kw == "GRID")
         process_grid(ctx, card.fields);
       else if (kw == "MAT1")
@@ -431,6 +496,14 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_temp(ctx, card.fields);
       else if (kw == "TEMPD")
         process_tempd(ctx, card.fields);
+      else if (kw == "PLOAD")
+        process_pload(ctx, card.fields);
+      else if (kw == "PLOAD1")
+        process_pload1(ctx, card.fields);
+      else if (kw == "PLOAD2")
+        process_pload2(ctx, card.fields);
+      else if (kw == "PLOAD4")
+        process_pload4(ctx, card.fields);
       else if (kw == "SPC")
         process_spc(ctx, card.fields);
       else if (kw == "SPC1")
@@ -457,7 +530,11 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_param(ctx, card.fields);
       else if (kw == "EIGRL")
         process_eigrl(ctx, card.fields);
-      // Silently ignore unrecognized cards
+      else
+        handled = false;
+
+      if (!handled && !kw.empty())
+        ctx.unsupported_bulk_keywords.insert(kw);
     } catch (const ParseError &) {
       throw;
     } catch (const std::exception &e) {
@@ -489,6 +566,9 @@ Model BdfParser::parse_stream(std::istream &in) {
 
   // Post-parse: resolve coordinate systems and transform node positions to basic
   ctx.model.resolve_coordinates();
+
+  log_unsupported_cards(ctx.unsupported_case_control_keywords,
+                        ctx.unsupported_bulk_keywords);
 
   return ctx.model;
 }
@@ -621,6 +701,72 @@ bool field_is_integer_like(const std::string &s) {
     if (!std::isdigit(static_cast<unsigned char>(s[i])))
       return false;
   return true;
+}
+
+std::string uppercase_copy(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(), ::toupper);
+  return s;
+}
+
+bool has_any_nonblank(const std::vector<std::string> &fields, size_t first,
+                      size_t last_exclusive) {
+  for (size_t i = first; i < last_exclusive && i < fields.size(); ++i) {
+    if (!fields[i].empty())
+      return true;
+  }
+  return false;
+}
+
+std::vector<int> expand_id_list(const std::vector<std::string> &fields,
+                                size_t start, int line) {
+  std::vector<int> ids;
+  bool pending_thru = false;
+  int thru_start = 0;
+
+  for (size_t i = start; i < fields.size(); ++i) {
+    if (fields[i].empty())
+      continue;
+
+    std::string upper = uppercase_copy(fields[i]);
+    if (upper == "THRU") {
+      if (ids.empty()) {
+        throw ParseError(std::format(
+            "Line {}: THRU cannot be the first entry in an element ID list",
+            line));
+      }
+      pending_thru = true;
+      thru_start = ids.back();
+      continue;
+    }
+
+    if (!field_is_integer_like(fields[i])) {
+      throw ParseError(std::format(
+          "Line {}: expected integer element ID or THRU, got '{}'", line,
+          fields[i]));
+    }
+
+    const int value = std::stoi(fields[i]);
+    if (pending_thru) {
+      if (value < thru_start) {
+        throw ParseError(std::format(
+            "Line {}: THRU range end {} is less than start {}", line, value,
+            thru_start));
+      }
+      for (int id = thru_start + 1; id <= value; ++id)
+        ids.push_back(id);
+      pending_thru = false;
+    } else if (value > 0) {
+      ids.push_back(value);
+    }
+  }
+
+  if (pending_thru) {
+    throw ParseError(
+        std::format("Line {}: THRU must be followed by an ending element ID",
+                    line));
+  }
+
+  return ids;
 }
 
 } // namespace
@@ -855,6 +1001,176 @@ void BdfParser::process_tempd(ParseContext &ctx,
   double T = parse_double(f[2], ctx.line_num);
   ctx.tempd_map[sid] = T;
   ctx.model.tempd[sid] = T;
+}
+
+void BdfParser::process_pload(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  // PLOAD, SID, P, G1, G2, G3, G4
+  PloadLoad l;
+  l.sid = LoadSetId(parse_int(f[1], ctx.line_num));
+  l.pressure = parse_double(f[2], ctx.line_num);
+
+  for (int i = 3; i <= 6 && i < static_cast<int>(f.size()); ++i) {
+    if (!f[i].empty())
+      l.nodes.push_back(NodeId(parse_int(f[i], ctx.line_num)));
+  }
+
+  if (l.nodes.size() != 3 && l.nodes.size() != 4) {
+    throw ParseError(std::format(
+        "Line {}: PLOAD requires 3 or 4 grid points, got {}", ctx.line_num,
+        l.nodes.size()));
+  }
+
+  std::vector<NodeId> unique_nodes = l.nodes;
+  std::sort(unique_nodes.begin(), unique_nodes.end());
+  unique_nodes.erase(std::unique(unique_nodes.begin(), unique_nodes.end()),
+                     unique_nodes.end());
+  if (unique_nodes.size() != l.nodes.size()) {
+    throw ParseError(
+        std::format("Line {}: PLOAD grid points must be unique", ctx.line_num));
+  }
+
+  ctx.model.loads.emplace_back(std::move(l));
+}
+
+void BdfParser::process_pload1(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  // PLOAD1, SID, EID, TYPE, SCALE, X1, P1, X2, P2
+  Pload1Load l;
+  l.sid = LoadSetId(parse_int(f[1], ctx.line_num));
+  l.element = ElementId(parse_int(f[2], ctx.line_num));
+  l.load_type = uppercase_copy(f[3]);
+  l.scale_type = uppercase_copy(f[4]);
+  l.x1 = parse_double(f[5], ctx.line_num);
+  l.p1 = parse_double(f[6], ctx.line_num);
+  if (f.size() > 7 && !f[7].empty())
+    l.x2 = parse_double(f[7], ctx.line_num);
+  if (f.size() > 8 && !f[8].empty())
+    l.p2 = parse_double(f[8], ctx.line_num);
+  ctx.model.loads.emplace_back(std::move(l));
+}
+
+void BdfParser::process_pload2(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  // PLOAD2, SID, P, EID...
+  const LoadSetId sid(parse_int(f[1], ctx.line_num));
+  const double pressure = parse_double(f[2], ctx.line_num);
+  const std::vector<int> element_ids = expand_id_list(f, 3, ctx.line_num);
+
+  if (element_ids.empty()) {
+    throw ParseError(std::format(
+        "Line {}: PLOAD2 requires at least one element ID", ctx.line_num));
+  }
+
+  for (int eid : element_ids) {
+    Pload2Load l;
+    l.sid = sid;
+    l.element = ElementId(eid);
+    l.pressure = pressure;
+    ctx.model.loads.emplace_back(l);
+  }
+}
+
+void BdfParser::process_pload4(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  // Supported forms:
+  //   PLOAD4, SID, EID, P1, P2, P3, P4
+  //   PLOAD4, SID, E1,  P1, P2, P3, P4, THRU, E2
+  //   PLOAD4, SID, P1,  EID
+  //   PLOAD4, SID, P1,  E1, ..., THRU, E2   (when P1 is clearly real-valued)
+  const LoadSetId sid(parse_int(f[1], ctx.line_num));
+  const bool alternate_form =
+      f.size() > 3 && !f[2].empty() && !field_is_integer_like(f[2]) &&
+      field_is_integer_like(f[3]);
+
+  std::array<double, 4> pressures{};
+  std::vector<int> element_ids;
+  std::optional<NodeId> face_node1;
+  std::optional<NodeId> face_node34;
+
+  if (alternate_form) {
+    const double p1 = parse_double(f[2], ctx.line_num);
+    pressures = {p1, p1, p1, p1};
+
+    if (f.size() > 7 && uppercase_copy(f[7]) == "THRU") {
+      element_ids = expand_id_list(f, 3, ctx.line_num);
+    } else {
+      element_ids.push_back(parse_int(f[3], ctx.line_num));
+    }
+  } else {
+    if (!field_is_integer_like(f[2])) {
+      throw ParseError(std::format(
+          "Line {}: PLOAD4 element field must be an integer element ID",
+          ctx.line_num));
+    }
+
+    const double p1 = parse_double(f[3], ctx.line_num);
+    pressures[0] = p1;
+    pressures[1] = (f.size() > 4 && !f[4].empty()) ? parse_double(f[4], ctx.line_num)
+                                                    : p1;
+    pressures[2] = (f.size() > 5 && !f[5].empty()) ? parse_double(f[5], ctx.line_num)
+                                                    : p1;
+    pressures[3] = (f.size() > 6 && !f[6].empty()) ? parse_double(f[6], ctx.line_num)
+                                                    : p1;
+
+    if (f.size() > 7 && uppercase_copy(f[7]) == "THRU") {
+      const int eid1 = parse_int(f[2], ctx.line_num);
+      const int eid2 = parse_int(f[8], ctx.line_num);
+      if (eid2 < eid1) {
+        throw ParseError(std::format(
+            "Line {}: PLOAD4 THRU range end {} is less than start {}",
+            ctx.line_num, eid2, eid1));
+      }
+      for (int eid = eid1; eid <= eid2; ++eid)
+        element_ids.push_back(eid);
+    } else {
+      element_ids.push_back(parse_int(f[2], ctx.line_num));
+      if (f.size() > 7 && !f[7].empty() && f.size() > 8 && !f[8].empty()) {
+        face_node1 = NodeId(parse_int(f[7], ctx.line_num));
+        face_node34 = NodeId(parse_int(f[8], ctx.line_num));
+      } else if ((f.size() > 7 && !f[7].empty()) ||
+                 (f.size() > 8 && !f[8].empty())) {
+        throw ParseError(std::format(
+            "Line {}: PLOAD4 solid face selection requires both face grid fields",
+            ctx.line_num));
+      }
+    }
+  }
+
+  if (element_ids.empty()) {
+    throw ParseError(std::format(
+        "Line {}: PLOAD4 requires at least one element ID", ctx.line_num));
+  }
+
+  if (face_node1 && element_ids.size() != 1) {
+    throw ParseError(std::format(
+        "Line {}: PLOAD4 face grid selection cannot be combined with THRU",
+        ctx.line_num));
+  }
+
+  const bool use_vector = has_any_nonblank(f, 9, 13);
+  CoordId cid{0};
+  Vec3 direction{0.0, 0.0, 0.0};
+  if (use_vector) {
+    cid = CoordId((f.size() > 9 && !f[9].empty()) ? parse_int(f[9], ctx.line_num)
+                                                  : 0);
+    direction = Vec3((f.size() > 10) ? parse_double(f[10], ctx.line_num) : 0.0,
+                     (f.size() > 11) ? parse_double(f[11], ctx.line_num) : 0.0,
+                     (f.size() > 12) ? parse_double(f[12], ctx.line_num) : 0.0);
+  }
+
+  for (int eid : element_ids) {
+    Pload4Load l;
+    l.sid = sid;
+    l.element = ElementId(eid);
+    l.pressures = pressures;
+    l.use_vector = use_vector;
+    l.cid = cid;
+    l.direction = direction;
+    l.face_node1 = face_node1;
+    l.face_node34 = face_node34;
+    ctx.model.loads.emplace_back(l);
+  }
 }
 
 void BdfParser::process_spc(ParseContext &ctx,

@@ -24,6 +24,7 @@
 #include "solver/eigensolver_backend.hpp"
 #include "solver/solver_backend.hpp"
 #include "io/results.hpp"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <filesystem>
@@ -46,10 +47,12 @@ static std::filesystem::path integration_data_path(const std::string& name) {
         std::filesystem::path("..") / "tests" / "integration" / "data" / name,
     };
 
-    for (const auto& candidate : candidates) {
-        if (std::filesystem::exists(candidate))
-            return candidate;
-    }
+    const auto it = std::find_if(candidates.begin(), candidates.end(),
+        [](const std::filesystem::path& candidate) {
+            return std::filesystem::exists(candidate);
+        });
+    if (it != candidates.end())
+        return *it;
 
     throw std::runtime_error("integration test data file not found: " + name);
 }
@@ -62,9 +65,12 @@ static ModalSolverResults run_modal_file(const std::string& filename) {
 
 // Helper: get the frequency of mode i (0-based) in Hz
 static double get_freq(const ModalSolverResults& res, int mode_0based) {
-    for (const auto& msc : res.subcases)
-        if (mode_0based < static_cast<int>(msc.modes.size()))
-            return msc.modes[mode_0based].cycles_per_sec;
+    const auto it = std::find_if(res.subcases.begin(), res.subcases.end(),
+        [mode_0based](const auto& msc) {
+            return mode_0based < static_cast<int>(msc.modes.size());
+        });
+    if (it != res.subcases.end())
+        return it->modes[mode_0based].cycles_per_sec;
     throw std::runtime_error("mode not found");
 }
 
@@ -73,6 +79,64 @@ static SolverResults run_analysis(const std::string& bdf) {
     Model model = BdfParser::parse_string(bdf);
     LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
     return solver.solve(model);
+}
+
+static double get_disp(const SolverResults& res, int node_id, int dof_0based);
+
+static std::string make_single_cquad4_pressure_bdf(const std::string& load_cards) {
+    std::ostringstream bdf;
+    bdf << "SOL 101\n"
+        << "CEND\n"
+        << "SUBCASE 1\n"
+        << "  LOAD = 1\n"
+        << "  SPC  = 1\n"
+        << "BEGIN BULK\n"
+        << "MAT1,1,1.0E6,,0.3\n"
+        << "PSHELL,1,1,0.1\n"
+        << "GRID,1,,0.0,0.0,0.0\n"
+        << "GRID,2,,1.0,0.0,0.0\n"
+        << "GRID,3,,1.0,1.0,0.0\n"
+        << "GRID,4,,0.0,1.0,0.0\n"
+        << "CQUAD4,1,1,1,2,3,4\n"
+        << "SPC1,1,123456,1,4\n"
+        << load_cards
+        << "ENDDATA\n";
+    return bdf.str();
+}
+
+static std::string make_single_chexa_pressure_bdf(const std::string& load_cards) {
+    std::ostringstream bdf;
+    bdf << "SOL 101\n"
+        << "CEND\n"
+        << "SUBCASE 1\n"
+        << "  LOAD = 1\n"
+        << "  SPC  = 1\n"
+        << "BEGIN BULK\n"
+        << "MAT1,1,1.0E6,,0.3\n"
+        << "PSOLID,1,1\n"
+        << "GRID,1,,0.0,0.0,0.0\n"
+        << "GRID,2,,1.0,0.0,0.0\n"
+        << "GRID,3,,1.0,1.0,0.0\n"
+        << "GRID,4,,0.0,1.0,0.0\n"
+        << "GRID,5,,0.0,0.0,1.0\n"
+        << "GRID,6,,1.0,0.0,1.0\n"
+        << "GRID,7,,1.0,1.0,1.0\n"
+        << "GRID,8,,0.0,1.0,1.0\n"
+        << "CHEXA,1,1,1,2,3,4,5,6,7,8\n"
+        << "SPC1,1,123,1,4,5,8\n"
+        << load_cards
+        << "ENDDATA\n";
+    return bdf.str();
+}
+
+static void expect_displacement_match(const SolverResults& a, const SolverResults& b,
+                                      int node_id, int dof_0based,
+                                      double abs_tol) {
+    const double da = get_disp(a, node_id, dof_0based);
+    const double db = get_disp(b, node_id, dof_0based);
+    EXPECT_NEAR(da, db, abs_tol)
+        << "node=" << node_id << " dof=" << dof_0based
+        << " lhs=" << da << " rhs=" << db;
 }
 
 // Helper: find plate stress by element ID (returns pointer, nullptr if not found)
@@ -1477,10 +1541,15 @@ ENDDATA
     //   u_basic_x = cos(θ)*u_r - sin(θ)*u_θ
     //   u_basic_y = sin(θ)*u_r + cos(θ)*u_θ
     constexpr double S60 = 0.8660254037844386;
-    struct NodeAngle { int id; double cos_t; double sin_t; };
-    NodeAngle nodes[] = {{1, 1.0, 0.0}, {2, 0.5, S60}, {7, 1.0, 0.0}, {8, 0.5, S60}};
+    constexpr std::array<std::array<double, 3>, 4> nodes{{
+        {1.0, 1.0, 0.0},
+        {2.0, 0.5, S60},
+        {7.0, 1.0, 0.0},
+        {8.0, 0.5, S60},
+    }};
 
-    for (const auto& [nid, ct, st] : nodes) {
+    for (const auto& [nid_value, ct, st] : nodes) {
+        const int nid = static_cast<int>(nid_value);
         // MPC version: output in basic
         double ux_mpc = get_disp(res_mpc, nid, 0);
         double uy_mpc = get_disp(res_mpc, nid, 1);
@@ -1993,4 +2062,78 @@ TEST(Integration, ClosedTubeCantileverBendingMitc4) {
 TEST(Integration, ClosedTubeCantileverBendingMindlin) {
     expect_closed_tube_matches_beam_theory(
         ShellFormulation::MINDLIN, 56, 6, 0.08);
+}
+
+TEST(Integration, PloadMatchesEquivalentNodalForcesOnCquad4) {
+    const SolverResults pressure = run_analysis(make_single_cquad4_pressure_bdf(
+        "PLOAD,1,-40.0,1,2,3,4\n"));
+    const SolverResults forces = run_analysis(make_single_cquad4_pressure_bdf(
+        "FORCE,1,1,0,10.0,0.0,0.0,-1.0\n"
+        "FORCE,1,2,0,10.0,0.0,0.0,-1.0\n"
+        "FORCE,1,3,0,10.0,0.0,0.0,-1.0\n"
+        "FORCE,1,4,0,10.0,0.0,0.0,-1.0\n"));
+
+    expect_displacement_match(pressure, forces, 2, 2, 1e-10);
+    expect_displacement_match(pressure, forces, 3, 2, 1e-10);
+}
+
+TEST(Integration, Pload2MatchesEquivalentNodalForcesOnCquad4) {
+    const SolverResults pressure = run_analysis(make_single_cquad4_pressure_bdf(
+        "PLOAD2,1,-40.0,1\n"));
+    const SolverResults forces = run_analysis(make_single_cquad4_pressure_bdf(
+        "FORCE,1,1,0,10.0,0.0,0.0,-1.0\n"
+        "FORCE,1,2,0,10.0,0.0,0.0,-1.0\n"
+        "FORCE,1,3,0,10.0,0.0,0.0,-1.0\n"
+        "FORCE,1,4,0,10.0,0.0,0.0,-1.0\n"));
+
+    expect_displacement_match(pressure, forces, 2, 2, 1e-10);
+    expect_displacement_match(pressure, forces, 3, 2, 1e-10);
+}
+
+TEST(Integration, Pload4ShellMatchesEquivalentNodalForcesOnCquad4) {
+    const SolverResults pressure = run_analysis(make_single_cquad4_pressure_bdf(
+        "PLOAD4,1,1,-40.0\n"));
+    const SolverResults forces = run_analysis(make_single_cquad4_pressure_bdf(
+        "FORCE,1,1,0,10.0,0.0,0.0,-1.0\n"
+        "FORCE,1,2,0,10.0,0.0,0.0,-1.0\n"
+        "FORCE,1,3,0,10.0,0.0,0.0,-1.0\n"
+        "FORCE,1,4,0,10.0,0.0,0.0,-1.0\n"));
+
+    expect_displacement_match(pressure, forces, 2, 2, 1e-10);
+    expect_displacement_match(pressure, forces, 3, 2, 1e-10);
+}
+
+TEST(Integration, Pload4SolidExplicitFaceMatchesEquivalentNodalForces) {
+    const SolverResults pressure = run_analysis(make_single_chexa_pressure_bdf(
+        "PLOAD4,1,1,40.0,,,,2,7\n"));
+    const SolverResults forces = run_analysis(make_single_chexa_pressure_bdf(
+        "FORCE,1,2,0,10.0,-1.0,0.0,0.0\n"
+        "FORCE,1,3,0,10.0,-1.0,0.0,0.0\n"
+        "FORCE,1,6,0,10.0,-1.0,0.0,0.0\n"
+        "FORCE,1,7,0,10.0,-1.0,0.0,0.0\n"));
+
+    expect_displacement_match(pressure, forces, 2, 0, 1e-10);
+    expect_displacement_match(pressure, forces, 3, 0, 1e-10);
+    expect_displacement_match(pressure, forces, 6, 0, 1e-10);
+    expect_displacement_match(pressure, forces, 7, 0, 1e-10);
+}
+
+TEST(Integration, Pload4SolidDefaultFaceMatchesEquivalentNodalForces) {
+    const SolverResults pressure = run_analysis(make_single_chexa_pressure_bdf(
+        "PLOAD4,1,1,40.0\n"));
+    const SolverResults forces = run_analysis(make_single_chexa_pressure_bdf(
+        "FORCE,1,1,0,10.0,0.0,0.0,1.0\n"
+        "FORCE,1,2,0,10.0,0.0,0.0,1.0\n"
+        "FORCE,1,3,0,10.0,0.0,0.0,1.0\n"
+        "FORCE,1,4,0,10.0,0.0,0.0,1.0\n"));
+
+    expect_displacement_match(pressure, forces, 2, 2, 1e-10);
+    expect_displacement_match(pressure, forces, 3, 2, 1e-10);
+}
+
+TEST(Integration, Pload1StubThrowsWhenActive) {
+    EXPECT_THROW(
+        run_analysis(make_single_cquad4_pressure_bdf(
+            "PLOAD1,1,1,FY,FR,0.0,25.0,1.0,25.0\n")),
+        SolverError);
 }

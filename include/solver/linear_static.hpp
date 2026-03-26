@@ -4,7 +4,7 @@
 //   1. Build DOF map (number free DOFs, apply SPCs)
 //   2. Build MPC system (RBE2/RBE3, explicit MPCs, CD-frame SPCs)
 //   3. Assemble global stiffness matrix K (MPC-transformed)
-//   4. Assemble global force vector F (point loads + thermal loads)
+//   4. Assemble global force vector F (point loads + pressure loads + thermal loads)
 //   5. Solve K_red * u_red = F_red
 //   6. Recover full displacements (free + dep DOFs)
 //   7. Recover element stresses
@@ -47,11 +47,17 @@ private:
                   SparseMatrixBuilder& K_builder,
                   std::vector<double>& F);
 
-    /// Apply point loads (FORCE, MOMENT) to F via MpcHandler
+    /// Apply concentrated loads (FORCE, MOMENT) to F via MpcHandler
     void apply_point_loads(const Model& model,
                            const SubCase& sc,
                            const MpcHandler& mpc_handler,
                            std::vector<double>& F);
+
+    /// Apply pressure loads (PLOAD, PLOAD1, PLOAD2, PLOAD4) to F via MpcHandler
+    void apply_pressure_loads(const Model& model,
+                              const SubCase& sc,
+                              const MpcHandler& mpc_handler,
+                              std::vector<double>& F);
 
     /// Apply thermal loads to F via MpcHandler
     void apply_thermal_loads(const Model& model,

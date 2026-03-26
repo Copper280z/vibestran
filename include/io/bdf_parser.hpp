@@ -13,8 +13,12 @@
 // Parsed card types: GRID, MAT1, PSHELL, PSOLID,
 //                    CQUAD4, CTRIA3, CHEXA, CTETRA,
 //                    FORCE, MOMENT, TEMP, TEMPD,
+//                    PLOAD, PLOAD1, PLOAD2, PLOAD4,
 //                    SPC, SPC1,
 //                    SOL, SUBCASE, LOAD, SPC (case control)
+//
+// Unsupported case-control entries and bulk cards are ignored, but reported
+// once per unique keyword through the normal logger output.
 
 #include "core/model.hpp"
 #include <filesystem>
@@ -55,6 +59,10 @@ private:
     static void process_moment  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_temp    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_tempd   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_pload   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_pload1  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_pload2  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_pload4  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_spc     (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_spc1    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_mpc     (ParseContext& ctx, const std::vector<std::string>& fields);

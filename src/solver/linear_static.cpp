@@ -66,9 +66,15 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   const auto t4 = Clock::now();
   spdlog::debug("[subcase {}] apply_point_loads: {:.3f} ms", sc.id, Ms(t4 - t3).count());
 
+  apply_pressure_loads(model, sc, mpc_handler, F);
+  const auto t4b = Clock::now();
+  spdlog::debug("[subcase {}] apply_pressure_loads: {:.3f} ms", sc.id,
+                Ms(t4b - t4).count());
+
   apply_thermal_loads(model, sc, mpc_handler, K_builder, F);
   const auto t5 = Clock::now();
-  spdlog::debug("[subcase {}] apply_thermal_loads: {:.3f} ms", sc.id, Ms(t5 - t4).count());
+  spdlog::debug("[subcase {}] apply_thermal_loads: {:.3f} ms", sc.id,
+                Ms(t5 - t4b).count());
 
   // 4. Solve
   auto csr = K_builder.build_csr();

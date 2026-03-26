@@ -46,7 +46,8 @@ vibestran/
 - **Elements**: CQUAD4, CTRIA3, CHEXA8, CHEXA20, CTETRA4, CTETRA10, CPENTA6
 - **Materials**: MAT1 (isotropic)
 - **Properties**: PSHELL, PSOLID
-- **Loads**: FORCE, MOMENT, TEMP (thermal)
+- **Loads**: FORCE, MOMENT, TEMP (thermal), PLOAD, PLOAD2, PLOAD4
+  (`PLOAD1` is parsed but remains a stub until bar/beam elements are added)
 - **Constraints**: SPC, SPC1, MPC, RBE2, RBE3
 - **Coordinate systems**: CORD1R/C/S, CORD2R/C/S
 - **Input formats**: Nastran BDF (`.bdf`) and CalculiX/Abaqus (`.inp`, experimental)

@@ -3,9 +3,25 @@
 
 #include <gtest/gtest.h>
 #include "io/bdf_parser.hpp"
+#include "core/logger.hpp"
 #include "core/model.hpp"
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <spdlog/spdlog.h>
 
 using namespace vibestran;
+
+namespace {
+
+std::string read_text_file(const std::filesystem::path& path) {
+    std::ifstream in(path);
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    return buffer.str();
+}
+
+} // namespace
 
 // ── Numeric format parsing ────────────────────────────────────────────────────
 
@@ -44,7 +60,7 @@ ENDDATA
 )";
     Model m = BdfParser::parse_string(bdf);
     ASSERT_EQ(m.nodes.size(), 1u);
-    auto& n = m.nodes.at(NodeId{1});
+    const auto& n = m.nodes.at(NodeId{1});
     EXPECT_DOUBLE_EQ(n.position.x, 1.5);
     EXPECT_DOUBLE_EQ(n.position.y, 2.5);
     EXPECT_DOUBLE_EQ(n.position.z, 3.5);
@@ -58,7 +74,7 @@ ENDDATA
 )";
     Model m = BdfParser::parse_string(bdf);
     ASSERT_EQ(m.nodes.size(), 1u);
-    auto& n = m.nodes.at(NodeId{10});
+    const auto& n = m.nodes.at(NodeId{10});
     EXPECT_NEAR(n.position.x, 3.14, 1e-10);
     EXPECT_NEAR(n.position.y, 2.72, 1e-10);
     EXPECT_NEAR(n.position.z, 1.41, 1e-10);
@@ -105,6 +121,89 @@ ENDDATA
     EXPECT_EQ(f.node.value, 1);
     EXPECT_DOUBLE_EQ(f.scale, 1000.0);
     EXPECT_DOUBLE_EQ(f.direction.z, 1.0);
+}
+
+TEST(BdfParser, PloadCard) {
+    const std::string bdf = R"(
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,1.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+PLOAD,7,-12.5,1,2,3,4
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.loads.size(), 1u);
+    const PloadLoad& pl = std::get<PloadLoad>(m.loads[0]);
+    EXPECT_EQ(pl.sid.value, 7);
+    EXPECT_DOUBLE_EQ(pl.pressure, -12.5);
+    ASSERT_EQ(pl.nodes.size(), 4u);
+    EXPECT_EQ(pl.nodes[0].value, 1);
+    EXPECT_EQ(pl.nodes[3].value, 4);
+}
+
+TEST(BdfParser, Pload1CardStub) {
+    const std::string bdf = R"(
+BEGIN BULK
+CQUAD4,1,1,1,2,3,4
+PLOAD1,9,1,FY,FR,0.0,25.0,1.0,50.0
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.loads.size(), 1u);
+    const Pload1Load& pl = std::get<Pload1Load>(m.loads[0]);
+    EXPECT_EQ(pl.sid.value, 9);
+    EXPECT_EQ(pl.element.value, 1);
+    EXPECT_EQ(pl.load_type, "FY");
+    EXPECT_EQ(pl.scale_type, "FR");
+    ASSERT_TRUE(pl.x2.has_value());
+    ASSERT_TRUE(pl.p2.has_value());
+    EXPECT_DOUBLE_EQ(*pl.x2, 1.0);
+    EXPECT_DOUBLE_EQ(*pl.p2, 50.0);
+}
+
+TEST(BdfParser, Pload2CardExpandsThruRange) {
+    const std::string bdf = R"(
+BEGIN BULK
+PLOAD2,3,-4.0,10,THRU,12,20
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.loads.size(), 4u);
+    const Pload2Load& p0 = std::get<Pload2Load>(m.loads[0]);
+    const Pload2Load& p1 = std::get<Pload2Load>(m.loads[1]);
+    const Pload2Load& p2 = std::get<Pload2Load>(m.loads[2]);
+    const Pload2Load& p3 = std::get<Pload2Load>(m.loads[3]);
+    EXPECT_EQ(p0.element.value, 10);
+    EXPECT_EQ(p1.element.value, 11);
+    EXPECT_EQ(p2.element.value, 12);
+    EXPECT_EQ(p3.element.value, 20);
+    EXPECT_DOUBLE_EQ(p0.pressure, -4.0);
+}
+
+TEST(BdfParser, Pload4CardParsesVectorAndFaceIds) {
+    const std::string bdf =
+        "BEGIN BULK\n"
+        "PLOAD4,5,17,8.0,9.0,10.0,11.0,101,104\n"
+        "+,42,1.0,2.0,3.0\n"
+        "ENDDATA\n";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.loads.size(), 1u);
+    const Pload4Load& pl = std::get<Pload4Load>(m.loads[0]);
+    EXPECT_EQ(pl.sid.value, 5);
+    EXPECT_EQ(pl.element.value, 17);
+    EXPECT_DOUBLE_EQ(pl.pressures[0], 8.0);
+    EXPECT_DOUBLE_EQ(pl.pressures[3], 11.0);
+    ASSERT_TRUE(pl.use_vector);
+    EXPECT_EQ(pl.cid.value, 42);
+    EXPECT_DOUBLE_EQ(pl.direction.x, 1.0);
+    EXPECT_DOUBLE_EQ(pl.direction.y, 2.0);
+    EXPECT_DOUBLE_EQ(pl.direction.z, 3.0);
+    ASSERT_TRUE(pl.face_node1.has_value());
+    ASSERT_TRUE(pl.face_node34.has_value());
+    EXPECT_EQ(pl.face_node1->value, 101);
+    EXPECT_EQ(pl.face_node34->value, 104);
 }
 
 TEST(BdfParser, SPC1WithThruRange) {
@@ -318,6 +417,39 @@ ENDDATA
     Model m = BdfParser::parse_string(bdf);
     ASSERT_FALSE(m.analysis.subcases.empty());
     EXPECT_NEAR(m.analysis.subcases[0].t_ref, 150.0, 1e-10);
+}
+
+TEST(BdfParser, ReportsUniqueUnsupportedCaseControlAndBulkCards) {
+    const auto log_path =
+        std::filesystem::temp_directory_path() / "vibestran_bdf_parser_unsupported_cards.log";
+    init_logger(log_path);
+
+    const std::string bdf = R"(
+SOL 101
+CEND
+TITLE = FIRST TITLE
+TITLE = SECOND TITLE
+ECHO = NONE
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+CBAR,100,10,1,1,0.0,1.0,0.0
+CBAR,101,10,1,1,0.0,1.0,0.0
+PBEAM,10,1,1.0
+ENDDATA
+)";
+
+    Model m = BdfParser::parse_string(bdf);
+    EXPECT_EQ(m.nodes.size(), 1u);
+
+    spdlog::default_logger()->flush();
+    const std::string log_text = read_text_file(log_path);
+
+    EXPECT_NE(log_text.find("Unsupported BDF cards were ignored"), std::string::npos);
+    EXPECT_NE(log_text.find("Case control: ECHO, TITLE"), std::string::npos);
+    EXPECT_NE(log_text.find("Bulk data: CBAR, PBEAM"), std::string::npos);
 }
 
 TEST(BdfParser, SmallFieldSpcFullLine) {
@@ -729,7 +861,7 @@ TEST(BdfParser, FixedWidth_GRID_NastranReals) {
         "ENDDATA\n";
     Model m = BdfParser::parse_string(bdf);
     ASSERT_EQ(m.nodes.size(), 1u);
-    auto& n = m.nodes.at(NodeId{1});
+    const auto& n = m.nodes.at(NodeId{1});
     EXPECT_EQ(n.cp.value, 0);
     EXPECT_NEAR(n.position.x, 12.39486, 1e-4);
     EXPECT_NEAR(n.position.y, 0.0, 1e-12);

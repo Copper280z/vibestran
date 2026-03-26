@@ -8,6 +8,11 @@
 namespace vibestran {
 
 void Model::validate() const {
+    std::unordered_set<ElementId> element_ids;
+    element_ids.reserve(elements.size());
+    for (const auto& elem : elements)
+        element_ids.insert(elem.id);
+
     // Check all element nodes exist
     for (const auto& elem : elements) {
         auto missing_node = std::find_if(elem.nodes.begin(), elem.nodes.end(),
@@ -62,6 +67,26 @@ void Model::validate() const {
                 if (!nodes.count(l.node))
                     throw SolverError(std::format(
                         "Load references undefined node {}", l.node.value));
+            } else if constexpr (std::is_same_v<T, PloadLoad>) {
+                auto missing_node = std::find_if(l.nodes.begin(), l.nodes.end(),
+                    [&](NodeId nid) { return !nodes.count(nid); });
+                if (missing_node != l.nodes.end())
+                    throw SolverError(std::format(
+                        "PLOAD references undefined node {}", missing_node->value));
+            } else if constexpr (std::is_same_v<T, Pload1Load> ||
+                                 std::is_same_v<T, Pload2Load> ||
+                                 std::is_same_v<T, Pload4Load>) {
+                if (!element_ids.count(l.element))
+                    throw SolverError(std::format(
+                        "Load references undefined element {}", l.element.value));
+                if constexpr (std::is_same_v<T, Pload4Load>) {
+                    if (l.face_node1 && !nodes.count(*l.face_node1))
+                        throw SolverError(std::format(
+                            "PLOAD4 references undefined face node {}", l.face_node1->value));
+                    if (l.face_node34 && !nodes.count(*l.face_node34))
+                        throw SolverError(std::format(
+                            "PLOAD4 references undefined face node {}", l.face_node34->value));
+                }
             }
         }, load);
     }

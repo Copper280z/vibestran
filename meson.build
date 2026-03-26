@@ -375,6 +375,7 @@ solver_sources = files(
   # Solver
   'src/solver/solver_backend.cpp',
   'src/solver/linear_static.cpp',
+  'src/solver/linear_static_pressure.cpp',
   'src/solver/eigensolver_backend.cpp',
   'src/solver/modal.cpp',
 )

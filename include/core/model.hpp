@@ -120,7 +120,49 @@ struct TempRefLoad {
   double t_ref{0}; // from TEMPD or analysis case
 };
 
-using Load = std::variant<ForceLoad, MomentLoad, TempLoad>;
+/// PLOAD card: pressure on 3 or 4 explicitly listed grid points.
+struct PloadLoad {
+  LoadSetId sid{0};
+  double pressure{0.0};
+  std::vector<NodeId> nodes;
+};
+
+/// PLOAD1 card: line pressure on bar/beam-type elements.
+/// This is currently parsed and carried through the model, but no supported
+/// element types consume it yet.
+struct Pload1Load {
+  LoadSetId sid{0};
+  ElementId element{0};
+  std::string load_type;
+  std::string scale_type;
+  double x1{0.0};
+  double p1{0.0};
+  std::optional<double> x2;
+  std::optional<double> p2;
+};
+
+/// PLOAD2 card: uniform pressure on a 2-D element.
+struct Pload2Load {
+  LoadSetId sid{0};
+  ElementId element{0};
+  double pressure{0.0};
+};
+
+/// PLOAD4 card: pressure on an element face, optionally with an explicit
+/// direction vector.
+struct Pload4Load {
+  LoadSetId sid{0};
+  ElementId element{0};
+  std::array<double, 4> pressures{0.0, 0.0, 0.0, 0.0};
+  bool use_vector{false};
+  CoordId cid{0};
+  Vec3 direction{0.0, 0.0, 0.0};
+  std::optional<NodeId> face_node1;
+  std::optional<NodeId> face_node34;
+};
+
+using Load = std::variant<ForceLoad, MomentLoad, TempLoad, PloadLoad,
+                          Pload1Load, Pload2Load, Pload4Load>;
 
 // ── Single point constraints
 // ──────────────────────────────────────────────────
