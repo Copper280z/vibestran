@@ -53,6 +53,41 @@ bool contains_solid_stress_type(const SubCaseResults& sc, ElementType etype) {
         [&](const auto& ss) { return ss.etype == etype; });
 }
 
+bool contains_line_stresses(const SubCaseResults& sc) {
+    return !sc.line_stresses.empty();
+}
+
+bool contains_plate_nodal_stress_type(const SubCaseResults& sc, ElementType etype) {
+    return std::any_of(
+        sc.plate_stresses.begin(), sc.plate_stresses.end(),
+        [&](const auto& ps) { return ps.etype == etype && !ps.nodal.empty(); });
+}
+
+bool contains_solid_nodal_stress_type(const SubCaseResults& sc, ElementType etype) {
+    return std::any_of(
+        sc.solid_stresses.begin(), sc.solid_stresses.end(),
+        [&](const auto& ss) { return ss.etype == etype && !ss.nodal.empty(); });
+}
+
+int plate_vertex_count(const ElementType etype) {
+    return (etype == ElementType::CQUAD4) ? 4 : 3;
+}
+
+int solid_vertex_count(const ElementType etype) {
+    switch (etype) {
+    case ElementType::CHEXA8:
+        return 8;
+    case ElementType::CTETRA4:
+        return 4;
+    case ElementType::CTETRA10:
+        return 4;
+    case ElementType::CPENTA6:
+        return 6;
+    default:
+        return 0;
+    }
+}
+
 } // namespace
 
 // ── Principal stress helpers ──────────────────────────────────────────────────
@@ -161,20 +196,44 @@ void F06Writer::write(const SolverResults& results, const Model& model,
     for (const auto& sc : results.subcases) {
         const SubCase* msc = find_model_subcase(model, sc.id);
         const bool do_disp = (msc != nullptr) && msc->disp_print;
+        const bool do_line_stress =
+            (msc != nullptr) &&
+            (msc->stress_print || msc->stress_corner_print);
         const bool do_stress = (msc != nullptr) && msc->stress_print;
+        const bool do_corner = (msc != nullptr) && msc->stress_corner_print;
+        const bool do_gpstress = (msc != nullptr) && msc->gpstress_print;
 
         out << "\n OUTPUT FOR SUBCASE" << std::setw(9) << sc.id << "\n";
         if (!sc.label.empty())
             out << " " << sc.label << "\n";
 
         if (do_disp)   write_displacement_table(sc, out);
-        if (do_stress) {
+        if (do_line_stress) {
+            write_line_stress_table(sc, out);
+        }
+        if (do_stress && !do_corner) {
             write_quad4_stress_table(sc, out);
             write_tria3_stress_table(sc, out);
             write_solid_stress_table(sc, out, ElementType::CHEXA8);
             write_solid_stress_table(sc, out, ElementType::CTETRA4);
             write_solid_stress_table(sc, out, ElementType::CTETRA10);
             write_solid_stress_table(sc, out, ElementType::CPENTA6);
+        }
+        if (do_corner) {
+            write_quad4_corner_stress_table(sc, out);
+            write_tria3_corner_stress_table(sc, out);
+            write_solid_corner_stress_table(sc, out, ElementType::CHEXA8);
+            write_solid_corner_stress_table(sc, out, ElementType::CTETRA4);
+            write_solid_corner_stress_table(sc, out, ElementType::CTETRA10);
+            write_solid_corner_stress_table(sc, out, ElementType::CPENTA6);
+        }
+        if (do_gpstress) {
+            write_quad4_gpstress_table(sc, out);
+            write_tria3_gpstress_table(sc, out);
+            write_solid_gpstress_table(sc, out, ElementType::CHEXA8);
+            write_solid_gpstress_table(sc, out, ElementType::CTETRA4);
+            write_solid_gpstress_table(sc, out, ElementType::CTETRA10);
+            write_solid_gpstress_table(sc, out, ElementType::CPENTA6);
         }
     }
     out << "\n\n                     * * * END OF JOB * * *\n\n";
@@ -219,6 +278,36 @@ void F06Writer::write_displacement_table(const SubCaseResults& sc,
     }
 }
 
+void F06Writer::write_line_stress_table(const SubCaseResults& sc,
+                                        std::ostream& out) {
+    if (!contains_line_stresses(sc)) return;
+
+    out << "\n                         S T R E S S E S   I N   B A R / B E A M   E L E M E N T S\n\n";
+    out << "  ELEMENT-ID    TYPE   END  GRID-ID           S1            S2            S3            S4         AXIAL          SMAX          SMIN\n";
+
+    auto write_end = [&](const LineStress& ls, const char* end_label,
+                         const LineStressEnd& end) {
+        const char* type = (ls.etype == ElementType::CBAR) ? "CBAR" : "CBEAM";
+        out << std::setw(12) << ls.eid.value
+            << std::setw(8) << type
+            << std::setw(6) << end_label
+            << std::setw(9) << end.node.value
+            << std::setw(14) << std::setprecision(6) << std::scientific << end.s[0]
+            << std::setw(14) << std::setprecision(6) << std::scientific << end.s[1]
+            << std::setw(14) << std::setprecision(6) << std::scientific << end.s[2]
+            << std::setw(14) << std::setprecision(6) << std::scientific << end.s[3]
+            << std::setw(14) << std::setprecision(6) << std::scientific << end.axial
+            << std::setw(14) << std::setprecision(6) << std::scientific << end.smax
+            << std::setw(14) << std::setprecision(6) << std::scientific << end.smin
+            << "\n";
+    };
+
+    for (const auto& ls : sc.line_stresses) {
+        write_end(ls, "A", ls.end_a);
+        write_end(ls, "B", ls.end_b);
+    }
+}
+
 void F06Writer::write_quad4_stress_table(const SubCaseResults& sc,
                                           std::ostream& out) {
     // Filter CQUAD4 plate stresses
@@ -245,6 +334,56 @@ void F06Writer::write_quad4_stress_table(const SubCaseResults& sc,
     }
 }
 
+void F06Writer::write_quad4_corner_stress_table(const SubCaseResults& sc,
+                                                std::ostream& out) {
+    if (!contains_plate_nodal_stress_type(sc, ElementType::CQUAD4)) return;
+
+    out << "\n                    C O R N E R   S T R E S S E S   I N   Q U A D R I L A T E R A L   E L E M E N T S   ( C Q U A D 4 )\n\n";
+    out << "  ELEMENT-ID  GRID-ID    NORMAL-X       NORMAL-Y      SHEAR-XY       MOMENT-X       MOMENT-Y      MOMENT-XY       VON MISES\n";
+
+    for (const auto& ps : sc.plate_stresses) {
+        if (ps.etype != ElementType::CQUAD4) continue;
+        const int limit = std::min<int>(plate_vertex_count(ps.etype), ps.nodal.size());
+        for (int i = 0; i < limit; ++i) {
+            const auto& point = ps.nodal[static_cast<std::size_t>(i)];
+            out << std::setw(12) << ps.eid.value;
+            out << std::setw(9) << point.node.value;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sx;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sxy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.mx;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.my;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.mxy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.von_mises;
+            out << "\n";
+        }
+    }
+}
+
+void F06Writer::write_quad4_gpstress_table(const SubCaseResults& sc,
+                                           std::ostream& out) {
+    if (!contains_plate_nodal_stress_type(sc, ElementType::CQUAD4)) return;
+
+    out << "\n                  G R I D   P O I N T   S T R E S S E S   I N   Q U A D R I L A T E R A L   E L E M E N T S   ( C Q U A D 4 )\n\n";
+    out << "  ELEMENT-ID  GRID-ID    NORMAL-X       NORMAL-Y      SHEAR-XY       MOMENT-X       MOMENT-Y      MOMENT-XY       VON MISES\n";
+
+    for (const auto& ps : sc.plate_stresses) {
+        if (ps.etype != ElementType::CQUAD4) continue;
+        for (const auto& point : ps.nodal) {
+            out << std::setw(12) << ps.eid.value;
+            out << std::setw(9) << point.node.value;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sx;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sxy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.mx;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.my;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.mxy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.von_mises;
+            out << "\n";
+        }
+    }
+}
+
 void F06Writer::write_tria3_stress_table(const SubCaseResults& sc,
                                           std::ostream& out) {
     if (!contains_plate_stress_type(sc, ElementType::CTRIA3)) return;
@@ -267,6 +406,56 @@ void F06Writer::write_tria3_stress_table(const SubCaseResults& sc,
         out << std::setw(15) << std::setprecision(6) << std::scientific << minor;
         out << std::setw(15) << std::setprecision(6) << std::scientific << ps.von_mises;
         out << "\n";
+    }
+}
+
+void F06Writer::write_tria3_corner_stress_table(const SubCaseResults& sc,
+                                                std::ostream& out) {
+    if (!contains_plate_nodal_stress_type(sc, ElementType::CTRIA3)) return;
+
+    out << "\n                        C O R N E R   S T R E S S E S   I N   T R I A N G U L A R   E L E M E N T S   ( C T R I A 3 )\n\n";
+    out << "  ELEMENT-ID  GRID-ID    NORMAL-X       NORMAL-Y      SHEAR-XY       MOMENT-X       MOMENT-Y      MOMENT-XY       VON MISES\n";
+
+    for (const auto& ps : sc.plate_stresses) {
+        if (ps.etype != ElementType::CTRIA3) continue;
+        const int limit = std::min<int>(plate_vertex_count(ps.etype), ps.nodal.size());
+        for (int i = 0; i < limit; ++i) {
+            const auto& point = ps.nodal[static_cast<std::size_t>(i)];
+            out << std::setw(12) << ps.eid.value;
+            out << std::setw(9) << point.node.value;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sx;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sxy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.mx;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.my;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.mxy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.von_mises;
+            out << "\n";
+        }
+    }
+}
+
+void F06Writer::write_tria3_gpstress_table(const SubCaseResults& sc,
+                                           std::ostream& out) {
+    if (!contains_plate_nodal_stress_type(sc, ElementType::CTRIA3)) return;
+
+    out << "\n                      G R I D   P O I N T   S T R E S S E S   I N   T R I A N G U L A R   E L E M E N T S   ( C T R I A 3 )\n\n";
+    out << "  ELEMENT-ID  GRID-ID    NORMAL-X       NORMAL-Y      SHEAR-XY       MOMENT-X       MOMENT-Y      MOMENT-XY       VON MISES\n";
+
+    for (const auto& ps : sc.plate_stresses) {
+        if (ps.etype != ElementType::CTRIA3) continue;
+        for (const auto& point : ps.nodal) {
+            out << std::setw(12) << ps.eid.value;
+            out << std::setw(9) << point.node.value;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sx;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sxy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.mx;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.my;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.mxy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.von_mises;
+            out << "\n";
+        }
     }
 }
 
@@ -310,6 +499,80 @@ void F06Writer::write_solid_stress_table(const SubCaseResults& sc,
         out << std::setw(15) << std::setprecision(6) << std::scientific << ss.szx;
         out << std::setw(15) << std::setprecision(6) << std::scientific << ss.von_mises;
         out << "\n";
+    }
+}
+
+void F06Writer::write_solid_corner_stress_table(const SubCaseResults& sc,
+                                                std::ostream& out,
+                                                ElementType etype) {
+    if (!contains_solid_nodal_stress_type(sc, etype)) return;
+
+    const char* title = "S O L I D";
+    if (etype == ElementType::CHEXA8) {
+        title  = "H E X A H E D R O N   E L E M E N T S   ( C H E X A )";
+    } else if (etype == ElementType::CTETRA4) {
+        title  = "T E T R A H E D R O N   E L E M E N T S   ( C T E T R A )";
+    } else if (etype == ElementType::CTETRA10) {
+        title  = "T E T R A H E D R O N   E L E M E N T S   ( C T E T R A 1 0 )";
+    } else if (etype == ElementType::CPENTA6) {
+        title  = "P E N T A H E D R O N   E L E M E N T S   ( C P E N T A )";
+    }
+
+    out << "\n                         C O R N E R   S T R E S S E S   I N   " << title << "\n\n";
+    out << "  ELEMENT-ID  GRID-ID    NORMAL-X       NORMAL-Y       NORMAL-Z      SHEAR-XY       SHEAR-YZ       SHEAR-ZX       VON MISES\n";
+
+    for (const auto& ss : sc.solid_stresses) {
+        if (ss.etype != etype) continue;
+        const int limit = std::min<int>(solid_vertex_count(etype), ss.nodal.size());
+        for (int i = 0; i < limit; ++i) {
+            const auto& point = ss.nodal[static_cast<std::size_t>(i)];
+            out << std::setw(12) << ss.eid.value;
+            out << std::setw(7)  << point.node.value;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sx;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sz;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sxy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.syz;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.szx;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.von_mises;
+            out << "\n";
+        }
+    }
+}
+
+void F06Writer::write_solid_gpstress_table(const SubCaseResults& sc,
+                                           std::ostream& out,
+                                           ElementType etype) {
+    if (!contains_solid_nodal_stress_type(sc, etype)) return;
+
+    const char* title = "S O L I D";
+    if (etype == ElementType::CHEXA8) {
+        title  = "H E X A H E D R O N   E L E M E N T S   ( C H E X A )";
+    } else if (etype == ElementType::CTETRA4) {
+        title  = "T E T R A H E D R O N   E L E M E N T S   ( C T E T R A )";
+    } else if (etype == ElementType::CTETRA10) {
+        title  = "T E T R A H E D R O N   E L E M E N T S   ( C T E T R A 1 0 )";
+    } else if (etype == ElementType::CPENTA6) {
+        title  = "P E N T A H E D R O N   E L E M E N T S   ( C P E N T A )";
+    }
+
+    out << "\n                       G R I D   P O I N T   S T R E S S E S   I N   " << title << "\n\n";
+    out << "  ELEMENT-ID  GRID-ID    NORMAL-X       NORMAL-Y       NORMAL-Z      SHEAR-XY       SHEAR-YZ       SHEAR-ZX       VON MISES\n";
+
+    for (const auto& ss : sc.solid_stresses) {
+        if (ss.etype != etype) continue;
+        for (const auto& point : ss.nodal) {
+            out << std::setw(12) << ss.eid.value;
+            out << std::setw(7)  << point.node.value;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sx;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sz;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.sxy;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.syz;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.szx;
+            out << std::setw(15) << std::setprecision(6) << std::scientific << point.von_mises;
+            out << "\n";
+        }
     }
 }
 

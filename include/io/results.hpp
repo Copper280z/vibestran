@@ -4,10 +4,12 @@
 
 #include "core/model.hpp"
 #include "core/types.hpp"
+#include <array>
 #include <filesystem>
 #include <optional>
 #include <ostream>
 #include <unordered_map>
+#include <vector>
 
 namespace vibestran {
 
@@ -21,6 +23,14 @@ struct NodeDisplacement {
 };
 
 /// Element stress at centroid (for plate elements: CQUAD4, CTRIA3)
+struct PlateStressPoint {
+  constexpr PlateStressPoint() = default;
+  NodeId node{0};
+  double sx{0}, sy{0}, sxy{0};
+  double mx{0}, my{0}, mxy{0};
+  double von_mises{0};
+};
+
 struct PlateStress {
   constexpr PlateStress() = default;
   ElementId eid{0};
@@ -28,9 +38,18 @@ struct PlateStress {
   double sx{0}, sy{0}, sxy{0};  // membrane stresses
   double mx{0}, my{0}, mxy{0};  // moments (plate bending)
   double von_mises{0}; // derived
+  std::vector<PlateStressPoint> nodal;
 };
 
 /// Element stress for solid elements (at centroid)
+struct SolidStressPoint {
+  constexpr SolidStressPoint() = default;
+  NodeId node{0};
+  double sx{0}, sy{0}, sz{0};
+  double sxy{0}, syz{0}, szx{0};
+  double von_mises{0};
+};
+
 struct SolidStress {
   constexpr SolidStress() = default;
   ElementId eid{0};
@@ -38,6 +57,24 @@ struct SolidStress {
   double sx{0}, sy{0}, sz{0};
   double sxy{0}, syz{0}, szx{0};
   double von_mises{0};
+  std::vector<SolidStressPoint> nodal;
+};
+
+struct LineStressEnd {
+  constexpr LineStressEnd() = default;
+  NodeId node{0};
+  std::array<double, 4> s{};
+  double axial{0};
+  double smax{0};
+  double smin{0};
+};
+
+struct LineStress {
+  constexpr LineStress() = default;
+  ElementId eid{0};
+  ElementType etype{ElementType::CBAR};
+  LineStressEnd end_a;
+  LineStressEnd end_b;
 };
 
 struct SubCaseResults {
@@ -45,6 +82,7 @@ struct SubCaseResults {
   std::string label;
 
   std::vector<NodeDisplacement> displacements;
+  std::vector<LineStress> line_stresses;
   std::vector<PlateStress> plate_stresses;
   std::vector<SolidStress> solid_stresses;
 };
@@ -117,11 +155,27 @@ private:
                                        std::ostream &out);
   static void write_quad4_stress_table(const SubCaseResults &sc,
                                        std::ostream &out);
+  static void write_quad4_corner_stress_table(const SubCaseResults &sc,
+                                              std::ostream &out);
+  static void write_quad4_gpstress_table(const SubCaseResults &sc,
+                                         std::ostream &out);
   static void write_tria3_stress_table(const SubCaseResults &sc,
                                        std::ostream &out);
+  static void write_tria3_corner_stress_table(const SubCaseResults &sc,
+                                              std::ostream &out);
+  static void write_tria3_gpstress_table(const SubCaseResults &sc,
+                                         std::ostream &out);
+  static void write_line_stress_table(const SubCaseResults &sc,
+                                      std::ostream &out);
   static void write_solid_stress_table(const SubCaseResults &sc,
                                        std::ostream &out,
                                        ElementType etype);
+  static void write_solid_corner_stress_table(const SubCaseResults &sc,
+                                              std::ostream &out,
+                                              ElementType etype);
+  static void write_solid_gpstress_table(const SubCaseResults &sc,
+                                         std::ostream &out,
+                                         ElementType etype);
   static void write_eigenvalue_table(const ModalSubCaseResults &msc,
                                      std::ostream &out);
   static void write_eigenvector_table(const ModeResult &mode,

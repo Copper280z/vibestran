@@ -148,6 +148,84 @@ static const PlateStress* get_plate_stress(const SolverResults& res, int elem_id
     return nullptr;
 }
 
+static const SolidStress* get_solid_stress(const SolverResults& res, int elem_id) {
+    for (const auto& sc : res.subcases)
+        for (const auto& ss : sc.solid_stresses)
+            if (ss.eid.value == elem_id) // cppcheck-suppress useStlAlgorithm
+                return &ss;
+    return nullptr;
+}
+
+static const LineStress* get_line_stress(const SolverResults& res, int elem_id) {
+    for (const auto& sc : res.subcases)
+        for (const auto& ls : sc.line_stresses)
+            if (ls.eid.value == elem_id) // cppcheck-suppress useStlAlgorithm
+                return &ls;
+    return nullptr;
+}
+
+static SolverResults run_analysis(const Model& model) {
+    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    return solver.solve(model);
+}
+
+static void expect_plate_stress_near_zero(const PlateStress& ps, double tol) {
+    EXPECT_NEAR(ps.sx, 0.0, tol);
+    EXPECT_NEAR(ps.sy, 0.0, tol);
+    EXPECT_NEAR(ps.sxy, 0.0, tol);
+    EXPECT_NEAR(ps.mx, 0.0, tol);
+    EXPECT_NEAR(ps.my, 0.0, tol);
+    EXPECT_NEAR(ps.mxy, 0.0, tol);
+    EXPECT_NEAR(ps.von_mises, 0.0, tol);
+}
+
+static void expect_solid_stress_near_zero(const SolidStress& ss, double tol) {
+    EXPECT_NEAR(ss.sx, 0.0, tol);
+    EXPECT_NEAR(ss.sy, 0.0, tol);
+    EXPECT_NEAR(ss.sz, 0.0, tol);
+    EXPECT_NEAR(ss.sxy, 0.0, tol);
+    EXPECT_NEAR(ss.syz, 0.0, tol);
+    EXPECT_NEAR(ss.szx, 0.0, tol);
+    EXPECT_NEAR(ss.von_mises, 0.0, tol);
+}
+
+static void expect_plate_nodal_stress_near_zero(const PlateStress& ps, double tol) {
+    ASSERT_FALSE(ps.nodal.empty());
+    for (const auto& point : ps.nodal) {
+        EXPECT_NEAR(point.sx, 0.0, tol);
+        EXPECT_NEAR(point.sy, 0.0, tol);
+        EXPECT_NEAR(point.sxy, 0.0, tol);
+        EXPECT_NEAR(point.mx, 0.0, tol);
+        EXPECT_NEAR(point.my, 0.0, tol);
+        EXPECT_NEAR(point.mxy, 0.0, tol);
+        EXPECT_NEAR(point.von_mises, 0.0, tol);
+    }
+}
+
+static void expect_solid_nodal_stress_near_zero(const SolidStress& ss, double tol) {
+    ASSERT_FALSE(ss.nodal.empty());
+    for (const auto& point : ss.nodal) {
+        EXPECT_NEAR(point.sx, 0.0, tol);
+        EXPECT_NEAR(point.sy, 0.0, tol);
+        EXPECT_NEAR(point.sz, 0.0, tol);
+        EXPECT_NEAR(point.sxy, 0.0, tol);
+        EXPECT_NEAR(point.syz, 0.0, tol);
+        EXPECT_NEAR(point.szx, 0.0, tol);
+        EXPECT_NEAR(point.von_mises, 0.0, tol);
+    }
+}
+
+static void expect_line_stress_near_zero(const LineStress& ls, double tol) {
+    for (double s : ls.end_a.s) EXPECT_NEAR(s, 0.0, tol);
+    for (double s : ls.end_b.s) EXPECT_NEAR(s, 0.0, tol);
+    EXPECT_NEAR(ls.end_a.axial, 0.0, tol);
+    EXPECT_NEAR(ls.end_a.smax, 0.0, tol);
+    EXPECT_NEAR(ls.end_a.smin, 0.0, tol);
+    EXPECT_NEAR(ls.end_b.axial, 0.0, tol);
+    EXPECT_NEAR(ls.end_b.smax, 0.0, tol);
+    EXPECT_NEAR(ls.end_b.smin, 0.0, tol);
+}
+
 // Helper: find node displacement
 static double get_disp(const SolverResults& res, int node_id, int dof_0based) {
     for (const auto& sc : res.subcases)
@@ -433,6 +511,357 @@ static void expect_closed_tube_matches_beam_theory(
         << "formulation=" << shellform_param(formulation)
         << " tip avg=" << tip_avg
         << " beam theory=" << expected;
+}
+
+struct LineElementSpec {
+    const char* label;
+    const char* property_card;
+    const char* element_card_prefix;
+};
+
+static constexpr std::array<LineElementSpec, 2> kLineElementSpecs{{
+    {"CBAR", "PBAR,10,1,0.2,0.01,0.01,0.01", "CBAR,1,10"},
+    {"CBEAM", "PBEAM,10,1,0.2,0.01,0.01,0.0,0.01", "CBEAM,1,10"},
+}};
+
+static std::string make_line_thermal_bdf(const LineElementSpec& spec) {
+    std::ostringstream bdf;
+    bdf << "SOL 101\n"
+        << "CEND\n"
+        << "SUBCASE 1\n"
+        << "  SPC = 1\n"
+        << "  TEMPERATURE(LOAD) = 2\n"
+        << "BEGIN BULK\n"
+        << "GRID,1,,0.0,0.0,0.0\n"
+        << "GRID,2,,2.0,0.0,0.0\n"
+        << "MAT1,1,1.0E6,,0.0,,1.2E-5,0.0\n"
+        << spec.property_card << "\n"
+        << spec.element_card_prefix << ",1,2,0.0,0.0,1.0\n"
+        << "SPC1,1,123456,1\n"
+        << "TEMPD,2,50.0\n"
+        << "ENDDATA\n";
+    return bdf.str();
+}
+
+static std::string make_beam_shell_interconnection_thermal_bdf(bool with_beams) {
+    std::ostringstream bdf;
+    bdf << "SOL 101\n"
+        << "CEND\n"
+        << "SUBCASE 1\n"
+        << "  SPC = 1\n"
+        << "  TEMPERATURE(LOAD) = 2\n"
+        << "  STRESS = ALL\n"
+        << "BEGIN BULK\n"
+        << "GRID,1,,0.0,0.0,0.0\n"
+        << "GRID,2,,1.0,0.0,0.0\n"
+        << "GRID,3,,2.0,0.0,0.0\n"
+        << "GRID,4,,0.0,1.0,0.0\n"
+        << "GRID,5,,1.0,1.0,0.0\n"
+        << "GRID,6,,2.0,1.0,0.0\n"
+        << "MAT1,1,1.0E6,,0.0,,1.2E-5,0.0\n"
+        << "PSHELL,1,1,0.1\n"
+        << "CQUAD4,1,1,1,2,5,4\n"
+        << "CQUAD4,2,1,2,3,6,5\n";
+    if (with_beams) {
+        bdf << "PBAR,10,1,0.1,0.01,0.01,0.01\n"
+            << "CBAR,10,10,1,2,0.0,0.0,1.0\n"
+            << "CBAR,11,10,2,3,0.0,0.0,1.0\n"
+            << "CBAR,12,10,4,5,0.0,0.0,1.0\n"
+            << "CBAR,13,10,5,6,0.0,0.0,1.0\n";
+    }
+    bdf << "SPC1,1,12,1\n"
+        << "SPC1,1,2,2\n"
+        << "SPC1,1,1,4\n"
+        << "TEMPD,2,50.0\n"
+        << "ENDDATA\n";
+    return bdf.str();
+}
+
+static std::string make_shell_solid_interconnection_thermal_bdf(bool with_skins) {
+    std::ostringstream bdf;
+    bdf << "SOL 101\n"
+        << "CEND\n"
+        << "SUBCASE 1\n"
+        << "  SPC = 1\n"
+        << "  TEMPERATURE(LOAD) = 2\n"
+        << "  STRESS = ALL\n"
+        << "BEGIN BULK\n"
+        << "GRID,1,,0.0,0.0,0.0\n"
+        << "GRID,2,,1.0,0.0,0.0\n"
+        << "GRID,3,,2.0,0.0,0.0\n"
+        << "GRID,4,,0.0,1.0,0.0\n"
+        << "GRID,5,,1.0,1.0,0.0\n"
+        << "GRID,6,,2.0,1.0,0.0\n"
+        << "GRID,7,,0.0,0.0,1.0\n"
+        << "GRID,8,,1.0,0.0,1.0\n"
+        << "GRID,9,,2.0,0.0,1.0\n"
+        << "GRID,10,,0.0,1.0,1.0\n"
+        << "GRID,11,,1.0,1.0,1.0\n"
+        << "GRID,12,,2.0,1.0,1.0\n"
+        << "MAT1,1,1.0E6,,0.0,,1.2E-5,0.0\n"
+        << "PSOLID,1,1\n"
+        << "CHEXA,1,1,1,2,5,4,7,8,11,10\n"
+        << "CHEXA,2,1,2,3,6,5,8,9,12,11\n";
+    if (with_skins) {
+        bdf << "PSHELL,20,1,0.25\n"
+            << "CQUAD4,20,20,1,2,5,4\n"
+            << "CQUAD4,21,20,2,3,6,5\n"
+            << "CQUAD4,22,20,7,8,11,10\n"
+            << "CQUAD4,23,20,8,9,12,11\n";
+    }
+    bdf << "SPC1,1,123456,1\n"
+        << "SPC1,1,23,2\n"
+        << "SPC1,1,13,4\n"
+        << "SPC1,1,12,7\n"
+        << "TEMPD,2,50.0\n"
+        << "ENDDATA\n";
+    return bdf.str();
+}
+
+static std::string make_beam_solid_interconnection_thermal_bdf(bool with_beams) {
+    std::ostringstream bdf;
+    bdf << "SOL 101\n"
+        << "CEND\n"
+        << "SUBCASE 1\n"
+        << "  SPC = 1\n"
+        << "  TEMPERATURE(LOAD) = 2\n"
+        << "  STRESS = ALL\n"
+        << "BEGIN BULK\n"
+        << "GRID,1,,0.0,0.0,0.0\n"
+        << "GRID,2,,1.0,0.0,0.0\n"
+        << "GRID,3,,2.0,0.0,0.0\n"
+        << "GRID,4,,0.0,1.0,0.0\n"
+        << "GRID,5,,1.0,1.0,0.0\n"
+        << "GRID,6,,2.0,1.0,0.0\n"
+        << "GRID,7,,0.0,0.0,1.0\n"
+        << "GRID,8,,1.0,0.0,1.0\n"
+        << "GRID,9,,2.0,0.0,1.0\n"
+        << "GRID,10,,0.0,1.0,1.0\n"
+        << "GRID,11,,1.0,1.0,1.0\n"
+        << "GRID,12,,2.0,1.0,1.0\n"
+        << "MAT1,1,1.0E6,,0.0,,1.2E-5,0.0\n"
+        << "PSOLID,1,1\n"
+        << "CHEXA,1,1,1,2,5,4,7,8,11,10\n"
+        << "CHEXA,2,1,2,3,6,5,8,9,12,11\n";
+    if (with_beams) {
+        bdf << "PBAR,20,1,0.1,0.01,0.01,0.01\n"
+            << "CBAR,20,20,1,2,0.0,0.0,1.0\n"
+            << "CBAR,21,20,2,3,0.0,0.0,1.0\n"
+            << "CBAR,22,20,4,5,0.0,0.0,1.0\n"
+            << "CBAR,23,20,5,6,0.0,0.0,1.0\n"
+            << "CBAR,24,20,7,8,0.0,0.0,1.0\n"
+            << "CBAR,25,20,8,9,0.0,0.0,1.0\n"
+            << "CBAR,26,20,10,11,0.0,0.0,1.0\n"
+            << "CBAR,27,20,11,12,0.0,0.0,1.0\n";
+    }
+    bdf << "SPC1,1,123456,1\n"
+        << "SPC1,1,23,2\n"
+        << "SPC1,1,13,4\n"
+        << "SPC1,1,12,7\n"
+        << "TEMPD,2,50.0\n"
+        << "ENDDATA\n";
+    return bdf.str();
+}
+
+static std::string make_cylindrical_shell_axial_full_ring_bdf() {
+    constexpr int ntheta = 6;
+    constexpr double radius = 1.0;
+    constexpr double length = 2.0;
+    constexpr double total_force = 600.0;
+
+    auto nid = [](int it, int iz) {
+        return 1 + iz * ntheta + it;
+    };
+
+    std::ostringstream bdf;
+    bdf << "SOL 101\n"
+        << "CEND\n"
+        << "SUBCASE 1\n"
+        << "  LOAD = 1\n"
+        << "  SPC = 1\n"
+        << "  STRESS = ALL\n"
+        << "BEGIN BULK\n"
+        << "CORD2C,10,0,0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.0,0.0\n"
+        << "MAT1,1,1.0E6,,0.3\n"
+        << "PSHELL,1,1,0.1\n";
+
+    for (int iz = 0; iz <= 1; ++iz) {
+        const double z = length * static_cast<double>(iz);
+        for (int it = 0; it < ntheta; ++it)
+            bdf << "GRID," << nid(it, iz) << ",10," << radius << ","
+                << 60.0 * static_cast<double>(it) << "," << z << ",10\n";
+    }
+
+    for (int it = 0; it < ntheta; ++it) {
+        const int next = (it + 1) % ntheta;
+        bdf << "CQUAD4," << (it + 1) << ",1,"
+            << nid(it, 0) << ","
+            << nid(it, 1) << ","
+            << nid(next, 1) << ","
+            << nid(next, 0) << "\n";
+    }
+
+    for (int it = 0; it < ntheta; ++it)
+        bdf << "SPC1,1,3," << nid(it, 0) << "\n";
+    bdf << "SPC1,1,12," << nid(0, 0) << "\n";
+
+    for (int it = 0; it < ntheta; ++it)
+        bdf << "FORCE,1," << nid(it, 1) << ",0," << (total_force / ntheta)
+            << ",0.0,0.0,1.0\n";
+
+    bdf << "ENDDATA\n";
+    return bdf.str();
+}
+
+static std::string make_cylindrical_shell_axial_slice_bdf() {
+    std::ostringstream bdf;
+    bdf << "SOL 101\n"
+        << "CEND\n"
+        << "SUBCASE 1\n"
+        << "  LOAD = 1\n"
+        << "  SPC = 1\n"
+        << "  STRESS = ALL\n"
+        << "BEGIN BULK\n"
+        << "CORD2C,10,0,0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.0,0.0\n"
+        << "MAT1,1,1.0E6,,0.3\n"
+        << "PSHELL,1,1,0.1\n"
+        << "GRID,1,10,1.0, 0.0,0.0,10\n"
+        << "GRID,2,10,1.0, 0.0,2.0,10\n"
+        << "GRID,3,10,1.0,60.0,2.0,10\n"
+        << "GRID,4,10,1.0,60.0,0.0,10\n"
+        << "CQUAD4,1,1,1,2,3,4\n"
+        << "SPC1,1,3,1,4\n"
+        << "SPC1,1,2,1,2,3,4\n"
+        << "SPC1,1,6,1,2,3,4\n"
+        << "SPC1,1,1,1\n"
+        << "FORCE,1,2,0,50.0,0.0,0.0,1.0\n"
+        << "FORCE,1,3,0,50.0,0.0,0.0,1.0\n"
+        << "ENDDATA\n";
+    return bdf.str();
+}
+
+static std::string make_shell_solid_flap_bdf(bool with_skin_shell) {
+    std::ostringstream bdf;
+    bdf << "SOL 101\n"
+        << "CEND\n"
+        << "SUBCASE 1\n"
+        << "  LOAD = 1\n"
+        << "  SPC = 1\n"
+        << "  STRESS = ALL\n"
+        << "BEGIN BULK\n"
+        << "GRID,1,,0.0,0.0,0.0\n"
+        << "GRID,2,,1.0,0.0,0.0\n"
+        << "GRID,3,,1.0,1.0,0.0\n"
+        << "GRID,4,,0.0,1.0,0.0\n"
+        << "GRID,5,,0.0,0.0,1.0\n"
+        << "GRID,6,,1.0,0.0,1.0\n"
+        << "GRID,7,,1.0,1.0,1.0\n"
+        << "GRID,8,,0.0,1.0,1.0\n"
+        << "GRID,9,,0.0,1.0,2.0\n"
+        << "GRID,10,,1.0,1.0,2.0\n"
+        << "MAT1,1,1.0E6,,0.3\n"
+        << "PSOLID,1,1\n"
+        << "PSHELL,20,1,0.1\n"
+        << "PSHELL,21,1,0.1\n"
+        << "CHEXA,1,1,1,2,3,4,5,6,7,8\n";
+    if (with_skin_shell)
+        bdf << "CQUAD4,20,20,5,6,7,8\n";
+    bdf << "CQUAD4,21,21,8,7,10,9\n"
+        << "SPC1,1,123456,1,2,3,4\n"
+        << "MOMENT,1,9,0,25.0,1.0,0.0,0.0\n"
+        << "MOMENT,1,10,0,25.0,1.0,0.0,0.0\n"
+        << "ENDDATA\n";
+    return bdf.str();
+}
+
+static std::string make_line_on_solid_moment_bdf(const LineElementSpec& spec) {
+    auto nid = [](int ix, int iy, int iz) {
+        return 1 + iz * 6 + iy * 2 + ix;
+    };
+
+    std::ostringstream bdf;
+    bdf << "SOL 101\n"
+        << "CEND\n"
+        << "SUBCASE 1\n"
+        << "  LOAD = 1\n"
+        << "  SPC = 1\n"
+        << "BEGIN BULK\n";
+
+    for (int iz = 0; iz <= 2; ++iz) {
+        const double z = -1.0 + static_cast<double>(iz);
+        for (int iy = 0; iy <= 2; ++iy) {
+            const double y = -1.0 + static_cast<double>(iy);
+            for (int ix = 0; ix <= 1; ++ix) {
+                const double x = -1.0 + static_cast<double>(ix);
+                bdf << "GRID," << nid(ix, iy, iz) << ",," << x << "," << y
+                    << "," << z << "\n";
+            }
+        }
+    }
+
+    bdf << "GRID,19,,1.0,0.0,0.0\n"
+        << "MAT1,1,1.0E6,,0.3\n"
+        << "PSOLID,1,1\n"
+        << spec.property_card << "\n";
+
+    int eid = 1;
+    for (int iz = 0; iz < 2; ++iz) {
+        for (int iy = 0; iy < 2; ++iy) {
+            bdf << "CHEXA," << eid++ << ",1,"
+                << nid(0, iy, iz) << ","
+                << nid(1, iy, iz) << ","
+                << nid(1, iy + 1, iz) << ","
+                << nid(0, iy + 1, iz) << ","
+                << nid(0, iy, iz + 1) << ","
+                << nid(1, iy, iz + 1) << ","
+                << nid(1, iy + 1, iz + 1) << ","
+                << nid(0, iy + 1, iz + 1) << "\n";
+        }
+    }
+
+    bdf << spec.element_card_prefix << ",10,19,0.0,0.0,1.0\n";
+    for (int iz = 0; iz <= 2; ++iz)
+        for (int iy = 0; iy <= 2; ++iy)
+            bdf << "SPC1,1,123456," << nid(0, iy, iz) << "\n";
+    bdf << "MOMENT,1,19,0,100.0,0.0,1.0,0.0\n"
+        << "ENDDATA\n";
+    return bdf.str();
+}
+
+static std::string make_line_on_shell_moment_bdf(const LineElementSpec& spec) {
+    auto nid = [](int ix, int iy) {
+        return 1 + iy * 3 + ix;
+    };
+
+    std::ostringstream bdf;
+    bdf << "SOL 101\n"
+        << "CEND\n"
+        << "SUBCASE 1\n"
+        << "  LOAD = 1\n"
+        << "  SPC = 1\n"
+        << "BEGIN BULK\n";
+
+    for (int iy = 0; iy <= 2; ++iy) {
+        const double y = -1.0 + static_cast<double>(iy);
+        for (int ix = 0; ix <= 2; ++ix) {
+            const double x = -1.0 + 0.5 * static_cast<double>(ix);
+            bdf << "GRID," << nid(ix, iy) << ",," << x << "," << y << ",0.0\n";
+        }
+    }
+
+    bdf << "GRID,10,,1.0,0.0,0.0\n"
+        << "MAT1,1,1.0E6,,0.3\n"
+        << "PSHELL,1,1,0.1\n"
+        << spec.property_card << "\n"
+        << "CQUAD4,1,1,1,2,5,4\n"
+        << "CQUAD4,2,1,2,3,6,5\n"
+        << "CQUAD4,3,1,4,5,8,7\n"
+        << "CQUAD4,4,1,5,6,9,8\n"
+        << spec.element_card_prefix << ",6,10,0.0,0.0,1.0\n"
+        << "SPC1,1,123456,1,4,7\n"
+        << "MOMENT,1,10,0,100.0,0.0,1.0,0.0\n"
+        << "ENDDATA\n";
+    return bdf.str();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1733,6 +2162,35 @@ TEST(Integration, CylindricalShellPressureSectorAxisymmetric) {
     }
 }
 
+TEST(Integration, CylindricalShellSliceSymmetryRectangularElements) {
+    const SolverResults full =
+        run_analysis(make_cylindrical_shell_axial_full_ring_bdf());
+    const SolverResults slice =
+        run_analysis(make_cylindrical_shell_axial_slice_bdf());
+
+    EXPECT_NEAR(get_disp(slice, 1, 2), 0.0, 1.0e-12);
+    EXPECT_NEAR(get_disp(slice, 4, 2), 0.0, 1.0e-12);
+    EXPECT_NEAR(get_disp(slice, 1, 1), 0.0, 1.0e-12);
+    EXPECT_NEAR(get_disp(slice, 2, 1), 0.0, 1.0e-12);
+    EXPECT_NEAR(get_disp(slice, 3, 1), 0.0, 1.0e-12);
+    EXPECT_NEAR(get_disp(slice, 4, 1), 0.0, 1.0e-12);
+
+    const double full_top_axial = 0.5 * (get_disp(full, 7, 2) + get_disp(full, 8, 2));
+    const double slice_top_axial = 0.5 * (get_disp(slice, 2, 2) + get_disp(slice, 3, 2));
+    EXPECT_GT(full_top_axial, 0.0);
+    EXPECT_GT(slice_top_axial, 0.0);
+    EXPECT_NEAR(slice_top_axial, full_top_axial, 0.05 * full_top_axial);
+
+    const PlateStress* ps_full = get_plate_stress(full, 1);
+    const PlateStress* ps_slice = get_plate_stress(slice, 1);
+    ASSERT_NE(ps_full, nullptr);
+    ASSERT_NE(ps_slice, nullptr);
+    EXPECT_GT(ps_slice->sx, 0.0);
+    EXPECT_NEAR(ps_slice->sx, ps_full->sx, 0.05 * ps_full->sx);
+    EXPECT_LT(std::abs(ps_slice->sy), 0.1 * ps_slice->sx);
+    EXPECT_LT(std::abs(ps_slice->sxy), 0.1 * ps_slice->sx);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SOL 103 Modal Analysis Tests
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2568,6 +3026,224 @@ TEST(Integration, BeamSolidInterconnectionMatchesCombinedAxialStiffness) {
     EXPECT_NEAR(solid_only_tip, plain_expected, 1e-10);
     EXPECT_NEAR(stiffened_tip, stiffened_expected, 1e-10);
     EXPECT_LT(stiffened_tip, solid_only_tip);
+}
+
+TEST(Integration, BeamShellInterconnectionThermalLoadProducesZeroStress) {
+    constexpr double alpha = 1.2e-5;
+    constexpr double dT = 50.0;
+    constexpr double expected = alpha * dT * 2.0;
+    constexpr double stress_tol = 1.0e-6 * 1.0e6 * alpha * dT;
+
+    const Model shell_model =
+        BdfParser::parse_string(make_beam_shell_interconnection_thermal_bdf(false));
+    const Model stiffened_model =
+        BdfParser::parse_string(make_beam_shell_interconnection_thermal_bdf(true));
+    const SolverResults shell_only = run_analysis(shell_model);
+    const SolverResults stiffened = run_analysis(stiffened_model);
+
+    const double shell_only_tip =
+        0.5 * (get_disp(shell_only, 3, 0) + get_disp(shell_only, 6, 0));
+    const double stiffened_tip =
+        0.5 * (get_disp(stiffened, 3, 0) + get_disp(stiffened, 6, 0));
+
+    EXPECT_NEAR(shell_only_tip, expected, 1e-10);
+    EXPECT_NEAR(stiffened_tip, expected, 1e-10);
+    EXPECT_NEAR(shell_only_tip, stiffened_tip, 1e-10);
+
+    for (int eid : {1, 2}) {
+        const PlateStress* shell_ps = get_plate_stress(shell_only, eid);
+        ASSERT_NE(shell_ps, nullptr);
+        expect_plate_stress_near_zero(*shell_ps, stress_tol);
+        expect_plate_nodal_stress_near_zero(*shell_ps, stress_tol);
+
+        const PlateStress* stiffened_ps = get_plate_stress(stiffened, eid);
+        ASSERT_NE(stiffened_ps, nullptr);
+        expect_plate_stress_near_zero(*stiffened_ps, stress_tol);
+        expect_plate_nodal_stress_near_zero(*stiffened_ps, stress_tol);
+    }
+
+    for (int eid : {10, 11, 12, 13}) {
+        const LineStress* ls = get_line_stress(stiffened, eid);
+        ASSERT_NE(ls, nullptr);
+        expect_line_stress_near_zero(*ls, stress_tol);
+    }
+}
+
+TEST(Integration, ShellSolidInterconnectionThermalLoadProducesZeroStress) {
+    constexpr double alpha = 1.2e-5;
+    constexpr double dT = 50.0;
+    constexpr double expected = alpha * dT * 2.0;
+    constexpr double stress_tol = 1.0e-6 * 1.0e6 * alpha * dT;
+
+    const Model solid_model =
+        BdfParser::parse_string(make_shell_solid_interconnection_thermal_bdf(false));
+    const Model skinned_model =
+        BdfParser::parse_string(make_shell_solid_interconnection_thermal_bdf(true));
+    const SolverResults solid_only = run_analysis(solid_model);
+    const SolverResults skinned = run_analysis(skinned_model);
+
+    const double solid_only_tip =
+        0.25 * (get_disp(solid_only, 3, 0) + get_disp(solid_only, 6, 0) +
+                get_disp(solid_only, 9, 0) + get_disp(solid_only, 12, 0));
+    const double skinned_tip =
+        0.25 * (get_disp(skinned, 3, 0) + get_disp(skinned, 6, 0) +
+                get_disp(skinned, 9, 0) + get_disp(skinned, 12, 0));
+
+    EXPECT_NEAR(solid_only_tip, expected, 1e-10);
+    EXPECT_NEAR(skinned_tip, expected, 1e-10);
+    EXPECT_NEAR(solid_only_tip, skinned_tip, 1e-10);
+
+    for (int eid : {1, 2}) {
+        const SolidStress* plain_ss = get_solid_stress(solid_only, eid);
+        ASSERT_NE(plain_ss, nullptr);
+        expect_solid_stress_near_zero(*plain_ss, stress_tol);
+        expect_solid_nodal_stress_near_zero(*plain_ss, stress_tol);
+
+        const SolidStress* skinned_ss = get_solid_stress(skinned, eid);
+        ASSERT_NE(skinned_ss, nullptr);
+        expect_solid_stress_near_zero(*skinned_ss, stress_tol);
+        expect_solid_nodal_stress_near_zero(*skinned_ss, stress_tol);
+    }
+
+    for (int eid : {20, 21, 22, 23}) {
+        const PlateStress* ps = get_plate_stress(skinned, eid);
+        ASSERT_NE(ps, nullptr);
+        expect_plate_stress_near_zero(*ps, stress_tol);
+        expect_plate_nodal_stress_near_zero(*ps, stress_tol);
+    }
+}
+
+TEST(Integration, BeamSolidInterconnectionThermalLoadProducesZeroStress) {
+    constexpr double alpha = 1.2e-5;
+    constexpr double dT = 50.0;
+    constexpr double expected = alpha * dT * 2.0;
+    constexpr double stress_tol = 1.0e-6 * 1.0e6 * alpha * dT;
+
+    const Model solid_model =
+        BdfParser::parse_string(make_beam_solid_interconnection_thermal_bdf(false));
+    const Model stiffened_model =
+        BdfParser::parse_string(make_beam_solid_interconnection_thermal_bdf(true));
+    const SolverResults solid_only = run_analysis(solid_model);
+    const SolverResults stiffened = run_analysis(stiffened_model);
+
+    const double solid_only_tip =
+        0.25 * (get_disp(solid_only, 3, 0) + get_disp(solid_only, 6, 0) +
+                get_disp(solid_only, 9, 0) + get_disp(solid_only, 12, 0));
+    const double stiffened_tip =
+        0.25 * (get_disp(stiffened, 3, 0) + get_disp(stiffened, 6, 0) +
+                get_disp(stiffened, 9, 0) + get_disp(stiffened, 12, 0));
+
+    EXPECT_NEAR(solid_only_tip, expected, 1e-10);
+    EXPECT_NEAR(stiffened_tip, expected, 1e-10);
+    EXPECT_NEAR(solid_only_tip, stiffened_tip, 1e-10);
+
+    for (int eid : {1, 2}) {
+        const SolidStress* plain_ss = get_solid_stress(solid_only, eid);
+        ASSERT_NE(plain_ss, nullptr);
+        expect_solid_stress_near_zero(*plain_ss, stress_tol);
+        expect_solid_nodal_stress_near_zero(*plain_ss, stress_tol);
+
+        const SolidStress* stiffened_ss = get_solid_stress(stiffened, eid);
+        ASSERT_NE(stiffened_ss, nullptr);
+        expect_solid_stress_near_zero(*stiffened_ss, stress_tol);
+        expect_solid_nodal_stress_near_zero(*stiffened_ss, stress_tol);
+    }
+
+    for (int eid : {20, 21, 22, 23, 24, 25, 26, 27}) {
+        const LineStress* ls = get_line_stress(stiffened, eid);
+        ASSERT_NE(ls, nullptr);
+        expect_line_stress_near_zero(*ls, stress_tol);
+    }
+}
+
+TEST(Integration, ShellSolidBarBeamThermalExpansionMatchesAcrossElementFamilies) {
+    constexpr double alpha = 1.2e-5;
+    constexpr double dT = 50.0;
+    constexpr double expected = alpha * dT * 2.0;
+    constexpr double stress_tol = 1.0e-6 * 1.0e6 * alpha * dT;
+
+    const SolverResults shell = run_analysis(
+        BdfParser::parse_string(make_beam_shell_interconnection_thermal_bdf(false)));
+    const SolverResults solid = run_analysis(
+        BdfParser::parse_string(make_shell_solid_interconnection_thermal_bdf(false)));
+
+    const double shell_tip =
+        0.5 * (get_disp(shell, 3, 0) + get_disp(shell, 6, 0));
+    const double solid_tip =
+        0.25 * (get_disp(solid, 3, 0) + get_disp(solid, 6, 0) +
+                get_disp(solid, 9, 0) + get_disp(solid, 12, 0));
+
+    EXPECT_NEAR(shell_tip, expected, 1e-10);
+    EXPECT_NEAR(solid_tip, expected, 1e-10);
+    EXPECT_NEAR(shell_tip, solid_tip, 1e-10);
+
+    for (const LineElementSpec& spec : kLineElementSpecs) {
+        SCOPED_TRACE(spec.label);
+        const Model line_model = BdfParser::parse_string(make_line_thermal_bdf(spec));
+        const SolverResults line = run_analysis(line_model);
+        const double line_tip = get_disp(line, 2, 0);
+
+        EXPECT_NEAR(line_tip, expected, 1e-10);
+        EXPECT_NEAR(line_tip, shell_tip, 1e-10);
+        EXPECT_NEAR(line_tip, solid_tip, 1e-10);
+        const LineStress* ls = get_line_stress(line, 1);
+        ASSERT_NE(ls, nullptr);
+        expect_line_stress_near_zero(*ls, stress_tol);
+    }
+}
+
+TEST(Integration, ShellEdgeSharedOnlyWithSolidShowsUnconstrainedMomentMode) {
+    const SolverResults free = run_analysis(make_shell_solid_flap_bdf(false));
+    const SolverResults skinned = run_analysis(make_shell_solid_flap_bdf(true));
+
+    const double free_rotation =
+        std::max(std::abs(get_disp(free, 9, 3)), std::abs(get_disp(free, 10, 3)));
+    const double skinned_rotation =
+        std::max(std::abs(get_disp(skinned, 9, 3)),
+                 std::abs(get_disp(skinned, 10, 3)));
+
+    EXPECT_GT(free_rotation, 1.0e6);
+    EXPECT_GT(free_rotation, 1.0e6 * skinned_rotation);
+}
+
+TEST(Integration, ShellEdgeSharedWithSkinnedSolidTransmitsMoments) {
+    const SolverResults res = run_analysis(make_shell_solid_flap_bdf(true));
+
+    EXPECT_GT(std::abs(get_disp(res, 9, 3)), 1.0e-8);
+    EXPECT_GT(std::abs(get_disp(res, 10, 3)), 1.0e-8);
+
+    const PlateStress* skin = get_plate_stress(res, 20);
+    const PlateStress* flap = get_plate_stress(res, 21);
+    ASSERT_NE(skin, nullptr);
+    ASSERT_NE(flap, nullptr);
+    EXPECT_GT(skin->von_mises, 0.0);
+    EXPECT_GT(flap->von_mises, 0.0);
+}
+
+TEST(Integration, LineElementsOnSolidDoNotTransmitMoments) {
+    for (const LineElementSpec& spec : kLineElementSpecs) {
+        SCOPED_TRACE(spec.label);
+        const SolverResults solid = run_analysis(make_line_on_solid_moment_bdf(spec));
+        const SolverResults shell = run_analysis(make_line_on_shell_moment_bdf(spec));
+
+        const double solid_tip_disp = std::abs(get_disp(solid, 19, 2));
+        const double solid_tip_rot = std::abs(get_disp(solid, 19, 4));
+        const double shell_tip_disp = std::abs(get_disp(shell, 10, 2));
+        const double shell_tip_rot = std::abs(get_disp(shell, 10, 4));
+
+        EXPECT_GT(solid_tip_disp, 1.0e6 * shell_tip_disp);
+        EXPECT_GT(solid_tip_rot, 1.0e6 * shell_tip_rot);
+    }
+}
+
+TEST(Integration, LineElementsOnShellTransmitMoments) {
+    for (const LineElementSpec& spec : kLineElementSpecs) {
+        SCOPED_TRACE(spec.label);
+        const SolverResults res = run_analysis(make_line_on_shell_moment_bdf(spec));
+
+        EXPECT_GT(std::abs(get_disp(res, 10, 2)), 1.0e-8);
+        EXPECT_GT(std::abs(get_disp(res, 10, 4)), 1.0e-8);
+    }
 }
 
 TEST(Integration, PloadMatchesEquivalentNodalForcesOnCquad4) {

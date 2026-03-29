@@ -15,9 +15,15 @@
 #include "io/results.hpp"
 #include "io/bdf_parser.hpp"
 #include "core/model.hpp"
+#include <algorithm>
 #include <sstream>
 #include <string>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <bit>
+#include <cstdint>
+#include <vector>
 
 using namespace vibestran;
 
@@ -57,6 +63,154 @@ static Model make_empty_model_sc1() {
     sc.stress_print = true;
     m.analysis.subcases.push_back(sc);
     return m;
+}
+
+static LineStress make_line_stress(ElementId eid) {
+    LineStress ls;
+    ls.eid = eid;
+    ls.etype = ElementType::CBAR;
+    ls.end_a.node = NodeId{101};
+    ls.end_a.s = {1.25, -2.5, 3.75, -4.5};
+    ls.end_a.axial = 5.125;
+    ls.end_a.smax = 6.25;
+    ls.end_a.smin = -7.5;
+    ls.end_b.node = NodeId{102};
+    ls.end_b.s = {8.5, -9.25, 10.75, -11.5};
+    ls.end_b.axial = 5.125;
+    ls.end_b.smax = 12.125;
+    ls.end_b.smin = -13.5;
+    return ls;
+}
+
+static PlateStressPoint make_plate_point(int node_id, double scale) {
+    PlateStressPoint pt;
+    pt.node = NodeId{node_id};
+    pt.sx = 10.0 * scale;
+    pt.sy = 20.0 * scale;
+    pt.sxy = 30.0 * scale;
+    pt.mx = 40.0 * scale;
+    pt.my = 50.0 * scale;
+    pt.mxy = 60.0 * scale;
+    pt.von_mises = 70.0 * scale;
+    return pt;
+}
+
+static SolidStress make_solid_stress(ElementId eid) {
+    SolidStress ss;
+    ss.eid = eid;
+    ss.etype = ElementType::CTETRA4;
+    ss.sx = 1.0;
+    ss.sy = 2.0;
+    ss.sz = 3.0;
+    ss.sxy = 4.0;
+    ss.syz = 5.0;
+    ss.szx = 6.0;
+    ss.von_mises = 7.0;
+    auto add_point = [&](int node_id, double sx, double sy, double sz,
+                         double sxy, double syz, double szx, double vm) {
+        SolidStressPoint pt;
+        pt.node = NodeId{node_id};
+        pt.sx = sx;
+        pt.sy = sy;
+        pt.sz = sz;
+        pt.sxy = sxy;
+        pt.syz = syz;
+        pt.szx = szx;
+        pt.von_mises = vm;
+        ss.nodal.push_back(pt);
+    };
+    add_point(9001, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0);
+    add_point(9002, 21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0);
+    add_point(9003, 31.0, 32.0, 33.0, 34.0, 35.0, 36.0, 37.0);
+    add_point(9004, 41.0, 42.0, 43.0, 44.0, 45.0, 46.0, 47.0);
+    return ss;
+}
+
+static SolidStress make_ctetra10_solid_stress(ElementId eid) {
+    SolidStress ss;
+    ss.eid = eid;
+    ss.etype = ElementType::CTETRA10;
+    ss.sx = 1.0;
+    ss.sy = 2.0;
+    ss.sz = 3.0;
+    ss.sxy = 4.0;
+    ss.syz = 5.0;
+    ss.szx = 6.0;
+    ss.von_mises = 7.0;
+    for (int i = 0; i < 10; ++i) {
+        const double base = 10.0 * static_cast<double>(i + 1);
+        SolidStressPoint pt;
+        pt.node = NodeId{9101 + i};
+        pt.sx = base + 1.0;
+        pt.sy = base + 2.0;
+        pt.sz = base + 3.0;
+        pt.sxy = base + 4.0;
+        pt.syz = base + 5.0;
+        pt.szx = base + 6.0;
+        pt.von_mises = base + 7.0;
+        ss.nodal.push_back(pt);
+    }
+    return ss;
+}
+
+static std::vector<std::byte> run_op2_writer(const SolverResults& res,
+                                             const Model& model) {
+    namespace fs = std::filesystem;
+    static int counter = 0;
+    const fs::path path = fs::temp_directory_path() /
+        ("vibestran_op2_test_" + std::to_string(++counter) + ".op2");
+
+    Op2Writer::write(res, model, path);
+
+    std::ifstream f(path, std::ios::binary);
+    std::vector<char> chars((std::istreambuf_iterator<char>(f)), {});
+    fs::remove(path);
+
+    std::vector<std::byte> bytes(chars.size());
+    std::transform(chars.begin(), chars.end(), bytes.begin(),
+                   [](char c) { return static_cast<std::byte>(c); });
+    return bytes;
+}
+
+static std::vector<int32_t> bytes_to_words(const std::vector<std::byte>& bytes) {
+    EXPECT_EQ(bytes.size() % sizeof(int32_t), 0u);
+    std::vector<int32_t> words;
+    words.reserve(bytes.size() / sizeof(int32_t));
+    for (std::size_t i = 0; i + sizeof(int32_t) <= bytes.size(); i += sizeof(int32_t)) {
+        int32_t word = 0;
+        std::memcpy(&word, bytes.data() + i, sizeof(int32_t));
+        words.push_back(word);
+    }
+    return words;
+}
+
+static bool contains_bytes(const std::vector<std::byte>& bytes, std::string_view needle) {
+    const auto* begin = reinterpret_cast<const char*>(bytes.data());
+    return std::string_view(begin, bytes.size()).find(needle) != std::string_view::npos;
+}
+
+static bool contains_word_sequence(const std::vector<int32_t>& words,
+                                   const std::vector<int32_t>& needle) {
+    if (needle.empty() || needle.size() > words.size()) return false;
+    for (std::size_t i = 0; i + needle.size() <= words.size(); ++i) {
+        bool match = true;
+        for (std::size_t j = 0; j < needle.size(); ++j) {
+            if (words[i + j] != needle[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
+static bool contains_word(const std::vector<int32_t>& words, int32_t needle) {
+    return std::find(words.begin(), words.end(), needle) != words.end();
+}
+
+static int32_t as_word(float value) {
+    return std::bit_cast<int32_t>(value);
 }
 
 // ── compute_principal_2d ─────────────────────────────────────────────────────
@@ -310,14 +464,171 @@ TEST(F06Writer, Quad4PrincipalStressValues) {
     EXPECT_NE(out.find("1.000000e+02"), std::string::npos);
 }
 
+TEST(F06Writer, LineStressTablePresent) {
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    sc.line_stresses.push_back(make_line_stress(ElementId{42}));
+    res.subcases.push_back(sc);
+    Model m = make_empty_model_sc1();
+
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+    const std::string out = oss.str();
+
+    EXPECT_NE(out.find("B A R / B E A M"), std::string::npos);
+    EXPECT_NE(out.find("CBAR"), std::string::npos);
+    EXPECT_NE(out.find("101"), std::string::npos);
+    EXPECT_NE(out.find("102"), std::string::npos);
+}
+
+TEST(F06Writer, Quad4CornerStressTablePresent) {
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+
+    PlateStress ps = make_quad4_stress(ElementId{7}, 100.0, 50.0, 30.0);
+    ps.nodal.push_back(make_plate_point(11, 1.0));
+    ps.nodal.push_back(make_plate_point(12, 2.0));
+    ps.nodal.push_back(make_plate_point(13, 3.0));
+    ps.nodal.push_back(make_plate_point(14, 4.0));
+    sc.plate_stresses.push_back(ps);
+    res.subcases.push_back(sc);
+
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].stress_print = true;
+    m.analysis.subcases[0].stress_corner_print = true;
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+    const std::string out = oss.str();
+
+    EXPECT_NE(out.find("C O R N E R   S T R E S S E S"), std::string::npos);
+    EXPECT_EQ(out.find("P R I N C I P A L"), std::string::npos);
+    EXPECT_NE(out.find("MOMENT-X"), std::string::npos);
+    EXPECT_NE(out.find("11"), std::string::npos);
+    EXPECT_NE(out.find("14"), std::string::npos);
+}
+
+TEST(F06Writer, CtetrA10GpstressTableIncludesMidsideRows) {
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    sc.solid_stresses.push_back(make_ctetra10_solid_stress(ElementId{8}));
+    res.subcases.push_back(sc);
+
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].stress_print = false;
+    m.analysis.subcases[0].gpstress_print = true;
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+    const std::string out = oss.str();
+
+    EXPECT_NE(out.find("G R I D   P O I N T   S T R E S S E S"), std::string::npos);
+    EXPECT_NE(out.find("9101"), std::string::npos);
+    EXPECT_NE(out.find("9104"), std::string::npos);
+    EXPECT_NE(out.find("9105"), std::string::npos);
+    EXPECT_NE(out.find("9110"), std::string::npos);
+}
+
+TEST(Op2Writer, UsesMystranBarStressTableAndPayload) {
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    sc.label = "BAR STRESS";
+    sc.line_stresses.push_back(make_line_stress(ElementId{42}));
+    res.subcases.push_back(sc);
+
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].stress_print = false;
+    m.analysis.subcases[0].stress_plot = true;
+
+    const auto bytes = run_op2_writer(res, m);
+    const auto words = bytes_to_words(bytes);
+
+    EXPECT_TRUE(contains_bytes(bytes, "OES1X   "));
+    EXPECT_TRUE(contains_word_sequence(words, {
+        11, 5, 34, 1, 1, 0, 0, 1, 1, 16, 1
+    }));
+    EXPECT_TRUE(contains_word_sequence(words, {
+        42 * 10 + 1,
+        as_word(1.25f), as_word(-2.5f), as_word(3.75f), as_word(-4.5f),
+        as_word(5.125f), as_word(6.25f), as_word(-7.5f), as_word(0.0f),
+        as_word(8.5f), as_word(-9.25f), as_word(10.75f), as_word(-11.5f),
+        as_word(12.125f), as_word(-13.5f), as_word(0.0f)
+    }));
+}
+
+TEST(Op2Writer, UsesMystranCornerStressTableAndSolidNodeIds) {
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    sc.label = "SOLID STRESS";
+
+    PlateStress ps = make_quad4_stress(ElementId{7}, 100.0, 50.0, 30.0);
+    ps.nodal.push_back(make_plate_point(11, 1.0));
+    ps.nodal.push_back(make_plate_point(12, 2.0));
+    ps.nodal.push_back(make_plate_point(13, 3.0));
+    ps.nodal.push_back(make_plate_point(14, 4.0));
+    sc.plate_stresses.push_back(ps);
+    sc.solid_stresses.push_back(make_solid_stress(ElementId{8}));
+    res.subcases.push_back(sc);
+
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].stress_print = false;
+    m.analysis.subcases[0].stress_plot = false;
+    m.analysis.subcases[0].stress_corner_plot = true;
+    m.analysis.subcases[0].gpstress_plot = true;
+
+    const auto bytes = run_op2_writer(res, m);
+    const auto words = bytes_to_words(bytes);
+
+    EXPECT_TRUE(contains_bytes(bytes, "OES1X1  "));
+    EXPECT_TRUE(contains_word_sequence(words, {
+        11, 5, 144, 1, 1, 0, 0, 1, 1, 87, 1
+    }));
+    EXPECT_TRUE(contains_word_sequence(words, {
+        11, 5, 39, 1, 1, 0, 0, 1, 1, 109, 1
+    }));
+    EXPECT_TRUE(contains_word(words, 9001));
+    EXPECT_TRUE(contains_word(words, 9002));
+    EXPECT_TRUE(contains_word(words, 9003));
+    EXPECT_TRUE(contains_word(words, 9004));
+}
+
+TEST(Op2Writer, UsesGridPointStressTableForCtetra10MidsideNodes) {
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    sc.label = "CTETRA10 GPSTRESS";
+    sc.solid_stresses.push_back(make_ctetra10_solid_stress(ElementId{12}));
+    res.subcases.push_back(sc);
+
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].stress_print = false;
+    m.analysis.subcases[0].stress_plot = false;
+    m.analysis.subcases[0].gpstress_plot = true;
+
+    const auto bytes = run_op2_writer(res, m);
+    const auto words = bytes_to_words(bytes);
+
+    EXPECT_TRUE(contains_bytes(bytes, "OES1X1  "));
+    EXPECT_TRUE(contains_word_sequence(words, {
+        11, 5, 99, 1, 1, 0, 0, 1, 1, 235, 1
+    }));
+    EXPECT_FALSE(contains_word_sequence(words, {
+        11, 5, 39, 1, 1, 0, 0, 1, 1, 109, 1
+    }));
+    EXPECT_TRUE(contains_word(words, 9101));
+    EXPECT_TRUE(contains_word(words, 9104));
+    EXPECT_TRUE(contains_word(words, 9105));
+    EXPECT_TRUE(contains_word(words, 9110));
+}
+
 // ── CsvWriter ─────────────────────────────────────────────────────────────────
 
 // Helper: write CSV and return the two file contents via ostringstreams
 // by re-implementing the logic inline using temporary files.
 // Since CsvWriter writes to filesystem paths, we use a tmpdir approach.
-#include <filesystem>
-#include <fstream>
-
 static std::pair<std::string,std::string> run_csv_writer(
     const SolverResults& res, const Model& m)
 {
@@ -561,6 +872,8 @@ ENDDATA
     const auto& sc = m.analysis.subcases[0];
     EXPECT_TRUE(sc.stress_print);
     EXPECT_FALSE(sc.stress_plot);
+    EXPECT_FALSE(sc.stress_corner_print);
+    EXPECT_FALSE(sc.stress_corner_plot);
 }
 
 TEST(BdfParser, StressPlotAllSetsPlotOnly) {
@@ -579,6 +892,8 @@ ENDDATA
     const auto& sc = m.analysis.subcases[0];
     EXPECT_FALSE(sc.stress_print);
     EXPECT_TRUE(sc.stress_plot);
+    EXPECT_FALSE(sc.stress_corner_print);
+    EXPECT_FALSE(sc.stress_corner_plot);
 }
 
 TEST(BdfParser, StressPrintPlotAllSetsBoth) {
@@ -597,6 +912,86 @@ ENDDATA
     const auto& sc = m.analysis.subcases[0];
     EXPECT_TRUE(sc.stress_print);
     EXPECT_TRUE(sc.stress_plot);
+    EXPECT_FALSE(sc.stress_corner_print);
+    EXPECT_FALSE(sc.stress_corner_plot);
+}
+
+TEST(BdfParser, StressCornerDefaultsToPrintAndSetsCornerFlags) {
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+  STRESS(CORNER) = ALL
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_TRUE(sc.stress_print);
+    EXPECT_FALSE(sc.stress_plot);
+    EXPECT_TRUE(sc.stress_corner_print);
+    EXPECT_FALSE(sc.stress_corner_plot);
+}
+
+TEST(BdfParser, StressPlotCornerSetsPlotAndCornerFlags) {
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+  STRESS(PLOT,CORNER) = ALL
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_FALSE(sc.stress_print);
+    EXPECT_TRUE(sc.stress_plot);
+    EXPECT_FALSE(sc.stress_corner_print);
+    EXPECT_TRUE(sc.stress_corner_plot);
+}
+
+TEST(BdfParser, GpstressDefaultsToPrint) {
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+  GPSTRESS = ALL
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_FALSE(sc.stress_print);
+    EXPECT_FALSE(sc.stress_plot);
+    EXPECT_TRUE(sc.gpstress_print);
+    EXPECT_FALSE(sc.gpstress_plot);
+}
+
+TEST(BdfParser, GpstressPrintPlotSetsBothFlags) {
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+  GPSTRESS(PRINT,PLOT) = ALL
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_TRUE(sc.gpstress_print);
+    EXPECT_TRUE(sc.gpstress_plot);
 }
 
 TEST(BdfParser, StressNoneClearsBoth) {
@@ -615,6 +1010,8 @@ ENDDATA
     const auto& sc = m.analysis.subcases[0];
     EXPECT_FALSE(sc.stress_print);
     EXPECT_FALSE(sc.stress_plot);
+    EXPECT_FALSE(sc.stress_corner_print);
+    EXPECT_FALSE(sc.stress_corner_plot);
 }
 
 TEST(BdfParser, MultipleSubcasesIndependentFlags) {
@@ -671,12 +1068,16 @@ ENDDATA
     EXPECT_FALSE(sc1.disp_plot);
     EXPECT_TRUE(sc1.stress_print);
     EXPECT_FALSE(sc1.stress_plot);
+    EXPECT_TRUE(sc1.stress_corner_print);
+    EXPECT_FALSE(sc1.stress_corner_plot);
 
     const auto& sc2 = m.analysis.subcases[1];
     EXPECT_TRUE(sc2.disp_print);
     EXPECT_FALSE(sc2.disp_plot);
     EXPECT_FALSE(sc2.stress_print);
     EXPECT_FALSE(sc2.stress_plot);
+    EXPECT_FALSE(sc2.stress_corner_print);
+    EXPECT_FALSE(sc2.stress_corner_plot);
 }
 
 TEST(BdfParser, GlobalLoadAndSpcDefaultsAreInheritedBySubcases) {

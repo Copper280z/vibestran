@@ -750,12 +750,12 @@ LocalFe compute_shell_thermal_load(ElementId eid, PropertyId pid,
 }
 
 CQuad4::CentroidResponse
-recover_shell_centroid_response(ElementId eid, PropertyId pid,
-                                const std::array<NodeId, 4> &nodes,
-                                const Model &model,
-                                std::span<const double> global_displacements,
-                                double avg_temperature,
-                                double reference_temperature) {
+recover_shell_response(ElementId eid, PropertyId pid,
+                       const std::array<NodeId, 4> &nodes, const Model &model,
+                       std::span<const double> global_displacements,
+                       const double xi, const double eta,
+                       const double temperature,
+                       const double reference_temperature) {
   const auto coords = lookup_node_coords(model, nodes);
   const ShellFrame frame = compute_shell_frame(coords);
   const ShellSection section = build_shell_section(model, eid, pid);
@@ -766,8 +766,7 @@ recover_shell_centroid_response(ElementId eid, PropertyId pid,
   const auto u_membrane = gather_membrane_dofs(u_local);
   const auto u_plate = gather_plate_dofs(u_local);
 
-  const QuadPointData q0 =
-      evaluate_quad_point(eid, frame.xl, frame.yl, 0.0, 0.0);
+  const QuadPointData q0 = evaluate_quad_point(eid, frame.xl, frame.yl, xi, eta);
   const Mitc4PlusMembraneData mitc_membrane =
       (formulation == ShellFormulation::MITC4)
           ? build_mitc4plus_membrane_data(eid, frame.xl, frame.yl)
@@ -783,7 +782,7 @@ recover_shell_centroid_response(ElementId eid, PropertyId pid,
   response.membrane_strain = Bm * u_membrane;
   response.curvature = Bb * u_plate;
 
-  const double dT = avg_temperature - reference_temperature;
+  const double dT = temperature - reference_temperature;
   const Eigen::Vector3d mechanical_membrane =
       response.membrane_strain - section.membrane_alpha * dT;
 
@@ -859,13 +858,24 @@ std::vector<EqIndex> CQuad4::global_dof_indices(const DofMap &dof_map) const {
   return result;
 }
 
+// cppcheck-suppress unusedFunction
+CQuad4::CentroidResponse CQuad4::recover_response(
+    ElementId eid, PropertyId pid, std::array<NodeId, NUM_NODES> node_ids,
+    const Model &model, std::span<const double> global_displacements,
+    const double xi, const double eta, const double temperature,
+    const double reference_temperature) {
+  return recover_shell_response(eid, pid, node_ids, model,
+                                global_displacements, xi, eta, temperature,
+                                reference_temperature);
+}
+
 CQuad4::CentroidResponse CQuad4::recover_centroid_response(
     ElementId eid, PropertyId pid, std::array<NodeId, NUM_NODES> node_ids,
     const Model &model, std::span<const double> global_displacements,
     double avg_temperature, double reference_temperature) {
-  return recover_shell_centroid_response(eid, pid, node_ids, model,
-                                         global_displacements, avg_temperature,
-                                         reference_temperature);
+  return recover_shell_response(eid, pid, node_ids, model,
+                                global_displacements, 0.0, 0.0,
+                                avg_temperature, reference_temperature);
 }
 
 CQuad4Mitc4::CQuad4Mitc4(ElementId eid, PropertyId pid,

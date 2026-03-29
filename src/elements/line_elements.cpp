@@ -240,6 +240,63 @@ struct HermiteData {
                                 eid.value, pid.value));
 }
 
+using RecoveryPoints = std::array<std::array<double, 2>, 4>;
+
+[[nodiscard]] RecoveryPoints default_recovery_points() {
+  return {{{0.0, 0.0}, {0.0, 0.0}, {0.0, 0.0}, {0.0, 0.0}}};
+}
+
+[[nodiscard]] RecoveryPoints recovery_points_from_property(const Property &prop) {
+  if (const auto *pbarl = std::get_if<PBarL>(&prop)) {
+    const std::string type = uppercase_copy(pbarl->section_type);
+    if (type == "BAR" && pbarl->dimensions.size() == 2) {
+      const double half_y = 0.5 * pbarl->dimensions[0];
+      const double half_z = 0.5 * pbarl->dimensions[1];
+      return {{{half_y, half_z},
+               {-half_y, half_z},
+               {-half_y, -half_z},
+               {half_y, -half_z}}};
+    }
+    if (type == "ROD" && pbarl->dimensions.size() == 1) {
+      const double r = 0.5 * pbarl->dimensions[0];
+      return {{{r, 0.0}, {0.0, r}, {-r, 0.0}, {0.0, -r}}};
+    }
+    if (type == "TUBE" && pbarl->dimensions.size() == 2) {
+      const double r = 0.5 * pbarl->dimensions[0];
+      return {{{r, 0.0}, {0.0, r}, {-r, 0.0}, {0.0, -r}}};
+    }
+  }
+  return default_recovery_points();
+}
+
+[[nodiscard]] CBarBeamElement::StressRecoveryEnd
+recover_line_end_stress(const LineSection &section,
+                        const RecoveryPoints &points,
+                        const double axial_force,
+                        const double moment_y,
+                        const double moment_z) {
+  CBarBeamElement::StressRecoveryEnd end;
+  if (section.A > 0.0)
+    end.axial = axial_force / section.A;
+
+  for (int i = 0; i < 4; ++i) {
+    const double y = points[static_cast<size_t>(i)][0];
+    const double z = points[static_cast<size_t>(i)][1];
+    double bending = 0.0;
+    if (section.I2 > 0.0)
+      bending -= moment_z * y / section.I2;
+    if (section.I1 > 0.0)
+      bending += moment_y * z / section.I1;
+    end.s[static_cast<size_t>(i)] = bending;
+  }
+
+  const auto [smin_it, smax_it] =
+      std::minmax_element(end.s.begin(), end.s.end());
+  end.smax = end.axial + *smax_it;
+  end.smin = end.axial + *smin_it;
+  return end;
+}
+
 // cppcheck-suppress constParameterReference -- Eigen matrices are mutated via operator()
 void add_linear_2x2(LocalKe &K, const int i0, const int i1,
                     const Eigen::Matrix2d &sub) {
@@ -490,6 +547,69 @@ LocalFe CBarBeamElement::thermal_load(std::span<const double> temperatures,
   fe_local(0) = -axial_force;
   fe_local(6) = axial_force;
   return frame.lambda.transpose() * fe_local;
+}
+
+// cppcheck-suppress unusedFunction
+CBarBeamElement::StressRecovery CBarBeamElement::recover_stress(
+    std::span<const double> global_displacements,
+    const double average_temperature, const double t_ref) const {
+  if (global_displacements.size() != static_cast<size_t>(NUM_DOFS)) {
+    throw SolverError(std::format(
+        "{} {}: expected {} displacement entries for stress recovery, got {}",
+        (type_ == ElementType::CBAR) ? "CBAR" : "CBEAM", eid_.value, NUM_DOFS,
+        global_displacements.size()));
+  }
+
+  const LineSection section = resolve_line_section(model_, pid_, type_, eid_);
+  const LineFrame frame = build_line_frame(
+      nodes_, model_, orientation_, g0_, std::nullopt,
+      std::format("{} {}", (type_ == ElementType::CBAR) ? "CBAR" : "CBEAM",
+                  eid_.value),
+      false, false);
+  const RecoveryPoints points =
+      recovery_points_from_property(model_.property(pid_));
+
+  Eigen::Matrix<double, 12, 1> u_global;
+  for (int i = 0; i < NUM_DOFS; ++i)
+    u_global(i) = global_displacements[static_cast<size_t>(i)];
+  const Eigen::Matrix<double, 12, 1> u_local = frame.lambda * u_global;
+
+  const double dT = average_temperature - t_ref;
+  const double axial_force =
+      section.E * section.A *
+      (((u_local(6) - u_local(0)) / frame.length) - section.alpha * dT);
+
+  const HermiteData h_a = hermite_shape(0.0, frame.length);
+  const HermiteData h_b = hermite_shape(frame.length, frame.length);
+
+  const Eigen::Matrix<double, 4, 1> v_dofs{
+      u_local(1), u_local(5), u_local(7), u_local(11)};
+  const Eigen::Matrix<double, 4, 1> w_dofs{
+      u_local(2), -u_local(4), u_local(8), -u_local(10)};
+
+  const double moment_z_a =
+      section.E * section.I2 *
+      (h_a.d2N_dx2[0] * v_dofs(0) + h_a.d2N_dx2[1] * v_dofs(1) +
+       h_a.d2N_dx2[2] * v_dofs(2) + h_a.d2N_dx2[3] * v_dofs(3));
+  const double moment_z_b =
+      section.E * section.I2 *
+      (h_b.d2N_dx2[0] * v_dofs(0) + h_b.d2N_dx2[1] * v_dofs(1) +
+       h_b.d2N_dx2[2] * v_dofs(2) + h_b.d2N_dx2[3] * v_dofs(3));
+  const double moment_y_a =
+      section.E * section.I1 *
+      (h_a.d2N_dx2[0] * w_dofs(0) + h_a.d2N_dx2[1] * w_dofs(1) +
+       h_a.d2N_dx2[2] * w_dofs(2) + h_a.d2N_dx2[3] * w_dofs(3));
+  const double moment_y_b =
+      section.E * section.I1 *
+      (h_b.d2N_dx2[0] * w_dofs(0) + h_b.d2N_dx2[1] * w_dofs(1) +
+       h_b.d2N_dx2[2] * w_dofs(2) + h_b.d2N_dx2[3] * w_dofs(3));
+
+  StressRecovery recovery;
+  recovery.end_a = recover_line_end_stress(section, points, axial_force,
+                                           moment_y_a, moment_z_a);
+  recovery.end_b = recover_line_end_stress(section, points, axial_force,
+                                           moment_y_b, moment_z_b);
+  return recovery;
 }
 
 std::vector<EqIndex>

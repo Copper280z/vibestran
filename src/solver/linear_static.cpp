@@ -9,6 +9,7 @@
 #include "elements/cquad4.hpp"
 #include "elements/ctria3.hpp"
 #include "elements/element_factory.hpp"
+#include "elements/line_elements.hpp"
 #include "elements/rbe_constraints.hpp"
 #include "elements/solid_elements.hpp"
 #include "assembly_parallel.hpp"
@@ -75,6 +76,121 @@ namespace {
         cid.value));
   }
   return apply_rotation(rotation_matrix(cs_it->second, position), direction);
+}
+
+[[nodiscard]] std::unordered_map<NodeId, double>
+build_nodal_temperature_map(const Model &model, const SubCase &sc) {
+  std::unordered_map<NodeId, double> nodal_temps;
+  int temp_set = sc.temp_load_set;
+  if (temp_set == 0)
+    temp_set = sc.load_set.value;
+
+  for (const Load *lp : model.loads_for_set(LoadSetId(temp_set))) {
+    if (const TempLoad *tl = std::get_if<TempLoad>(lp))
+      nodal_temps[tl->node] = tl->temperature;
+  }
+
+  const auto tempd_it = model.tempd.find(temp_set);
+  if (tempd_it != model.tempd.end()) {
+    const double t_default = tempd_it->second;
+    for (const auto &[nid, _] : model.nodes) {
+      if (!nodal_temps.contains(nid))
+        nodal_temps[nid] = t_default;
+    }
+  }
+  return nodal_temps;
+}
+
+[[nodiscard]] double
+average_temperature(const std::vector<NodeId> &nodes,
+                    const std::unordered_map<NodeId, double> &nodal_temps,
+                    const double default_temp) {
+  if (nodes.empty())
+    return default_temp;
+  double sum = 0.0;
+  for (NodeId nid : nodes) {
+    const auto it = nodal_temps.find(nid);
+    sum += (it != nodal_temps.end()) ? it->second : default_temp;
+  }
+  return sum / static_cast<double>(nodes.size());
+}
+
+[[nodiscard]] Eigen::Matrix<double, 6, 6>
+solid_constitutive_matrix(const Mat1 &mat) {
+  const double lam =
+      mat.E * mat.nu / ((1.0 + mat.nu) * (1.0 - 2.0 * mat.nu));
+  const double mu = mat.E / (2.0 * (1.0 + mat.nu));
+  Eigen::Matrix<double, 6, 6> D = Eigen::Matrix<double, 6, 6>::Zero();
+  D(0, 0) = lam + 2.0 * mu;
+  D(0, 1) = lam;
+  D(0, 2) = lam;
+  D(1, 0) = lam;
+  D(1, 1) = lam + 2.0 * mu;
+  D(1, 2) = lam;
+  D(2, 0) = lam;
+  D(2, 1) = lam;
+  D(2, 2) = lam + 2.0 * mu;
+  D(3, 3) = mu;
+  D(4, 4) = mu;
+  D(5, 5) = mu;
+  return D;
+}
+
+[[nodiscard]] double solid_von_mises(const Eigen::Matrix<double, 6, 1> &sigma) {
+  const double s1 = sigma(0);
+  const double s2 = sigma(1);
+  const double s3 = sigma(2);
+  const double t12 = sigma(3);
+  const double t23 = sigma(4);
+  const double t31 = sigma(5);
+  return std::sqrt(0.5 * ((s1 - s2) * (s1 - s2) + (s2 - s3) * (s2 - s3) +
+                          (s3 - s1) * (s3 - s1) +
+                          6.0 * (t12 * t12 + t23 * t23 + t31 * t31)));
+}
+
+[[nodiscard]] SolidStressPoint
+make_solid_stress_point(const NodeId node,
+                        const Eigen::Matrix<double, 6, 1> &sigma) {
+  SolidStressPoint point;
+  point.node = node;
+  point.sx = sigma(0);
+  point.sy = sigma(1);
+  point.sz = sigma(2);
+  point.sxy = sigma(3);
+  point.syz = sigma(4);
+  point.szx = sigma(5);
+  point.von_mises = solid_von_mises(sigma);
+  return point;
+}
+
+[[nodiscard]] PlateStressPoint
+make_plate_stress_point(const NodeId node,
+                        const Eigen::Vector3d &membrane_stress,
+                        const Eigen::Vector3d &bending_moment) {
+  PlateStressPoint point;
+  point.node = node;
+  point.sx = membrane_stress(0);
+  point.sy = membrane_stress(1);
+  point.sxy = membrane_stress(2);
+  point.mx = bending_moment(0);
+  point.my = bending_moment(1);
+  point.mxy = bending_moment(2);
+  point.von_mises =
+      std::sqrt(point.sx * point.sx - point.sx * point.sy +
+                point.sy * point.sy + 3.0 * point.sxy * point.sxy);
+  return point;
+}
+
+[[nodiscard]] Eigen::Matrix<double, 6, 1>
+solid_sigma_from_B(const Eigen::Matrix<double, 6, 6> &D,
+                   const Eigen::MatrixXd &B, const Eigen::VectorXd &ue,
+                   const double alpha, const double temperature,
+                   const double reference_temperature) {
+  Eigen::Matrix<double, 6, 1> eps_th;
+  eps_th << alpha * (temperature - reference_temperature),
+      alpha * (temperature - reference_temperature),
+      alpha * (temperature - reference_temperature), 0.0, 0.0, 0.0;
+  return D * (B * ue - eps_th);
 }
 
 } // namespace
@@ -496,32 +612,13 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
   }
 
   // ── Build nodal temperature map for thermal stress correction ────────────
-  std::unordered_map<NodeId, double> nodal_temps_rec;
-  int temp_set_rec = sc.temp_load_set;
-  if (temp_set_rec == 0) temp_set_rec = sc.load_set.value;
-  for (const Load *lp : model.loads_for_set(LoadSetId(temp_set_rec))) {
-    if (const TempLoad *tl = std::get_if<TempLoad>(lp))
-      nodal_temps_rec[tl->node] = tl->temperature;
-  }
-  auto tempd_rec_it = model.tempd.find(temp_set_rec);
-  if (tempd_rec_it != model.tempd.end()) {
-    double T_default = tempd_rec_it->second;
-    for (const auto& [nid, _] : model.nodes) {
-      if (nodal_temps_rec.find(nid) == nodal_temps_rec.end())
-        nodal_temps_rec[nid] = T_default;
-    }
-  }
+  const std::unordered_map<NodeId, double> nodal_temps_rec =
+      build_nodal_temperature_map(model, sc);
 
-  if (sc.stress_print || sc.stress_plot) {
+  if (sc.has_any_stress_output()) {
     std::set<std::string> unsupported_types;
     for (const auto &elem_data : model.elements) {
       switch (elem_data.type) {
-      case ElementType::CBAR:
-        unsupported_types.insert("CBAR");
-        break;
-      case ElementType::CBEAM:
-        unsupported_types.insert("CBEAM");
-        break;
       case ElementType::CBUSH:
         unsupported_types.insert("CBUSH");
         break;
@@ -569,8 +666,40 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         ue(i) = u_free[static_cast<size_t>(eq)];
     }
 
-    if (elem_data.type == ElementType::CQUAD4 ||
-        elem_data.type == ElementType::CTRIA3) {
+    if (elem_data.type == ElementType::CBAR ||
+        elem_data.type == ElementType::CBEAM) {
+      const MaterialId mid = property_material_id(model.property(elem_data.pid));
+      const Mat1 &mat_ = model.material(mid);
+      const double avg_temp =
+          average_temperature(elem_data.nodes, nodal_temps_rec, mat_.ref_temp);
+
+      std::array<double, CBarBeamElement::NUM_DOFS> line_u{};
+      for (int i = 0; i < CBarBeamElement::NUM_DOFS; ++i)
+        line_u[static_cast<size_t>(i)] = ue(i);
+
+      CBarBeamElement line_elem(
+          elem_data.type, elem_data.id, elem_data.pid,
+          {elem_data.nodes[0], elem_data.nodes[1]}, model, elem_data.orientation,
+          elem_data.g0);
+      const auto recovery =
+          line_elem.recover_stress(line_u, avg_temp, mat_.ref_temp);
+
+      LineStress ls;
+      ls.eid = elem_data.id;
+      ls.etype = elem_data.type;
+      ls.end_a.node = elem_data.nodes[0];
+      ls.end_a.s = recovery.end_a.s;
+      ls.end_a.axial = recovery.end_a.axial;
+      ls.end_a.smax = recovery.end_a.smax;
+      ls.end_a.smin = recovery.end_a.smin;
+      ls.end_b.node = elem_data.nodes[1];
+      ls.end_b.s = recovery.end_b.s;
+      ls.end_b.axial = recovery.end_b.axial;
+      ls.end_b.smax = recovery.end_b.smax;
+      ls.end_b.smin = recovery.end_b.smin;
+      res.line_stresses.push_back(ls);
+    } else if (elem_data.type == ElementType::CQUAD4 ||
+               elem_data.type == ElementType::CTRIA3) {
       PlateStress ps;
       ps.eid   = elem_data.id;
       ps.etype = elem_data.type;
@@ -578,29 +707,42 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
       if (elem_data.type == ElementType::CQUAD4) {
         const auto &pshell_ = std::get<PShell>(model.property(elem_data.pid));
         const Mat1 &mat_ = model.material(pshell_.mid1);
-        double T_avg4 = 0.0;
-        for (int n = 0; n < 4; ++n) {
-          auto it = nodal_temps_rec.find(elem_data.nodes[n]);
-          T_avg4 += (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
-        }
-        T_avg4 /= 4.0;
-
         std::array<NodeId, 4> nodes{
             elem_data.nodes[0], elem_data.nodes[1], elem_data.nodes[2],
             elem_data.nodes[3]};
+        const double T_avg4 =
+            average_temperature(elem_data.nodes, nodal_temps_rec, mat_.ref_temp);
         const auto response = CQuad4::recover_centroid_response(
             elem_data.id, elem_data.pid, nodes, model,
             std::span<const double>(ue.data(), static_cast<size_t>(ue.size())),
             T_avg4, mat_.ref_temp);
+        const PlateStressPoint centroid = make_plate_stress_point(
+            NodeId{0}, response.membrane_stress, response.bending_moment);
+        ps.sx = centroid.sx;
+        ps.sy = centroid.sy;
+        ps.sxy = centroid.sxy;
+        ps.mx = centroid.mx;
+        ps.my = centroid.my;
+        ps.mxy = centroid.mxy;
+        ps.von_mises = centroid.von_mises;
 
-        ps.sx = response.membrane_stress(0);
-        ps.sy = response.membrane_stress(1);
-        ps.sxy = response.membrane_stress(2);
-        ps.mx = response.bending_moment(0);
-        ps.my = response.bending_moment(1);
-        ps.mxy = response.bending_moment(2);
-        ps.von_mises = std::sqrt(ps.sx * ps.sx - ps.sx * ps.sy + ps.sy * ps.sy +
-                                 3 * ps.sxy * ps.sxy);
+        static constexpr std::array<std::pair<double, double>, 4>
+            kQuadCornerCoords{{{-1.0, -1.0}, {1.0, -1.0},
+                               {1.0, 1.0}, {-1.0, 1.0}}};
+        for (int n = 0; n < 4; ++n) {
+          const NodeId nid = elem_data.nodes[static_cast<size_t>(n)];
+          const auto temp_it = nodal_temps_rec.find(nid);
+          const double point_temp =
+              (temp_it != nodal_temps_rec.end()) ? temp_it->second : mat_.ref_temp;
+          const auto point = CQuad4::recover_response(
+              elem_data.id, elem_data.pid, nodes, model,
+              std::span<const double>(ue.data(), static_cast<size_t>(ue.size())),
+              kQuadCornerCoords[static_cast<size_t>(n)].first,
+              kQuadCornerCoords[static_cast<size_t>(n)].second, point_temp,
+              mat_.ref_temp);
+          ps.nodal.push_back(make_plate_stress_point(
+              nid, point.membrane_stress, point.bending_moment));
+        }
       } else {
         auto node_c = [&]() -> std::array<Vec3, 3> {
           std::array<Vec3, 3> c;
@@ -645,21 +787,25 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
           u_mem(2 * n)     = u_glob.dot(e1_t);
           u_mem(2 * n + 1) = u_glob.dot(e2_t);
         }
-        double T_avg3 = 0.0;
-        for (int n = 0; n < 3; ++n) {
-          auto it = nodal_temps_rec.find(elem_data.nodes[n]);
-          T_avg3 += (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
-        }
-        T_avg3 /= 3.0;
+        const double T_avg3 =
+            average_temperature(elem_data.nodes, nodal_temps_rec, mat_.ref_temp);
         double dT3 = T_avg3 - mat_.ref_temp;
         double alpha3 = mat_.A;
         Eigen::Vector3d eps_th3{alpha3 * dT3, alpha3 * dT3, 0.0};
 
         Eigen::Vector3d sigma = Dm_ * (Bm * u_mem - eps_th3);
-        ps.sx = sigma(0); ps.sy = sigma(1); ps.sxy = sigma(2);
-        ps.mx = 0; ps.my = 0; ps.mxy = 0;
-        ps.von_mises = std::sqrt(ps.sx * ps.sx - ps.sx * ps.sy + ps.sy * ps.sy +
-                                 3 * ps.sxy * ps.sxy);
+        const PlateStressPoint centroid = make_plate_stress_point(
+            NodeId{0}, sigma, Eigen::Vector3d::Zero());
+        ps.sx = centroid.sx;
+        ps.sy = centroid.sy;
+        ps.sxy = centroid.sxy;
+        ps.mx = 0.0;
+        ps.my = 0.0;
+        ps.mxy = 0.0;
+        ps.von_mises = centroid.von_mises;
+        for (NodeId nid : elem_data.nodes)
+          ps.nodal.push_back(
+              make_plate_stress_point(nid, sigma, Eigen::Vector3d::Zero()));
       }
       res.plate_stresses.push_back(ps);
     } else if (elem_data.type == ElementType::CHEXA8 ||
@@ -672,211 +818,376 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
 
       const auto &psol_ = std::get<PSolid>(model.property(elem_data.pid));
       const Mat1 &mat_ = model.material(psol_.mid);
-      Eigen::Matrix<double, 6, 6> D_ = [&]() {
-        double lam = mat_.E * mat_.nu / ((1 + mat_.nu) * (1 - 2 * mat_.nu));
-        double mu_ = mat_.E / (2 * (1 + mat_.nu));
-        Eigen::Matrix<double, 6, 6> D;
-        D.setZero();
-        D(0, 0) = lam + 2 * mu_; D(0, 1) = lam; D(0, 2) = lam;
-        D(1, 0) = lam; D(1, 1) = lam + 2 * mu_; D(1, 2) = lam;
-        D(2, 0) = lam; D(2, 1) = lam; D(2, 2) = lam + 2 * mu_;
-        D(3, 3) = mu_; D(4, 4) = mu_; D(5, 5) = mu_;
-        return D;
-      }();
+      const Eigen::Matrix<double, 6, 6> D_ = solid_constitutive_matrix(mat_);
 
       Eigen::Matrix<double, 6, 1> sigma;
       sigma.setZero();
-
-      if (elem_data.type == ElementType::CTETRA10) {
-        auto nc10 = [&]() -> std::array<Vec3,10> {
-          std::array<Vec3,10> arr;
-          for (int i = 0; i < 10; ++i)
-            arr[i] = model.node(elem_data.nodes[i]).position;
-          return arr;
-        }();
-        double L1=0.25, L2=0.25, L3=0.25;
-        double L4 = 1.0 - L1 - L2 - L3;
-        std::array<double,10> dNdL1, dNdL2, dNdL3;
-        dNdL1[0] = 4*L1 - 1; dNdL1[1] = 0; dNdL1[2] = 0; dNdL1[3] = -(4*L4-1);
-        dNdL1[4] = 4*L2; dNdL1[5] = 0; dNdL1[6] = 4*L3; dNdL1[7] = 4*(L4-L1); dNdL1[8] = -4*L2; dNdL1[9] = -4*L3;
-        dNdL2[0] = 0; dNdL2[1] = 4*L2-1; dNdL2[2] = 0; dNdL2[3] = -(4*L4-1);
-        dNdL2[4] = 4*L1; dNdL2[5] = 4*L3; dNdL2[6] = 0; dNdL2[7] = -4*L1; dNdL2[8] = 4*(L4-L2); dNdL2[9] = -4*L3;
-        dNdL3[0] = 0; dNdL3[1] = 0; dNdL3[2] = 4*L3-1; dNdL3[3] = -(4*L4-1);
-        dNdL3[4] = 0; dNdL3[5] = 4*L2; dNdL3[6] = 4*L1; dNdL3[7] = -4*L1; dNdL3[8] = -4*L2; dNdL3[9] = 4*(L4-L3);
-
-        Eigen::Matrix3d J10 = Eigen::Matrix3d::Zero();
-        for (int n = 0; n < 10; ++n) {
-          J10(0,0)+=dNdL1[n]*nc10[n].x; J10(0,1)+=dNdL1[n]*nc10[n].y; J10(0,2)+=dNdL1[n]*nc10[n].z;
-          J10(1,0)+=dNdL2[n]*nc10[n].x; J10(1,1)+=dNdL2[n]*nc10[n].y; J10(1,2)+=dNdL2[n]*nc10[n].z;
-          J10(2,0)+=dNdL3[n]*nc10[n].x; J10(2,1)+=dNdL3[n]*nc10[n].y; J10(2,2)+=dNdL3[n]*nc10[n].z;
-        }
-        Eigen::Matrix3d Jinv10 = J10.inverse();
-        Eigen::MatrixXd B10(6, 30); B10.setZero();
-        for (int n = 0; n < 10; ++n) {
-          double dnx = Jinv10(0,0)*dNdL1[n]+Jinv10(0,1)*dNdL2[n]+Jinv10(0,2)*dNdL3[n];
-          double dny = Jinv10(1,0)*dNdL1[n]+Jinv10(1,1)*dNdL2[n]+Jinv10(1,2)*dNdL3[n];
-          double dnz = Jinv10(2,0)*dNdL1[n]+Jinv10(2,1)*dNdL2[n]+Jinv10(2,2)*dNdL3[n];
-          int c0=3*n;
-          B10(0,c0)=dnx; B10(1,c0+1)=dny; B10(2,c0+2)=dnz;
-          B10(3,c0)=dny; B10(3,c0+1)=dnx;
-          B10(4,c0+1)=dnz; B10(4,c0+2)=dny;
-          B10(5,c0)=dnz; B10(5,c0+2)=dnx;
-        }
-        double T10=0;
-        for (int i=0; i<10; ++i) {
-          auto it=nodal_temps_rec.find(elem_data.nodes[i]);
-          T10 += (it!=nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
-        }
-        T10 /= 10.0;
-        double dT10 = T10 - mat_.ref_temp;
-        Eigen::Matrix<double,6,1> eps_th10;
-        eps_th10 << mat_.A*dT10, mat_.A*dT10, mat_.A*dT10, 0, 0, 0;
-        sigma = D_ * (B10 * ue - eps_th10);
-      } else if (elem_data.type == ElementType::CTETRA4) {
+      auto eval_ctetra4 = [&]() {
         auto nc = [&]() -> std::array<Vec3, 4> {
           std::array<Vec3, 4> c;
           for (int i = 0; i < 4; ++i)
-            c[i] = model.node(elem_data.nodes[i]).position;
+            c[i] = model.node(elem_data.nodes[static_cast<size_t>(i)]).position;
           return c;
         }();
-        double x1 = nc[0].x, y1 = nc[0].y, z1 = nc[0].z;
-        double x2 = nc[1].x, y2 = nc[1].y, z2 = nc[1].z;
-        double x3 = nc[2].x, y3 = nc[2].y, z3 = nc[2].z;
-        double x4 = nc[3].x, y4 = nc[3].y, z4 = nc[3].z;
+        const double x1 = nc[0].x, y1 = nc[0].y, z1 = nc[0].z;
+        const double x2 = nc[1].x, y2 = nc[1].y, z2 = nc[1].z;
+        const double x3 = nc[2].x, y3 = nc[2].y, z3 = nc[2].z;
+        const double x4 = nc[3].x, y4 = nc[3].y, z4 = nc[3].z;
         Eigen::Matrix4d A4;
         A4 << 1, x1, y1, z1, 1, x2, y2, z2, 1, x3, y3, z3, 1, x4, y4, z4;
-        double V6 = A4.determinant();
+        const double V6 = A4.determinant();
         Eigen::Matrix4d cofA = Eigen::Matrix4d::Zero();
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 4; ++i) {
           for (int j = 0; j < 4; ++j) {
             Eigen::Matrix3d m3;
             int ri = 0;
             for (int r = 0; r < 4; ++r) {
-              if (r == j) continue;
-              int ci_ = 0;
-              for (int cc = 0; cc < 4; ++cc) {
-                if (cc == i) continue;
-                m3(ri, ci_++) = A4(r, cc);
+              if (r == j)
+                continue;
+              int ci = 0;
+              for (int c = 0; c < 4; ++c) {
+                if (c == i)
+                  continue;
+                m3(ri, ci++) = A4(r, c);
               }
-              ri++;
+              ++ri;
             }
             cofA(i, j) = std::pow(-1.0, i + j) * m3.determinant();
           }
+        }
         Eigen::MatrixXd B(6, 12);
         B.setZero();
         for (int n = 0; n < 4; ++n) {
-          double bx = cofA(1, n) / V6, by = cofA(2, n) / V6,
-                 bz = cofA(3, n) / V6;
-          int c0 = 3 * n;
-          B(0, c0) = bx; B(1, c0+1) = by; B(2, c0+2) = bz;
-          B(3, c0) = by; B(3, c0+1) = bx;
-          B(4, c0+1) = bz; B(4, c0+2) = by;
-          B(5, c0) = bz; B(5, c0+2) = bx;
+          const double bx = cofA(1, n) / V6;
+          const double by = cofA(2, n) / V6;
+          const double bz = cofA(3, n) / V6;
+          const int c0 = 3 * n;
+          B(0, c0) = bx;
+          B(1, c0 + 1) = by;
+          B(2, c0 + 2) = bz;
+          B(3, c0) = by;
+          B(3, c0 + 1) = bx;
+          B(4, c0 + 1) = bz;
+          B(4, c0 + 2) = by;
+          B(5, c0) = bz;
+          B(5, c0 + 2) = bx;
         }
-        double T_avg_tet = 0.0;
-        for (int i = 0; i < 4; ++i) {
-          auto it = nodal_temps_rec.find(elem_data.nodes[i]);
-          T_avg_tet += (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
+        const double temp =
+            average_temperature(elem_data.nodes, nodal_temps_rec, mat_.ref_temp);
+        return solid_sigma_from_B(D_, B, ue, mat_.A, temp, mat_.ref_temp);
+      };
+
+      struct Tetra10ShapeData {
+        std::array<double, 10> N{};
+        std::array<double, 10> dNdL1{};
+        std::array<double, 10> dNdL2{};
+        std::array<double, 10> dNdL3{};
+      };
+      const auto tet10_shape = [](const double L1, const double L2,
+                                  const double L3) {
+        const double L4 = 1.0 - L1 - L2 - L3;
+        Tetra10ShapeData s;
+        s.N[0] = L1 * (2 * L1 - 1);
+        s.N[1] = L2 * (2 * L2 - 1);
+        s.N[2] = L3 * (2 * L3 - 1);
+        s.N[3] = L4 * (2 * L4 - 1);
+        s.N[4] = 4 * L1 * L2;
+        s.N[5] = 4 * L2 * L3;
+        s.N[6] = 4 * L1 * L3;
+        s.N[7] = 4 * L1 * L4;
+        s.N[8] = 4 * L2 * L4;
+        s.N[9] = 4 * L3 * L4;
+        s.dNdL1[0] = 4 * L1 - 1;
+        s.dNdL1[1] = 0.0;
+        s.dNdL1[2] = 0.0;
+        s.dNdL1[3] = -(4 * L4 - 1);
+        s.dNdL1[4] = 4 * L2;
+        s.dNdL1[5] = 0.0;
+        s.dNdL1[6] = 4 * L3;
+        s.dNdL1[7] = 4 * (L4 - L1);
+        s.dNdL1[8] = -4 * L2;
+        s.dNdL1[9] = -4 * L3;
+        s.dNdL2[0] = 0.0;
+        s.dNdL2[1] = 4 * L2 - 1;
+        s.dNdL2[2] = 0.0;
+        s.dNdL2[3] = -(4 * L4 - 1);
+        s.dNdL2[4] = 4 * L1;
+        s.dNdL2[5] = 4 * L3;
+        s.dNdL2[6] = 0.0;
+        s.dNdL2[7] = -4 * L1;
+        s.dNdL2[8] = 4 * (L4 - L2);
+        s.dNdL2[9] = -4 * L3;
+        s.dNdL3[0] = 0.0;
+        s.dNdL3[1] = 0.0;
+        s.dNdL3[2] = 4 * L3 - 1;
+        s.dNdL3[3] = -(4 * L4 - 1);
+        s.dNdL3[4] = 0.0;
+        s.dNdL3[5] = 4 * L2;
+        s.dNdL3[6] = 4 * L1;
+        s.dNdL3[7] = -4 * L1;
+        s.dNdL3[8] = -4 * L2;
+        s.dNdL3[9] = 4 * (L4 - L3);
+        return s;
+      };
+      auto eval_ctetra10 = [&](const double L1, const double L2,
+                               const double L3) {
+        auto nc = [&]() -> std::array<Vec3, 10> {
+          std::array<Vec3, 10> c;
+          for (int i = 0; i < 10; ++i)
+            c[i] = model.node(elem_data.nodes[static_cast<size_t>(i)]).position;
+          return c;
+        }();
+        std::array<double, 10> temp{};
+        for (int i = 0; i < 10; ++i) {
+          const auto it =
+              nodal_temps_rec.find(elem_data.nodes[static_cast<size_t>(i)]);
+          temp[static_cast<size_t>(i)] =
+              (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
         }
-        T_avg_tet /= 4.0;
-        double dT_tet = T_avg_tet - mat_.ref_temp;
-        Eigen::Matrix<double, 6, 1> eps_th_tet;
-        eps_th_tet << mat_.A*dT_tet, mat_.A*dT_tet, mat_.A*dT_tet, 0, 0, 0;
-        sigma = D_ * (B * ue - eps_th_tet);
-      } else if (elem_data.type == ElementType::CPENTA6) {
-        // Centroid stress recovery: L1=1/3, L2=1/3, zeta=0
-        auto sd = CPenta6::shape_functions(1.0/3.0, 1.0/3.0, 0.0);
+        const auto sd = tet10_shape(L1, L2, L3);
+        Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
+        for (int n = 0; n < 10; ++n) {
+          J(0, 0) += sd.dNdL1[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].x;
+          J(0, 1) += sd.dNdL1[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].y;
+          J(0, 2) += sd.dNdL1[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].z;
+          J(1, 0) += sd.dNdL2[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].x;
+          J(1, 1) += sd.dNdL2[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].y;
+          J(1, 2) += sd.dNdL2[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].z;
+          J(2, 0) += sd.dNdL3[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].x;
+          J(2, 1) += sd.dNdL3[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].y;
+          J(2, 2) += sd.dNdL3[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].z;
+        }
+        const Eigen::Matrix3d Jinv = J.inverse();
+        Eigen::MatrixXd B(6, 30);
+        B.setZero();
+        for (int n = 0; n < 10; ++n) {
+          const double dnx =
+              Jinv(0, 0) * sd.dNdL1[static_cast<size_t>(n)] +
+              Jinv(0, 1) * sd.dNdL2[static_cast<size_t>(n)] +
+              Jinv(0, 2) * sd.dNdL3[static_cast<size_t>(n)];
+          const double dny =
+              Jinv(1, 0) * sd.dNdL1[static_cast<size_t>(n)] +
+              Jinv(1, 1) * sd.dNdL2[static_cast<size_t>(n)] +
+              Jinv(1, 2) * sd.dNdL3[static_cast<size_t>(n)];
+          const double dnz =
+              Jinv(2, 0) * sd.dNdL1[static_cast<size_t>(n)] +
+              Jinv(2, 1) * sd.dNdL2[static_cast<size_t>(n)] +
+              Jinv(2, 2) * sd.dNdL3[static_cast<size_t>(n)];
+          const int c0 = 3 * n;
+          B(0, c0) = dnx;
+          B(1, c0 + 1) = dny;
+          B(2, c0 + 2) = dnz;
+          B(3, c0) = dny;
+          B(3, c0 + 1) = dnx;
+          B(4, c0 + 1) = dnz;
+          B(4, c0 + 2) = dny;
+          B(5, c0) = dnz;
+          B(5, c0 + 2) = dnx;
+        }
+        double point_temp = 0.0;
+        for (int n = 0; n < 10; ++n)
+          point_temp += sd.N[static_cast<size_t>(n)] * temp[static_cast<size_t>(n)];
+        return solid_sigma_from_B(D_, B, ue, mat_.A, point_temp, mat_.ref_temp);
+      };
+
+      auto eval_cpenta6 = [&](const double L1, const double L2,
+                              const double zeta) {
         auto nc = [&]() -> std::array<Vec3, 6> {
           std::array<Vec3, 6> c;
           for (int i = 0; i < 6; ++i)
-            c[i] = model.node(elem_data.nodes[i]).position;
+            c[i] = model.node(elem_data.nodes[static_cast<size_t>(i)]).position;
           return c;
         }();
+        std::array<double, 6> temp{};
+        for (int i = 0; i < 6; ++i) {
+          const auto it =
+              nodal_temps_rec.find(elem_data.nodes[static_cast<size_t>(i)]);
+          temp[static_cast<size_t>(i)] =
+              (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
+        }
+        const auto sd = CPenta6::shape_functions(L1, L2, zeta);
         Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
         for (int n = 0; n < 6; ++n) {
-          J(0,0) += sd.dNdL1[n]*nc[n].x; J(0,1) += sd.dNdL1[n]*nc[n].y; J(0,2) += sd.dNdL1[n]*nc[n].z;
-          J(1,0) += sd.dNdL2[n]*nc[n].x; J(1,1) += sd.dNdL2[n]*nc[n].y; J(1,2) += sd.dNdL2[n]*nc[n].z;
-          J(2,0) += sd.dNdzeta[n]*nc[n].x; J(2,1) += sd.dNdzeta[n]*nc[n].y; J(2,2) += sd.dNdzeta[n]*nc[n].z;
+          J(0, 0) += sd.dNdL1[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].x;
+          J(0, 1) += sd.dNdL1[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].y;
+          J(0, 2) += sd.dNdL1[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].z;
+          J(1, 0) += sd.dNdL2[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].x;
+          J(1, 1) += sd.dNdL2[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].y;
+          J(1, 2) += sd.dNdL2[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].z;
+          J(2, 0) += sd.dNdzeta[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].x;
+          J(2, 1) += sd.dNdzeta[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].y;
+          J(2, 2) += sd.dNdzeta[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].z;
         }
-        Eigen::Matrix3d Jinv = J.inverse();
-        Eigen::MatrixXd B(6, 18); B.setZero();
+        const Eigen::Matrix3d Jinv = J.inverse();
+        Eigen::MatrixXd B(6, 18);
+        B.setZero();
         for (int n = 0; n < 6; ++n) {
-          double dnx = Jinv(0,0)*sd.dNdL1[n]+Jinv(0,1)*sd.dNdL2[n]+Jinv(0,2)*sd.dNdzeta[n];
-          double dny = Jinv(1,0)*sd.dNdL1[n]+Jinv(1,1)*sd.dNdL2[n]+Jinv(1,2)*sd.dNdzeta[n];
-          double dnz = Jinv(2,0)*sd.dNdL1[n]+Jinv(2,1)*sd.dNdL2[n]+Jinv(2,2)*sd.dNdzeta[n];
-          int c0 = 3*n;
-          B(0,c0)=dnx; B(1,c0+1)=dny; B(2,c0+2)=dnz;
-          B(3,c0)=dny; B(3,c0+1)=dnx;
-          B(4,c0+1)=dnz; B(4,c0+2)=dny;
-          B(5,c0)=dnz; B(5,c0+2)=dnx;
+          const double dnx =
+              Jinv(0, 0) * sd.dNdL1[static_cast<size_t>(n)] +
+              Jinv(0, 1) * sd.dNdL2[static_cast<size_t>(n)] +
+              Jinv(0, 2) * sd.dNdzeta[static_cast<size_t>(n)];
+          const double dny =
+              Jinv(1, 0) * sd.dNdL1[static_cast<size_t>(n)] +
+              Jinv(1, 1) * sd.dNdL2[static_cast<size_t>(n)] +
+              Jinv(1, 2) * sd.dNdzeta[static_cast<size_t>(n)];
+          const double dnz =
+              Jinv(2, 0) * sd.dNdL1[static_cast<size_t>(n)] +
+              Jinv(2, 1) * sd.dNdL2[static_cast<size_t>(n)] +
+              Jinv(2, 2) * sd.dNdzeta[static_cast<size_t>(n)];
+          const int c0 = 3 * n;
+          B(0, c0) = dnx;
+          B(1, c0 + 1) = dny;
+          B(2, c0 + 2) = dnz;
+          B(3, c0) = dny;
+          B(3, c0 + 1) = dnx;
+          B(4, c0 + 1) = dnz;
+          B(4, c0 + 2) = dny;
+          B(5, c0) = dnz;
+          B(5, c0 + 2) = dnx;
         }
-        double T_avg_penta = 0.0;
-        for (int i = 0; i < 6; ++i) {
-          auto it = nodal_temps_rec.find(elem_data.nodes[i]);
-          T_avg_penta += (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
-        }
-        T_avg_penta /= 6.0;
-        double dT_penta = T_avg_penta - mat_.ref_temp;
-        Eigen::Matrix<double,6,1> eps_th_penta;
-        eps_th_penta << mat_.A*dT_penta, mat_.A*dT_penta, mat_.A*dT_penta, 0, 0, 0;
-        sigma = D_ * (B * ue - eps_th_penta);
-      } else {
-        auto sd = CHexa8::shape_functions(0, 0, 0);
+        double point_temp = 0.0;
+        for (int n = 0; n < 6; ++n)
+          point_temp += sd.N[static_cast<size_t>(n)] * temp[static_cast<size_t>(n)];
+        return solid_sigma_from_B(D_, B, ue, mat_.A, point_temp, mat_.ref_temp);
+      };
+
+      auto eval_chexa8 = [&](const double xi, const double eta,
+                             const double zeta) {
         auto nc = [&]() -> std::array<Vec3, 8> {
           std::array<Vec3, 8> c;
           for (int i = 0; i < 8; ++i)
-            c[i] = model.node(elem_data.nodes[i]).position;
+            c[i] = model.node(elem_data.nodes[static_cast<size_t>(i)]).position;
           return c;
         }();
+        std::array<double, 8> temp{};
+        for (int i = 0; i < 8; ++i) {
+          const auto it =
+              nodal_temps_rec.find(elem_data.nodes[static_cast<size_t>(i)]);
+          temp[static_cast<size_t>(i)] =
+              (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
+        }
+        const auto sd = CHexa8::shape_functions(xi, eta, zeta);
         Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
         for (int n = 0; n < 8; ++n) {
-          J(0, 0) += sd.dNdxi[n] * nc[n].x;
-          J(0, 1) += sd.dNdxi[n] * nc[n].y;
-          J(0, 2) += sd.dNdxi[n] * nc[n].z;
-          J(1, 0) += sd.dNdeta[n] * nc[n].x;
-          J(1, 1) += sd.dNdeta[n] * nc[n].y;
-          J(1, 2) += sd.dNdeta[n] * nc[n].z;
-          J(2, 0) += sd.dNdzeta[n] * nc[n].x;
-          J(2, 1) += sd.dNdzeta[n] * nc[n].y;
-          J(2, 2) += sd.dNdzeta[n] * nc[n].z;
+          J(0, 0) += sd.dNdxi[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].x;
+          J(0, 1) += sd.dNdxi[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].y;
+          J(0, 2) += sd.dNdxi[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].z;
+          J(1, 0) += sd.dNdeta[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].x;
+          J(1, 1) += sd.dNdeta[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].y;
+          J(1, 2) += sd.dNdeta[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].z;
+          J(2, 0) += sd.dNdzeta[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].x;
+          J(2, 1) += sd.dNdzeta[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].y;
+          J(2, 2) += sd.dNdzeta[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].z;
         }
-        Eigen::Matrix3d Jinv = J.inverse();
-        Eigen::MatrixXd dNdx(3, 8);
-        for (int n = 0; n < 8; ++n) {
-          dNdx(0, n) = Jinv(0,0)*sd.dNdxi[n] + Jinv(0,1)*sd.dNdeta[n] + Jinv(0,2)*sd.dNdzeta[n];
-          dNdx(1, n) = Jinv(1,0)*sd.dNdxi[n] + Jinv(1,1)*sd.dNdeta[n] + Jinv(1,2)*sd.dNdzeta[n];
-          dNdx(2, n) = Jinv(2,0)*sd.dNdxi[n] + Jinv(2,1)*sd.dNdeta[n] + Jinv(2,2)*sd.dNdzeta[n];
-        }
+        const Eigen::Matrix3d Jinv = J.inverse();
         Eigen::MatrixXd B(6, 24);
         B.setZero();
         for (int n = 0; n < 8; ++n) {
-          double dnx = dNdx(0, n), dny = dNdx(1, n), dnz = dNdx(2, n);
-          int c0 = 3 * n;
-          B(0, c0) = dnx; B(1, c0+1) = dny; B(2, c0+2) = dnz;
-          B(3, c0) = dny; B(3, c0+1) = dnx;
-          B(4, c0+1) = dnz; B(4, c0+2) = dny;
-          B(5, c0) = dnz; B(5, c0+2) = dnx;
+          const double dnx =
+              Jinv(0, 0) * sd.dNdxi[static_cast<size_t>(n)] +
+              Jinv(0, 1) * sd.dNdeta[static_cast<size_t>(n)] +
+              Jinv(0, 2) * sd.dNdzeta[static_cast<size_t>(n)];
+          const double dny =
+              Jinv(1, 0) * sd.dNdxi[static_cast<size_t>(n)] +
+              Jinv(1, 1) * sd.dNdeta[static_cast<size_t>(n)] +
+              Jinv(1, 2) * sd.dNdzeta[static_cast<size_t>(n)];
+          const double dnz =
+              Jinv(2, 0) * sd.dNdxi[static_cast<size_t>(n)] +
+              Jinv(2, 1) * sd.dNdeta[static_cast<size_t>(n)] +
+              Jinv(2, 2) * sd.dNdzeta[static_cast<size_t>(n)];
+          const int c0 = 3 * n;
+          B(0, c0) = dnx;
+          B(1, c0 + 1) = dny;
+          B(2, c0 + 2) = dnz;
+          B(3, c0) = dny;
+          B(3, c0 + 1) = dnx;
+          B(4, c0 + 1) = dnz;
+          B(4, c0 + 2) = dny;
+          B(5, c0) = dnz;
+          B(5, c0 + 2) = dnx;
         }
-        double T_avg_hex = 0.0;
-        for (int i = 0; i < 8; ++i) {
-          auto it = nodal_temps_rec.find(elem_data.nodes[i]);
-          T_avg_hex += (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
+        double point_temp = 0.0;
+        for (int n = 0; n < 8; ++n)
+          point_temp += sd.N[static_cast<size_t>(n)] * temp[static_cast<size_t>(n)];
+        return solid_sigma_from_B(D_, B, ue, mat_.A, point_temp, mat_.ref_temp);
+      };
+
+      if (elem_data.type == ElementType::CTETRA4) {
+        sigma = eval_ctetra4();
+        for (NodeId nid : elem_data.nodes)
+          ss.nodal.push_back(make_solid_stress_point(nid, sigma));
+      } else if (elem_data.type == ElementType::CTETRA10) {
+        sigma = eval_ctetra10(0.25, 0.25, 0.25);
+        static constexpr std::array<std::array<double, 3>, 10> kTet10Coords{{
+            {1.0, 0.0, 0.0},
+            {0.0, 1.0, 0.0},
+            {0.0, 0.0, 1.0},
+            {0.0, 0.0, 0.0},
+            {0.5, 0.5, 0.0},
+            {0.0, 0.5, 0.5},
+            {0.5, 0.0, 0.5},
+            {0.5, 0.0, 0.0},
+            {0.0, 0.5, 0.0},
+            {0.0, 0.0, 0.5},
+        }};
+        for (int n = 0; n < 10; ++n) {
+          const auto point =
+              eval_ctetra10(kTet10Coords[static_cast<size_t>(n)][0],
+                            kTet10Coords[static_cast<size_t>(n)][1],
+                            kTet10Coords[static_cast<size_t>(n)][2]);
+          ss.nodal.push_back(
+              make_solid_stress_point(elem_data.nodes[static_cast<size_t>(n)],
+                                      point));
         }
-        T_avg_hex /= 8.0;
-        double dT_hex = T_avg_hex - mat_.ref_temp;
-        Eigen::Matrix<double, 6, 1> eps_th_hex;
-        eps_th_hex << mat_.A*dT_hex, mat_.A*dT_hex, mat_.A*dT_hex, 0, 0, 0;
-        sigma = D_ * (B * ue - eps_th_hex);
+      } else if (elem_data.type == ElementType::CPENTA6) {
+        sigma = eval_cpenta6(1.0 / 3.0, 1.0 / 3.0, 0.0);
+        static constexpr std::array<std::array<double, 3>, 6> kPentaCoords{{
+            {1.0, 0.0, -1.0},
+            {0.0, 1.0, -1.0},
+            {0.0, 0.0, -1.0},
+            {1.0, 0.0, 1.0},
+            {0.0, 1.0, 1.0},
+            {0.0, 0.0, 1.0},
+        }};
+        for (int n = 0; n < 6; ++n) {
+          const auto point =
+              eval_cpenta6(kPentaCoords[static_cast<size_t>(n)][0],
+                           kPentaCoords[static_cast<size_t>(n)][1],
+                           kPentaCoords[static_cast<size_t>(n)][2]);
+          ss.nodal.push_back(
+              make_solid_stress_point(elem_data.nodes[static_cast<size_t>(n)],
+                                      point));
+        }
+      } else {
+        sigma = eval_chexa8(0.0, 0.0, 0.0);
+        static constexpr std::array<std::array<double, 3>, 8> kHexCoords{{
+            {-1.0, -1.0, -1.0},
+            {1.0, -1.0, -1.0},
+            {1.0, 1.0, -1.0},
+            {-1.0, 1.0, -1.0},
+            {-1.0, -1.0, 1.0},
+            {1.0, -1.0, 1.0},
+            {1.0, 1.0, 1.0},
+            {-1.0, 1.0, 1.0},
+        }};
+        for (int n = 0; n < 8; ++n) {
+          const auto point =
+              eval_chexa8(kHexCoords[static_cast<size_t>(n)][0],
+                          kHexCoords[static_cast<size_t>(n)][1],
+                          kHexCoords[static_cast<size_t>(n)][2]);
+          ss.nodal.push_back(
+              make_solid_stress_point(elem_data.nodes[static_cast<size_t>(n)],
+                                      point));
+        }
       }
 
-      ss.sx = sigma(0); ss.sy = sigma(1); ss.sz = sigma(2);
-      ss.sxy = sigma(3); ss.syz = sigma(4); ss.szx = sigma(5);
-      double s1 = ss.sx, s2 = ss.sy, s3 = ss.sz,
-             t12 = ss.sxy, t23 = ss.syz, t31 = ss.szx;
-      ss.von_mises =
-          std::sqrt(0.5 * ((s1-s2)*(s1-s2) + (s2-s3)*(s2-s3) +
-                           (s3-s1)*(s3-s1) +
-                           6*(t12*t12 + t23*t23 + t31*t31)));
+      ss.sx = sigma(0);
+      ss.sy = sigma(1);
+      ss.sz = sigma(2);
+      ss.sxy = sigma(3);
+      ss.syz = sigma(4);
+      ss.szx = sigma(5);
+      ss.von_mises = solid_von_mises(sigma);
       res.solid_stresses.push_back(ss);
     }
   }

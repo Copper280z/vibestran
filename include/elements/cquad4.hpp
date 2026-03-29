@@ -57,6 +57,16 @@ public:
         Eigen::Vector3d membrane_resultant{Eigen::Vector3d::Zero()};
         Eigen::Vector3d bending_moment{Eigen::Vector3d::Zero()};
     };
+    static CentroidResponse recover_response(
+        ElementId eid,
+        PropertyId pid,
+        std::array<NodeId, NUM_NODES> node_ids,
+        const Model& model,
+        std::span<const double> global_displacements,
+        double xi,
+        double eta,
+        double temperature,
+        double reference_temperature);
     static CentroidResponse recover_centroid_response(
         ElementId eid,
         PropertyId pid,

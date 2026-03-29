@@ -337,11 +337,27 @@ struct SubCase {
   bool disp_plot{false};    // DISPLACEMENT(PLOT)=ALL
   bool stress_print{false}; // STRESS(PRINT)=ALL  or  STRESS=ALL
   bool stress_plot{false};  // STRESS(PLOT)=ALL
+  bool stress_corner_print{false}; // STRESS(PRINT,CORNER)=ALL
+  bool stress_corner_plot{false};  // STRESS(PLOT,CORNER)=ALL
+  bool gpstress_print{false};      // GPSTRESS(PRINT)=ALL
+  bool gpstress_plot{false};       // GPSTRESS(PLOT)=ALL
 
   // Modal analysis (SOL 103) output selection
   int eigrl_id{0};        // METHOD = <sid>  references an EIGRL card
   bool eigvec_print{false}; // EIGENVECTOR(PRINT)=ALL
   bool eigvec_plot{false};  // EIGENVECTOR(PLOT)=ALL
+
+  [[nodiscard]] bool has_any_stress_print() const noexcept {
+    return stress_print || stress_corner_print || gpstress_print;
+  }
+
+  [[nodiscard]] bool has_any_stress_plot() const noexcept {
+    return stress_plot || stress_corner_plot || gpstress_plot;
+  }
+
+  [[nodiscard]] bool has_any_stress_output() const noexcept {
+    return has_any_stress_print() || has_any_stress_plot();
+  }
 };
 
 struct AnalysisCase {

@@ -30,6 +30,19 @@ public:
   [[nodiscard]] LocalKe mass_matrix() const override;
   [[nodiscard]] LocalFe thermal_load(std::span<const double> temperatures,
                                      double t_ref) const override;
+  struct StressRecoveryEnd {
+    std::array<double, 4> s{};
+    double axial{0.0};
+    double smax{0.0};
+    double smin{0.0};
+  };
+  struct StressRecovery {
+    StressRecoveryEnd end_a;
+    StressRecoveryEnd end_b;
+  };
+  [[nodiscard]] StressRecovery
+  recover_stress(std::span<const double> global_displacements,
+                 double average_temperature, double t_ref) const;
   [[nodiscard]] std::vector<EqIndex>
   global_dof_indices(const DofMap &dof_map) const override;
   [[nodiscard]] std::span<const NodeId> node_ids() const noexcept override {
