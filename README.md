@@ -44,7 +44,7 @@ vibestran/
 ## Supported Features
 
 - **Elements**: CQUAD4, CTRIA3, CHEXA8, CHEXA20, CTETRA4, CTETRA10, CPENTA6, CBAR, CBEAM, CBUSH, CELAS1, CELAS2, CMASS1, CMASS2
-- **Materials**: MAT1 (isotropic)
+- **Materials**: MAT1 (analysis), plus parser/model support for MAT2, MAT3, MAT4, MAT5, MAT6, and MAT8
 - **Properties**: PSHELL, PSOLID, PBAR, PBARL (`ROD`, `TUBE`, `BAR`), PBEAM, PBUSH (`K` section), PELAS, PMASS
 - **Loads**: FORCE, MOMENT, TEMP/TEMPD, PLOAD, PLOAD1 (CBAR/CBEAM), PLOAD2, PLOAD4, GRAV, ACCEL1
 - **Constraints**: SPC, SPC1, MPC, RBE2, RBE3

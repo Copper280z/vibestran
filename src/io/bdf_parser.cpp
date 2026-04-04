@@ -558,6 +558,18 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_grid(ctx, card.fields);
       else if (kw == "MAT1")
         process_mat1(ctx, card.fields);
+      else if (kw == "MAT2")
+        process_mat2(ctx, card.fields);
+      else if (kw == "MAT3")
+        process_mat3(ctx, card.fields);
+      else if (kw == "MAT4")
+        process_mat4(ctx, card.fields);
+      else if (kw == "MAT5")
+        process_mat5(ctx, card.fields);
+      else if (kw == "MAT6")
+        process_mat6(ctx, card.fields);
+      else if (kw == "MAT8")
+        process_mat8(ctx, card.fields);
       else if (kw == "PSHELL")
         process_pshell(ctx, card.fields);
       else if (kw == "PSOLID")
@@ -859,6 +871,20 @@ bool has_any_nonblank(const std::vector<std::string> &fields, size_t first,
   return false;
 }
 
+double optional_double_field(const std::vector<std::string> &fields,
+                             const size_t index, const int line) {
+  return (index < fields.size() && !fields[index].empty())
+             ? parse_double_field(fields[index], line)
+             : 0.0;
+}
+
+int optional_int_field(const std::vector<std::string> &fields,
+                       const size_t index, const int line) {
+  return (index < fields.size() && !fields[index].empty())
+             ? parse_int_field(fields[index], line)
+             : 0;
+}
+
 std::vector<int> expand_id_list(const std::vector<std::string> &fields,
                                 size_t start, int line) {
   std::vector<int> ids;
@@ -1091,6 +1117,149 @@ void BdfParser::process_mat1(ParseContext &ctx,
   if (m.G == 0.0 && m.E > 0 && m.nu > 0)
     m.G = m.E / (2.0 * (1.0 + m.nu));
   ctx.model.materials[m.id] = m;
+}
+
+void BdfParser::process_mat2(ParseContext &ctx,
+                             const std::vector<std::string> &f) {
+  // MAT2, MID, G11, G12, G13, G22, G23, G33, RHO,
+  //       A1, A2, A12, TREF, GE, ST, SC, SS,
+  //       MCSID
+  Mat2 m;
+  m.id = MaterialId(parse_int(f[1], ctx.line_num));
+  m.g11 = optional_double_field(f, 2, ctx.line_num);
+  m.g12 = optional_double_field(f, 3, ctx.line_num);
+  m.g13 = optional_double_field(f, 4, ctx.line_num);
+  m.g22 = optional_double_field(f, 5, ctx.line_num);
+  m.g23 = optional_double_field(f, 6, ctx.line_num);
+  m.g33 = optional_double_field(f, 7, ctx.line_num);
+  m.rho = optional_double_field(f, 8, ctx.line_num);
+  m.a1 = optional_double_field(f, 9, ctx.line_num);
+  m.a2 = optional_double_field(f, 10, ctx.line_num);
+  m.a12 = optional_double_field(f, 11, ctx.line_num);
+  m.ref_temp = optional_double_field(f, 12, ctx.line_num);
+  m.ge = optional_double_field(f, 13, ctx.line_num);
+  m.st = optional_double_field(f, 14, ctx.line_num);
+  m.sc = optional_double_field(f, 15, ctx.line_num);
+  m.ss = optional_double_field(f, 16, ctx.line_num);
+  m.mcsid = CoordId(optional_int_field(f, 17, ctx.line_num));
+  ctx.model.mat2_materials[m.id] = m;
+}
+
+void BdfParser::process_mat3(ParseContext &ctx,
+                             const std::vector<std::string> &f) {
+  // MAT3, MID, EX, EY, EZ, NUXY, NUYZ, NUZX, RHO,
+  //       GXY, GYZ, GZX, AX, AY, AZ, TREF, GE
+  Mat3Material m;
+  m.id = MaterialId(parse_int(f[1], ctx.line_num));
+  m.ex = optional_double_field(f, 2, ctx.line_num);
+  m.ey = optional_double_field(f, 3, ctx.line_num);
+  m.ez = optional_double_field(f, 4, ctx.line_num);
+  m.nuxy = optional_double_field(f, 5, ctx.line_num);
+  m.nuyz = optional_double_field(f, 6, ctx.line_num);
+  m.nuzx = optional_double_field(f, 7, ctx.line_num);
+  m.rho = optional_double_field(f, 8, ctx.line_num);
+  m.gxy = optional_double_field(f, 9, ctx.line_num);
+  m.gyz = optional_double_field(f, 10, ctx.line_num);
+  m.gzx = optional_double_field(f, 11, ctx.line_num);
+  m.ax = optional_double_field(f, 12, ctx.line_num);
+  m.ay = optional_double_field(f, 13, ctx.line_num);
+  m.az = optional_double_field(f, 14, ctx.line_num);
+  m.ref_temp = optional_double_field(f, 15, ctx.line_num);
+  m.ge = optional_double_field(f, 16, ctx.line_num);
+  ctx.model.mat3_materials[m.id] = m;
+}
+
+void BdfParser::process_mat4(ParseContext &ctx,
+                             const std::vector<std::string> &f) {
+  // MAT4, MID, K, CP
+  Mat4 m;
+  m.id = MaterialId(parse_int(f[1], ctx.line_num));
+  m.k = optional_double_field(f, 2, ctx.line_num);
+  m.cp = optional_double_field(f, 3, ctx.line_num);
+  ctx.model.mat4_materials[m.id] = m;
+}
+
+void BdfParser::process_mat5(ParseContext &ctx,
+                             const std::vector<std::string> &f) {
+  // MAT5, MID, KXX, KXY, KXZ, KYY, KYZ, KZZ, CP
+  Mat5 m;
+  m.id = MaterialId(parse_int(f[1], ctx.line_num));
+  m.kxx = optional_double_field(f, 2, ctx.line_num);
+  m.kxy = optional_double_field(f, 3, ctx.line_num);
+  m.kxz = optional_double_field(f, 4, ctx.line_num);
+  m.kyy = optional_double_field(f, 5, ctx.line_num);
+  m.kyz = optional_double_field(f, 6, ctx.line_num);
+  m.kzz = optional_double_field(f, 7, ctx.line_num);
+  m.cp = optional_double_field(f, 8, ctx.line_num);
+  ctx.model.mat5_materials[m.id] = m;
+}
+
+void BdfParser::process_mat6(ParseContext &ctx,
+                             const std::vector<std::string> &f) {
+  // MAT6, MID, G11, G12, G13, G14, G15, G16, G22,
+  //       G23, G24, G25, G26, G33, G34, G35, G36,
+  //       G44, G45, G46, G55, G56, G66, RHO, AXX,
+  //       AYY, AZZ, AXY, AYZ, AZX, TREF, GE
+  Mat6 m;
+  m.id = MaterialId(parse_int(f[1], ctx.line_num));
+  m.g11 = optional_double_field(f, 2, ctx.line_num);
+  m.g12 = optional_double_field(f, 3, ctx.line_num);
+  m.g13 = optional_double_field(f, 4, ctx.line_num);
+  m.g14 = optional_double_field(f, 5, ctx.line_num);
+  m.g15 = optional_double_field(f, 6, ctx.line_num);
+  m.g16 = optional_double_field(f, 7, ctx.line_num);
+  m.g22 = optional_double_field(f, 8, ctx.line_num);
+  m.g23 = optional_double_field(f, 9, ctx.line_num);
+  m.g24 = optional_double_field(f, 10, ctx.line_num);
+  m.g25 = optional_double_field(f, 11, ctx.line_num);
+  m.g26 = optional_double_field(f, 12, ctx.line_num);
+  m.g33 = optional_double_field(f, 13, ctx.line_num);
+  m.g34 = optional_double_field(f, 14, ctx.line_num);
+  m.g35 = optional_double_field(f, 15, ctx.line_num);
+  m.g36 = optional_double_field(f, 16, ctx.line_num);
+  m.g44 = optional_double_field(f, 17, ctx.line_num);
+  m.g45 = optional_double_field(f, 18, ctx.line_num);
+  m.g46 = optional_double_field(f, 19, ctx.line_num);
+  m.g55 = optional_double_field(f, 20, ctx.line_num);
+  m.g56 = optional_double_field(f, 21, ctx.line_num);
+  m.g66 = optional_double_field(f, 22, ctx.line_num);
+  m.rho = optional_double_field(f, 23, ctx.line_num);
+  m.axx = optional_double_field(f, 24, ctx.line_num);
+  m.ayy = optional_double_field(f, 25, ctx.line_num);
+  m.azz = optional_double_field(f, 26, ctx.line_num);
+  m.axy = optional_double_field(f, 27, ctx.line_num);
+  m.ayz = optional_double_field(f, 28, ctx.line_num);
+  m.azx = optional_double_field(f, 29, ctx.line_num);
+  m.ref_temp = optional_double_field(f, 30, ctx.line_num);
+  m.ge = optional_double_field(f, 31, ctx.line_num);
+  ctx.model.mat6_materials[m.id] = m;
+}
+
+void BdfParser::process_mat8(ParseContext &ctx,
+                             const std::vector<std::string> &f) {
+  // MAT8, MID, E1, E2, NU12, G12, G1Z, G2Z, RHO,
+  //       A1, A2, TREF, XT, XC, YT, YC, S,
+  //       GE, F12
+  Mat8 m;
+  m.id = MaterialId(parse_int(f[1], ctx.line_num));
+  m.e1 = optional_double_field(f, 2, ctx.line_num);
+  m.e2 = optional_double_field(f, 3, ctx.line_num);
+  m.nu12 = optional_double_field(f, 4, ctx.line_num);
+  m.g12 = optional_double_field(f, 5, ctx.line_num);
+  m.g1z = optional_double_field(f, 6, ctx.line_num);
+  m.g2z = optional_double_field(f, 7, ctx.line_num);
+  m.rho = optional_double_field(f, 8, ctx.line_num);
+  m.a1 = optional_double_field(f, 9, ctx.line_num);
+  m.a2 = optional_double_field(f, 10, ctx.line_num);
+  m.ref_temp = optional_double_field(f, 11, ctx.line_num);
+  m.xt = optional_double_field(f, 12, ctx.line_num);
+  m.xc = optional_double_field(f, 13, ctx.line_num);
+  m.yt = optional_double_field(f, 14, ctx.line_num);
+  m.yc = optional_double_field(f, 15, ctx.line_num);
+  m.s = optional_double_field(f, 16, ctx.line_num);
+  m.ge = optional_double_field(f, 17, ctx.line_num);
+  m.f12 = optional_double_field(f, 18, ctx.line_num);
+  ctx.model.mat8_materials[m.id] = m;
 }
 
 void BdfParser::process_pshell(ParseContext &ctx,

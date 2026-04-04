@@ -86,26 +86,26 @@ void Model::validate() const {
         std::visit([&](const auto& p) {
             using T = std::decay_t<decltype(p)>;
             if constexpr (std::is_same_v<T, PShell>) {
-                if (!materials.count(p.mid1))
+                if (!has_structural_material(p.mid1))
                     throw SolverError(std::format(
                         "PSHELL {} references undefined material {}", pid.value, p.mid1.value));
-                if (p.mid2.value != 0 && !materials.count(p.mid2))
+                if (p.mid2.value != 0 && !has_structural_material(p.mid2))
                     throw SolverError(std::format(
                         "PSHELL {} references undefined bending material {}", pid.value, p.mid2.value));
-                if (p.mid3.value != 0 && !materials.count(p.mid3))
+                if (p.mid3.value != 0 && !has_structural_material(p.mid3))
                     throw SolverError(std::format(
                         "PSHELL {} references undefined shear material {}", pid.value, p.mid3.value));
-                if (p.mid4.value != 0 && !materials.count(p.mid4))
+                if (p.mid4.value != 0 && !has_structural_material(p.mid4))
                     throw SolverError(std::format(
                         "PSHELL {} references undefined coupling material {}", pid.value, p.mid4.value));
             } else if constexpr (std::is_same_v<T, PSolid>) {
-                if (!materials.count(p.mid))
+                if (!has_structural_material(p.mid))
                     throw SolverError(std::format(
                         "PSOLID {} references undefined material {}", pid.value, p.mid.value));
             } else if constexpr (std::is_same_v<T, PBar> ||
                                  std::is_same_v<T, PBarL> ||
                                  std::is_same_v<T, PBeam>) {
-                if (!materials.count(p.mid))
+                if (!has_structural_material(p.mid))
                     throw SolverError(std::format(
                         "Property {} references undefined material {}", pid.value, p.mid.value));
             }

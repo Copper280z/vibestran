@@ -108,6 +108,138 @@ ENDDATA
     EXPECT_NEAR(mat.G, G_expected, 1.0);
 }
 
+TEST(BdfParser, ParsesMat2WithContinuations) {
+    const std::string bdf = R"(
+BEGIN BULK
+MAT2,20,11.0,12.0,13.0,22.0,23.0,33.0,7.8,+M2
++M2,1.1,1.2,1.3,25.0,0.02,100.0,90.0,80.0,+M3
++M3,42
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.mat2_materials.size(), 1u);
+    const Mat2& mat = m.mat2_materials.at(MaterialId{20});
+    EXPECT_DOUBLE_EQ(mat.g11, 11.0);
+    EXPECT_DOUBLE_EQ(mat.g33, 33.0);
+    EXPECT_DOUBLE_EQ(mat.rho, 7.8);
+    EXPECT_DOUBLE_EQ(mat.a1, 1.1);
+    EXPECT_DOUBLE_EQ(mat.a12, 1.3);
+    EXPECT_DOUBLE_EQ(mat.ref_temp, 25.0);
+    EXPECT_DOUBLE_EQ(mat.ge, 0.02);
+    EXPECT_DOUBLE_EQ(mat.st, 100.0);
+    EXPECT_DOUBLE_EQ(mat.sc, 90.0);
+    EXPECT_DOUBLE_EQ(mat.ss, 80.0);
+    EXPECT_EQ(mat.mcsid.value, 42);
+}
+
+TEST(BdfParser, ParsesMat3WithContinuation) {
+    const std::string bdf = R"(
+BEGIN BULK
+MAT3,30,100.0,110.0,120.0,0.25,0.26,0.27,1.5,+M3
++M3,40.0,50.0,60.0,1.1e-5,1.2e-5,1.3e-5,75.0,0.03
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.mat3_materials.size(), 1u);
+    const Mat3Material& mat = m.mat3_materials.at(MaterialId{30});
+    EXPECT_DOUBLE_EQ(mat.ex, 100.0);
+    EXPECT_DOUBLE_EQ(mat.ey, 110.0);
+    EXPECT_DOUBLE_EQ(mat.ez, 120.0);
+    EXPECT_DOUBLE_EQ(mat.nuxy, 0.25);
+    EXPECT_DOUBLE_EQ(mat.nuyz, 0.26);
+    EXPECT_DOUBLE_EQ(mat.nuzx, 0.27);
+    EXPECT_DOUBLE_EQ(mat.rho, 1.5);
+    EXPECT_DOUBLE_EQ(mat.gxy, 40.0);
+    EXPECT_DOUBLE_EQ(mat.gyz, 50.0);
+    EXPECT_DOUBLE_EQ(mat.gzx, 60.0);
+    EXPECT_DOUBLE_EQ(mat.ax, 1.1e-5);
+    EXPECT_DOUBLE_EQ(mat.ay, 1.2e-5);
+    EXPECT_DOUBLE_EQ(mat.az, 1.3e-5);
+    EXPECT_DOUBLE_EQ(mat.ref_temp, 75.0);
+    EXPECT_DOUBLE_EQ(mat.ge, 0.03);
+}
+
+TEST(BdfParser, ParsesMat4AndMat5Cards) {
+    const std::string bdf = R"(
+BEGIN BULK
+MAT4,40,0.6,0.2
+MAT5,50,1.0,0.1,0.2,2.0,0.3,3.0,0.4
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.mat4_materials.size(), 1u);
+    ASSERT_EQ(m.mat5_materials.size(), 1u);
+
+    const Mat4& mat4 = m.mat4_materials.at(MaterialId{40});
+    EXPECT_DOUBLE_EQ(mat4.k, 0.6);
+    EXPECT_DOUBLE_EQ(mat4.cp, 0.2);
+
+    const Mat5& mat5 = m.mat5_materials.at(MaterialId{50});
+    EXPECT_DOUBLE_EQ(mat5.kxx, 1.0);
+    EXPECT_DOUBLE_EQ(mat5.kxy, 0.1);
+    EXPECT_DOUBLE_EQ(mat5.kxz, 0.2);
+    EXPECT_DOUBLE_EQ(mat5.kyy, 2.0);
+    EXPECT_DOUBLE_EQ(mat5.kyz, 0.3);
+    EXPECT_DOUBLE_EQ(mat5.kzz, 3.0);
+    EXPECT_DOUBLE_EQ(mat5.cp, 0.4);
+}
+
+TEST(BdfParser, ParsesMat6WithThreeContinuations) {
+    const std::string bdf = R"(
+BEGIN BULK
+MAT6,60,11,12,13,14,15,16,22,+M1
++M1,23,24,25,26,33,34,35,36,+M2
++M2,44,45,46,55,56,66,7.7,1.1,+M3
++M3,1.2,1.3,1.4,1.5,1.6,25.0,0.04
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.mat6_materials.size(), 1u);
+    const Mat6& mat = m.mat6_materials.at(MaterialId{60});
+    EXPECT_DOUBLE_EQ(mat.g11, 11.0);
+    EXPECT_DOUBLE_EQ(mat.g26, 26.0);
+    EXPECT_DOUBLE_EQ(mat.g66, 66.0);
+    EXPECT_DOUBLE_EQ(mat.rho, 7.7);
+    EXPECT_DOUBLE_EQ(mat.axx, 1.1);
+    EXPECT_DOUBLE_EQ(mat.ayy, 1.2);
+    EXPECT_DOUBLE_EQ(mat.azz, 1.3);
+    EXPECT_DOUBLE_EQ(mat.axy, 1.4);
+    EXPECT_DOUBLE_EQ(mat.ayz, 1.5);
+    EXPECT_DOUBLE_EQ(mat.azx, 1.6);
+    EXPECT_DOUBLE_EQ(mat.ref_temp, 25.0);
+    EXPECT_DOUBLE_EQ(mat.ge, 0.04);
+}
+
+TEST(BdfParser, ParsesMat8WithContinuations) {
+    const std::string bdf = R"(
+BEGIN BULK
+MAT8,80,140.0,12.0,0.28,5.0,2.5,2.0,1.6,+M8
++M8,1.1e-5,2.2e-5,80.0,500.0,450.0,300.0,280.0,120.0,+M9
++M9,0.015,-0.25
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.mat8_materials.size(), 1u);
+    const Mat8& mat = m.mat8_materials.at(MaterialId{80});
+    EXPECT_DOUBLE_EQ(mat.e1, 140.0);
+    EXPECT_DOUBLE_EQ(mat.e2, 12.0);
+    EXPECT_DOUBLE_EQ(mat.nu12, 0.28);
+    EXPECT_DOUBLE_EQ(mat.g12, 5.0);
+    EXPECT_DOUBLE_EQ(mat.g1z, 2.5);
+    EXPECT_DOUBLE_EQ(mat.g2z, 2.0);
+    EXPECT_DOUBLE_EQ(mat.rho, 1.6);
+    EXPECT_DOUBLE_EQ(mat.a1, 1.1e-5);
+    EXPECT_DOUBLE_EQ(mat.a2, 2.2e-5);
+    EXPECT_DOUBLE_EQ(mat.ref_temp, 80.0);
+    EXPECT_DOUBLE_EQ(mat.xt, 500.0);
+    EXPECT_DOUBLE_EQ(mat.xc, 450.0);
+    EXPECT_DOUBLE_EQ(mat.yt, 300.0);
+    EXPECT_DOUBLE_EQ(mat.yc, 280.0);
+    EXPECT_DOUBLE_EQ(mat.s, 120.0);
+    EXPECT_DOUBLE_EQ(mat.ge, 0.015);
+    EXPECT_DOUBLE_EQ(mat.f12, -0.25);
+}
+
 TEST(BdfParser, ForceCard) {
     const std::string bdf = R"(
 BEGIN BULK
@@ -627,6 +759,32 @@ TEST(Model, MaterialAccessorReturnsCorrectE) {
 TEST(Model, MaterialAccessorThrowsForMissingMaterial) {
     Model m = make_simple_model();
     EXPECT_THROW(m.material(MaterialId{999}), SolverError);
+}
+
+TEST(Model, ValidateAcceptsDefinedNonMat1StructuralMaterial) {
+    const std::string bdf = R"(
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,1.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+MAT8,1,140.0,12.0,0.28,5.0,2.5,2.0,1.6,+M8
++M8,1.1e-5,2.2e-5,80.0,500.0,450.0,300.0,280.0,120.0,+M9
++M9,0.015,-0.25
+PSHELL,1,1,0.1
+CQUAD4,1,1,1,2,3,4
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    EXPECT_NO_THROW(m.validate());
+
+    try {
+        (void)m.material(MaterialId{1});
+        FAIL() << "Expected MAT8 lookup through Model::material to throw";
+    } catch (const SolverError& err) {
+        const std::string msg = err.what();
+        EXPECT_NE(msg.find("MAT8"), std::string::npos);
+    }
 }
 
 TEST(Model, PropertyAccessorReturnsPShell) {

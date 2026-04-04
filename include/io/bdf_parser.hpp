@@ -10,8 +10,8 @@
 //   - INCLUDE statements (recursive)
 //   - Comment lines ($)
 //
-// Parsed card types: GRID, MAT1, PSHELL, PSOLID, PBAR, PBARL, PBEAM, PBUSH,
-//                    PELAS, PMASS,
+// Parsed card types: GRID, MAT1, MAT2, MAT3, MAT4, MAT5, MAT6, MAT8,
+//                    PSHELL, PSOLID, PBAR, PBARL, PBEAM, PBUSH, PELAS, PMASS,
 //                    CQUAD4, CTRIA3, CHEXA, CTETRA, CPENTA,
 //                    CBAR, CBEAM, CBUSH, CELAS1, CELAS2, CMASS1, CMASS2,
 //                    FORCE, MOMENT, TEMP, TEMPD, GRAV, ACCEL1,
@@ -50,6 +50,12 @@ private:
     // Card processors
     static void process_grid    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_mat1    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_mat2    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_mat3    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_mat4    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_mat5    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_mat6    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_mat8    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_pshell  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_psolid  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_pbar    (ParseContext& ctx, const std::vector<std::string>& fields);

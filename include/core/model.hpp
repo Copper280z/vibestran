@@ -34,6 +34,117 @@ struct Mat1 {
   double ref_temp{0}; // reference temperature
 };
 
+struct Mat2 {
+  MaterialId id{0};
+  double g11{0};
+  double g12{0};
+  double g13{0};
+  double g22{0};
+  double g23{0};
+  double g33{0};
+  double rho{0};
+  double a1{0};
+  double a2{0};
+  double a12{0};
+  double ref_temp{0};
+  double ge{0};
+  double st{0};
+  double sc{0};
+  double ss{0};
+  CoordId mcsid{0};
+};
+
+struct Mat3Material {
+  MaterialId id{0};
+  double ex{0};
+  double ey{0};
+  double ez{0};
+  double nuxy{0};
+  double nuyz{0};
+  double nuzx{0};
+  double rho{0};
+  double gxy{0};
+  double gyz{0};
+  double gzx{0};
+  double ax{0};
+  double ay{0};
+  double az{0};
+  double ref_temp{0};
+  double ge{0};
+};
+
+struct Mat4 {
+  MaterialId id{0};
+  double k{0};
+  double cp{0};
+};
+
+struct Mat5 {
+  MaterialId id{0};
+  double kxx{0};
+  double kxy{0};
+  double kxz{0};
+  double kyy{0};
+  double kyz{0};
+  double kzz{0};
+  double cp{0};
+};
+
+struct Mat6 {
+  MaterialId id{0};
+  double g11{0};
+  double g12{0};
+  double g13{0};
+  double g14{0};
+  double g15{0};
+  double g16{0};
+  double g22{0};
+  double g23{0};
+  double g24{0};
+  double g25{0};
+  double g26{0};
+  double g33{0};
+  double g34{0};
+  double g35{0};
+  double g36{0};
+  double g44{0};
+  double g45{0};
+  double g46{0};
+  double g55{0};
+  double g56{0};
+  double g66{0};
+  double rho{0};
+  double axx{0};
+  double ayy{0};
+  double azz{0};
+  double axy{0};
+  double ayz{0};
+  double azx{0};
+  double ref_temp{0};
+  double ge{0};
+};
+
+struct Mat8 {
+  MaterialId id{0};
+  double e1{0};
+  double e2{0};
+  double nu12{0};
+  double g12{0};
+  double g1z{0};
+  double g2z{0};
+  double rho{0};
+  double a1{0};
+  double a2{0};
+  double ref_temp{0};
+  double xt{0};
+  double xc{0};
+  double yt{0};
+  double yc{0};
+  double s{0};
+  double ge{0};
+  double f12{0};
+};
+
 // ── Properties ───────────────────────────────────────────────────────────────
 
 enum class SolidFormulation { SRI, EAS };
@@ -378,6 +489,12 @@ public:
 
   // Materials
   std::unordered_map<MaterialId, Mat1> materials;
+  std::unordered_map<MaterialId, Mat2> mat2_materials;
+  std::unordered_map<MaterialId, Mat3Material> mat3_materials;
+  std::unordered_map<MaterialId, Mat4> mat4_materials;
+  std::unordered_map<MaterialId, Mat5> mat5_materials;
+  std::unordered_map<MaterialId, Mat6> mat6_materials;
+  std::unordered_map<MaterialId, Mat8> mat8_materials;
 
   // Properties
   std::unordered_map<PropertyId, Property> properties;
@@ -419,11 +536,57 @@ public:
     return it->second;
   }
 
+  [[nodiscard]] const char *structural_material_card_name(MaterialId id) const {
+    if (materials.count(id))
+      return "MAT1";
+    if (mat2_materials.count(id))
+      return "MAT2";
+    if (mat3_materials.count(id))
+      return "MAT3";
+    if (mat6_materials.count(id))
+      return "MAT6";
+    if (mat8_materials.count(id))
+      return "MAT8";
+    return nullptr;
+  }
+
+  [[nodiscard]] const char *material_card_name(MaterialId id) const {
+    if (const char *card = structural_material_card_name(id))
+      return card;
+    if (mat4_materials.count(id))
+      return "MAT4";
+    if (mat5_materials.count(id))
+      return "MAT5";
+    return nullptr;
+  }
+
+  [[nodiscard]] bool has_structural_material(MaterialId id) const {
+    return structural_material_card_name(id) != nullptr;
+  }
+
+  [[nodiscard]] size_t material_count() const {
+    return materials.size() + mat2_materials.size() + mat3_materials.size() +
+           mat4_materials.size() + mat5_materials.size() +
+           mat6_materials.size() + mat8_materials.size();
+  }
+
   const Mat1 &material(MaterialId id) const {
     auto it = materials.find(id);
-    if (it == materials.end())
-      throw SolverError(std::format("Material {} not found", id.value));
-    return it->second;
+    if (it != materials.end())
+      return it->second;
+    if (const char *card = structural_material_card_name(id)) {
+      throw SolverError(std::format(
+          "Material {} is defined on {}, but current element formulations "
+          "require MAT1",
+          id.value, card));
+    }
+    if (const char *card = material_card_name(id)) {
+      throw SolverError(std::format(
+          "Material {} is defined on {}, which is not a structural material "
+          "card for the current element formulations",
+          id.value, card));
+    }
+    throw SolverError(std::format("Material {} not found", id.value));
   }
 
   const Property &property(PropertyId id) const {
