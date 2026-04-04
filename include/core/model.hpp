@@ -364,6 +364,14 @@ using Load = std::variant<ForceLoad, MomentLoad, TempLoad, PloadLoad,
                           Pload1Load, Pload2Load, Pload4Load, GravLoad,
                           Accel1Load, AccelLoad>;
 
+/// LOAD bulk data card: combines multiple load sets with scale factors.
+/// The effective load = overall_scale * sum(Si * loads_with_SID_Li)
+struct LoadCombination {
+  LoadSetId sid{0};
+  double overall_scale{1.0};
+  std::vector<std::pair<double, LoadSetId>> entries; // (Si, Li)
+};
+
 // ── Single point constraints
 // ──────────────────────────────────────────────────
 
@@ -502,6 +510,9 @@ public:
   // Loads (keyed by set id for quick lookup)
   std::vector<Load> loads;
 
+  // LOAD bulk data card combinations (SID → combination)
+  std::unordered_map<LoadSetId, LoadCombination> load_combinations;
+
   // SPCs
   std::vector<Spc> spcs;
 
@@ -596,13 +607,32 @@ public:
     return it->second;
   }
 
-  /// Retrieve all loads for a given set
-  std::vector<const Load *> loads_for_set(LoadSetId sid) const {
-    std::vector<const Load *> result;
-    for (const auto &load : loads) {
-      auto has_sid = [&](const auto &l) { return l.sid == sid; };
-      if (std::visit(has_sid, load))
-        result.push_back(&load);
+  /// Retrieve all loads for a given set, along with the combined scale factor
+  /// from any LOAD bulk data card indirection. If the SID refers to a LOAD
+  /// card, loads from each referenced sub-set are returned with scale =
+  /// overall_scale * Si. Otherwise each load is returned with scale = 1.0.
+  std::vector<std::pair<const Load *, double>> loads_for_set(LoadSetId sid) const {
+    std::vector<std::pair<const Load *, double>> result;
+
+    auto it = load_combinations.find(sid);
+    if (it != load_combinations.end()) {
+      // Resolve through LOAD card
+      const LoadCombination &combo = it->second;
+      for (const auto &[entry_scale, entry_sid] : combo.entries) {
+        const double combined = combo.overall_scale * entry_scale;
+        for (const auto &load : loads) {
+          auto has_sid = [&](const auto &l) { return l.sid == entry_sid; };
+          if (std::visit(has_sid, load))
+            result.emplace_back(&load, combined);
+        }
+      }
+    } else {
+      // Direct SID lookup — no LOAD card
+      for (const auto &load : loads) {
+        auto has_sid = [&](const auto &l) { return l.sid == sid; };
+        if (std::visit(has_sid, load))
+          result.emplace_back(&load, 1.0);
+      }
     }
     return result;
   }

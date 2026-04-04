@@ -159,15 +159,16 @@ void Model::validate() const {
         }, load);
     }
 
-    // Check analysis case references
-    for (const auto& sc : analysis.subcases) {
-        if (sc.load_set.value != 0) {
+    // Validate LOAD combination entries reference existing load set SIDs
+    for (const auto& [combo_sid, combo] : load_combinations) {
+        for (const auto& [entry_scale, entry_sid] : combo.entries) {
             bool found = std::any_of(loads.begin(), loads.end(), [&](const Load& l){
-                return std::visit([&](const auto& ll){ return ll.sid == sc.load_set; }, l);
+                return std::visit([&](const auto& ll){ return ll.sid == entry_sid; }, l);
             });
-            if (!found && sc.load_set.value != 0) {
-                // Not necessarily an error — thermal only case may have no FORCE loads
-            }
+            if (!found)
+                throw SolverError(std::format(
+                    "LOAD {} references load set {} which has no load entries",
+                    combo_sid.value, entry_sid.value));
         }
     }
 }

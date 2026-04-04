@@ -86,9 +86,13 @@ build_nodal_temperature_map(const Model &model, const SubCase &sc) {
   if (temp_set == 0)
     temp_set = sc.load_set.value;
 
-  for (const Load *lp : model.loads_for_set(LoadSetId(temp_set))) {
-    if (const TempLoad *tl = std::get_if<TempLoad>(lp))
-      nodal_temps[tl->node] = tl->temperature;
+  // TEMP/TEMPD are always looked up by direct SID match against the temperature
+  // set — they do not participate in LOAD card combination.
+  for (const auto &load : model.loads) {
+    if (const TempLoad *tl = std::get_if<TempLoad>(&load)) {
+      if (tl->sid == LoadSetId(temp_set))
+        nodal_temps[tl->node] = tl->temperature;
+    }
   }
 
   const auto tempd_it = model.tempd.find(temp_set);
@@ -346,16 +350,16 @@ void LinearStaticSolver::apply_point_loads(const Model &model,
                                            const MpcHandler &mpc_handler,
                                            std::vector<double> &F) {
   const DofMap &dof_map = mpc_handler.full_dof_map();
-  for (const Load *lp : model.loads_for_set(sc.load_set)) {
+  for (const auto &[lp, load_scale] : model.loads_for_set(sc.load_set)) {
     std::visit(
         [&](const auto &load) {
           using T = std::decay_t<decltype(load)>;
 
           if constexpr (std::is_same_v<T, ForceLoad>) {
             // Rotate force from CID to basic if CID ≠ 0
-            Vec3 force{load.scale * load.direction.x,
-                       load.scale * load.direction.y,
-                       load.scale * load.direction.z};
+            Vec3 force{load_scale * load.scale * load.direction.x,
+                       load_scale * load.scale * load.direction.y,
+                       load_scale * load.scale * load.direction.z};
             if (load.cid.value != 0) {
               auto cs_it = model.coord_systems.find(load.cid);
               if (cs_it != model.coord_systems.end()) {
@@ -374,9 +378,9 @@ void LinearStaticSolver::apply_point_loads(const Model &model,
                 std::span<const double>(fe, 6), F);
 
           } else if constexpr (std::is_same_v<T, MomentLoad>) {
-            Vec3 moment{load.scale * load.direction.x,
-                        load.scale * load.direction.y,
-                        load.scale * load.direction.z};
+            Vec3 moment{load_scale * load.scale * load.direction.x,
+                        load_scale * load.scale * load.direction.y,
+                        load_scale * load.scale * load.direction.z};
             if (load.cid.value != 0) {
               auto cs_it = model.coord_systems.find(load.cid);
               if (cs_it != model.coord_systems.end()) {
@@ -409,7 +413,7 @@ void LinearStaticSolver::apply_inertial_loads(const Model &model,
     nodal_accels[nid] = nodal_accels[nid] + accel;
   };
 
-  for (const Load *lp : model.loads_for_set(sc.load_set)) {
+  for (const auto &[lp, load_scale] : model.loads_for_set(sc.load_set)) {
     std::visit(
         [&](const auto &load) {
           using T = std::decay_t<decltype(load)>;
@@ -418,7 +422,7 @@ void LinearStaticSolver::apply_inertial_loads(const Model &model,
             for (const auto &[nid, gp] : model.nodes) {
               const Vec3 accel =
                   load_direction_in_basic(model, load.cid,
-                                          load.direction * load.scale,
+                                          load.direction * (load_scale * load.scale),
                                           gp.position);
               add_accel_to_node(nid, accel);
             }
@@ -426,7 +430,7 @@ void LinearStaticSolver::apply_inertial_loads(const Model &model,
             has_inertial_load = true;
             for (NodeId nid : load.nodes) {
               const Vec3 accel = load_direction_in_basic(
-                  model, load.cid, load.direction * load.scale,
+                  model, load.cid, load.direction * (load_scale * load.scale),
                   model.node(nid).position);
               add_accel_to_node(nid, accel);
             }
@@ -514,10 +518,13 @@ void LinearStaticSolver::apply_thermal_loads(
   int temp_set = sc.temp_load_set;
   if (temp_set == 0) temp_set = sc.load_set.value; // backward compat
 
-  // Individual TEMP cards for this set
-  for (const Load *lp : model.loads_for_set(LoadSetId(temp_set))) {
-    if (const TempLoad *tl = std::get_if<TempLoad>(lp))
-      nodal_temps[tl->node] = tl->temperature;
+  // TEMP/TEMPD are always looked up by direct SID match against the temperature
+  // set — they do not participate in LOAD card combination.
+  for (const auto &load : model.loads) {
+    if (const TempLoad *tl = std::get_if<TempLoad>(&load)) {
+      if (tl->sid == LoadSetId(temp_set))
+        nodal_temps[tl->node] = tl->temperature;
+    }
   }
 
   // TEMPD (default temperature for all nodes not covered by individual TEMP cards)

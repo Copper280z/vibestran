@@ -76,6 +76,7 @@ private:
     static void process_celas2  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_cmass1  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_cmass2  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_load    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_force   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_moment  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_temp    (ParseContext& ctx, const std::vector<std::string>& fields);

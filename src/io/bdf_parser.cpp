@@ -610,6 +610,8 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_cmass1(ctx, card.fields);
       else if (kw == "CMASS2")
         process_cmass2(ctx, card.fields);
+      else if (kw == "LOAD")
+        process_load(ctx, card.fields);
       else if (kw == "FORCE")
         process_force(ctx, card.fields);
       else if (kw == "MOMENT")
@@ -671,10 +673,19 @@ Model BdfParser::parse_stream(std::istream &in) {
     }
   }
 
-  // Apply TEMPD to subcases that don't have explicit t_ref
+  // Assign TEMPD default temperature to subcases.
+  // Per Nastran: TEMPD is selected by TEMP(LOAD) case control SID, not by
+  // the LOAD set SID. If TEMP(LOAD) is unspecified, fall back to the LOAD
+  // set SID directly (common single-set usage). TEMPD never participates in
+  // LOAD card combination — it is always a direct SID match.
   for (auto &sc : ctx.model.analysis.subcases) {
-    if (sc.t_ref == 0.0 && ctx.tempd_map.count(sc.load_set.value))
-      sc.t_ref = ctx.tempd_map.at(sc.load_set.value);
+    if (sc.t_ref != 0.0)
+      continue;
+    const int lookup_sid = (sc.temp_load_set != 0)
+                               ? sc.temp_load_set
+                               : sc.load_set.value;
+    if (ctx.tempd_map.count(lookup_sid))
+      sc.t_ref = ctx.tempd_map.at(lookup_sid);
   }
 
   // Post-parse: apply PARAM,SHELLFORM to all PShell properties
@@ -1658,6 +1669,33 @@ void BdfParser::process_cmass2(ParseContext &ctx,
   reject_nonblank_fields(f, 7, ctx.line_num, "CMASS2",
                          "extra continuation data is not supported");
   ctx.model.elements.push_back(std::move(e));
+}
+
+void BdfParser::process_load(ParseContext &ctx,
+                             const std::vector<std::string> &f) {
+  // LOAD, SID, S, S1, L1, S2, L2, S3, L3 [continuation: S4, L4, ...]
+  // SID: load set ID referenced by SUBCASE LOAD = SID
+  // S:   overall scale factor applied to the sum of all sub-loads
+  // Si, Li: scale factor and load set ID for each component load set
+  LoadCombination combo;
+  combo.sid = LoadSetId(parse_int(f[1], ctx.line_num));
+  combo.overall_scale = parse_double(f[2], ctx.line_num);
+
+  // Fields 3,4 are (S1,L1); 5,6 are (S2,L2); etc. — may continue past field 9
+  for (size_t i = 3; i + 1 < f.size(); i += 2) {
+    if (f[i].empty() && f[i + 1].empty())
+      continue;
+    const double si = parse_double(f[i], ctx.line_num);
+    const int li = parse_int(f[i + 1], ctx.line_num);
+    combo.entries.emplace_back(si, LoadSetId(li));
+  }
+
+  if (combo.entries.empty())
+    throw ParseError(std::format(
+        "Line {}: LOAD card {} has no load set entries", ctx.line_num,
+        combo.sid.value));
+
+  ctx.model.load_combinations.emplace(combo.sid, std::move(combo));
 }
 
 void BdfParser::process_force(ParseContext &ctx,

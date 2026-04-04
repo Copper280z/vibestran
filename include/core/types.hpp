@@ -228,4 +228,9 @@ template <> struct hash<vibestran::MpcSetId> {
     return hash<int>{}(id.value);
   }
 };
+template <> struct hash<vibestran::LoadSetId> {
+  size_t operator()(vibestran::LoadSetId id) const noexcept {
+    return hash<int>{}(id.value);
+  }
+};
 } // namespace std

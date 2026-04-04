@@ -614,7 +614,7 @@ void LinearStaticSolver::apply_pressure_loads(const Model &model,
   for (const auto &elem : model.elements)
     elements_by_id.emplace(elem.id, &elem);
 
-  for (const Load *lp : model.loads_for_set(sc.load_set)) {
+  for (const auto &[lp, load_scale] : model.loads_for_set(sc.load_set)) {
     std::visit(
         [&](const auto &load) {
           using T = std::decay_t<decltype(load)>;
@@ -626,7 +626,7 @@ void LinearStaticSolver::apply_pressure_loads(const Model &model,
                   model.node(load.nodes[1]).position,
                   model.node(load.nodes[2]).position,
               };
-              const Vec3 total_force = pload_triangle_force(coords, load.pressure);
+              const Vec3 total_force = pload_triangle_force(coords, load_scale * load.pressure);
               for (NodeId nid : load.nodes)
                 add_force_to_node(dof_map, mpc_handler, nid,
                                   scaled(total_force, 1.0 / 3.0), F);
@@ -637,7 +637,7 @@ void LinearStaticSolver::apply_pressure_loads(const Model &model,
                   model.node(load.nodes[2]).position,
                   model.node(load.nodes[3]).position,
               };
-              const Vec3 total_force = pload_quad_force(coords, load.pressure);
+              const Vec3 total_force = pload_quad_force(coords, load_scale * load.pressure);
               for (NodeId nid : load.nodes)
                 add_force_to_node(dof_map, mpc_handler, nid,
                                   scaled(total_force, 0.25), F);
@@ -671,8 +671,8 @@ void LinearStaticSolver::apply_pressure_loads(const Model &model,
                   model.node(elem.nodes[2]).position,
                   model.node(elem.nodes[3]).position,
               };
-              const std::array<double, 4> pressures{
-                  load.pressure, load.pressure, load.pressure, load.pressure};
+              const double p = load_scale * load.pressure;
+              const std::array<double, 4> pressures{p, p, p, p};
               const auto nodal_forces = integrate_quad_surface_load(
                   coords, pressures, model, std::nullopt, 1.0,
                   std::format("PLOAD2 element {}", elem.id.value));
@@ -686,8 +686,8 @@ void LinearStaticSolver::apply_pressure_loads(const Model &model,
                   model.node(elem.nodes[1]).position,
                   model.node(elem.nodes[2]).position,
               };
-              const std::array<double, 3> pressures{
-                  load.pressure, load.pressure, load.pressure};
+              const double p = load_scale * load.pressure;
+              const std::array<double, 3> pressures{p, p, p};
               const auto nodal_forces = integrate_tri3_surface_load(
                   coords, pressures, model, std::nullopt, 1.0,
                   std::format("PLOAD2 element {}", elem.id.value));
@@ -715,6 +715,9 @@ void LinearStaticSolver::apply_pressure_loads(const Model &model,
             const std::string context =
                 std::format("PLOAD4 element {}", elem.id.value);
 
+            const std::array<double, 4> scaled_pressures{
+                load_scale * load.pressures[0], load_scale * load.pressures[1],
+                load_scale * load.pressures[2], load_scale * load.pressures[3]};
             if (elem.type == ElementType::CQUAD4) {
               const std::array<Vec3, 4> coords{
                   model.node(elem.nodes[0]).position,
@@ -723,7 +726,7 @@ void LinearStaticSolver::apply_pressure_loads(const Model &model,
                   model.node(elem.nodes[3]).position,
               };
               const auto nodal_forces = integrate_quad_surface_load(
-                  coords, load.pressures, model, direction, 1.0, context);
+                  coords, scaled_pressures, model, direction, 1.0, context);
               const std::vector<Vec3> forces(nodal_forces.begin(),
                                              nodal_forces.end());
               apply_element_force_vector(elem, model, dof_map, mpc_handler,
@@ -735,7 +738,7 @@ void LinearStaticSolver::apply_pressure_loads(const Model &model,
                   model.node(elem.nodes[2]).position,
               };
               const std::array<double, 3> tri_pressures{
-                  load.pressures[0], load.pressures[1], load.pressures[2]};
+                  scaled_pressures[0], scaled_pressures[1], scaled_pressures[2]};
               const auto nodal_forces = integrate_tri3_surface_load(
                   coords, tri_pressures, model, direction, 1.0, context);
               const std::vector<Vec3> forces(nodal_forces.begin(),
@@ -748,7 +751,7 @@ void LinearStaticSolver::apply_pressure_loads(const Model &model,
               if (face.size() == 4) {
                 const auto coords = quad_face_coords(elem, model, face);
                 const auto nodal_forces = integrate_quad_surface_load(
-                    coords, load.pressures, model, direction, -1.0, context);
+                    coords, scaled_pressures, model, direction, -1.0, context);
                 const std::vector<Vec3> forces(nodal_forces.begin(),
                                                nodal_forces.end());
                 apply_element_force_vector(
@@ -757,7 +760,7 @@ void LinearStaticSolver::apply_pressure_loads(const Model &model,
               } else if (face.size() == 3) {
                 const auto coords = tri3_face_coords(elem, model, face);
                 const std::array<double, 3> tri_pressures{
-                    load.pressures[0], load.pressures[1], load.pressures[2]};
+                    scaled_pressures[0], scaled_pressures[1], scaled_pressures[2]};
                 const auto nodal_forces = integrate_tri3_surface_load(
                     coords, tri_pressures, model, direction, -1.0, context);
                 const std::vector<Vec3> forces(nodal_forces.begin(),
@@ -768,7 +771,7 @@ void LinearStaticSolver::apply_pressure_loads(const Model &model,
               } else if (face.size() == 6) {
                 const auto coords = tri6_face_coords(elem, model, face);
                 const std::array<double, 3> tri_pressures{
-                    load.pressures[0], load.pressures[1], load.pressures[2]};
+                    scaled_pressures[0], scaled_pressures[1], scaled_pressures[2]};
                 const auto nodal_forces = integrate_tri6_surface_load(
                     coords, tri_pressures, model, direction, -1.0, context);
                 const std::vector<Vec3> forces(nodal_forces.begin(),

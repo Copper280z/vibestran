@@ -803,7 +803,7 @@ TEST(Model, LoadsForSetReturnsMatchingLoads) {
     Model m = make_simple_model();
     auto loads = m.loads_for_set(LoadSetId{1});
     ASSERT_EQ(loads.size(), 1u);
-    const ForceLoad& f = std::get<ForceLoad>(*loads[0]);
+    const ForceLoad& f = std::get<ForceLoad>(*loads[0].first);
     EXPECT_EQ(f.node.value, 2);
 }
 
@@ -811,6 +811,70 @@ TEST(Model, LoadsForSetReturnsEmptyForUnknownSet) {
     Model m = make_simple_model();
     auto loads = m.loads_for_set(LoadSetId{999});
     EXPECT_TRUE(loads.empty());
+}
+
+// LOAD bulk data card: combines multiple load sets with scale factors.
+// SUBCASE LOAD = 1 → LOAD 1, S=1.0, (S1=2.0, L1=11), (S2=3.0, L2=12)
+// Effective force on node = 1.0 * (2.0 * F_11 + 3.0 * F_12)
+TEST(BdfParser, LoadCardCombinesTwoForceSets) {
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC = 10
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+MAT1,1,2.0E7,,0.3
+PSHELL,1,1,0.1
+CQUAD4,1,1,1,1,2,2
+SPC1,10,123456,1,2
+LOAD,1,1.0,2.0,11,3.0,12
+FORCE,11,2,,1.0,0.0,0.0,1.0
+FORCE,12,2,,1.0,0.0,0.0,1.0
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+
+    // LOAD combination should be stored
+    ASSERT_EQ(m.load_combinations.size(), 1u);
+    const auto& combo = m.load_combinations.at(LoadSetId{1});
+    EXPECT_EQ(combo.overall_scale, 1.0);
+    ASSERT_EQ(combo.entries.size(), 2u);
+    EXPECT_EQ(combo.entries[0].first, 2.0);
+    EXPECT_EQ(combo.entries[0].second, LoadSetId{11});
+    EXPECT_EQ(combo.entries[1].first, 3.0);
+    EXPECT_EQ(combo.entries[1].second, LoadSetId{12});
+
+    // loads_for_set should resolve through the LOAD card
+    auto loads = m.loads_for_set(LoadSetId{1});
+    ASSERT_EQ(loads.size(), 2u);
+
+    // First entry: scale = 1.0 * 2.0 = 2.0, references FORCE SID=11
+    EXPECT_DOUBLE_EQ(loads[0].second, 2.0);
+    ASSERT_TRUE(std::holds_alternative<ForceLoad>(*loads[0].first));
+    EXPECT_EQ(std::get<ForceLoad>(*loads[0].first).sid, LoadSetId{11});
+
+    // Second entry: scale = 1.0 * 3.0 = 3.0, references FORCE SID=12
+    EXPECT_DOUBLE_EQ(loads[1].second, 3.0);
+    ASSERT_TRUE(std::holds_alternative<ForceLoad>(*loads[1].first));
+    EXPECT_EQ(std::get<ForceLoad>(*loads[1].first).sid, LoadSetId{12});
+}
+
+TEST(BdfParser, LoadCardDirectLookupStillWorksWithoutLoadCard) {
+    // Without a LOAD card, loads_for_set should still return loads directly
+    // with scale factor 1.0
+    const std::string bdf = R"(
+BEGIN BULK
+FORCE,5,2,,1.0,1.0,0.0,0.0
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    auto loads = m.loads_for_set(LoadSetId{5});
+    ASSERT_EQ(loads.size(), 1u);
+    EXPECT_DOUBLE_EQ(loads[0].second, 1.0);
+    ASSERT_TRUE(std::holds_alternative<ForceLoad>(*loads[0].first));
 }
 
 TEST(Model, SpcsForSetReturnsMatchingSpcs) {
