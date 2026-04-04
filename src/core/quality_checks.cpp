@@ -45,11 +45,6 @@ double angle_deg(const Vec3& v1, const Vec3& v2) {
     return std::acos(cos_a) * (180.0 / std::numbers::pi);
 }
 
-// Canonical sorted edge key from two node IDs
-std::pair<int,int> edge_key(NodeId a, NodeId b) {
-    return {std::min(a.value, b.value), std::max(a.value, b.value)};
-}
-
 // 3×3 determinant (row-major storage)
 double det3(const double J[3][3]) {
     return J[0][0] * (J[1][1]*J[2][2] - J[1][2]*J[2][1])
@@ -604,10 +599,15 @@ TopologyResult check_topology(const Model& model, double dup_node_tol) {
               [](MaterialId a, MaterialId b){ return a.value < b.value; });
 
     // ── Free edges (shell elements only) ─────────────────────────────────────
-    // Edge defined by (min_node_id, max_node_id) → count, owning element id
+    // Edge key: pack (min_node_id, max_node_id) into a uint64 for O(1) hashing.
+    auto edge_u64 = [](NodeId a, NodeId b) -> uint64_t {
+        uint32_t lo = static_cast<uint32_t>(std::min(a.value, b.value));
+        uint32_t hi = static_cast<uint32_t>(std::max(a.value, b.value));
+        return (static_cast<uint64_t>(lo) << 32) | hi;
+    };
 
 #ifdef HAVE_TBB
-    tbb::enumerable_thread_specific<std::map<std::pair<int,int>, int>> local_edge_count;
+    tbb::enumerable_thread_specific<std::unordered_map<uint64_t, int>> local_edge_count;
     tbb::parallel_for(tbb::blocked_range<size_t>(0, model.elements.size()),
         [&](const tbb::blocked_range<size_t>& range) {
             auto& ec = local_edge_count.local();
@@ -617,44 +617,69 @@ TopologyResult check_topology(const Model& model, double dup_node_tol) {
                     continue;
                 int nn = static_cast<int>(elem.nodes.size());
                 for (int j = 0; j < nn; ++j)
-                    ec[edge_key(elem.nodes[j], elem.nodes[(j+1) % nn])]++;
+                    ec[edge_u64(elem.nodes[j], elem.nodes[(j+1) % nn])]++;
             }
         });
-    std::map<std::pair<int,int>, int> edge_count;
+    std::unordered_map<uint64_t, int> edge_count;
     for (auto& ec : local_edge_count)
         for (const auto& [k, v] : ec)
             edge_count[k] += v;
 #else
-    std::map<std::pair<int,int>, int> edge_count;
+    std::unordered_map<uint64_t, int> edge_count;
     for (const auto& elem : model.elements) {
         if (elem.type != ElementType::CQUAD4 && elem.type != ElementType::CTRIA3)
             continue;
         int nn = static_cast<int>(elem.nodes.size());
         for (int j = 0; j < nn; ++j)
-            edge_count[edge_key(elem.nodes[j], elem.nodes[(j+1) % nn])]++;
+            edge_count[edge_u64(elem.nodes[j], elem.nodes[(j+1) % nn])]++;
     }
 #endif
 
-    // Collect elements that own at least one free edge
-    std::unordered_set<ElementId> free_edge_set;
+    // Collect elements that own at least one free edge (parallelized).
+#ifdef HAVE_TBB
+    tbb::enumerable_thread_specific<std::vector<ElementId>> local_free;
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, model.elements.size()),
+        [&](const tbb::blocked_range<size_t>& range) {
+            auto& lf = local_free.local();
+            for (size_t i = range.begin(); i != range.end(); ++i) {
+                const auto& elem = model.elements[i];
+                if (elem.type != ElementType::CQUAD4 && elem.type != ElementType::CTRIA3)
+                    continue;
+                int nn = static_cast<int>(elem.nodes.size());
+                for (int j = 0; j < nn; ++j) {
+                    auto it = edge_count.find(edge_u64(elem.nodes[j], elem.nodes[(j+1) % nn]));
+                    if (it != edge_count.end() && it->second == 1) {
+                        lf.push_back(elem.id);
+                        break;
+                    }
+                }
+            }
+        });
+    for (auto& lf : local_free)
+        res.free_edge_elements.insert(res.free_edge_elements.end(), lf.begin(), lf.end());
+#else
     for (const auto& elem : model.elements) {
         if (elem.type != ElementType::CQUAD4 && elem.type != ElementType::CTRIA3)
             continue;
         int nn = static_cast<int>(elem.nodes.size());
         for (int j = 0; j < nn; ++j) {
-            auto key = edge_key(elem.nodes[j], elem.nodes[(j+1) % nn]);
-            if (edge_count[key] == 1) {
-                free_edge_set.insert(elem.id);
+            auto it = edge_count.find(edge_u64(elem.nodes[j], elem.nodes[(j+1) % nn]));
+            if (it != edge_count.end() && it->second == 1) {
+                res.free_edge_elements.push_back(elem.id);
                 break;
             }
         }
     }
-    res.free_edge_elements.assign(free_edge_set.begin(), free_edge_set.end());
+#endif
     std::sort(res.free_edge_elements.begin(), res.free_edge_elements.end(),
               [](ElementId a, ElementId b){ return a.value < b.value; });
 
     // ── Duplicate nodes ───────────────────────────────────────────────────────
-    // Build sorted list by x, then sweep for close pairs
+    // Spatial hash grid: bucket nodes into cells of size dup_node_tol, then
+    // only compare pairs within the same cell and its 13 "forward" neighbours.
+    // This is O(n) average regardless of node distribution, avoiding the O(n²)
+    // worst case of a sort-and-sweep when all nodes share a coordinate (e.g. a
+    // flat plate where every node has x = 0).
     auto intentional = build_intentional_coincident_pairs(model);
     auto is_intentional = [&](NodeId a, NodeId b) -> bool {
         int lo = std::min(a.value, b.value), hi = std::max(a.value, b.value);
@@ -662,38 +687,89 @@ TopologyResult check_topology(const Model& model, double dup_node_tol) {
         return intentional.count(key) > 0;
     };
 
-    std::vector<std::pair<Vec3, NodeId>> sorted_nodes;
-    sorted_nodes.reserve(model.nodes.size());
-    for (const auto& [nid, gp] : model.nodes)
-        sorted_nodes.push_back({gp.position, nid});
-    std::sort(sorted_nodes.begin(), sorted_nodes.end(),
-              [](const auto& a, const auto& b){ return a.first.x < b.first.x; });
+    {
+        using Cell = std::array<int64_t, 3>;
+        struct CellHash {
+            size_t operator()(const Cell& c) const {
+                size_t h = 0;
+                for (int64_t v : c)
+                    h ^= std::hash<int64_t>{}(v) + 0x9e3779b9u + (h << 6) + (h >> 2);
+                return h;
+            }
+        };
 
-    for (size_t i = 0; i < sorted_nodes.size(); ++i) {
-        for (size_t j = i + 1; j < sorted_nodes.size(); ++j) {
-            if (sorted_nodes[j].first.x - sorted_nodes[i].first.x > dup_node_tol)
-                break;
-            Vec3 diff = sorted_nodes[i].first - sorted_nodes[j].first;
-            if (diff.norm() <= dup_node_tol) {
-                NodeId a = sorted_nodes[i].second, b = sorted_nodes[j].second;
-                if (!is_intentional(a, b))
-                    res.duplicate_node_pairs.push_back({a, b});
+        // Build index: cell → list of (node index into nodes_vec)
+        std::vector<std::pair<Vec3, NodeId>> nodes_vec;
+        nodes_vec.reserve(model.nodes.size());
+        for (const auto& [nid, gp] : model.nodes)
+            nodes_vec.push_back({gp.position, nid});
+
+        const double inv_cell = 1.0 / dup_node_tol;
+        std::unordered_map<Cell, std::vector<size_t>, CellHash> grid;
+        grid.reserve(nodes_vec.size());
+        for (size_t i = 0; i < nodes_vec.size(); ++i) {
+            const Vec3& p = nodes_vec[i].first;
+            Cell c = { static_cast<int64_t>(std::floor(p.x * inv_cell)),
+                       static_cast<int64_t>(std::floor(p.y * inv_cell)),
+                       static_cast<int64_t>(std::floor(p.z * inv_cell)) };
+            grid[c].push_back(i);
+        }
+
+        // 13 "forward" neighbour offsets (half of the 26-cell shell).
+        // Together with the within-cell check this covers all distinct pairs
+        // exactly once.
+        static const std::array<Cell, 13> fwd = {{
+            {1, 0, 0}, {0, 1, 0}, {0, 0, 1},
+            {1, 1, 0}, {1,-1, 0}, {1, 0, 1}, {1, 0,-1}, {0, 1, 1}, {0, 1,-1},
+            {1, 1, 1}, {1, 1,-1}, {1,-1, 1}, {1,-1,-1}
+        }};
+
+        for (const auto& [ck, bucket] : grid) {
+            // Within-cell pairs
+            for (size_t a = 0; a < bucket.size(); ++a) {
+                for (size_t b = a + 1; b < bucket.size(); ++b) {
+                    Vec3 diff = nodes_vec[bucket[a]].first - nodes_vec[bucket[b]].first;
+                    if (diff.norm() <= dup_node_tol) {
+                        NodeId na = nodes_vec[bucket[a]].second;
+                        NodeId nb = nodes_vec[bucket[b]].second;
+                        if (!is_intentional(na, nb))
+                            res.duplicate_node_pairs.push_back({na, nb});
+                    }
+                }
+            }
+            // Cross-cell pairs with forward neighbours
+            for (const auto& d : fwd) {
+                Cell nb_key = {ck[0]+d[0], ck[1]+d[1], ck[2]+d[2]};
+                auto it = grid.find(nb_key);
+                if (it == grid.end()) continue;
+                for (size_t a : bucket) {
+                    for (size_t b : it->second) {
+                        Vec3 diff = nodes_vec[a].first - nodes_vec[b].first;
+                        if (diff.norm() <= dup_node_tol) {
+                            NodeId na = nodes_vec[a].second;
+                            NodeId nb2 = nodes_vec[b].second;
+                            if (!is_intentional(na, nb2))
+                                res.duplicate_node_pairs.push_back({na, nb2});
+                        }
+                    }
+                }
             }
         }
     }
 
     // ── Duplicate elements ────────────────────────────────────────────────────
-    // Key: element type + sorted node IDs encoded as int64 hash
+    // Key: element type + sorted node IDs as a string; unambiguous and fast
+    // enough for the expected element counts.
     std::unordered_map<std::string, ElementId> elem_seen;
+    elem_seen.reserve(model.elements.size());
     for (const auto& elem : model.elements) {
         std::vector<int> node_vals;
         node_vals.reserve(elem.nodes.size());
         for (NodeId n : elem.nodes) node_vals.push_back(n.value);
         std::sort(node_vals.begin(), node_vals.end());
-        // Build a string key: type:n1,n2,...
         std::string key = std::to_string(static_cast<int>(elem.type)) + ":";
         for (int v : node_vals) key += std::to_string(v) + ",";
-        auto [it, inserted] = elem_seen.emplace(key, elem.id);
+        auto [it, inserted] = elem_seen.emplace(std::move(key), elem.id);
         if (!inserted)
             res.duplicate_element_pairs.push_back({it->second, elem.id});
     }

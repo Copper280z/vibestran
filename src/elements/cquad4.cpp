@@ -337,7 +337,12 @@ Mitc4PlusMembraneData build_mitc4plus_membrane_data(
   xr_xs.col(0) = x_r;
   xr_xs.col(1) = x_s;
   const double dual_det = xr_xs.determinant();
-  if (std::abs(dual_det) < 1e-12) {
+  // Use a relative threshold: |det| / (|x_r| * |x_s|) is the sine of the
+  // angle between the two characteristic vectors. An absolute threshold
+  // incorrectly rejects valid elements with very small coordinates (e.g.,
+  // models in meters with micron-scale mesh).
+  const double rel_scale = x_r.norm() * x_s.norm();
+  if (rel_scale < 1e-30 || std::abs(dual_det) < 1e-6 * rel_scale) {
     throw SolverError(std::format(
         "CQUAD4 {}: MITC4+ characteristic geometry is singular", eid.value));
   }
