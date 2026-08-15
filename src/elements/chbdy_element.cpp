@@ -4,8 +4,10 @@
 #include "elements/chbdy_element.hpp"
 #include "elements/thermal_elements.hpp"   // resolve_thermal_material
 
+#include <array>
 #include <cmath>
 #include <format>
+#include <numeric>
 
 namespace vibestran {
 
@@ -19,19 +21,20 @@ namespace {
 
 ChbdyElementImpl::ChbdyElementImpl(const ChbdyElement &data, const Model &model)
     : data_(data), model_(model) {
-  // Material: MAT4.k holds the film coefficient H for CHBDY.
-  if (auto it = model_.mat4_materials.find(data_.mid);
-      it != model_.mat4_materials.end()) {
-    film_h_ = it->second.k;
-  } else if (data_.mid.value != 0) {
-    throw SolverError(std::format(
-        "CHBDY {} references MAT4 ID {} which is not defined",
-        data_.eid.value, data_.mid.value));
-  }
-  // T_amb: from PHBDY if present.
+  // PHBDY owns both the film material and radiation/vector-flux properties.
   if (auto it = model_.phbdy_properties.find(data_.pid);
       it != model_.phbdy_properties.end()) {
-    t_amb_ = it->second.t_amb;
+    const PHBDY &property = it->second;
+    absorptivity_ = property.absorptivity;
+    if (property.mid.value != 0) {
+      auto material = model_.mat4_materials.find(property.mid);
+      if (material == model_.mat4_materials.end()) {
+        throw SolverError(std::format(
+            "CHBDY {} PHBDY {} references MAT4 ID {} which is not defined",
+            data_.eid.value, data_.pid.value, property.mid.value));
+      }
+      film_h_ = material->second.k;
+    }
   }
   compute_geometry();
 }
@@ -85,17 +88,35 @@ void ChbdyElementImpl::compute_geometry() {
     if (area_ < 1e-20)
       throw SolverError(std::format("CHBDY AREA4 {} degenerate", data_.eid.value));
     normal_ = d13.cross(d24).normalized();
-    // Uniform lumping for applied flux: ∫N_i dA = A_face / 4 for a flat quad
-    // under bilinear shape functions (row-summing the 2×2-Gauss consistent
-    // mass matrix).  Keeps total applied load = q·A_face for uniform flux.
-    area_frac_ = {area_ / 4.0, area_ / 4.0, area_ / 4.0, area_ / 4.0};
-    N_int_ = Eigen::VectorXd::Constant(4, area_ / 4.0);
-    // Lumped (row-summed) convection matrix: K_ii = H · A_face / 4.
-    // Equivalent to the consistent bilinear matrix after row-sum lumping;
-    // sufficient for steady-state where T is single-valued at each node.
-    conv_ = Eigen::MatrixXd::Zero(4, 4);
-    for (int i = 0; i < 4; ++i)
-      conv_(i, i) = film_h_ * area_ / 4.0;
+    // NASTRAN-95 HBDYS formulation. Ai is twice the area of the triangle
+    // opposite node i. This preserves the correct nonuniform tributary areas
+    // for tapered and mildly warped quadrilaterals.
+    const std::array<Vec3, 4> edge{
+        r3 - r2, r4 - r3, r1 - r4, r2 - r1};
+    const std::array<double, 4> opposite_twice_area{
+        edge[0].cross(edge[1]).norm(), edge[1].cross(edge[2]).norm(),
+        edge[2].cross(edge[3]).norm(), edge[3].cross(edge[0]).norm()};
+    const double area_sum = std::accumulate(opposite_twice_area.begin(),
+                                            opposite_twice_area.end(), 0.0);
+    area_frac_.resize(4);
+    N_int_.resize(4);
+    conv_.resize(4, 4);
+    for (int i = 0; i < 4; ++i) {
+      area_frac_[static_cast<size_t>(i)] =
+          (area_sum - opposite_twice_area[static_cast<size_t>(i)]) / 12.0;
+      N_int_(i) = area_frac_[static_cast<size_t>(i)];
+      for (int j = 0; j < 4; ++j) {
+        if (i == j) {
+          conv_(i, j) = film_h_ *
+              2.0 * (area_sum - opposite_twice_area[static_cast<size_t>(i)]) /
+              48.0;
+        } else {
+          conv_(i, j) = film_h_ *
+              (area_sum - opposite_twice_area[static_cast<size_t>(i)] -
+               opposite_twice_area[static_cast<size_t>(j)]) / 48.0;
+        }
+      }
+    }
     break;
   }
   default:
@@ -106,14 +127,6 @@ void ChbdyElementImpl::compute_geometry() {
 
 Eigen::MatrixXd ChbdyElementImpl::convection_conductance() const {
   return conv_;
-}
-
-Eigen::VectorXd ChbdyElementImpl::ambient_rhs() const {
-  // P_i = H · T_amb · ∫ N_i dA  (consistent integral; matches conv_ rowsum)
-  // Use conv_.rowwise().sum() · T_amb so the resulting steady-state with
-  // uniform T = T_amb yields zero net heat — i.e. the rowsum of conv_ equals
-  // H · ∫ N_i dA exactly.
-  return conv_.rowwise().sum() * t_amb_;
 }
 
 Eigen::VectorXd ChbdyElementImpl::applied_flux_load(double q) const {
@@ -139,7 +152,7 @@ Eigen::VectorXd ChbdyElementImpl::directional_flux_load(
                    + direction.z * normal_.z;
   if (dot >= 0.0)
     return out;
-  const double q_eff = q0 * (-dot);
+  const double q_eff = absorptivity_ * q0 * (-dot);
   for (size_t i = 0; i < area_frac_.size(); ++i)
     out(static_cast<int>(i)) = q_eff * area_frac_[i];
   return out;

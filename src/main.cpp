@@ -352,10 +352,12 @@ int main(int argc, const char *argv[]) {
       // to HEAT under SOL 153.  STATICS subcases that follow run a linear
       // static pass with TEMP(LOAD)=THERMAL consuming the most recent heat
       // subcase's temperatures.
-      std::vector<vibestran::SubCase> heat_subcases, stat_subcases;
-      for (const auto &sc : model.analysis.subcases) {
+      std::vector<vibestran::SubCase> heat_subcases;
+      std::vector<std::pair<size_t, vibestran::SubCase>> stat_subcases;
+      for (size_t i = 0; i < model.analysis.subcases.size(); ++i) {
+        const auto &sc = model.analysis.subcases[i];
         if (sc.analysis_type == vibestran::SubCaseAnalysis::Statics)
-          stat_subcases.push_back(sc);
+          stat_subcases.emplace_back(i, sc);
         else
           heat_subcases.push_back(sc);
       }
@@ -395,12 +397,16 @@ int main(int argc, const char *argv[]) {
         stat_model.analysis.sol = vibestran::SolutionType::LinearStatic;
         stat_model.analysis.subcases.clear();
 
-        for (auto sc : stat_subcases) {
+        for (auto [subcase_index, sc] : stat_subcases) {
           if (sc.temp_from_heat) {
-            // Pick the most recent thermal result whose subcase ID precedes
-            // this statics subcase (by position in the original deck).  If
-            // there is only one heat subcase, use it.
-            const auto &th = thermal_results.subcases.back();
+            const auto heat_index = vibestran::preceding_heat_result_index(
+                model.analysis.subcases, subcase_index);
+            if (!heat_index || *heat_index >= thermal_results.subcases.size()) {
+              throw vibestran::SolverError(std::format(
+                  "STATICS subcase {} requests TEMP(LOAD)=THERMAL but no HEAT "
+                  "subcase precedes it", sc.id));
+            }
+            const auto &th = thermal_results.subcases[*heat_index];
             for (const auto &nt : th.temperatures) {
               vibestran::TempLoad t;
               t.sid = vibestran::LoadSetId(next_sid);

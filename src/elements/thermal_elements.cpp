@@ -150,13 +150,17 @@ public:
               std::array<NodeId, 2> nodes, const Model &model)
       : eid_(eid), type_(type), pid_(pid), nodes_(nodes), model_(model) {
     const auto pts = node_pair(model_, nodes_[0], nodes_[1]);
-    length_ = (pts[1] - pts[0]).norm();
+    const Vec3 delta = pts[1] - pts[0];
+    length_ = delta.norm();
     if (length_ < 1e-20)
       throw SolverError(std::format("Thermal line element {} has zero length",
                                     eid_.value));
     area_ = bar_area(model_.property(pid_));
     const MaterialId mid = property_thermal_mid(model_, pid_);
     mat_ = resolve_thermal_material(model_, mid);
+    const Eigen::Vector3d axis(delta.x / length_, delta.y / length_,
+                               delta.z / length_);
+    conductivity_ = axis.dot(mat_.k_tensor * axis);
   }
 
   [[nodiscard]] ElementId id() const noexcept override { return eid_; }
@@ -167,7 +171,7 @@ public:
   }
 
   [[nodiscard]] Eigen::MatrixXd conductance_matrix() const override {
-    const double c = mat_.k * area_ / length_;
+    const double c = conductivity_ * area_ / length_;
     Eigen::MatrixXd Ke(2, 2);
     Ke << c, -c, -c, c;
     return Ke;
@@ -184,7 +188,7 @@ public:
   [[nodiscard]] Eigen::VectorXd
   heat_flux(std::span<const double> t) const override {
     Eigen::VectorXd q(1);
-    q(0) = -mat_.k * (t[1] - t[0]) / length_;
+    q(0) = -conductivity_ * (t[1] - t[0]) / length_;
     return q;
   }
 
@@ -196,6 +200,7 @@ private:
   const Model &model_;
   double length_{0.0};
   double area_{0.0};
+  double conductivity_{0.0};
   ThermalMaterial mat_;
 };
 

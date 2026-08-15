@@ -2412,41 +2412,61 @@ namespace {
 
 } // namespace
 
-// CHBDY, EID, PID, TYPE, MID, G1, G2, G3, G4 [+, GF]
+// CHBDY, EID, PID, TYPE, G1, G2, G3, G4, blank
+// +, GA1, GA2, GA3, GA4, V1, V2, V3
 // TYPE may be a keyword (POINT/LINE/AREA3/AREA4/REV/ELCYL/FTUBE) or NASTRAN-95
-// integer FLAG.  MID references a MAT4 whose K field carries the film
-// coefficient H.  GF is an optional ambient/fluid grid point.
+// integer FLAG. GAi is the ambient grid corresponding to primary grid Gi.
 void BdfParser::process_chbdy(ParseContext &ctx,
                               const std::vector<std::string> &f) {
   ChbdyElement c;
   c.eid = ElementId(parse_int(f[1], ctx.line_num));
   c.pid = PropertyId(f[2].empty() ? 0 : parse_int(f[2], ctx.line_num));
   c.geom = parse_chbdy_type(f[3], ctx.line_num);
-  c.mid = MaterialId(f[4].empty() ? 0 : parse_int(f[4], ctx.line_num));
   const int n_required = chbdy_required_grids(c.geom);
   for (int i = 0; i < n_required; ++i) {
-    const int idx = 5 + i;
+    const int idx = 4 + i;
     if (idx >= static_cast<int>(f.size()) || f[idx].empty())
       throw ParseError(std::format(
           "Line {}: CHBDY {} missing grid G{}", ctx.line_num, c.eid.value, i + 1));
     c.nodes.push_back(NodeId(parse_int(f[idx], ctx.line_num)));
   }
-  // Optional ambient/fluid grid point: GF in the field immediately after the
-  // last required surface grid.
-  const int gf_idx = 5 + n_required;
-  if (gf_idx < static_cast<int>(f.size()) && !f[gf_idx].empty()) {
-    c.ambient_node = NodeId(parse_int(f[gf_idx], ctx.line_num));
+  c.ambient_nodes.resize(static_cast<size_t>(n_required), NodeId{0});
+  for (int i = 0; i < n_required; ++i) {
+    const int idx = 9 + i;
+    if (idx < static_cast<int>(f.size()) && !f[idx].empty())
+      c.ambient_nodes[static_cast<size_t>(i)] =
+          NodeId(parse_int(f[idx], ctx.line_num));
   }
+  c.orientation = Vec3(
+      (f.size() > 13 && !f[13].empty()) ? parse_double(f[13], ctx.line_num) : 0.0,
+      (f.size() > 14 && !f[14].empty()) ? parse_double(f[14], ctx.line_num) : 0.0,
+      (f.size() > 15 && !f[15].empty()) ? parse_double(f[15], ctx.line_num) : 0.0);
   ctx.model.chbdy_elements.push_back(c);
 }
 
-// PHBDY, PID, AF, TAMB
+// PHBDY, PID, MID, AF, E, ALPHA, R1, R2
 void BdfParser::process_phbdy(ParseContext &ctx,
                               const std::vector<std::string> &f) {
   PHBDY p;
   p.pid = PropertyId(parse_int(f[1], ctx.line_num));
-  p.af  = (f.size() > 2 && !f[2].empty()) ? parse_double(f[2], ctx.line_num) : 1.0;
-  p.t_amb = (f.size() > 3 && !f[3].empty()) ? parse_double(f[3], ctx.line_num) : 0.0;
+  p.mid = MaterialId((f.size() > 2 && !f[2].empty())
+                         ? parse_int(f[2], ctx.line_num)
+                         : 0);
+  p.af = (f.size() > 3 && !f[3].empty())
+             ? parse_double(f[3], ctx.line_num)
+             : 1.0;
+  p.emissivity = (f.size() > 4 && !f[4].empty())
+                     ? parse_double(f[4], ctx.line_num)
+                     : 0.0;
+  p.absorptivity = (f.size() > 5 && !f[5].empty())
+                       ? parse_double(f[5], ctx.line_num)
+                       : p.emissivity;
+  p.r1 = (f.size() > 6 && !f[6].empty())
+             ? parse_double(f[6], ctx.line_num)
+             : 0.0;
+  p.r2 = (f.size() > 7 && !f[7].empty())
+             ? parse_double(f[7], ctx.line_num)
+             : 0.0;
   ctx.model.phbdy_properties[p.pid] = p;
 }
 
@@ -2457,6 +2477,11 @@ void BdfParser::process_qhbdy(ParseContext &ctx,
   q.sid = LoadSetId(parse_int(f[1], ctx.line_num));
   q.geom = parse_chbdy_type(f[2], ctx.line_num);
   q.q0 = parse_double(f[3], ctx.line_num);
+  if (q.geom == ChbdyType::ELCYL || q.geom == ChbdyType::FTUBE) {
+    throw ParseError(std::format(
+        "Line {}: QHBDY geometry must be POINT, LINE, REV, AREA3, or AREA4",
+        ctx.line_num));
+  }
   q.af = (f.size() > 4 && !f[4].empty()) ? parse_double(f[4], ctx.line_num) : 1.0;
   const int n_required = chbdy_required_grids(q.geom);
   for (int i = 0; i < n_required; ++i) {

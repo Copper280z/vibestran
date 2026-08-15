@@ -37,6 +37,23 @@ bool component_is_valid(const int component) {
     return component >= 1 && component <= 6;
 }
 
+bool element_supports_thermal_conduction(const ElementType type) {
+    switch (type) {
+    case ElementType::CQUAD4:
+    case ElementType::CTRIA3:
+    case ElementType::CHEXA8:
+    case ElementType::CHEXA20:
+    case ElementType::CTETRA4:
+    case ElementType::CTETRA10:
+    case ElementType::CPENTA6:
+    case ElementType::CBAR:
+    case ElementType::CBEAM:
+        return true;
+    default:
+        return false;
+    }
+}
+
 } // namespace
 
 void Model::validate() const {
@@ -44,6 +61,49 @@ void Model::validate() const {
     element_ids.reserve(elements.size());
     for (const auto& elem : elements)
         element_ids.insert(elem.id);
+    std::unordered_set<ElementId> chbdy_ids;
+    chbdy_ids.reserve(chbdy_elements.size());
+    for (const auto& elem : chbdy_elements) {
+        if (element_ids.count(elem.eid) || !chbdy_ids.insert(elem.eid).second)
+            throw SolverError(std::format(
+                "CHBDY element ID {} duplicates another element", elem.eid.value));
+        const auto missing_primary = std::find_if(
+            elem.nodes.begin(), elem.nodes.end(),
+            [&](NodeId nid) { return !nodes.count(nid); });
+        if (missing_primary != elem.nodes.end())
+            throw SolverError(std::format(
+                "CHBDY {} references undefined primary node {}",
+                elem.eid.value, missing_primary->value));
+        if (elem.ambient_nodes.size() != elem.nodes.size())
+            throw SolverError(std::format(
+                "CHBDY {} must provide one ambient field per primary node",
+                elem.eid.value));
+        const auto missing_ambient = std::find_if(
+            elem.ambient_nodes.begin(), elem.ambient_nodes.end(),
+            [&](NodeId nid) { return nid.value != 0 && !nodes.count(nid); });
+        if (missing_ambient != elem.ambient_nodes.end())
+            throw SolverError(std::format(
+                "CHBDY {} references undefined ambient node {}",
+                elem.eid.value, missing_ambient->value));
+        if (elem.pid.value != 0 && !phbdy_properties.count(elem.pid))
+            throw SolverError(std::format(
+                "CHBDY {} references undefined PHBDY {}",
+                elem.eid.value, elem.pid.value));
+    }
+
+    for (const auto& [pid, phbdy] : phbdy_properties) {
+        if (phbdy.mid.value != 0 && !mat4_materials.count(phbdy.mid))
+            throw SolverError(std::format(
+                "PHBDY {} references undefined MAT4 {}",
+                pid.value, phbdy.mid.value));
+        if (phbdy.af < 0.0)
+            throw SolverError(std::format("PHBDY {} has negative AF", pid.value));
+        if (phbdy.emissivity < 0.0 || phbdy.emissivity > 1.0 ||
+            phbdy.absorptivity < 0.0 || phbdy.absorptivity > 1.0)
+            throw SolverError(std::format(
+                "PHBDY {} emissivity and absorptivity must be in [0,1]",
+                pid.value));
+    }
 
     // Check all element nodes exist.  NodeId{0} is the "absent midnode"
     // placeholder for variable-noded CTETRA10/CHEXA20 (allowed only on those
@@ -165,6 +225,42 @@ void Model::validate() const {
                 if (missing_node != l.nodes.end())
                     throw SolverError(std::format(
                         "ACCEL1 references undefined node {}", missing_node->value));
+            } else if constexpr (std::is_same_v<T, QvolLoad>) {
+                for (ElementId eid : l.elements) {
+                    auto element = std::find_if(
+                        elements.begin(), elements.end(),
+                        [eid](const ElementData& candidate) {
+                            return candidate.id == eid;
+                        });
+                    if (element == elements.end())
+                        throw SolverError(std::format(
+                            "QVOL references undefined conduction element {}",
+                            eid.value));
+                    if (!element_supports_thermal_conduction(element->type))
+                        throw SolverError(std::format(
+                            "QVOL references element {} whose type has no thermal "
+                            "conduction formulation", eid.value));
+                }
+            } else if constexpr (std::is_same_v<T, QhbdyLoad>) {
+                const auto missing_node = std::find_if(
+                    l.nodes.begin(), l.nodes.end(),
+                    [&](NodeId nid) { return !nodes.count(nid); });
+                if (missing_node != l.nodes.end())
+                    throw SolverError(std::format(
+                        "QHBDY references undefined node {}", missing_node->value));
+            } else if constexpr (std::is_same_v<T, Qbdy1Load> ||
+                                 std::is_same_v<T, QvectLoad>) {
+                const auto missing_element = std::find_if(
+                    l.elements.begin(), l.elements.end(),
+                    [&](ElementId eid) { return !chbdy_ids.count(eid); });
+                if (missing_element != l.elements.end())
+                    throw SolverError(std::format(
+                        "Thermal boundary load references undefined CHBDY {}",
+                        missing_element->value));
+            } else if constexpr (std::is_same_v<T, Qbdy2Load>) {
+                if (!chbdy_ids.count(l.element))
+                    throw SolverError(std::format(
+                        "QBDY2 references undefined CHBDY {}", l.element.value));
             }
         }, load);
     }

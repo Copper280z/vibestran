@@ -262,8 +262,12 @@ enum class ChbdyType {
 /// AF is the area factor for POINT/LINE/ELCYL/FTUBE geometries.
 struct PHBDY {
   PropertyId pid{0};
-  double af{1.0};   ///< area factor (multiplies geometric area)
-  double t_amb{0.0}; ///< ambient temperature for convection
+  MaterialId mid{0}; ///< MAT4 carrying film coefficient and surface capacity
+  double af{1.0};    ///< area factor for POINT/LINE/ELCYL/FTUBE
+  double emissivity{0.0};
+  double absorptivity{0.0}; ///< defaults to emissivity when blank
+  double r1{0.0};
+  double r2{0.0};
 };
 
 /// CHBDY boundary element (parsed at top level, stored separately from solid
@@ -272,9 +276,11 @@ struct ChbdyElement {
   ElementId eid{0};
   PropertyId pid{0};      ///< references a PHBDY
   ChbdyType geom{ChbdyType::AREA3};
-  MaterialId mid{0};      ///< MAT4 carrying the film coefficient (K → H)
   std::vector<NodeId> nodes;     ///< surface nodes (1, 2, 3, or 4)
-  std::optional<NodeId> ambient_node; ///< optional fluid SIL (NASTRAN-95 grids 5-8)
+  /// Ambient grids GA1..GA4 correspond positionally to the surface grids.
+  /// NodeId{0} denotes a blank field, i.e. a fixed zero-temperature ambient.
+  std::vector<NodeId> ambient_nodes;
+  Vec3 orientation{0.0, 0.0, 0.0};
 };
 
 struct ElementData {

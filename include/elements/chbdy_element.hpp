@@ -21,7 +21,9 @@ public:
   [[nodiscard]] std::span<const NodeId> surface_nodes() const noexcept {
     return {data_.nodes.data(), data_.nodes.size()};
   }
-  [[nodiscard]] double t_amb() const noexcept { return t_amb_; }
+  [[nodiscard]] std::span<const NodeId> ambient_nodes() const noexcept {
+    return {data_.ambient_nodes.data(), data_.ambient_nodes.size()};
+  }
   /// Outward unit normal (only meaningful for AREA3/AREA4; zero for POINT).
   /// Currently only used in tests.
   [[nodiscard]] const Vec3 &outward_normal() const noexcept { return normal_; }
@@ -32,16 +34,6 @@ public:
   /// Always positive-semidefinite; couples surface nodes among themselves
   /// (heat flow at node i is H·integral(N_i·(T_i − T_amb))).
   [[nodiscard]] Eigen::MatrixXd convection_conductance() const;
-
-  /// Coupling block from surface nodes to the ambient (fluid) node.
-  /// Returns an (n × n) augmented [[K -K]; [-K K]]-style block restricted to
-  /// the surface part minus its convection contribution to the ambient node
-  /// vector — used when ambient_node is set.
-  /// (Implementation packs it into the off-diagonal terms during assembly.)
-
-  /// RHS contribution from a fixed ambient temperature (no ambient node).
-  /// Returns Pe = H · integral(N_i) · T_amb for each surface node.
-  [[nodiscard]] Eigen::VectorXd ambient_rhs() const;
 
   /// Distributed flux load (QBDY1/QHBDY/QBDY2) onto surface nodes.
   /// q is either a scalar (uniform) or one value per node.
@@ -60,7 +52,7 @@ private:
   const Model &model_;
   double area_{0.0};
   double film_h_{0.0};
-  double t_amb_{0.0};
+  double absorptivity_{0.0};
   std::vector<double> area_frac_; // per-surface-node tributary area
   Eigen::MatrixXd conv_;          // consistent convection matrix (surface part)
   Eigen::VectorXd N_int_;         // ∫ N_i dA  (= area_frac_ × something)

@@ -544,6 +544,14 @@ TopologyResult check_topology(const Model& model, double dup_node_tol) {
             used_nodes.insert(n);
 #endif
 
+    for (const auto& elem : model.chbdy_elements) {
+        for (NodeId n : elem.nodes)
+            used_nodes.insert(n);
+        for (NodeId n : elem.ambient_nodes)
+            if (n.value != 0)
+                used_nodes.insert(n);
+    }
+
     for (const auto& spc : model.spcs)
         used_nodes.insert(spc.node);
     for (const auto& mpc : model.mpcs)

@@ -37,52 +37,45 @@ thermal_active_nodes(const Model &model) {
   for (const auto &c : model.chbdy_elements) {
     for (NodeId nid : c.nodes)
       active.insert(nid);
-    if (c.ambient_node)
-      active.insert(*c.ambient_node);
+    for (NodeId nid : c.ambient_nodes)
+      if (nid.value != 0)
+        active.insert(nid);
   }
   return active;
 }
 
-// Augmented convection block over (surface nodes..., ambient node f):
-//   [[Ks, -r], [-rᵀ, Σr]]  where r = Ks·1 (row sums).
-// This is the exact consistent discretization of q_i = r_i·(T_i − T_f) for a
-// single-valued surface field, and lets assembly / Dirichlet condensation
-// treat the ambient coupling uniformly (including a *prescribed* ambient
-// node, whose off-diagonal terms must be moved to the RHS).
+// Augmented convection block over corresponding surface and ambient nodes:
+//   [[Ks, -Ks], [-Ks, Ks]].
+// Blank ambient fields are represented by NodeId{0}, which DofMap treats as a
+// constrained zero-temperature degree of freedom. Duplicate ambient grids are
+// intentionally retained; global assembly superimposes their contributions.
 [[nodiscard]] std::pair<std::vector<NodeId>, Eigen::MatrixXd>
-augmented_convection(const ChbdyElementImpl &cb, NodeId f) {
+augmented_convection(const ChbdyElementImpl &cb) {
   const auto sn = cb.surface_nodes();
+  const auto an = cb.ambient_nodes();
   const int n = static_cast<int>(sn.size());
   const Eigen::MatrixXd Ks = cb.convection_conductance();
-  Eigen::MatrixXd Ka = Eigen::MatrixXd::Zero(n + 1, n + 1);
+  Eigen::MatrixXd Ka = Eigen::MatrixXd::Zero(2 * n, 2 * n);
   Ka.topLeftCorner(n, n) = Ks;
-  const Eigen::VectorXd r = Ks.rowwise().sum();
-  for (int i = 0; i < n; ++i) {
-    Ka(i, n) = -r(i);
-    Ka(n, i) = -r(i);
-    Ka(n, n) += r(i);
-  }
+  Ka.topRightCorner(n, n) = -Ks;
+  Ka.bottomLeftCorner(n, n) = -Ks;
+  Ka.bottomRightCorner(n, n) = Ks;
   std::vector<NodeId> nodes(sn.begin(), sn.end());
-  nodes.push_back(f);
+  nodes.insert(nodes.end(), an.begin(), an.end());
   return {std::move(nodes), std::move(Ka)};
 }
 
-// Collect prescribed nodal temperatures: TEMP cards whose SID matches the
-// case's TEMP(LOAD) set, plus an optional TEMPD default for those same nodes.
-// IMPORTANT: TEMPD alone is *not* a Dirichlet BC — it's a default value,
-// matching NASTRAN convention.  Only nodes that appear on a TEMP card are
-// constrained.
+// Collect prescribed nodal temperatures from the selected SPC set. Thermal
+// SPC component 0 is represented by an empty DofSet; component 1 is accepted
+// as the scalar temperature DOF for compatibility with common decks.
 [[nodiscard]] std::unordered_map<NodeId, double>
 collect_prescribed_temperatures(const Model &model, const SubCase &sc) {
   std::unordered_map<NodeId, double> out;
-  const int temp_set = (sc.temp_load_set != 0) ? sc.temp_load_set
-                                               : sc.load_set.value;
-  if (temp_set == 0)
+  if (sc.spc_set.value == 0)
     return out;
-  for (const auto &load : model.loads) {
-    if (const TempLoad *tl = std::get_if<TempLoad>(&load))
-      if (tl->sid == LoadSetId(temp_set))
-        out[tl->node] = tl->temperature;
+  for (const Spc *spc : model.spcs_for_set(sc.spc_set)) {
+    if (spc->dofs.mask == 0 || spc->dofs.mask == 1)
+      out[spc->node] = spc->value;
   }
   return out;
 }
@@ -142,12 +135,8 @@ void apply_prescribed_temperatures(
   }
   for (const auto &c : model.chbdy_elements) {
     ChbdyElementImpl cb(c, model);
-    if (c.ambient_node) {
-      const auto [nodes, Ka] = augmented_convection(cb, *c.ambient_node);
-      contribute(nodes, Ka);
-    } else {
-      contribute(cb.surface_nodes(), cb.convection_conductance());
-    }
+    const auto [nodes, Ka] = augmented_convection(cb);
+    contribute(nodes, Ka);
   }
 }
 
@@ -187,20 +176,11 @@ void assemble_system(const Model &model, const SubCase &sc,
     add_block(te->node_ids(), te->conductance_matrix());
   }
 
-  // 2) CHBDY convection (couples surface nodes; also surface↔ambient_node
-  //    when present)
+  // 2) CHBDY convection between corresponding primary and ambient nodes.
   for (const auto &c : model.chbdy_elements) {
     ChbdyElementImpl cb(c, model);
-    if (c.ambient_node) {
-      const auto [nodes, Ka] = augmented_convection(cb, *c.ambient_node);
-      add_block(nodes, Ka);
-    } else {
-      add_block(cb.surface_nodes(), cb.convection_conductance());
-      if (cb.t_amb() != 0.0) {
-        // Fixed ambient T from PHBDY: contributes to RHS only.
-        add_rhs(cb.surface_nodes(), cb.ambient_rhs());
-      }
-    }
+    const auto [nodes, Ka] = augmented_convection(cb);
+    add_block(nodes, Ka);
   }
 
   // 3) Apply load-set Q*: QVOL, QHBDY, QBDY1, QBDY2
@@ -267,11 +247,16 @@ void assemble_system(const Model &model, const SubCase &sc,
             tmp.eid = ElementId(-1);
             tmp.pid = PropertyId(0);
             tmp.geom = load.geom;
-            tmp.mid = MaterialId(0);
             tmp.nodes = load.nodes;
+            tmp.ambient_nodes.resize(tmp.nodes.size(), NodeId{0});
             ChbdyElementImpl cb(tmp, model);
+            const double area_factor =
+                (load.geom == ChbdyType::POINT ||
+                 load.geom == ChbdyType::LINE)
+                    ? load.af
+                    : 1.0;
             add_rhs(cb.surface_nodes(),
-                    cb.applied_flux_load(scale * load.q0 * load.af));
+                    cb.applied_flux_load(scale * load.q0 * area_factor));
           }
         },
         *lp);
@@ -283,6 +268,22 @@ void assemble_system(const Model &model, const SubCase &sc,
 HeatTransferSteadySolver::HeatTransferSteadySolver(
     std::unique_ptr<SolverBackend> backend)
     : backend_(std::move(backend)) {}
+
+std::optional<size_t>
+preceding_heat_result_index(std::span<const SubCase> subcases,
+                            size_t target_subcase) {
+  if (target_subcase >= subcases.size() ||
+      subcases[target_subcase].analysis_type != SubCaseAnalysis::Statics) {
+    return std::nullopt;
+  }
+  size_t heat_count = 0;
+  for (size_t i = 0; i < target_subcase; ++i) {
+    if (subcases[i].analysis_type != SubCaseAnalysis::Statics)
+      ++heat_count;
+  }
+  return heat_count == 0 ? std::nullopt
+                         : std::optional<size_t>(heat_count - 1);
+}
 
 SolverResults HeatTransferSteadySolver::solve(const Model &model) {
   model.validate();
