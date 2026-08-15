@@ -11,6 +11,8 @@ SUBCASE 1
   LABEL = CHEXA8 FREE-FREE MODAL
   METHOD = 1
 BEGIN BULK
+$ Intentionally slender benchmark elements (aspect exactly 20); the deck opts in.
+PARAM,ASPECT,21
 MAT1,1,2.0000E+11,,0.3,7850.0000
 PSOLID,1,1,,2
 EIGRL,1,0.0,,7

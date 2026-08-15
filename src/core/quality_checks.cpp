@@ -803,10 +803,13 @@ void run_quality_checks(Model& model, const QualityThresholds& t) {
         issue(std::format("PSHELL {}: thickness ≤ 0", pid.value), strict);
     for (int sc_id : phys.subcases_no_load)
         log_warn(std::format("[quality] Subcase {}: load set references no loads", sc_id));
-    // No-constraint is fatal for SOL 101 regardless of mode; warn for SOL 103 in lenient
+    // No-constraint is fatal for SOL 101 regardless of mode.  Unconstrained
+    // SOL 103 (free-free modal) is legitimate — rigid-body modes appear as
+    // zero-frequency eigenpairs and shift-invert handles them — so it is only
+    // fatal in strict mode for non-modal solutions.
     for (int sc_id : phys.subcases_no_constraint) {
-        bool fatal_constraint = strict ||
-            (model.analysis.sol == SolutionType::LinearStatic);
+        bool fatal_constraint = (model.analysis.sol == SolutionType::LinearStatic) ||
+            (strict && model.analysis.sol != SolutionType::Modal);
         issue(std::format("Subcase {}: no constraints (SPC/RBE) — model may be singular",
                           sc_id), fatal_constraint);
     }

@@ -15,6 +15,8 @@ SUBCASE 1
   METHOD = 1
   EIGENVECTOR(PLOT) = ALL
 BEGIN BULK
+$ Intentionally slender benchmark elements (aspect 40:1); the deck opts in.
+PARAM,ASPECT,45
 MAT1,1,2.0000E+11,,0.3,7850.0000
 PSOLID,1,1,,2
 EIGRL,1,0.0,,3

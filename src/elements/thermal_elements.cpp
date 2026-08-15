@@ -314,6 +314,9 @@ solid_conductance(const std::array<Vec3, N> &coords, const Eigen::Matrix3d &kt,
     }
     const double det = J.determinant();
     const Eigen::Matrix3d Jinv = J.inverse();
+    // J as built is (parameter × physical): J(r, c) = ∂x_c/∂ξ_r, i.e. the
+    // transpose of the usual Jacobian.  Physical gradients are therefore
+    // ∇N_n = J⁻¹·(∂N_n/∂ξ, ∂N_n/∂η, ∂N_n/∂ζ).
     Eigen::MatrixXd B(3, N);
     for (int n = 0; n < N; ++n) {
       const double a = sd.dN0[n], b = sd.dN1[n], cc = sd.dN2[n];
@@ -374,6 +377,8 @@ solid_centroid_flux(const std::array<Vec3, N> &coords,
     J(2, 2) += sd.dN2[n] * coords[n].z;
   }
   const Eigen::Matrix3d Jinv = J.inverse();
+  // ∇T = Σ_n T_n·J⁻¹·∂N_n/∂ξ — same transposed-Jacobian convention as
+  // solid_conductance above.
   Eigen::Vector3d gradT = Eigen::Vector3d::Zero();
   for (int n = 0; n < N; ++n) {
     const double a = sd.dN0[n], b = sd.dN1[n], cc = sd.dN2[n];

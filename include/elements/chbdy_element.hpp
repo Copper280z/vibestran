@@ -23,8 +23,9 @@ public:
   }
   [[nodiscard]] double t_amb() const noexcept { return t_amb_; }
   /// Outward unit normal (only meaningful for AREA3/AREA4; zero for POINT).
-  [[nodiscard]] Vec3 outward_normal() const noexcept { return normal_; }
-  /// Total surface area.
+  /// Currently only used in tests.
+  [[nodiscard]] const Vec3 &outward_normal() const noexcept { return normal_; }
+  /// Total surface area.  Currently only used in tests.
   [[nodiscard]] double area() const noexcept { return area_; }
 
   /// Consistent convection conductance block (surface × surface), n × n.

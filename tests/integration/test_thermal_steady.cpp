@@ -13,6 +13,7 @@
 // Test 3: 1-D conduction through a single CTETRA4 prism (sanity)
 //   - Two corners at 100 °C, two at 0 °C: linear field reproduces exactly.
 
+#include "elements/chbdy_element.hpp"
 #include "io/bdf_parser.hpp"
 #include "io/results.hpp"
 #include "solver/eigensolver_backend.hpp"
@@ -24,6 +25,7 @@
 #include <cmath>
 #include <memory>
 #include <sstream>
+#include <string_view>
 
 using namespace vibestran;
 
@@ -604,4 +606,281 @@ TEST(ThermalSteady, CTetra4_LinearFieldReproduction) {
   EXPECT_NEAR(temp_at(r, 2), 1.0, 1e-9);
   // q = -k * grad T = -1·(1,0,0) = (-1, 0, 0)
   EXPECT_NEAR(flux_x_of(r, 1), -1.0, 1e-9);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Shared preamble: unit-cube CHEXA8 deck.  Node layout:
+//   1(0,0,0) 2(1,0,0) 3(1,1,0) 4(0,1,0) — bottom
+//   5(0,0,1) 6(1,0,1) 7(1,1,1) 8(0,1,1) — top
+// Face x=0 = nodes 1,4,5,8; face x=1 = nodes 2,3,6,7.
+namespace {
+
+std::string cube_deck(double k, std::string_view extra_bulk,
+                      std::string_view extra_case = "") {
+  std::ostringstream bdf;
+  bdf << "SOL 153\n"
+      << "CEND\n"
+      << "SUBCASE 1\n"
+      << "  TEMP(LOAD) = 1\n"
+      << extra_case
+      << "  THERMAL = ALL\n"
+      << "BEGIN BULK\n"
+      << "MAT4,1," << k << "\n"
+      << "PSOLID,1,1\n"
+      << "GRID,1,,0.0,0.0,0.0\n"
+      << "GRID,2,,1.0,0.0,0.0\n"
+      << "GRID,3,,1.0,1.0,0.0\n"
+      << "GRID,4,,0.0,1.0,0.0\n"
+      << "GRID,5,,0.0,0.0,1.0\n"
+      << "GRID,6,,1.0,0.0,1.0\n"
+      << "GRID,7,,1.0,1.0,1.0\n"
+      << "GRID,8,,0.0,1.0,1.0\n"
+      << "CHEXA,1,1,1,2,3,4,5,6,+\n"
+      << "+,7,8\n"
+      << extra_bulk
+      << "ENDDATA\n";
+  return bdf.str();
+}
+
+} // namespace
+
+// ── Convection ────────────────────────────────────────────────────────────
+
+TEST(ThermalSteady, Convection_FixedAmbientTemp) {
+  // 1-D bar with a convective end: x=0 face Dirichlet T1=100, x=1 face
+  // (nodes 2,3,7,6) convecting to a FIXED ambient T∞=0 with film coefficient
+  // h=10 (MAT4.K carries H for the CHBDY MID), k=50, L=1.
+  // Steady state: T_end = (k·T1 + h·L·T∞)/(k + h·L) = 5000/60 = 83.3̅
+  // (exact: the solution T = T1 + βx is in the trilinear FE space, and the
+  // lumped convection matrix is exact for a single-valued surface field).
+  // Flux: qx = k·(T1 − T_end)/L = 50000/60 = 833.3̅ in +x.
+  const auto bulk = std::string("MAT4,2,10.0\n")
+                  + "PHBDY,2,1.0,0.0\n"
+                  + "TEMP,1,1,100.0,4,100.0\n"
+                  + "TEMP,1,5,100.0,8,100.0\n"
+                  + "CHBDY,101,2,AREA4,2,2,3,7,6\n";
+  const auto r = run_thermal(cube_deck(50.0, bulk));
+  const double t_end = 5000.0 / 60.0;
+  for (int nid : {2, 3, 6, 7})
+    EXPECT_NEAR(temp_at(r, nid), t_end, 1e-6) << "end node " << nid;
+  EXPECT_NEAR(flux_x_of(r, 1), 50000.0 / 60.0, 1e-3);
+}
+
+TEST(ThermalSteady, Convection_AmbientNodePrescribed) {
+  // Same 1-D setup, but convection couples to an AMBIENT NODE (CHBDY GF
+  // field) whose temperature is prescribed at 50 via TEMP.  This exercises
+  // the surface↔fluid coupling assembly AND its Dirichlet condensation.
+  // T_end = (k·T1 + h·L·T_f)/(k + h·L) = (50·100 + 10·50)/60 = 91.6̅
+  const auto bulk = std::string("MAT4,2,10.0\n")
+                  + "PHBDY,2,1.0\n"
+                  + "GRID,9,,5.0,5.0,5.0\n"  // ambient fluid node
+                  + "TEMP,1,1,100.0,4,100.0\n"
+                  + "TEMP,1,5,100.0,8,100.0\n"
+                  + "TEMP,1,9,50.0\n"
+                  + "CHBDY,101,2,AREA4,2,2,3,7,6,9\n";
+  const auto r = run_thermal(cube_deck(50.0, bulk));
+  const double t_end = 5500.0 / 60.0;
+  for (int nid : {2, 3, 6, 7})
+    EXPECT_NEAR(temp_at(r, nid), t_end, 1e-6) << "end node " << nid;
+  EXPECT_NEAR(temp_at(r, 9), 50.0, 1e-9);
+}
+
+TEST(ThermalSteady, Convection_AmbientNodeNoSinkIsUniform) {
+  // Ambient node free (no sink anywhere except the Dirichlet face).  Energy
+  // conservation: with no heat leaving the system, steady state is a uniform
+  // field: every node — surface AND fluid — must settle at T1 = 100.
+  const auto bulk = std::string("MAT4,2,10.0\n")
+                  + "PHBDY,2,1.0\n"
+                  + "GRID,9,,5.0,5.0,5.0\n"
+                  + "TEMP,1,1,100.0,4,100.0\n"
+                  + "TEMP,1,5,100.0,8,100.0\n"
+                  + "CHBDY,101,2,AREA4,2,2,3,7,6,9\n";
+  const auto r = run_thermal(cube_deck(50.0, bulk));
+  for (int nid : {2, 3, 6, 7, 9})
+    EXPECT_NEAR(temp_at(r, nid), 100.0, 1e-6) << "node " << nid;
+}
+
+// ── Applied-flux loads ─────────────────────────────────────────────────────
+
+TEST(ThermalSteady, Qbdy1_AppliedFlux) {
+  // x=0 face Dirichlet at 0; QBDY1 applies q0=500 W/m² INTO the x=1 face
+  // (referenced by CHBDY EID).  1-D steady: T(x) = q·x/k → T_end = 10,
+  // flux qx = −q (heat travels in −x).
+  const auto bulk = std::string("TEMP,1,1,0.0,4,0.0\n")
+                  + "TEMP,1,5,0.0,8,0.0\n"
+                  + "CHBDY,101,0,AREA4,,2,3,7,6\n"
+                  + "QBDY1,7,500.0,101\n";
+  const auto r = run_thermal(cube_deck(50.0, bulk, "  LOAD = 7\n"));
+  for (int nid : {2, 3, 6, 7})
+    EXPECT_NEAR(temp_at(r, nid), 10.0, 1e-6) << "end node " << nid;
+  EXPECT_NEAR(flux_x_of(r, 1), -500.0, 1e-3);
+}
+
+TEST(ThermalSteady, Qbdy2_UniformPerNodeFlux) {
+  // QBDY2 supplies per-corner fluxes Q1..Q4.  Uniform values equal the QBDY1
+  // result: each node receives q·A/4 → T_end = q·L/k = 10.
+  const auto bulk = std::string("TEMP,1,1,0.0,4,0.0\n")
+                  + "TEMP,1,5,0.0,8,0.0\n"
+                  + "CHBDY,101,0,AREA4,,2,3,7,6\n"
+                  + "QBDY2,7,101,500.0,500.0,500.0,500.0\n";
+  const auto r = run_thermal(cube_deck(50.0, bulk, "  LOAD = 7\n"));
+  for (int nid : {2, 3, 6, 7})
+    EXPECT_NEAR(temp_at(r, nid), 10.0, 1e-6) << "end node " << nid;
+}
+
+TEST(ThermalSteady, Qhbdy_AreaFactor) {
+  // QHBDY defines its own surface (no CHBDY needed): q0=500 on AREA4 grids,
+  // with area factor AF=2 → effective flux 1000 W/m² into the x=1 face.
+  // T_end = q0·AF·L/k = 1000/50 = 20.
+  const auto bulk = std::string("TEMP,1,1,0.0,4,0.0\n")
+                  + "TEMP,1,5,0.0,8,0.0\n"
+                  + "QHBDY,7,AREA4,500.0,2.0,2,3,7,6\n";
+  const auto r = run_thermal(cube_deck(50.0, bulk, "  LOAD = 7\n"));
+  for (int nid : {2, 3, 6, 7})
+    EXPECT_NEAR(temp_at(r, nid), 20.0, 1e-6) << "end node " << nid;
+}
+
+// ── CPENTA6 ────────────────────────────────────────────────────────────────
+
+TEST(ThermalSteady, CPenta6_LinearFieldReproduction) {
+  // Unit right-triangle prism (wedge): bottom (0,0,0),(1,0,0),(0,1,0);
+  // top (0,0,1),(1,0,1),(0,1,1).  Prescribe T = x at all six nodes (a linear
+  // field is exactly representable by P1 shape functions) and check the
+  // centroidal flux = −k·(1,0,0) with k = 1.
+  std::ostringstream bdf;
+  bdf << "SOL 153\n"
+      << "CEND\n"
+      << "SUBCASE 1\n"
+      << "  TEMP(LOAD) = 1\n"
+      << "  FLUX = ALL\n"
+      << "BEGIN BULK\n"
+      << "MAT4,1,1.0\n"
+      << "PSOLID,1,1\n"
+      << "GRID,1,,0.0,0.0,0.0\n"
+      << "GRID,2,,1.0,0.0,0.0\n"
+      << "GRID,3,,0.0,1.0,0.0\n"
+      << "GRID,4,,0.0,0.0,1.0\n"
+      << "GRID,5,,1.0,0.0,1.0\n"
+      << "GRID,6,,0.0,1.0,1.0\n"
+      << "CPENTA,1,1,1,2,3,4,5,6\n"
+      << "TEMP,1,1,0.0,2,1.0\n"
+      << "TEMP,1,3,0.0,4,0.0\n"
+      << "TEMP,1,5,1.0,6,0.0\n"
+      << "ENDDATA\n";
+  const auto r = run_thermal(bdf.str());
+  EXPECT_NEAR(flux_x_of(r, 1), -1.0, 1e-9);
+}
+
+TEST(ThermalSteady, CPenta6_StackedBar1DConduction) {
+  // Two wedges stacked in z, k = 1.  Bottom triangle held at 100, top at 0;
+  // all side faces are insulated (natural BC).  T(z) = 100·(1 − z) satisfies
+  // Laplace's equation, the Dirichlet ends, AND the zero-flux side condition,
+  // so it is the exact solution of the mixed problem — Galerkin reproduces it
+  // exactly and the three mid-plane nodes solve to 50.  Recovered flux:
+  // q = −k·∇T = (0, 0, +100).
+  std::ostringstream bdf;
+  bdf << "SOL 153\n"
+      << "CEND\n"
+      << "SUBCASE 1\n"
+      << "  TEMP(LOAD) = 1\n"
+      << "  FLUX = ALL\n"
+      << "BEGIN BULK\n"
+      << "MAT4,1,1.0\n"
+      << "PSOLID,1,1\n"
+      << "GRID,1,,0.0,0.0,0.0\n"
+      << "GRID,2,,1.0,0.0,0.0\n"
+      << "GRID,3,,0.0,1.0,0.0\n"
+      << "GRID,4,,0.0,0.0,0.5\n"
+      << "GRID,5,,1.0,0.0,0.5\n"
+      << "GRID,6,,0.0,1.0,0.5\n"
+      << "GRID,7,,0.0,0.0,1.0\n"
+      << "GRID,8,,1.0,0.0,1.0\n"
+      << "GRID,9,,0.0,1.0,1.0\n"
+      << "CPENTA,1,1,1,2,3,4,5,6\n"
+      << "CPENTA,2,1,4,5,6,7,8,9\n"
+      << "TEMP,1,1,100.0,2,100.0\n"
+      << "TEMP,1,3,100.0\n"
+      << "TEMP,1,7,0.0,8,0.0\n"
+      << "TEMP,1,9,0.0\n"
+      << "ENDDATA\n";
+  const auto r = run_thermal(bdf.str());
+  for (int nid : {4, 5, 6})
+    EXPECT_NEAR(temp_at(r, nid), 50.0, 1e-9) << "mid node " << nid;
+  for (int eid : {1, 2}) {
+    const auto &ef = std::find_if(
+                         r.subcases[0].heat_fluxes.begin(),
+                         r.subcases[0].heat_fluxes.end(),
+                         [eid](const ElementHeatFlux &h) {
+                           return h.eid.value == eid;
+                         });
+    ASSERT_NE(ef, r.subcases[0].heat_fluxes.end());
+    EXPECT_NEAR(ef->q[0], 0.0, 1e-9);
+    EXPECT_NEAR(ef->q[1], 0.0, 1e-9);
+    EXPECT_NEAR(ef->q[2], 100.0, 1e-9) << "element " << eid;
+  }
+}
+
+// ── Semantics / edge cases ─────────────────────────────────────────────────
+
+TEST(ThermalSteady, Tempd_IsNotADirichletDefault) {
+  // TEMPD provides a *default* temperature, never a boundary condition.  Deck
+  // pins only the x=0 face at 0 (TEMP set 1) and declares TEMPD,1,50.  With no
+  // heat sources the steady state drives every free node to 0 — NOT to the
+  // TEMPD value.  A solver that wrongly treats TEMPD as Dirichlet returns 50.
+  const auto bulk = std::string("TEMPD,1,50.0\n")
+                  + "TEMP,1,1,0.0,4,0.0\n"
+                  + "TEMP,1,5,0.0,8,0.0\n";
+  const auto r = run_thermal(cube_deck(50.0, bulk));
+  for (int nid : {2, 3, 6, 7})
+    EXPECT_NEAR(temp_at(r, nid), 0.0, 1e-9) << "free node " << nid;
+}
+
+TEST(ThermalSteady, OrphanGrid_IsConstrainedAndDoesNotPerturbSolve) {
+  // GRID 99 belongs to no thermal element.  It must be constrained out of the
+  // system (reported T = 0) without making K singular or disturbing the solve:
+  // with only the x=0 face pinned at 100 and no sink, the steady state is a
+  // uniform 100 field.
+  const auto bulk = std::string("GRID,99,,5.0,5.0,5.0\n")
+                  + "TEMP,1,1,100.0,4,100.0\n"
+                  + "TEMP,1,5,100.0,8,100.0\n";
+  const auto r = run_thermal(cube_deck(50.0, bulk));
+  EXPECT_NEAR(temp_at(r, 99), 0.0, 1e-12);
+  for (int nid : {2, 3, 6, 7})
+    EXPECT_NEAR(temp_at(r, nid), 100.0, 1e-6) << "free node " << nid;
+}
+
+// ── CHBDY geometry (exercises ChbdyElementImpl::area / outward_normal,
+//    which are otherwise unused in the main codebase) ────────────────────────
+
+TEST(ThermalSteady, ChbdyGeometry_Area4AreaNormalAndPointAreaFactor) {
+  std::ostringstream bdf;
+  bdf << "SOL 153\n"
+      << "CEND\n"
+      << "SUBCASE 1\n"
+      << "BEGIN BULK\n"
+      << "MAT4,2,10.0\n"
+      << "PHBDY,2,1.0,25.0\n"
+      << "PHBDY,3,2.0\n"
+      << "GRID,1,,0.0,0.0,0.0\n"
+      << "GRID,2,,1.0,0.0,0.0\n"
+      << "GRID,3,,1.0,1.0,0.0\n"
+      << "GRID,4,,0.0,1.0,0.0\n"
+      << "CHBDY,101,2,AREA4,2,1,2,3,4\n"
+      << "CHBDY,102,3,POINT,2,1\n"
+      << "ENDDATA\n";
+  const Model m = BdfParser::parse_string(bdf.str());
+  ASSERT_EQ(m.chbdy_elements.size(), 2U);
+
+  const ChbdyElementImpl quad(m.chbdy_elements[0], m);
+  EXPECT_NEAR(quad.area(), 1.0, 1e-12);
+  const Vec3 n = quad.outward_normal();
+  EXPECT_NEAR(n.x, 0.0, 1e-12);
+  EXPECT_NEAR(n.y, 0.0, 1e-12);
+  EXPECT_NEAR(n.z, 1.0, 1e-12);
+  EXPECT_NEAR(quad.t_amb(), 25.0, 1e-12);
+
+  // POINT geometry: area comes from the PHBDY area factor AF = 2.
+  const ChbdyElementImpl point(m.chbdy_elements[1], m);
+  EXPECT_NEAR(point.area(), 2.0, 1e-12);
+  EXPECT_NEAR(point.t_amb(), 0.0, 1e-12);
 }

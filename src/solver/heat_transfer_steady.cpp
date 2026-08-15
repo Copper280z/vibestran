@@ -43,6 +43,30 @@ thermal_active_nodes(const Model &model) {
   return active;
 }
 
+// Augmented convection block over (surface nodes..., ambient node f):
+//   [[Ks, -r], [-rᵀ, Σr]]  where r = Ks·1 (row sums).
+// This is the exact consistent discretization of q_i = r_i·(T_i − T_f) for a
+// single-valued surface field, and lets assembly / Dirichlet condensation
+// treat the ambient coupling uniformly (including a *prescribed* ambient
+// node, whose off-diagonal terms must be moved to the RHS).
+[[nodiscard]] std::pair<std::vector<NodeId>, Eigen::MatrixXd>
+augmented_convection(const ChbdyElementImpl &cb, NodeId f) {
+  const auto sn = cb.surface_nodes();
+  const int n = static_cast<int>(sn.size());
+  const Eigen::MatrixXd Ks = cb.convection_conductance();
+  Eigen::MatrixXd Ka = Eigen::MatrixXd::Zero(n + 1, n + 1);
+  Ka.topLeftCorner(n, n) = Ks;
+  const Eigen::VectorXd r = Ks.rowwise().sum();
+  for (int i = 0; i < n; ++i) {
+    Ka(i, n) = -r(i);
+    Ka(n, i) = -r(i);
+    Ka(n, n) += r(i);
+  }
+  std::vector<NodeId> nodes(sn.begin(), sn.end());
+  nodes.push_back(f);
+  return {std::move(nodes), std::move(Ka)};
+}
+
 // Collect prescribed nodal temperatures: TEMP cards whose SID matches the
 // case's TEMP(LOAD) set, plus an optional TEMPD default for those same nodes.
 // IMPORTANT: TEMPD alone is *not* a Dirichlet BC — it's a default value,
@@ -118,8 +142,12 @@ void apply_prescribed_temperatures(
   }
   for (const auto &c : model.chbdy_elements) {
     ChbdyElementImpl cb(c, model);
-    const Eigen::MatrixXd Ke = cb.convection_conductance();
-    contribute(cb.surface_nodes(), Ke);
+    if (c.ambient_node) {
+      const auto [nodes, Ka] = augmented_convection(cb, *c.ambient_node);
+      contribute(nodes, Ka);
+    } else {
+      contribute(cb.surface_nodes(), cb.convection_conductance());
+    }
   }
 }
 
@@ -163,31 +191,15 @@ void assemble_system(const Model &model, const SubCase &sc,
   //    when present)
   for (const auto &c : model.chbdy_elements) {
     ChbdyElementImpl cb(c, model);
-    const Eigen::MatrixXd Ks = cb.convection_conductance();
-    add_block(cb.surface_nodes(), Ks);
     if (c.ambient_node) {
-      // Augmented block: K_sf = -row_sum_per_row distributed to ambient node.
-      // Simpler form: convection couples surface node i and ambient node f as
-      //   q_i = sum_j K_ij (T_i - T_f)  (consistent matrix)
-      // → add K_ii contribution to (i,f) as -K_ij rowsum.
-      const int n = static_cast<int>(cb.surface_nodes().size());
-      const NodeId f = *c.ambient_node;
-      const EqIndex rf = dof_map.eq_index(f, 0);
-      for (int i = 0; i < n; ++i) {
-        const EqIndex ri = dof_map.eq_index(cb.surface_nodes()[i], 0);
-        if (ri == CONSTRAINED_DOF) continue;
-        double rowsum = 0.0;
-        for (int j = 0; j < n; ++j) rowsum += Ks(i, j);
-        // -K_ij rowsum on (ri, rf) and (rf, ri); +rowsum on (rf, rf).
-        if (rf != CONSTRAINED_DOF) {
-          K_builder.add(ri, rf, -rowsum);
-          K_builder.add(rf, ri, -rowsum);
-          K_builder.add(rf, rf, rowsum);
-        }
+      const auto [nodes, Ka] = augmented_convection(cb, *c.ambient_node);
+      add_block(nodes, Ka);
+    } else {
+      add_block(cb.surface_nodes(), cb.convection_conductance());
+      if (cb.t_amb() != 0.0) {
+        // Fixed ambient T from PHBDY: contributes to RHS only.
+        add_rhs(cb.surface_nodes(), cb.ambient_rhs());
       }
-    } else if (cb.t_amb() != 0.0) {
-      // Fixed ambient T from PHBDY: contributes to RHS only.
-      add_rhs(cb.surface_nodes(), cb.ambient_rhs());
     }
   }
 
