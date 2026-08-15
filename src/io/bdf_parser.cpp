@@ -140,6 +140,8 @@ Model BdfParser::parse_stream(std::istream &in) {
         ctx.model.analysis.sol = SolutionType::LinearStatic;
       else if (sol_num == 103)
         ctx.model.analysis.sol = SolutionType::Modal;
+      else if (sol_num == 153)
+        ctx.model.analysis.sol = SolutionType::HeatTransferSteady;
     }
   }
 
@@ -262,8 +264,16 @@ Model BdfParser::parse_stream(std::istream &in) {
       } else if (kw.starts_with("TEMP(LOAD)") || kw.starts_with("TEMPERATURE(LOAD)")) {
         SubCase& sc = current_subcase();
         size_t eq = kw.find('=');
-        if (eq != std::string::npos)
-          try { sc.temp_load_set = std::stoi(kw.substr(eq + 1)); } catch (...) {}
+        if (eq != std::string::npos) {
+          std::string val = kw.substr(eq + 1);
+          size_t ns = val.find_first_not_of(" \t");
+          if (ns != std::string::npos) val = val.substr(ns);
+          if (val.starts_with("THERMAL")) {
+            sc.temp_from_heat = true;
+          } else {
+            try { sc.temp_load_set = std::stoi(val); } catch (...) {}
+          }
+        }
       } else if (kw.starts_with("TEMP(INIT)") || kw.starts_with("TEMPERATURE(INIT)")) {
         // Not used yet but consume gracefully
       } else if (kw.starts_with("DISPLACEMENT")) {
@@ -375,6 +385,57 @@ Model BdfParser::parse_stream(std::istream &in) {
                 parse_print_plot_modifiers(kw, /*default_print=*/true);
             sc.gpstress_print = sc.gpstress_print || do_print;
             sc.gpstress_plot = sc.gpstress_plot || do_plot;
+          }
+        }
+      } else if (kw.starts_with("ANALYSIS")) {
+        SubCase& sc = current_subcase();
+        // ANALYSIS = HEAT | STATICS | STATIC
+        size_t eq = kw.find('=');
+        if (eq != std::string::npos) {
+          std::string val = kw.substr(eq + 1);
+          size_t ns = val.find_first_not_of(" \t");
+          if (ns != std::string::npos) val = val.substr(ns);
+          if (val.starts_with("HEAT"))
+            sc.analysis_type = SubCaseAnalysis::Heat;
+          else if (val.starts_with("STATIC"))
+            sc.analysis_type = SubCaseAnalysis::Statics;
+        }
+      } else if (kw.starts_with("THERMAL") || kw.starts_with("TEMPERATURE(PRINT")) {
+        SubCase& sc = current_subcase();
+        // THERMAL[(PRINT[,PLOT])] = ALL  — temperature output request
+        size_t eq = kw.find('=');
+        if (eq != std::string::npos) {
+          std::string val = kw.substr(eq + 1);
+          size_t ns = val.find_first_not_of(" \t");
+          if (ns != std::string::npos) val = val.substr(ns);
+          if (val.starts_with("NONE")) {
+            sc.disp_print = false;
+            sc.disp_plot = false;
+          } else {
+            const auto [do_print, do_plot] =
+                parse_print_plot_modifiers(kw, /*default_print=*/true);
+            // Repurpose disp_print/disp_plot for nodal temperature output in
+            // heat-transfer subcases — output writer dispatches on SOL.
+            sc.disp_print = sc.disp_print || do_print;
+            sc.disp_plot = sc.disp_plot || do_plot;
+          }
+        }
+      } else if (kw.starts_with("FLUX")) {
+        SubCase& sc = current_subcase();
+        // FLUX[(PRINT[,PLOT])] = ALL  — element heat-flux output
+        size_t eq = kw.find('=');
+        if (eq != std::string::npos) {
+          std::string val = kw.substr(eq + 1);
+          size_t ns = val.find_first_not_of(" \t");
+          if (ns != std::string::npos) val = val.substr(ns);
+          if (val.starts_with("NONE")) {
+            sc.stress_print = false;
+            sc.stress_plot = false;
+          } else {
+            const auto [do_print, do_plot] =
+                parse_print_plot_modifiers(kw, /*default_print=*/true);
+            sc.stress_print = sc.stress_print || do_print;
+            sc.stress_plot = sc.stress_plot || do_plot;
           }
         }
       } else if (kw == "CEND" || kw == "SOL" || kw.starts_with("SOL ") ||
@@ -660,6 +721,20 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_param(ctx, card.fields);
       else if (kw == "EIGRL")
         process_eigrl(ctx, card.fields);
+      else if (kw == "CHBDY")
+        process_chbdy(ctx, card.fields);
+      else if (kw == "PHBDY")
+        process_phbdy(ctx, card.fields);
+      else if (kw == "QHBDY")
+        process_qhbdy(ctx, card.fields);
+      else if (kw == "QBDY1")
+        process_qbdy1(ctx, card.fields);
+      else if (kw == "QBDY2")
+        process_qbdy2(ctx, card.fields);
+      else if (kw == "QVOL")
+        process_qvol(ctx, card.fields);
+      else if (kw == "QVECT")
+        process_qvect(ctx, card.fields);
       else
         handled = false;
 
@@ -1486,41 +1561,82 @@ void BdfParser::process_chexa(ParseContext &ctx,
   // CHEXA, EID, PID, G1..G8 or G1..G20. Node count determines variant:
   // 8 nodes → CHEXA8, 20 nodes → CHEXA20. Nodes may span continuation lines.
   // Empty slots (e.g. blank continuation-label fields) are skipped.
+  // CHEXA, EID, PID, G1..G8 (8-node linear) or G1..G20 (quadratic).  Any
+  // subset of the 12 midside nodes (slots G9..G20) may be omitted positionally;
+  // shape functions redistribute the absent midnode to its two adjacent
+  // corners.  Element is classified as CHEXA20 as soon as any midnode slot is
+  // populated.
   ElementData e;
   e.id = ElementId(parse_int(f[1], ctx.line_num));
   e.pid = PropertyId(parse_int(f[2], ctx.line_num));
-  for (int i = 3; i < static_cast<int>(f.size()); ++i)
-    if (!f[i].empty())
-      e.nodes.push_back(NodeId(parse_int(f[i], ctx.line_num)));
 
-  if (e.nodes.size() == 8)
+  std::array<NodeId, 20> slots{
+      NodeId{0}, NodeId{0}, NodeId{0}, NodeId{0}, NodeId{0},
+      NodeId{0}, NodeId{0}, NodeId{0}, NodeId{0}, NodeId{0},
+      NodeId{0}, NodeId{0}, NodeId{0}, NodeId{0}, NodeId{0},
+      NodeId{0}, NodeId{0}, NodeId{0}, NodeId{0}, NodeId{0}};
+  bool any_midnode = false;
+  for (int i = 0; i < 20; ++i) {
+    const int idx = 3 + i;
+    if (idx < static_cast<int>(f.size()) && !f[idx].empty()) {
+      slots[static_cast<size_t>(i)] =
+          NodeId(parse_int(f[idx], ctx.line_num));
+      if (i >= 8) any_midnode = true;
+    }
+  }
+  for (int i = 0; i < 8; ++i) {
+    if (slots[static_cast<size_t>(i)].value == 0)
+      throw ParseError(std::format(
+          "Line {}: CHEXA corner grid G{} is required", ctx.line_num, i + 1));
+  }
+  if (any_midnode) {
+    e.type = ElementType::CHEXA20;
+    e.nodes.assign(slots.begin(), slots.end());
+  } else {
     e.type = ElementType::CHEXA8;
-  else if (e.nodes.size() > 8)
-    throw ParseError(std::format("Line {}: CHEXA has {} nodes; CHEXA20 is not yet supported",
-                                 ctx.line_num, e.nodes.size()));
-  else
-    throw ParseError(std::format("Line {}: CHEXA has {} nodes; expected 8",
-                                 ctx.line_num, e.nodes.size()));
+    e.nodes.assign(slots.begin(), slots.begin() + 8);
+  }
   ctx.model.elements.push_back(std::move(e));
 }
 
 void BdfParser::process_ctetra(ParseContext &ctx,
                                const std::vector<std::string> &f) {
-  // CTETRA, EID, PID, G1..G4 (4-node) or G1..G10 (10-node, may span continuations)
+  // CTETRA, EID, PID, G1..G4 (4-node linear) or G1..G10 (quadratic).  Any
+  // subset of the 6 midside nodes (slots G5..G10) may be omitted positionally
+  // — a blank slot means "midnode absent."  The element is classified as
+  // CTETRA10 (with NodeId{0} placeholders) as soon as any midnode slot is
+  // populated.  Shape functions handle the transition by redistributing the
+  // absent midnode's contribution to its two adjacent corners.
   ElementData e;
   e.id = ElementId(parse_int(f[1], ctx.line_num));
   e.pid = PropertyId(parse_int(f[2], ctx.line_num));
-  for (int i = 3; i < static_cast<int>(f.size()); ++i)
-    if (!f[i].empty())
-      e.nodes.push_back(NodeId(parse_int(f[i], ctx.line_num)));
 
-  if (e.nodes.size() == 4)
-    e.type = ElementType::CTETRA4;
-  else if (e.nodes.size() == 10)
+  // Read up to 10 grid slots positionally (slots 3..12 of f); preserve blanks.
+  std::array<NodeId, 10> slots{
+      NodeId{0}, NodeId{0}, NodeId{0}, NodeId{0}, NodeId{0},
+      NodeId{0}, NodeId{0}, NodeId{0}, NodeId{0}, NodeId{0}};
+  bool any_midnode = false;
+  for (int i = 0; i < 10; ++i) {
+    const int idx = 3 + i;
+    if (idx < static_cast<int>(f.size()) && !f[idx].empty()) {
+      slots[static_cast<size_t>(i)] =
+          NodeId(parse_int(f[idx], ctx.line_num));
+      if (i >= 4) any_midnode = true;
+    }
+  }
+  // The 4 corner grids are mandatory.
+  for (int i = 0; i < 4; ++i) {
+    if (slots[static_cast<size_t>(i)].value == 0)
+      throw ParseError(std::format(
+          "Line {}: CTETRA corner grid G{} is required", ctx.line_num, i + 1));
+  }
+  if (any_midnode) {
     e.type = ElementType::CTETRA10;
-  else
-    throw ParseError(std::format("Line {}: CTETRA has {} nodes; expected 4 or 10",
-                                 ctx.line_num, e.nodes.size()));
+    e.nodes.assign(slots.begin(), slots.end());
+  } else {
+    e.type = ElementType::CTETRA4;
+    e.nodes.assign(slots.begin(), slots.begin() + 4);
+  }
   ctx.model.elements.push_back(std::move(e));
 }
 
@@ -2247,6 +2363,204 @@ void BdfParser::process_eigrl(ParseContext& ctx,
       e.norm = EigRL::Norm::Mass;
   }
   ctx.model.eigrls[e.sid] = e;
+}
+
+// ── Thermal cards ───────────────────────────────────────────────────────────
+
+namespace {
+
+[[nodiscard]] ChbdyType parse_chbdy_type(const std::string &s, int line) {
+  std::string u = s;
+  std::transform(u.begin(), u.end(), u.begin(), ::toupper);
+  if (u == "POINT") return ChbdyType::POINT;
+  if (u == "LINE")  return ChbdyType::LINE;
+  if (u == "REV")   return ChbdyType::REV;
+  if (u == "AREA3") return ChbdyType::AREA3;
+  if (u == "AREA4") return ChbdyType::AREA4;
+  if (u == "ELCYL") return ChbdyType::ELCYL;
+  if (u == "FTUBE") return ChbdyType::FTUBE;
+  // Numeric legacy form (NASTRAN-95 FLAG: 1=POINT, 2=LINE, 3=REV, 4=AREA3,
+  // 5=AREA4, 6=ELCYL, 7=FTUBE)
+  try {
+    const int v = std::stoi(s);
+    switch (v) {
+    case 1: return ChbdyType::POINT;
+    case 2: return ChbdyType::LINE;
+    case 3: return ChbdyType::REV;
+    case 4: return ChbdyType::AREA3;
+    case 5: return ChbdyType::AREA4;
+    case 6: return ChbdyType::ELCYL;
+    case 7: return ChbdyType::FTUBE;
+    default: break;
+    }
+  } catch (...) {}
+  throw ParseError(std::format("Line {}: invalid CHBDY type '{}'", line, s));
+}
+
+[[nodiscard]] int chbdy_required_grids(ChbdyType t) {
+  switch (t) {
+  case ChbdyType::POINT: return 1;
+  case ChbdyType::LINE:
+  case ChbdyType::REV:
+  case ChbdyType::ELCYL:
+  case ChbdyType::FTUBE: return 2;
+  case ChbdyType::AREA3: return 3;
+  case ChbdyType::AREA4: return 4;
+  }
+  return 0;
+}
+
+} // namespace
+
+// CHBDY, EID, PID, TYPE, MID, G1, G2, G3, G4 [+, GF]
+// TYPE may be a keyword (POINT/LINE/AREA3/AREA4/REV/ELCYL/FTUBE) or NASTRAN-95
+// integer FLAG.  MID references a MAT4 whose K field carries the film
+// coefficient H.  GF is an optional ambient/fluid grid point.
+void BdfParser::process_chbdy(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  ChbdyElement c;
+  c.eid = ElementId(parse_int(f[1], ctx.line_num));
+  c.pid = PropertyId(f[2].empty() ? 0 : parse_int(f[2], ctx.line_num));
+  c.geom = parse_chbdy_type(f[3], ctx.line_num);
+  c.mid = MaterialId(f[4].empty() ? 0 : parse_int(f[4], ctx.line_num));
+  const int n_required = chbdy_required_grids(c.geom);
+  for (int i = 0; i < n_required; ++i) {
+    const int idx = 5 + i;
+    if (idx >= static_cast<int>(f.size()) || f[idx].empty())
+      throw ParseError(std::format(
+          "Line {}: CHBDY {} missing grid G{}", ctx.line_num, c.eid.value, i + 1));
+    c.nodes.push_back(NodeId(parse_int(f[idx], ctx.line_num)));
+  }
+  // Optional ambient/fluid grid point: GF in the field immediately after the
+  // last required surface grid.
+  const int gf_idx = 5 + n_required;
+  if (gf_idx < static_cast<int>(f.size()) && !f[gf_idx].empty()) {
+    c.ambient_node = NodeId(parse_int(f[gf_idx], ctx.line_num));
+  }
+  ctx.model.chbdy_elements.push_back(c);
+}
+
+// PHBDY, PID, AF, TAMB
+void BdfParser::process_phbdy(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  PHBDY p;
+  p.pid = PropertyId(parse_int(f[1], ctx.line_num));
+  p.af  = (f.size() > 2 && !f[2].empty()) ? parse_double(f[2], ctx.line_num) : 1.0;
+  p.t_amb = (f.size() > 3 && !f[3].empty()) ? parse_double(f[3], ctx.line_num) : 0.0;
+  ctx.model.phbdy_properties[p.pid] = p;
+}
+
+// QHBDY, SID, FLAG, Q0, AF, G1, G2, G3, G4
+void BdfParser::process_qhbdy(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  QhbdyLoad q;
+  q.sid = LoadSetId(parse_int(f[1], ctx.line_num));
+  q.geom = parse_chbdy_type(f[2], ctx.line_num);
+  q.q0 = parse_double(f[3], ctx.line_num);
+  q.af = (f.size() > 4 && !f[4].empty()) ? parse_double(f[4], ctx.line_num) : 1.0;
+  const int n_required = chbdy_required_grids(q.geom);
+  for (int i = 0; i < n_required; ++i) {
+    const int idx = 5 + i;
+    if (idx >= static_cast<int>(f.size()) || f[idx].empty())
+      throw ParseError(std::format(
+          "Line {}: QHBDY missing grid G{}", ctx.line_num, i + 1));
+    q.nodes.push_back(NodeId(parse_int(f[idx], ctx.line_num)));
+  }
+  ctx.model.loads.emplace_back(q);
+}
+
+// QBDY1, SID, Q0, EID1, EID2, ... (with optional THRU)
+void BdfParser::process_qbdy1(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  Qbdy1Load q;
+  q.sid = LoadSetId(parse_int(f[1], ctx.line_num));
+  q.q0  = parse_double(f[2], ctx.line_num);
+  for (size_t i = 3; i < f.size(); ++i) {
+    if (f[i].empty()) continue;
+    std::string u = f[i];
+    std::transform(u.begin(), u.end(), u.begin(), ::toupper);
+    if (u == "THRU") {
+      if (i + 1 >= f.size() || q.elements.empty())
+        throw ParseError(std::format("Line {}: QBDY1 THRU malformed", ctx.line_num));
+      const int end_id = parse_int(f[i + 1], ctx.line_num);
+      const int start_id = q.elements.back().value;
+      for (int e = start_id + 1; e <= end_id; ++e)
+        q.elements.push_back(ElementId(e));
+      ++i;
+    } else {
+      q.elements.push_back(ElementId(parse_int(f[i], ctx.line_num)));
+    }
+  }
+  ctx.model.loads.emplace_back(q);
+}
+
+// QBDY2, SID, EID, Q1, Q2, Q3, Q4
+void BdfParser::process_qbdy2(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  Qbdy2Load q;
+  q.sid = LoadSetId(parse_int(f[1], ctx.line_num));
+  q.element = ElementId(parse_int(f[2], ctx.line_num));
+  for (int i = 0; i < 4; ++i) {
+    const int idx = 3 + i;
+    if (idx < static_cast<int>(f.size()) && !f[idx].empty())
+      q.q[i] = parse_double(f[idx], ctx.line_num);
+  }
+  ctx.model.loads.emplace_back(q);
+}
+
+// QVECT, SID, Q0, E1, E2, E3, EID1, EID2, ... (with optional THRU)
+// Direction vector (E1,E2,E3) is in the basic frame.  Element list may include
+// the keyword THRU to denote contiguous element-ID ranges.
+void BdfParser::process_qvect(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  QvectLoad q;
+  q.sid = LoadSetId(parse_int(f[1], ctx.line_num));
+  q.q0 = parse_double(f[2], ctx.line_num);
+  q.direction = Vec3(parse_double(f[3], ctx.line_num),
+                     parse_double(f[4], ctx.line_num),
+                     parse_double(f[5], ctx.line_num));
+  for (size_t i = 6; i < f.size(); ++i) {
+    if (f[i].empty()) continue;
+    std::string u = f[i];
+    std::transform(u.begin(), u.end(), u.begin(), ::toupper);
+    if (u == "THRU") {
+      if (i + 1 >= f.size() || q.elements.empty())
+        throw ParseError(std::format("Line {}: QVECT THRU malformed", ctx.line_num));
+      const int end_id = parse_int(f[i + 1], ctx.line_num);
+      const int start_id = q.elements.back().value;
+      for (int e = start_id + 1; e <= end_id; ++e)
+        q.elements.push_back(ElementId(e));
+      ++i;
+    } else {
+      q.elements.push_back(ElementId(parse_int(f[i], ctx.line_num)));
+    }
+  }
+  ctx.model.loads.emplace_back(q);
+}
+
+// QVOL, SID, QVOL, EID1, EID2, ... (with optional THRU)
+void BdfParser::process_qvol(ParseContext &ctx,
+                             const std::vector<std::string> &f) {
+  QvolLoad q;
+  q.sid = LoadSetId(parse_int(f[1], ctx.line_num));
+  q.q_vol = parse_double(f[2], ctx.line_num);
+  for (size_t i = 3; i < f.size(); ++i) {
+    if (f[i].empty()) continue;
+    std::string u = f[i];
+    std::transform(u.begin(), u.end(), u.begin(), ::toupper);
+    if (u == "THRU") {
+      if (i + 1 >= f.size() || q.elements.empty())
+        throw ParseError(std::format("Line {}: QVOL THRU malformed", ctx.line_num));
+      const int end_id = parse_int(f[i + 1], ctx.line_num);
+      const int start_id = q.elements.back().value;
+      for (int e = start_id + 1; e <= end_id; ++e)
+        q.elements.push_back(ElementId(e));
+      ++i;
+    } else {
+      q.elements.push_back(ElementId(parse_int(f[i], ctx.line_num)));
+    }
+  }
+  ctx.model.loads.emplace_back(q);
 }
 
 } // namespace vibestran

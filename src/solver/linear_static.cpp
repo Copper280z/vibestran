@@ -495,6 +495,8 @@ void LinearStaticSolver::apply_inertial_loads(const Model &model,
             component_value(it->second, elem_data.components[i]);
       }
       break;
+    case ElementType::CHBDY:
+      continue;  // CHBDY boundary elements have no inertial load contribution
     }
 
     const LocalFe fe = mass * accel;

@@ -665,4 +665,72 @@ void F06Writer::write_eigenvector_table(const ModeResult& mode,
     }
 }
 
+// ── Heat-transfer (SOL 153) F06 output ───────────────────────────────────────
+
+void F06Writer::write_thermal(const SolverResults& results, const Model& model,
+                              const std::filesystem::path& path) {
+    std::ofstream f(path);
+    if (!f) throw SolverError(std::format("Cannot write F06: {}", path.string()));
+    write_thermal(results, model, f);
+}
+
+void F06Writer::write_thermal(const SolverResults& results, const Model& model,
+                              std::ostream& out) {
+    // Header (heat-transfer banner instead of SOL 101)
+    std::time_t t = std::time(nullptr);
+    char date_buf[32];
+    std::strftime(date_buf, sizeof(date_buf), "%B %e, %Y", std::localtime(&t));
+    out << "1" << banner_line("V I B E S T R A N", date_buf, kF06PageWidth - 1);
+    out << "0" << std::string(static_cast<std::size_t>(kF06PageWidth - 1), ' ') << "\n";
+    out << page_line("S O L   1 5 3   L I N E A R   H E A T   T R A N S F E R");
+    out << "\n";
+
+    for (const auto& sc : results.subcases) {
+        const SubCase* msc = find_model_subcase(model, sc.id);
+        const bool do_temp  = (msc != nullptr) && msc->disp_print;
+        const bool do_flux  = (msc != nullptr) && msc->stress_print;
+
+        out << "\n OUTPUT FOR SUBCASE" << std::setw(9) << sc.id << "\n";
+        if (!sc.label.empty())
+            out << " " << sc.label << "\n";
+
+        if (do_temp && !sc.temperatures.empty()) {
+            out << "\n";
+            out << "                                                          T E M P E R A T U R E S\n";
+            out << "      POINT ID.                  TEMPERATURE\n";
+            for (const auto& nt : sc.temperatures) {
+                out << "    " << std::setw(10) << nt.node.value
+                    << "    " << std::scientific << std::setprecision(6)
+                    << std::setw(18) << nt.temperature << "\n";
+            }
+        }
+
+        if (do_flux && !sc.heat_fluxes.empty()) {
+            out << "\n";
+            out << "                                            E L E M E N T   H E A T   F L U X\n";
+            out << "    ELEMENT ID.   TYPE      QX             QY             QZ             |Q|\n";
+            for (const auto& ef : sc.heat_fluxes) {
+                const char* tn = "?";
+                switch (ef.etype) {
+                  case ElementType::CHEXA8:  tn = "CHEXA"; break;
+                  case ElementType::CTETRA4: tn = "CTETRA"; break;
+                  case ElementType::CTETRA10:tn = "CTETRA10"; break;
+                  case ElementType::CPENTA6: tn = "CPENTA"; break;
+                  case ElementType::CBAR:    tn = "CBAR"; break;
+                  case ElementType::CBEAM:   tn = "CBEAM"; break;
+                  default: break;
+                }
+                out << "    " << std::setw(10) << ef.eid.value
+                    << "    " << std::setw(8) << tn
+                    << std::scientific << std::setprecision(6)
+                    << std::setw(16) << ef.q[0]
+                    << std::setw(16) << ef.q[1]
+                    << std::setw(16) << ef.q[2]
+                    << std::setw(16) << ef.magnitude << "\n";
+            }
+        }
+    }
+    out << "\n\n                     * * * END OF JOB * * *\n\n";
+}
+
 } // namespace vibestran

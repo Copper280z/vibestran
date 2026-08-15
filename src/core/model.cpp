@@ -27,6 +27,7 @@ bool element_requires_property(const ElementType type) {
         return true;
     case ElementType::CELAS2:
     case ElementType::CMASS2:
+    case ElementType::CHBDY:
         return false;
     }
     return false;
@@ -44,10 +45,19 @@ void Model::validate() const {
     for (const auto& elem : elements)
         element_ids.insert(elem.id);
 
-    // Check all element nodes exist
+    // Check all element nodes exist.  NodeId{0} is the "absent midnode"
+    // placeholder for variable-noded CTETRA10/CHEXA20 (allowed only on those
+    // element types).
+    const auto allows_absent_midnodes = [](ElementType t) {
+        return t == ElementType::CTETRA10 || t == ElementType::CHEXA20;
+    };
     for (const auto& elem : elements) {
         auto missing_node = std::find_if(elem.nodes.begin(), elem.nodes.end(),
-            [&](NodeId nid) { return !nodes.count(nid); });
+            [&](NodeId nid) {
+                if (nid.value == 0 && allows_absent_midnodes(elem.type))
+                    return false;
+                return !nodes.count(nid);
+            });
         if (missing_node != elem.nodes.end())
             throw SolverError(std::format(
                 "Element {} references undefined node {}", elem.id.value, missing_node->value));
@@ -86,7 +96,7 @@ void Model::validate() const {
         std::visit([&](const auto& p) {
             using T = std::decay_t<decltype(p)>;
             if constexpr (std::is_same_v<T, PShell>) {
-                if (!has_structural_material(p.mid1))
+                if (material_card_name(p.mid1) == nullptr)
                     throw SolverError(std::format(
                         "PSHELL {} references undefined material {}", pid.value, p.mid1.value));
                 if (p.mid2.value != 0 && !has_structural_material(p.mid2))
@@ -99,13 +109,13 @@ void Model::validate() const {
                     throw SolverError(std::format(
                         "PSHELL {} references undefined coupling material {}", pid.value, p.mid4.value));
             } else if constexpr (std::is_same_v<T, PSolid>) {
-                if (!has_structural_material(p.mid))
+                if (material_card_name(p.mid) == nullptr)
                     throw SolverError(std::format(
                         "PSOLID {} references undefined material {}", pid.value, p.mid.value));
             } else if constexpr (std::is_same_v<T, PBar> ||
                                  std::is_same_v<T, PBarL> ||
                                  std::is_same_v<T, PBeam>) {
-                if (!has_structural_material(p.mid))
+                if (material_card_name(p.mid) == nullptr)
                     throw SolverError(std::format(
                         "Property {} references undefined material {}", pid.value, p.mid.value));
             }

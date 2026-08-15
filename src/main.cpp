@@ -47,6 +47,7 @@
 #include "io/inp_parser.hpp"
 #include "io/results.hpp"
 #include "solver/eigensolver_backend.hpp"
+#include "solver/heat_transfer_steady.hpp"
 #include "solver/linear_static.hpp"
 #include "solver/modal.hpp"
 #include "solver/solver_backend.hpp"
@@ -63,6 +64,7 @@
 #include "solver/cuda_eigensolver_backend.hpp"
 #endif
 #include <algorithm>
+#include <numeric>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
@@ -344,7 +346,95 @@ int main(int argc, const char *argv[]) {
 
     auto op2_path = std::filesystem::path(f06_path).replace_extension(".op2");
 
-    if (model.analysis.sol == vibestran::SolutionType::Modal) {
+    if (model.analysis.sol == vibestran::SolutionType::HeatTransferSteady) {
+      // ── SOL 153 Heat Transfer Steady-State (with optional STATICS chain) ─
+      // Partition subcases by ANALYSIS keyword.  Unspecified subcases default
+      // to HEAT under SOL 153.  STATICS subcases that follow run a linear
+      // static pass with TEMP(LOAD)=THERMAL consuming the most recent heat
+      // subcase's temperatures.
+      std::vector<vibestran::SubCase> heat_subcases, stat_subcases;
+      for (const auto &sc : model.analysis.subcases) {
+        if (sc.analysis_type == vibestran::SubCaseAnalysis::Statics)
+          stat_subcases.push_back(sc);
+        else
+          heat_subcases.push_back(sc);
+      }
+      if (heat_subcases.empty())
+        throw vibestran::SolverError("SOL 153 deck has no HEAT subcases");
+
+      vibestran::Model heat_model = model;
+      heat_model.analysis.subcases = heat_subcases;
+      spdlog::info("Solving thermal with: {}", backend->name());
+      vibestran::SolverResults thermal_results;
+      {
+        vibestran::HeatTransferSteadySolver thsolver(std::move(backend));
+        thermal_results = thsolver.solve(heat_model);
+      }
+
+      auto t1 = std::chrono::steady_clock::now();
+      spdlog::info("Thermal solution complete in {:.3f} s",
+                   std::chrono::duration<double>(t1 - t0).count());
+
+      // Write thermal F06
+      vibestran::F06Writer::write_thermal(thermal_results, heat_model, f06_path);
+      spdlog::info("F06 written: {}", f06_path.string());
+
+      // ── STATICS chain ────────────────────────────────────────────────────
+      if (!stat_subcases.empty()) {
+        // Synthetic TempLoad SID for materialized temperatures.  Choose one
+        // above any existing load set ID.
+        int max_sid = 0;
+        for (const auto &l : model.loads)
+          std::visit([&](const auto &ll){ max_sid = std::max(max_sid, ll.sid.value); }, l);
+        max_sid = std::accumulate(
+            model.tempd.begin(), model.tempd.end(), max_sid,
+            [](int m, const auto &tl) { return std::max(m, tl.first); });
+        int next_sid = max_sid + 1000;
+
+        vibestran::Model stat_model = model;
+        stat_model.analysis.sol = vibestran::SolutionType::LinearStatic;
+        stat_model.analysis.subcases.clear();
+
+        for (auto sc : stat_subcases) {
+          if (sc.temp_from_heat) {
+            // Pick the most recent thermal result whose subcase ID precedes
+            // this statics subcase (by position in the original deck).  If
+            // there is only one heat subcase, use it.
+            const auto &th = thermal_results.subcases.back();
+            for (const auto &nt : th.temperatures) {
+              vibestran::TempLoad t;
+              t.sid = vibestran::LoadSetId(next_sid);
+              t.node = nt.node;
+              t.temperature = nt.temperature;
+              stat_model.loads.emplace_back(t);
+            }
+            sc.temp_load_set = next_sid;
+            ++next_sid;
+          }
+          stat_model.analysis.subcases.push_back(sc);
+        }
+
+        spdlog::info("Solving structural chain with: Apple Accelerate (CPU)");
+        vibestran::LinearStaticSolver lsolver(
+            std::make_unique<vibestran::EigenSolverBackend>());
+        vibestran::SolverResults stat_results = lsolver.solve(stat_model);
+
+        auto t2 = std::chrono::steady_clock::now();
+        spdlog::info("Structural solution complete in {:.3f} s",
+                     std::chrono::duration<double>(t2 - t1).count());
+
+        // Append structural F06 to a sibling file <stem>.structural.f06
+        auto struct_f06 =
+            std::filesystem::path(f06_path).replace_extension(".structural.f06");
+        vibestran::F06Writer::write(stat_results, stat_model, struct_f06);
+        spdlog::info("F06 written: {}", struct_f06.string());
+
+        auto struct_op2 =
+            std::filesystem::path(f06_path).replace_extension(".structural.op2");
+        vibestran::Op2Writer::write(stat_results, stat_model, struct_op2);
+        spdlog::info("OP2 written: {}", struct_op2.string());
+      }
+    } else if (model.analysis.sol == vibestran::SolutionType::Modal) {
       // ── SOL 103 Modal Analysis ───────────────────────────────────────────
       // Select eigensolver backend.
       // CUDA (cuda / cuda-pcg): use the GPU shift-invert Lanczos eigensolver

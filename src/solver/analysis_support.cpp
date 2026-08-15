@@ -64,6 +64,8 @@ void mark_element_dofs(const ElementData &elem,
     if (elem.nodes.size() > 1)
       mark_component(node_masks[elem.nodes[1]], elem.components[1]);
     break;
+  case ElementType::CHBDY:
+    break;  // CHBDY elements are stored in model.chbdy_elements, never here
   }
 }
 

@@ -183,8 +183,10 @@ struct Vec3 {
 // ─────────────────────────────────────────────────────────────
 
 enum class SolutionType {
-  LinearStatic = 101,
-  Modal        = 103,
+  LinearStatic        = 101,
+  Modal               = 103,
+  HeatTransferSteady  = 153,
+  // 159 reserved for HeatTransferTransient
 };
 
 // ── Solver error

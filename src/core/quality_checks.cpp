@@ -70,6 +70,7 @@ static const char* element_type_name(ElementType t) {
     case ElementType::CELAS2:  return "CELAS2";
     case ElementType::CMASS1:  return "CMASS1";
     case ElementType::CMASS2:  return "CMASS2";
+    case ElementType::CHBDY:   return "CHBDY";
     }
     return "UNKNOWN";
 }

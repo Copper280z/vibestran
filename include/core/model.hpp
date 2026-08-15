@@ -242,6 +242,39 @@ enum class ElementType {
   CELAS2,
   CMASS1,
   CMASS2,
+  CHBDY,
+};
+
+/// CHBDY geometry types (FLAG field on the CHBDY card).
+/// Mirrors NASTRAN-95's HBDY geometry codes; LINE/REV/ELCYL/FTUBE are reserved
+/// for future use.
+enum class ChbdyType {
+  POINT,
+  LINE,
+  REV,
+  AREA3,
+  AREA4,
+  ELCYL,
+  FTUBE,
+};
+
+/// PHBDY card: properties for CHBDY boundary element (NASTRAN PHBDY).
+/// AF is the area factor for POINT/LINE/ELCYL/FTUBE geometries.
+struct PHBDY {
+  PropertyId pid{0};
+  double af{1.0};   ///< area factor (multiplies geometric area)
+  double t_amb{0.0}; ///< ambient temperature for convection
+};
+
+/// CHBDY boundary element (parsed at top level, stored separately from solid
+/// elements because its DOF/connectivity model is different).
+struct ChbdyElement {
+  ElementId eid{0};
+  PropertyId pid{0};      ///< references a PHBDY
+  ChbdyType geom{ChbdyType::AREA3};
+  MaterialId mid{0};      ///< MAT4 carrying the film coefficient (K → H)
+  std::vector<NodeId> nodes;     ///< surface nodes (1, 2, 3, or 4)
+  std::optional<NodeId> ambient_node; ///< optional fluid SIL (NASTRAN-95 grids 5-8)
 };
 
 struct ElementData {
@@ -360,9 +393,52 @@ struct AccelLoad {
   Vec3 direction{0.0, 0.0, 0.0};
 };
 
+/// QVOL — volumetric heat generation rate on structural elements (W/volume).
+struct QvolLoad {
+  LoadSetId sid{0};
+  double q_vol{0.0};
+  std::vector<ElementId> elements;
+};
+
+/// QHBDY — distributed heat flux on a directly-listed boundary patch
+/// (does not reference a CHBDY element; carries its own geometry tag and grids).
+struct QhbdyLoad {
+  LoadSetId sid{0};
+  ChbdyType geom{ChbdyType::AREA3};
+  double q0{0.0};
+  double af{1.0};
+  std::vector<NodeId> nodes;
+};
+
+/// QBDY1 — uniform heat flux on listed CHBDY elements.
+struct Qbdy1Load {
+  LoadSetId sid{0};
+  double q0{0.0};
+  std::vector<ElementId> elements;
+};
+
+/// QBDY2 — per-node heat flux on a single CHBDY element.
+struct Qbdy2Load {
+  LoadSetId sid{0};
+  ElementId element{0};
+  std::array<double, 4> q{0.0, 0.0, 0.0, 0.0};
+};
+
+/// QVECT — directional heat flux vector applied to CHBDY elements (e.g. solar
+/// irradiance). Only the inward-facing component (−E·n̂ > 0) is loaded; faces
+/// pointed away from the source receive no flux (matches NASTRAN-95).
+struct QvectLoad {
+  LoadSetId sid{0};
+  double q0{0.0};           ///< magnitude scale
+  Vec3 direction{0,0,0};    ///< flux propagation direction (basic frame)
+  std::vector<ElementId> elements;
+};
+
 using Load = std::variant<ForceLoad, MomentLoad, TempLoad, PloadLoad,
                           Pload1Load, Pload2Load, Pload4Load, GravLoad,
-                          Accel1Load, AccelLoad>;
+                          Accel1Load, AccelLoad,
+                          QvolLoad, QhbdyLoad, Qbdy1Load, Qbdy2Load,
+                          QvectLoad>;
 
 /// LOAD bulk data card: combines multiple load sets with scale factors.
 /// The effective load = overall_scale * sum(Si * loads_with_SID_Li)
@@ -439,6 +515,14 @@ struct EigRL {
 // ── Analysis case
 // ─────────────────────────────────────────────────────────────
 
+/// Subcase-scoped ANALYSIS keyword.  Used by the SOL 153 driver to mix heat
+/// and statics passes in a single deck (one-way coupling).
+enum class SubCaseAnalysis {
+  Default,  ///< inherit from solution sequence (SOL 101 → Statics, SOL 153 → Heat)
+  Heat,
+  Statics,
+};
+
 struct SubCase {
   int id{1};
   std::string label;
@@ -446,7 +530,11 @@ struct SubCase {
   SpcSetId spc_set{0};
   MpcSetId mpc_set{0}; // 0 = no MPCs
   int temp_load_set{0}; // TEMPERATURE(LOAD) / TEMP(LOAD) set ID
+  /// True when TEMP(LOAD)=THERMAL was given: structural pass consumes the
+  /// most recent heat subcase's temperature field instead of TEMP cards.
+  bool temp_from_heat{false};
   double t_ref{0}; // reference temperature for thermal load
+  SubCaseAnalysis analysis_type{SubCaseAnalysis::Default};
 
   // Output selection (case control deck).
   // PRINT → text output (F06, CSV); PLOT → binary output (OP2).
@@ -506,6 +594,14 @@ public:
 
   // Properties
   std::unordered_map<PropertyId, Property> properties;
+
+  // PHBDY properties (separate map; not part of Property variant since they
+  // are only used by CHBDY boundary elements).
+  std::unordered_map<PropertyId, PHBDY> phbdy_properties;
+
+  // CHBDY boundary elements (kept separate from `elements` since they have a
+  // different DOF model and only participate in thermal analyses).
+  std::vector<ChbdyElement> chbdy_elements;
 
   // Loads (keyed by set id for quick lookup)
   std::vector<Load> loads;

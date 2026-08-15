@@ -99,6 +99,15 @@ private:
     static void process_param   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_eigrl   (ParseContext& ctx, const std::vector<std::string>& fields);
 
+    // Thermal cards
+    static void process_chbdy   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_phbdy   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_qhbdy   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_qbdy1   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_qbdy2   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_qvol    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_qvect   (ParseContext& ctx, const std::vector<std::string>& fields);
+
     // Field parsing helpers
     static double parse_double(const std::string& s, int line);
     static int    parse_int   (const std::string& s, int line);

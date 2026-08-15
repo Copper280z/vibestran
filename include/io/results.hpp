@@ -77,6 +77,24 @@ struct LineStress {
   LineStressEnd end_b;
 };
 
+/// Nodal temperature (SOL 153 heat-transfer output).
+struct NodeTemperature {
+  NodeId node{0};
+  double temperature{0};
+};
+
+/// Element centroidal heat flux  q = -k·∇T  (1, 2, or 3 components).
+struct ElementHeatFlux {
+  ElementId eid{0};
+  ElementType etype{ElementType::CHEXA8};
+  /// Spatial dimension: 1 (line), 2 (shell), 3 (solid).
+  int dim{3};
+  /// q components in element-local frame (size dim).
+  std::array<double, 3> q{0.0, 0.0, 0.0};
+  /// Magnitude |q|.
+  double magnitude{0.0};
+};
+
 struct SubCaseResults {
   int id{1};
   std::string label;
@@ -85,6 +103,10 @@ struct SubCaseResults {
   std::vector<LineStress> line_stresses;
   std::vector<PlateStress> plate_stresses;
   std::vector<SolidStress> solid_stresses;
+
+  // Heat-transfer (SOL 153) outputs
+  std::vector<NodeTemperature> temperatures;
+  std::vector<ElementHeatFlux> heat_fluxes;
 };
 
 struct SolverResults {
@@ -147,6 +169,12 @@ public:
   /// Write modal results to stream (for testing)
   static void write_modal(const ModalSolverResults &results, const Model &model,
                           std::ostream &out);
+
+  /// Write heat-transfer (SOL 153) results to an F06 file.
+  static void write_thermal(const SolverResults &results, const Model &model,
+                            const std::filesystem::path &path);
+  static void write_thermal(const SolverResults &results, const Model &model,
+                            std::ostream &out);
 
 private:
   static void write_header(std::ostream &out);

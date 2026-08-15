@@ -381,6 +381,8 @@ solver_sources = files(
   'src/elements/solid_elements.cpp',
   'src/elements/element_factory.cpp',
   'src/elements/rbe_constraints.cpp',
+  'src/elements/thermal_elements.cpp',
+  'src/elements/chbdy_element.cpp',
   # I/O
   'src/io/bdf_parser.cpp',
   'src/io/inp_parser.cpp',
@@ -394,6 +396,7 @@ solver_sources = files(
   'src/solver/linear_static_pressure.cpp',
   'src/solver/eigensolver_backend.cpp',
   'src/solver/modal.cpp',
+  'src/solver/heat_transfer_steady.cpp',
 )
 
 # Append Vulkan and CUDA sources when available
@@ -491,6 +494,7 @@ test('unit_tests', unit_tests,
 # Integration tests
 integration_test_sources = files(
   'tests/integration/test_integration.cpp',
+  'tests/integration/test_thermal_steady.cpp',
 )
 
 integration_tests = executable(
