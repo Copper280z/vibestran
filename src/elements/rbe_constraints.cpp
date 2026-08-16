@@ -2,32 +2,23 @@
 // Expand RBE2 / RBE3 elements into MPC equations.
 
 #include "elements/rbe_constraints.hpp"
+#include "core/coord_sys.hpp"
+#include <Eigen/Dense>
+#include <algorithm>
 #include <cmath>
 #include <format>
+#include <limits>
+#include <map>
 
 namespace vibestran {
 
-// ── RBE2 ──────────────────────────────────────────────────────────────────────
-//
-// Rigid body constraint: gm moves with gn as a rigid body.
-// Let r = pos(gm) - pos(gn) in basic Cartesian.
-// For translations (T1,T2,T3) and rotations (R1,R2,R3) in cm:
-//
-// u_gm[T1] - u_gn[T1] - r.z*θ_gn[R2] + r.y*θ_gn[R3] = 0
-// u_gm[T2] - u_gn[T2] + r.z*θ_gn[R1] - r.x*θ_gn[R3] = 0
-// u_gm[T3] - u_gn[T3] - r.y*θ_gn[R1] + r.x*θ_gn[R2] = 0
-// u_gm[R1] - u_gn[R1] = 0
-// u_gm[R2] - u_gn[R2] = 0
-// u_gm[R3] - u_gn[R3] = 0
-
+// RBE2 rigid-body constraint: gm moves with gn as a rigid body.
 void expand_rbe2(const Rbe2& rbe, const Model& model, std::vector<Mpc>& out) {
     const Vec3 pos_n = model.node(rbe.gn).position;
 
     for (NodeId gm : rbe.gm) {
         const Vec3 pos_m = model.node(gm).position;
         Vec3 r{pos_m.x - pos_n.x, pos_m.y - pos_n.y, pos_m.z - pos_n.z};
-
-        // Use a synthetic MpcSetId of 0 (the solver wires these in directly)
         MpcSetId sid{0};
 
         auto make_mpc = [&](std::initializer_list<MpcTerm> terms) {
@@ -37,146 +28,231 @@ void expand_rbe2(const Rbe2& rbe, const Model& model, std::vector<Mpc>& out) {
             out.push_back(std::move(mpc));
         };
 
-        if (rbe.cm.has(1)) { // T1
-            make_mpc({
-                {gm, 1, +1.0},
-                {rbe.gn, 1, -1.0},
-                {rbe.gn, 5, -r.z}, // -r.z * θ_R2
-                {rbe.gn, 6, +r.y}, // +r.y * θ_R3
-            });
+        if (rbe.cm.has(1)) {
+            make_mpc({{gm, 1, +1.0}, {rbe.gn, 1, -1.0},
+                      {rbe.gn, 5, -r.z}, {rbe.gn, 6, +r.y}});
         }
-        if (rbe.cm.has(2)) { // T2
-            make_mpc({
-                {gm, 2, +1.0},
-                {rbe.gn, 2, -1.0},
-                {rbe.gn, 4, +r.z}, // +r.z * θ_R1
-                {rbe.gn, 6, -r.x}, // -r.x * θ_R3
-            });
+        if (rbe.cm.has(2)) {
+            make_mpc({{gm, 2, +1.0}, {rbe.gn, 2, -1.0},
+                      {rbe.gn, 4, +r.z}, {rbe.gn, 6, -r.x}});
         }
-        if (rbe.cm.has(3)) { // T3
-            make_mpc({
-                {gm, 3, +1.0},
-                {rbe.gn, 3, -1.0},
-                {rbe.gn, 4, -r.y}, // -r.y * θ_R1
-                {rbe.gn, 5, +r.x}, // +r.x * θ_R2
-            });
+        if (rbe.cm.has(3)) {
+            make_mpc({{gm, 3, +1.0}, {rbe.gn, 3, -1.0},
+                      {rbe.gn, 4, -r.y}, {rbe.gn, 5, +r.x}});
         }
-        if (rbe.cm.has(4)) { // R1
-            make_mpc({
-                {gm, 4, +1.0},
-                {rbe.gn, 4, -1.0},
-            });
-        }
-        if (rbe.cm.has(5)) { // R2
-            make_mpc({
-                {gm, 5, +1.0},
-                {rbe.gn, 5, -1.0},
-            });
-        }
-        if (rbe.cm.has(6)) { // R3
-            make_mpc({
-                {gm, 6, +1.0},
-                {rbe.gn, 6, -1.0},
-            });
-        }
+        if (rbe.cm.has(4))
+            make_mpc({{gm, 4, +1.0}, {rbe.gn, 4, -1.0}});
+        if (rbe.cm.has(5))
+            make_mpc({{gm, 5, +1.0}, {rbe.gn, 5, -1.0}});
+        if (rbe.cm.has(6))
+            make_mpc({{gm, 6, +1.0}, {rbe.gn, 6, -1.0}});
     }
 }
 
-// ── RBE3 ──────────────────────────────────────────────────────────────────────
-//
-// Interpolation constraint: the reference node motion equals a weighted average
-// of independent node motions (including rigid-body lever-arm correction).
-//
-// For translational DOF Ti of reference node (ref):
-//   u_ref[Ti] = (1/W) * sum_j wj * (u_j[Ti] + (omega_j × r_j)[i])
-// where r_j = pos(j) - pos(ref) and omega_j are the rotational DOFs of j
-// (only included if j's weight group component includes rotation DOFs).
-//
-// Rearranging (multiply through by W, move ref to left):
-//   W * u_ref[Ti] - sum_j wj * u_j[Ti] - sum_j wj * (omega_j × r_j)[i] = 0
+namespace {
 
-void expand_rbe3(const Rbe3& rbe, const Model& model, std::vector<Mpc>& out) {
-    const Vec3 pos_ref = model.node(rbe.ref_node).position;
-    MpcSetId sid{0};
+Eigen::Matrix3d displacement_axes(const Model& model, const NodeId node) {
+    const GridPoint& grid = model.node(node);
+    if (grid.cd == CoordId{0})
+        return Eigen::Matrix3d::Identity();
 
-    // Compute total weights (sum over all independent nodes, all weight groups)
-    double W_trans = 0.0; // for translational DOFs
-    double W_rot   = 0.0; // for rotational DOFs (only groups with rotation components)
-    for (const auto& wg : rbe.weight_groups) {
-        double wt = wg.weight * static_cast<double>(wg.nodes.size());
-        // For translational averaging, all groups contribute
-        W_trans += wt;
-        // For rotational averaging, only groups that include rotation components
-        bool has_rot = wg.component.has(4) || wg.component.has(5) || wg.component.has(6);
-        if (has_rot) W_rot += wt;
+    const auto coord_it = model.coord_systems.find(grid.cd);
+    if (coord_it == model.coord_systems.end()) {
+        throw SolverError(std::format(
+            "RBE3 grid {} references unresolved displacement coordinate system {}",
+            node.value, grid.cd.value));
     }
-    if (W_trans < 1e-30) return; // degenerate
+    const Mat3 axes = rotation_matrix(coord_it->second, grid.position);
+    Eigen::Matrix3d result;
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col)
+            result(row, col) = axes(row, col);
+    return result;
+}
 
-    // Generate MPCs for each constrained DOF in refc
-    for (int d = 1; d <= 6; ++d) {
-        if (!rbe.refc.has(d))
-            continue;
+struct Rbe3Column {
+    NodeId node{0};
+    int component{0};
+    Eigen::Matrix3d axes{Eigen::Matrix3d::Identity()};
+};
 
-        Mpc mpc;
-        mpc.sid = sid;
+Eigen::MatrixXd select_matrix(const Eigen::MatrixXd& matrix,
+                              const std::vector<int>& rows,
+                              const std::vector<int>& cols) {
+    Eigen::MatrixXd selected(rows.size(), cols.size());
+    for (size_t i = 0; i < rows.size(); ++i)
+        for (size_t j = 0; j < cols.size(); ++j)
+            selected(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j)) =
+                matrix(rows[i], cols[j]);
+    return selected;
+}
 
-        if (d <= 3) {
-            // Translational DOF d: W * u_ref[d] = sum_j wj * u_j[d] + lever terms
-            // → W * u_ref[d] - sum_j wj * u_j[d] - sum_j wj * (ω_j × r_j)[d-1] = 0
-            mpc.terms.push_back({rbe.ref_node, d, W_trans});
+Eigen::MatrixXd select_rows(const Eigen::MatrixXd& matrix,
+                            const std::vector<int>& rows) {
+    Eigen::MatrixXd selected(rows.size(), matrix.cols());
+    for (size_t i = 0; i < rows.size(); ++i)
+        selected.row(static_cast<Eigen::Index>(i)) = matrix.row(rows[i]);
+    return selected;
+}
 
-            for (const auto& wg : rbe.weight_groups) {
-                for (NodeId nid : wg.nodes) {
-                    const Vec3 pos_j = model.node(nid).position;
-                    Vec3 r_j{pos_j.x - pos_ref.x,
-                             pos_j.y - pos_ref.y,
-                             pos_j.z - pos_ref.z};
+} // namespace
 
-                    // Translational term
-                    mpc.terms.push_back({nid, d, -wg.weight});
+// Weighted least-squares fit of independent scalar DOFs to the six rigid-body
+// motions at the reference grid. A = sum(w H H^T), B_j = -w H. Components
+// omitted from REFC are eliminated with a generalized Schur complement.
+void expand_rbe3(const Rbe3& rbe, const Model& model, std::vector<Mpc>& out) {
+    const GridPoint& reference = model.node(rbe.ref_node);
+    const Eigen::Vector3d reference_position{
+        reference.position.x, reference.position.y, reference.position.z};
+    const Eigen::Matrix3d reference_axes =
+        displacement_axes(model, rbe.ref_node);
 
-                    // Lever-arm rotation correction: omega_j × r_j
-                    // (omega_j × r_j)[0] = omega_y * r_z - omega_z * r_y  (for T1)
-                    // (omega_j × r_j)[1] = omega_z * r_x - omega_x * r_z  (for T2)
-                    // (omega_j × r_j)[2] = omega_x * r_y - omega_y * r_x  (for T3)
-                    bool has_rot = wg.component.has(4) || wg.component.has(5) || wg.component.has(6);
-                    if (!has_rot) continue;
+    Eigen::Matrix<double, 6, 6> a =
+        Eigen::Matrix<double, 6, 6>::Zero();
+    std::vector<Eigen::Matrix<double, 6, 1>> b_columns;
+    std::vector<Rbe3Column> columns;
 
-                    if (d == 1) {
-                        // (ω × r)[x] = ω_y * r_z - ω_z * r_y
-                        if (wg.component.has(5)) // R2 = ω_y
-                            mpc.terms.push_back({nid, 5, -wg.weight * r_j.z});
-                        if (wg.component.has(6)) // R3 = ω_z
-                            mpc.terms.push_back({nid, 6, +wg.weight * r_j.y});
-                    } else if (d == 2) {
-                        // (ω × r)[y] = ω_z * r_x - ω_x * r_z
-                        if (wg.component.has(6)) // R3 = ω_z
-                            mpc.terms.push_back({nid, 6, -wg.weight * r_j.x});
-                        if (wg.component.has(4)) // R1 = ω_x
-                            mpc.terms.push_back({nid, 4, +wg.weight * r_j.z});
-                    } else { // d == 3
-                        // (ω × r)[z] = ω_x * r_y - ω_y * r_x
-                        if (wg.component.has(4)) // R1 = ω_x
-                            mpc.terms.push_back({nid, 4, -wg.weight * r_j.y});
-                        if (wg.component.has(5)) // R2 = ω_y
-                            mpc.terms.push_back({nid, 5, +wg.weight * r_j.x});
-                    }
+    for (const auto& group : rbe.weight_groups) {
+        for (const NodeId node : group.nodes) {
+            const GridPoint& independent = model.node(node);
+            const Eigen::Vector3d position{
+                independent.position.x, independent.position.y,
+                independent.position.z};
+            const Eigen::Vector3d relative =
+                reference_axes.transpose() * (position - reference_position);
+            const Eigen::Matrix3d independent_axes =
+                displacement_axes(model, node);
+            const Eigen::Matrix3d axes_in_reference =
+                reference_axes.transpose() * independent_axes;
+
+            for (int component = 1; component <= 6; ++component) {
+                if (!group.component.has(component))
+                    continue;
+                Eigen::Matrix<double, 6, 1> h =
+                    Eigen::Matrix<double, 6, 1>::Zero();
+                const Eigen::Vector3d direction = axes_in_reference.col(
+                    component <= 3 ? component - 1 : component - 4);
+                if (component <= 3) {
+                    h.head<3>() = direction;
+                    h.tail<3>() = relative.cross(direction);
+                } else {
+                    h.tail<3>() = direction;
                 }
+                a.noalias() += group.weight * h * h.transpose();
+                b_columns.push_back(-group.weight * h);
+                columns.push_back({node, component, independent_axes});
             }
-        } else {
-            // Rotational DOF d: W_rot * θ_ref[d] = sum_j wj * θ_j[d]
-            if (W_rot < 1e-30) continue;
-            mpc.terms.push_back({rbe.ref_node, d, W_rot});
-            for (const auto& wg : rbe.weight_groups) {
-                bool has_rot = wg.component.has(d);
-                if (!has_rot) continue;
-                for (NodeId nid : wg.nodes)
-                    mpc.terms.push_back({nid, d, -wg.weight});
+        }
+    }
+
+    if (columns.empty())
+        throw SolverError(std::format(
+            "RBE3 {} has no active independent DOFs", rbe.eid.value));
+
+    Eigen::MatrixXd b(6, static_cast<Eigen::Index>(b_columns.size()));
+    for (size_t col = 0; col < b_columns.size(); ++col)
+        b.col(static_cast<Eigen::Index>(col)) = b_columns[col];
+
+    std::vector<int> retained;
+    std::vector<int> discarded;
+    for (int component = 0; component < 6; ++component) {
+        if (rbe.refc.has(component + 1))
+            retained.push_back(component);
+        else
+            discarded.push_back(component);
+    }
+    if (retained.empty())
+        throw SolverError(std::format(
+            "RBE3 {} has no active REFC components", rbe.eid.value));
+
+    Eigen::MatrixXd a_reduced = select_matrix(a, retained, retained);
+    Eigen::MatrixXd b_reduced = select_rows(b, retained);
+    if (!discarded.empty()) {
+        const Eigen::MatrixXd a_dd = select_matrix(a, discarded, discarded);
+        const Eigen::MatrixXd a_dr = select_matrix(a, discarded, retained);
+        const Eigen::MatrixXd a_rd = select_matrix(a, retained, discarded);
+        const Eigen::MatrixXd b_d = select_rows(b, discarded);
+        Eigen::MatrixXd rhs(a_dr.rows(), a_dr.cols() + b_d.cols());
+        rhs << a_dr, b_d;
+
+        Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> decomposition(a_dd);
+        decomposition.setThreshold(1e-12);
+        const Eigen::MatrixXd eliminated = decomposition.solve(rhs);
+        const double residual = (a_dd * eliminated - rhs).cwiseAbs().maxCoeff();
+        const double scale = std::max(1.0, rhs.cwiseAbs().maxCoeff());
+        if (residual > 1e-10 * scale) {
+            throw SolverError(std::format(
+                "RBE3 {} has an inconsistent rank-deficient omitted-component "
+                "system (residual {:.3e})", rbe.eid.value, residual));
+        }
+        a_reduced.noalias() -= a_rd * eliminated.leftCols(
+            static_cast<Eigen::Index>(retained.size()));
+        b_reduced.noalias() -= a_rd * eliminated.rightCols(b_d.cols());
+    }
+
+    Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> rank_check(a_reduced);
+    rank_check.setThreshold(1e-12);
+    if (rank_check.rank() < static_cast<Eigen::Index>(retained.size())) {
+        throw SolverError(std::format(
+            "RBE3 {} cannot determine all {} requested REFC components; rank is {}",
+            rbe.eid.value, retained.size(), rank_check.rank()));
+    }
+
+    for (size_t row = 0; row < retained.size(); ++row) {
+        std::map<std::pair<NodeId, int>, double> coefficients;
+        for (size_t col = 0; col < retained.size(); ++col) {
+            const int local_component = retained[col];
+            const int offset = local_component < 3 ? 0 : 3;
+            const Eigen::Vector3d axis =
+                reference_axes.col(local_component % 3);
+            for (int basic = 0; basic < 3; ++basic) {
+                coefficients[{rbe.ref_node, offset + basic + 1}] +=
+                    a_reduced(static_cast<Eigen::Index>(row),
+                              static_cast<Eigen::Index>(col)) * axis(basic);
+            }
+        }
+        for (size_t col = 0; col < columns.size(); ++col) {
+            const Rbe3Column& source = columns[col];
+            const int offset = source.component <= 3 ? 0 : 3;
+            const Eigen::Vector3d axis = source.axes.col(
+                source.component <= 3 ? source.component - 1
+                                      : source.component - 4);
+            for (int basic = 0; basic < 3; ++basic) {
+                coefficients[{source.node, offset + basic + 1}] +=
+                    b_reduced(static_cast<Eigen::Index>(row),
+                              static_cast<Eigen::Index>(col)) * axis(basic);
             }
         }
 
-        if (!mpc.terms.empty())
-            out.push_back(std::move(mpc));
+        const double scale = std::max(
+            a_reduced.row(static_cast<Eigen::Index>(row)).cwiseAbs().maxCoeff(),
+            b_reduced.row(static_cast<Eigen::Index>(row)).cwiseAbs().maxCoeff());
+        const double tolerance =
+            10.0 * std::numeric_limits<double>::epsilon() * scale;
+        Mpc mpc;
+        mpc.sid = MpcSetId{0};
+
+        auto preferred = coefficients.end();
+        for (auto it = coefficients.begin(); it != coefficients.end(); ++it) {
+            if (it->first.first != rbe.ref_node ||
+                std::abs(it->second) <= tolerance)
+                continue;
+            if (preferred == coefficients.end() ||
+                std::abs(it->second) > std::abs(preferred->second))
+                preferred = it;
+        }
+        if (preferred == coefficients.end())
+            throw SolverError(std::format(
+                "RBE3 {} reduced equation {} has no reference-grid pivot",
+                rbe.eid.value, row + 1));
+        mpc.terms.push_back(
+            {preferred->first.first, preferred->first.second, preferred->second});
+        coefficients.erase(preferred);
+        for (const auto& [key, coefficient] : coefficients) {
+            if (std::abs(coefficient) > tolerance)
+                mpc.terms.push_back({key.first, key.second, coefficient});
+        }
+        out.push_back(std::move(mpc));
     }
 }
 

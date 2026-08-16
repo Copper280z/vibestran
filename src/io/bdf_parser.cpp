@@ -136,12 +136,15 @@ Model BdfParser::parse_stream(std::istream &in) {
         sol_num = std::stoi(num_str);
       } catch (...) {
       }
-      if (sol_num == 101)
+      if (sol_num == 1 || sol_num == 101)
         ctx.model.analysis.sol = SolutionType::LinearStatic;
-      else if (sol_num == 103)
+      else if (sol_num == 3 || sol_num == 103)
         ctx.model.analysis.sol = SolutionType::Modal;
       else if (sol_num == 153)
         ctx.model.analysis.sol = SolutionType::HeatTransferSteady;
+      else
+        throw ParseError(std::format(
+            "Unsupported solution type in executive control: {}", num_str));
     }
   }
 
@@ -2206,14 +2209,19 @@ void BdfParser::process_mpc(ParseContext &ctx,
   Mpc mpc;
   mpc.sid = MpcSetId(sid);
 
-  // Fields start at index 2; groups of 3
-  for (size_t i = 2; i + 2 < f.size(); i += 3) {
-    if (f[i].empty())
-      break;
+  // Fixed-field MPC continuations reserve alignment fields between pairs of
+  // terms. Logical-card flattening preserves those blanks, so compact the
+  // required fields before grouping them into (G, C, A) triples.
+  std::vector<std::string> data;
+  for (size_t i = 2; i < f.size(); ++i) {
+    if (!f[i].empty())
+      data.emplace_back(f[i]);
+  }
+  for (size_t i = 0; i + 2 < data.size(); i += 3) {
     MpcTerm term;
-    term.node  = NodeId(parse_int(f[i],     ctx.line_num));
-    term.dof   = parse_int(f[i + 1], ctx.line_num);
-    term.coeff = parse_double(f[i + 2], ctx.line_num);
+    term.node  = NodeId(parse_int(data[i], ctx.line_num));
+    term.dof   = parse_int(data[i + 1], ctx.line_num);
+    term.coeff = parse_double(data[i + 2], ctx.line_num);
     mpc.terms.push_back(term);
   }
 

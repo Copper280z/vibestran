@@ -332,17 +332,28 @@ void LinearStaticSolver::build_mpc_system(const Model &model,
                                            const SubCase &sc,
                                            DofMap &dof_map,
                                            MpcHandler &mpc_handler) {
-  build_analysis_mpc_system(model, sc, dof_map, mpc_handler);
+  build_analysis_mpc_system(model, sc, dof_map, mpc_handler,
+                            /*use_spc_values=*/true);
 }
 
 void LinearStaticSolver::assemble(const Model &model, const SubCase & /*sc*/,
                                   const MpcHandler &mpc_handler,
                                   SparseMatrixBuilder &K_builder,
-                                  std::vector<double> & /*F*/) {
+                                  std::vector<double> &F) {
   K_builder.reserve_triplets(detail::estimate_triplet_capacity(model));
   detail::assemble_element_matrix(
       model, mpc_handler, K_builder,
       [](const ElementBase &elem) { return elem.stiffness_matrix(); });
+
+  if (mpc_handler.has_affine_offsets()) {
+    const DofMap& full_dof_map = mpc_handler.full_dof_map();
+    for (const auto& elem_data : model.elements) {
+      auto elem = make_element(elem_data, model);
+      const auto gdofs = elem->global_dof_indices(full_dof_map);
+      const auto ke = detail::to_row_major(elem->stiffness_matrix());
+      mpc_handler.apply_prescribed_displacement_load(gdofs, ke, F);
+    }
+  }
 }
 
 void LinearStaticSolver::apply_point_loads(const Model &model,

@@ -10,6 +10,7 @@ namespace vibestran {
                                             const SubCase &sc);
 
 void build_analysis_mpc_system(const Model &model, const SubCase &sc,
-                               DofMap &dof_map, MpcHandler &mpc_handler);
+                               DofMap &dof_map, MpcHandler &mpc_handler,
+                               bool use_spc_values);
 
 } // namespace vibestran

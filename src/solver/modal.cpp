@@ -198,7 +198,8 @@ DofMap ModalSolver::build_dof_map(const Model& model, const SubCase& sc) {
 
 void ModalSolver::build_mpc_system(const Model& model, const SubCase& sc,
                                    DofMap& dof_map, MpcHandler& mpc_handler) {
-    build_analysis_mpc_system(model, sc, dof_map, mpc_handler);
+    build_analysis_mpc_system(model, sc, dof_map, mpc_handler,
+                              /*use_spc_values=*/false);
 }
 
 // ── Assemble stiffness ────────────────────────────────────────────────────────

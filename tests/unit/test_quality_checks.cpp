@@ -713,7 +713,7 @@ TEST(PhysicalSanityChecks, UnconstrainedModel) {
 
 // ── ModeDispatchStrict ────────────────────────────────────────────────────────
 
-TEST(ModeDispatchStrict, AspectRatioViolationThrows) {
+TEST(ModeDispatchStrict, AspectRatioViolationWarns) {
     Model m = make_minimal_sol101_model();
     // Add a 20:1 rectangle — will exceed default ASPECT threshold of 20
     add_node(m, 10, 0.0,  0.0, 0.0);
@@ -723,15 +723,15 @@ TEST(ModeDispatchStrict, AspectRatioViolationThrows) {
     add_cquad4(m, 2, 1, 10, 11, 12, 13);
 
     QualityThresholds t;  // defaults: strict, max_aspect = 20
-    EXPECT_THROW(run_quality_checks(m, t), SolverError);
+    EXPECT_NO_THROW(run_quality_checks(m, t));
 }
 
-TEST(ModeDispatchStrict, OrphanedNodeThrows) {
+TEST(ModeDispatchStrict, OrphanedNodeWarns) {
     Model m = make_minimal_sol101_model();
     add_node(m, 99, 5.0, 5.0, 5.0);  // orphaned
 
     QualityThresholds t;
-    EXPECT_THROW(run_quality_checks(m, t), SolverError);
+    EXPECT_NO_THROW(run_quality_checks(m, t));
 }
 
 TEST(ModeDispatchStrict, MissingLoadSetIsWarningNotThrow) {

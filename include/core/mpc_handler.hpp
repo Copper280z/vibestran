@@ -5,11 +5,13 @@
 // An MPC equation takes the form:
 //   sum_i coeff_i * u[node_i, dof_i] = 0
 //
-// The dependent DOF (largest |coeff|) is eliminated.  The transformation
+// The first term identifies the preferred dependent DOF. If multiple equations
+// share it, a later free term is pivoted instead. The affine transformation
 // T maps the reduced DOF vector to the full (post-SPC, pre-MPC) vector:
-//   u_full = T * u_reduced
+//   u_full = T * u_reduced + u0
 //
-// The reduced stiffness is K_red = T^T * K_full * T, and similarly for F.
+// The reduced system is K_red = T^T * K_full * T and
+// F_red = T^T * (F_full - K_full * u0).
 //
 // Workflow:
 //   1. Build dof_map with SPCs only.
@@ -31,6 +33,7 @@ namespace vibestran {
 /// Describes how one dependent DOF is expressed in terms of independent DOFs.
 struct MpcElimination {
     EqIndex dep;   ///< pre-MPC eq index of the dependent DOF
+    double offset{0.0}; ///< affine offset in u_dep
     /// u_dep = sum_i coeff_i * u[ind_reduced_eq_i]
     /// ind_reduced_eq_i are POST-MPC reduced eq indices
     std::vector<std::pair<EqIndex, double>> terms;
@@ -68,6 +71,12 @@ public:
                         std::span<const double> fe,
                         std::vector<double>& F) const;
 
+    /// Add -T^T Ke u0 to the reduced force vector for prescribed motion.
+    void apply_prescribed_displacement_load(
+        std::span<const EqIndex> gdofs_full,
+        std::span<const double> ke,
+        std::vector<double>& F) const;
+
     /// After solving the reduced system, recover dep DOF values.
     /// @param u_free_full  Output vector sized for pre-MPC free DOFs.
     ///                     On return, all entries (free and dep) are filled.
@@ -79,6 +88,8 @@ public:
     [[nodiscard]] bool has_constraints() const noexcept {
         return !eliminations_.empty();
     }
+
+    [[nodiscard]] bool has_affine_offsets() const noexcept;
 
     /// Number of free DOFs in the reduced (post-MPC) system.
     [[nodiscard]] int num_reduced() const noexcept { return n_reduced_; }
@@ -107,6 +118,8 @@ private:
     /// For dep DOFs: one entry per independent term.
     std::vector<std::pair<EqIndex, double>>
     t_column(EqIndex full_eq) const;
+
+    [[nodiscard]] double t_offset(EqIndex full_eq) const;
 };
 
 } // namespace vibestran

@@ -99,7 +99,9 @@ struct PhysicalResult {
 QualityThresholds build_thresholds(const Model& model);
 
 /// Run all quality checks.
-/// In Strict mode, throws SolverError on first violation.
+/// In Strict mode, throws SolverError on violations that can invalidate the
+/// mathematical model. Unused entities, coincident topology, and taper are
+/// diagnostic because valid decks can intentionally contain them.
 /// In Lenient mode, logs warnings and returns; may still throw for conditions
 /// that prevent a valid solve (E ≤ 0, nu ≥ 0.5, SOL 101 with no constraints).
 /// In Lenient mode with AUTOMERGE=1, coincident node pairs (excluding zero-length

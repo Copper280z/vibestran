@@ -474,12 +474,13 @@ struct MpcTerm {
   double coeff{0.0};
 };
 
-/// One MPC equation: sum_i coeff_i * u[node_i, dof_i] = 0
-/// The term with the largest |coeff| is chosen as the dependent DOF
-/// during elimination.
+/// One MPC equation: sum_i coeff_i * u[node_i, dof_i] = rhs.
+/// Nastran defines the first term as the dependent DOF. rhs is zero for BDF
+/// MPC cards and nonzero for internally generated enforced-displacement rows.
 struct Mpc {
   MpcSetId sid{0};
   std::vector<MpcTerm> terms;
+  double rhs{0.0};
 };
 
 // ── Rigid elements

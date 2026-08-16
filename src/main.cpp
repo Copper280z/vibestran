@@ -241,7 +241,9 @@ int main(int argc, const char *argv[]) {
   }
 
   if (f06_path.empty())
-    f06_path = std::filesystem::path(bdf_path).replace_extension(".f06");
+    // Uppercase extension for compatibility with the MYSTRAN validation
+    // suite runner (case-sensitive filesystems).
+    f06_path = std::filesystem::path(bdf_path).replace_extension(".F06");
 
   try {
     auto t0 = std::chrono::steady_clock::now();
@@ -429,9 +431,9 @@ int main(int argc, const char *argv[]) {
         spdlog::info("Structural solution complete in {:.3f} s",
                      std::chrono::duration<double>(t2 - t1).count());
 
-        // Append structural F06 to a sibling file <stem>.structural.f06
+        // Append structural F06 to a sibling file <stem>.structural.F06
         auto struct_f06 =
-            std::filesystem::path(f06_path).replace_extension(".structural.f06");
+            std::filesystem::path(f06_path).replace_extension(".structural.F06");
         vibestran::F06Writer::write(stat_results, stat_model, struct_f06);
         spdlog::info("F06 written: {}", struct_f06.string());
 

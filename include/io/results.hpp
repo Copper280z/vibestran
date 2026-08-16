@@ -177,38 +177,33 @@ public:
                             std::ostream &out);
 
 private:
-  static void write_header(std::ostream &out);
-  static void write_modal_header(std::ostream &out);
-  static void write_displacement_table(const SubCaseResults &sc,
-                                       std::ostream &out);
-  static void write_quad4_stress_table(const SubCaseResults &sc,
-                                       std::ostream &out);
-  static void write_quad4_corner_stress_table(const SubCaseResults &sc,
-                                              std::ostream &out);
-  static void write_quad4_gpstress_table(const SubCaseResults &sc,
-                                         std::ostream &out);
-  static void write_tria3_stress_table(const SubCaseResults &sc,
-                                       std::ostream &out);
-  static void write_tria3_corner_stress_table(const SubCaseResults &sc,
-                                              std::ostream &out);
-  static void write_tria3_gpstress_table(const SubCaseResults &sc,
-                                         std::ostream &out);
-  static void write_line_stress_table(const SubCaseResults &sc,
-                                      std::ostream &out);
-  static void write_solid_stress_table(const SubCaseResults &sc,
-                                       std::ostream &out,
-                                       ElementType etype);
-  static void write_solid_corner_stress_table(const SubCaseResults &sc,
-                                              std::ostream &out,
-                                              ElementType etype);
-  static void write_solid_gpstress_table(const SubCaseResults &sc,
-                                         std::ostream &out,
-                                         ElementType etype);
-  static void write_eigenvalue_table(const ModalSubCaseResults &msc,
-                                     std::ostream &out);
-  static void write_eigenvector_table(const ModeResult &mode,
-                                      const std::string &label,
-                                      std::ostream &out);
+  static void write_header(std::ostream& out);
+  static void write_modal_header(std::ostream& out);
+  /// " OUTPUT FOR SUBCASE " + %8d line required by the MYSTRAN validation
+  /// suite parser before every results block.
+  static void write_subcase_header(std::ostream& out, int subcase_id);
+  static void write_displacement_table(const SubCaseResults& sc,
+                                       std::ostream& out);
+  static void write_shell_stress_table(
+      const SubCaseResults& sc, std::ostream& out, ElementType etype,
+      bool corners,
+      const std::unordered_map<ElementId, const PShell*>& shell_props);
+  static void write_solid_stress_table(const SubCaseResults& sc,
+                                       std::ostream& out, ElementType etype,
+                                       bool corners);
+  static void write_bar_stress_table(const SubCaseResults& sc,
+                                     std::ostream& out);
+  static void write_quad4_gpstress_table(const SubCaseResults& sc,
+                                         std::ostream& out);
+  static void write_tria3_gpstress_table(const SubCaseResults& sc,
+                                         std::ostream& out);
+  static void write_solid_gpstress_table(const SubCaseResults& sc,
+                                         std::ostream& out, ElementType etype);
+  static void write_eigenvalue_table(const ModalSubCaseResults& msc,
+                                     std::ostream& out);
+  static void write_eigenvector_table(const ModeResult& mode, int subcase_id,
+                                      const std::string& label,
+                                      std::ostream& out);
 };
 
 // ── OP2 writer ────────────────────────────────────────────────────────────────

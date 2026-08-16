@@ -1276,6 +1276,20 @@ ENDDATA
     EXPECT_TRUE(sc.disp_print);
 }
 
+TEST(BdfParser, LegacySol3SelectsModalAnalysis) {
+    const Model model = BdfParser::parse_string(
+        "SOL 3\nCEND\nBEGIN BULK\nENDDATA\n");
+    EXPECT_EQ(model.analysis.sol, SolutionType::Modal);
+}
+
+TEST(BdfParser, UnsupportedSolutionDoesNotFallBackToStatic) {
+    EXPECT_THROW({
+        const Model ignored = BdfParser::parse_string(
+            "SOL 105\nCEND\nBEGIN BULK\nENDDATA\n");
+        (void)ignored;
+    }, ParseError);
+}
+
 TEST(BdfParser, TEMPD_StoredInModel) {
     // TEMPD cards should populate model.tempd map
     const std::string bdf = R"(

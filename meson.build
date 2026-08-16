@@ -522,6 +522,24 @@ test('e2e_tests', python,
   ],
 )
 
+# The validation repository is kept alongside this project during local
+# solver validation rather than vendored into the application repository.
+# Run the parser round-trip whenever that working copy is available.
+f06_query = join_paths(meson.project_source_root(), 'MYSTRAN_Validation', 'f06_query.py')
+if fs.exists(f06_query)
+  test('f06_query_roundtrip', python,
+    timeout : 120,
+    suite   : 'e2e',
+    args    : [
+      files('tools/f06_query_roundtrip.py'),
+      '--solver', vibestran_exe.full_path(),
+      '--query', f06_query,
+      '--bdf', join_paths(meson.project_source_root(), 'tests', 'e2e', 'cases',
+                          'cquad4_cantilever_bending_mitc4.bdf'),
+    ],
+  )
+endif
+
 # ── Vulkan unit tests (built only when Vulkan backend is available) ────────────
 if have_vulkan_backend
   vulkan_tests = executable(

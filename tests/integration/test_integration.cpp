@@ -75,13 +75,32 @@ static double get_freq(const ModalSolverResults& res, int mode_0based) {
 }
 
 // Helper: run a full analysis from BDF string
+static double get_disp(const SolverResults& res, int node_id, int dof_0based);
+
 static SolverResults run_analysis(const std::string& bdf) {
     Model model = BdfParser::parse_string(bdf);
     LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
     return solver.solve(model);
 }
 
-static double get_disp(const SolverResults& res, int node_id, int dof_0based);
+TEST(Integration, EnforcedDisplacementMovesUnloadedSpring) {
+    const SolverResults results = run_analysis(R"(
+SOL 101
+CEND
+SUBCASE 1
+  SPC = 1
+  DISPLACEMENT = ALL
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,1.,0.,0.
+CELAS2,1,100.,1,1,2,1
+SPC,1,1,1,2.0
+ENDDATA
+)");
+
+    EXPECT_NEAR(get_disp(results, 1, 0), 2.0, 1e-12);
+    EXPECT_NEAR(get_disp(results, 2, 0), 2.0, 1e-12);
+}
 
 static std::string make_single_cquad4_pressure_bdf(const std::string& load_cards) {
     std::ostringstream bdf;

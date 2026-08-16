@@ -829,11 +829,11 @@ void run_quality_checks(Model& model, const QualityThresholds& t) {
     // shell sections. Keep them in TopologyResult for diagnostics, but do not
     // stop the solve here.
     for (NodeId nid : topo.orphaned_nodes)
-        issue(std::format("Node {}: not referenced by any element or constraint", nid.value), strict);
+        issue(std::format("Node {}: not referenced by any element or constraint", nid.value), false);
     for (PropertyId pid : topo.orphaned_properties)
-        issue(std::format("Property {}: defined but not used by any element", pid.value), strict);
+        issue(std::format("Property {}: defined but not used by any element", pid.value), false);
     for (MaterialId mid : topo.orphaned_materials)
-        issue(std::format("Material {}: defined but not referenced by any property", mid.value), strict);
+        issue(std::format("Material {}: defined but not referenced by any property", mid.value), false);
     for (const auto& [eid1, eid2] : topo.duplicate_element_pairs)
         issue(std::format("Elements {} and {} have identical connectivity", eid1.value, eid2.value), strict);
 
@@ -843,19 +843,14 @@ void run_quality_checks(Model& model, const QualityThresholds& t) {
             // Merge higher-ID node into lower-ID node
             NodeId keep = (a.value < b.value) ? a : b;
             NodeId drop = (a.value < b.value) ? b : a;
-            if (strict) {
-                issue(std::format("Nodes {} and {} are coincident (distance ≤ {:.2e})",
-                                  drop.value, keep.value, t.dup_node_tol), true);
-            } else {
-                if (t.auto_merge_nodes) {
+            if (!strict && t.auto_merge_nodes) {
                     remap_node(model, drop, keep);
                     model.nodes.erase(drop);
                     log_warn(std::format("[quality] Merged node {} into {} (coincident nodes)",
                                          drop.value, keep.value));
-                } else {
+            } else {
                     log_warn(std::format("[quality] Nodes {} and {} are coincident "
-                                         "(AUTOMERGE=0, not merged)", drop.value, keep.value));
-                }
+                                         "(not merged)", drop.value, keep.value));
             }
         }
     }
@@ -886,7 +881,7 @@ void run_quality_checks(Model& model, const QualityThresholds& t) {
 
         if (q.aspect_ratio > t.max_aspect_ratio)
             issue(std::format("Element {} ({}): aspect ratio {:.2f} > threshold {:.2f}",
-                              q.id.value, tname, q.aspect_ratio, t.max_aspect_ratio), strict);
+                               q.id.value, tname, q.aspect_ratio, t.max_aspect_ratio), false);
 
         if (t.min_jacobian_ratio > 0.0 && q.min_jacobian_ratio >= 0.0 &&
             q.min_jacobian_ratio < t.min_jacobian_ratio)
@@ -911,7 +906,7 @@ void run_quality_checks(Model& model, const QualityThresholds& t) {
 
         if (q.taper_ratio >= 0.0 && q.taper_ratio > t.max_taper_ratio)
             issue(std::format("Element {} ({}): taper ratio {:.3f} > threshold {:.3f}",
-                              q.id.value, tname, q.taper_ratio, t.max_taper_ratio), strict);
+                               q.id.value, tname, q.taper_ratio, t.max_taper_ratio), false);
     }
 }
 

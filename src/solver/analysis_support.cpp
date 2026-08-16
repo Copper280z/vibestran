@@ -82,15 +82,32 @@ void mark_rigid_element_dofs(const Model &model,
   }
 
   for (const auto &rbe3 : model.rbe3s) {
-    for (int dof = 1; dof <= 6; ++dof)
-      if (rbe3.refc.has(dof))
+    const bool transformed_reference =
+        model.node(rbe3.ref_node).cd != CoordId{0};
+    for (int dof = 1; dof <= 6; ++dof) {
+      if (!rbe3.refc.has(dof))
+        continue;
+      if (transformed_reference) {
+        const int first = dof <= 3 ? 1 : 4;
+        for (int basic_dof = first; basic_dof < first + 3; ++basic_dof)
+          mark_component(node_masks[rbe3.ref_node], basic_dof);
+      } else {
         mark_component(node_masks[rbe3.ref_node], dof);
+      }
+    }
     for (const auto &group : rbe3.weight_groups) {
       for (int dof = 1; dof <= 6; ++dof) {
         if (!group.component.has(dof))
           continue;
-        for (NodeId nid : group.nodes)
-          mark_component(node_masks[nid], dof);
+        for (NodeId nid : group.nodes) {
+          if (model.node(nid).cd != CoordId{0}) {
+            const int first = dof <= 3 ? 1 : 4;
+            for (int basic_dof = first; basic_dof < first + 3; ++basic_dof)
+              mark_component(node_masks[nid], basic_dof);
+          } else {
+            mark_component(node_masks[nid], dof);
+          }
+        }
       }
     }
   }
@@ -108,6 +125,7 @@ void mark_explicit_mpc_dofs(const Model &model, const SubCase &sc,
 
 void reduce_3x3_constraints(NodeId nid, const Mat3 &T3,
                             const std::array<int, 3> &cd_dofs,
+                            const std::array<double, 3> &cd_values,
                             const int count, const int base_offset,
                             std::vector<Mpc> &all_mpcs,
                             std::vector<std::pair<NodeId, int>> &direct_constraints) {
@@ -120,10 +138,13 @@ void reduce_3x3_constraints(NodeId nid, const Mat3 &T3,
   }
 
   double A[3][3] = {};
+  double rhs[3] = {};
   int col_perm[3] = {0, 1, 2};
   for (int i = 0; i < count; ++i)
     for (int j = 0; j < 3; ++j)
       A[i][j] = T3(j, cd_dofs[i]);
+  for (int i = 0; i < count; ++i)
+    rhs[i] = cd_values[i];
 
   for (int row = 0; row < count; ++row) {
     int best_col = row;
@@ -145,6 +166,7 @@ void reduce_3x3_constraints(NodeId nid, const Mat3 &T3,
       const double factor = A[i][row] / A[row][row];
       for (int j = row; j < 3; ++j)
         A[i][j] -= factor * A[row][j];
+      rhs[i] -= factor * rhs[row];
     }
   }
 
@@ -157,13 +179,14 @@ void reduce_3x3_constraints(NodeId nid, const Mat3 &T3,
       if (std::abs(A[row][col]) > 1e-14)
         ++nnz;
 
-    if (nnz == 1) {
+    if (nnz == 1 && std::abs(rhs[row]) < 1e-14) {
       direct_constraints.emplace_back(nid, base_offset + col_perm[row]);
       continue;
     }
 
     Mpc mpc;
     mpc.sid = MpcSetId{0};
+    mpc.rhs = rhs[row];
     for (int col = row; col < 3; ++col) {
       if (std::abs(A[row][col]) > 1e-14)
         mpc.terms.push_back({nid, base_offset + col_perm[col] + 1, A[row][col]});
@@ -205,7 +228,7 @@ DofMap build_analysis_dof_map(const Model &model, const SubCase &sc) {
     for (int d = 0; d < 6; ++d) {
       if (!spc->dofs.has(d + 1))
         continue;
-      if (has_cd)
+      if (has_cd || spc->value != 0.0)
         continue;
       spc_constraints.emplace_back(spc->node, d);
     }
@@ -217,52 +240,85 @@ DofMap build_analysis_dof_map(const Model &model, const SubCase &sc) {
 
 // cppcheck-suppress unusedFunction -- referenced from linear_static.cpp and modal.cpp
 void build_analysis_mpc_system(const Model &model, const SubCase &sc,
-                               DofMap &dof_map, MpcHandler &mpc_handler) {
+                               DofMap &dof_map, MpcHandler &mpc_handler,
+                               const bool use_spc_values) {
   std::vector<Mpc> all_mpcs;
 
-  {
-    std::unordered_map<NodeId, DofSet> node_spc_dofs;
-    for (const Spc *spc : model.spcs_for_set(sc.spc_set)) {
-      if (spc->value != 0.0)
-        continue;
-      node_spc_dofs[spc->node].mask |= spc->dofs.mask;
+  struct SpcValues {
+    DofSet dofs;
+    std::array<double, 6> values{};
+  };
+  std::unordered_map<NodeId, SpcValues> node_spcs;
+  for (const Spc *spc : model.spcs_for_set(sc.spc_set)) {
+    SpcValues& values = node_spcs[spc->node];
+    values.dofs.mask |= spc->dofs.mask;
+    for (int d = 0; d < 6; ++d) {
+      if (spc->dofs.has(d + 1))
+        values.values[static_cast<size_t>(d)] =
+            use_spc_values ? spc->value : 0.0;
     }
+  }
 
+  {
     std::vector<std::pair<NodeId, int>> direct_constraints;
     for (const auto &[nid, gp] : model.nodes) {
       if (gp.cd == CoordId{0})
         continue;
-      const auto spc_it = node_spc_dofs.find(nid);
-      if (spc_it == node_spc_dofs.end())
+      const auto spc_it = node_spcs.find(nid);
+      if (spc_it == node_spcs.end())
         continue;
       const auto cs_it = model.coord_systems.find(gp.cd);
       if (cs_it == model.coord_systems.end())
         continue;
 
       const Mat3 T3 = rotation_matrix(cs_it->second, gp.position);
-      const DofSet dofs = spc_it->second;
+      const SpcValues& spc_values = spc_it->second;
 
       std::array<int, 3> trans{};
+      std::array<double, 3> trans_values{};
       int n_trans = 0;
       for (int d = 0; d < 3; ++d) {
-        if (dofs.has(d + 1) && dof_map.is_free(nid, d))
-          trans[n_trans++] = d;
+        if (spc_values.dofs.has(d + 1) && dof_map.is_free(nid, d)) {
+          trans[n_trans] = d;
+          trans_values[n_trans++] = spc_values.values[static_cast<size_t>(d)];
+        }
       }
-      reduce_3x3_constraints(nid, T3, trans, n_trans, 0, all_mpcs,
+      reduce_3x3_constraints(nid, T3, trans, trans_values, n_trans, 0, all_mpcs,
                              direct_constraints);
 
       std::array<int, 3> rot{};
+      std::array<double, 3> rot_values{};
       int n_rot = 0;
       for (int d = 0; d < 3; ++d) {
-        if (dofs.has(d + 4) && dof_map.is_free(nid, d + 3))
-          rot[n_rot++] = d;
+        if (spc_values.dofs.has(d + 4) && dof_map.is_free(nid, d + 3)) {
+          rot[n_rot] = d;
+          rot_values[n_rot++] =
+              spc_values.values[static_cast<size_t>(d + 3)];
+        }
       }
-      reduce_3x3_constraints(nid, T3, rot, n_rot, 3, all_mpcs,
+      reduce_3x3_constraints(nid, T3, rot, rot_values, n_rot, 3, all_mpcs,
                              direct_constraints);
     }
 
     if (!direct_constraints.empty())
       dof_map.constrain_batch(direct_constraints);
+  }
+
+  // Basic-frame nonzero SPCs remain in the pre-MPC map and are represented as
+  // one-term affine equations. Zero SPCs were already removed by the DOF map.
+  for (const auto& [nid, spc_values] : node_spcs) {
+    const auto node_it = model.nodes.find(nid);
+    if (node_it == model.nodes.end() || node_it->second.cd.value != 0)
+      continue;
+    for (int d = 0; d < 6; ++d) {
+      const double value = spc_values.values[static_cast<size_t>(d)];
+      if (!spc_values.dofs.has(d + 1) || !dof_map.is_free(nid, d))
+        continue;
+      Mpc prescribed;
+      prescribed.terms.push_back({nid, d + 1, 1.0});
+      prescribed.rhs = value;
+      all_mpcs.push_back(std::move(prescribed));
+    }
   }
 
   for (const auto &rbe2 : model.rbe2s)

@@ -235,7 +235,7 @@ def _load_csv_f06_results(op2_path: Path) -> tuple[dict, dict, dict]:
                 }
 
     modal_data: dict = {}
-    f06_path = base.with_suffix(".f06")
+    f06_path = base.with_suffix(".F06")
     if f06_path.exists():
         in_eigen_table = False
         with open(f06_path, encoding="utf-8") as fh:
@@ -478,7 +478,7 @@ def run_one_test(
     Returns (success, list_of_message_lines, op2_path).
     """
     stem = bdf_path.stem
-    f06_out = results_dir / f"{stem}.f06"
+    f06_out = results_dir / f"{stem}.F06"
     op2_path = results_dir / f"{stem}.op2"
 
     cmd = [solver] + solver_extra_args + [str(bdf_path), str(f06_out)]

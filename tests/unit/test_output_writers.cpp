@@ -19,6 +19,7 @@
 #include <sstream>
 #include <string>
 #include <cmath>
+#include <numbers>
 #include <filesystem>
 #include <fstream>
 #include <bit>
@@ -325,6 +326,23 @@ TEST(F06Writer, HeaderContainsNastranTitle) {
     EXPECT_NE(out.find("S O L   1 0 1"), std::string::npos);
 }
 
+TEST(F06Writer, HeaderLine3IdentifiesVibestran) {
+    // The MYSTRAN validation suite parser (f06_query.py) requires the 3rd
+    // line of the file to start with " VIBESTRAN Version".
+    SolverResults res;
+    res.subcases.push_back({});
+    res.subcases[0].id = 1;
+    Model m = make_empty_model_sc1();
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+    std::istringstream iss(oss.str());
+    std::string line0, line1, line2;
+    std::getline(iss, line0);
+    std::getline(iss, line1);
+    std::getline(iss, line2);
+    EXPECT_EQ(line2.rfind(" VIBESTRAN Version ", 0), 0);
+}
+
 TEST(F06Writer, DisplacementTable) {
     SolverResults res;
     res.subcases.push_back(make_sc_with_disps());
@@ -337,6 +355,35 @@ TEST(F06Writer, DisplacementTable) {
     EXPECT_NE(out.find("GRID     COORD"), std::string::npos);
     // Node 5 should appear
     EXPECT_NE(out.find("5"), std::string::npos);
+}
+
+TEST(F06Writer, DisplacementRowMatchesParserColumns) {
+    // Parser windows: gid cols 8-15, TX 26-38, TY 40-52, RZ 96-108.
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    NodeDisplacement nd;
+    nd.node = NodeId{5};
+    nd.d = {1.5, -2.5, 0.0, 0.0, 0.0, 3.25e-4};
+    sc.displacements.push_back(nd);
+    res.subcases.push_back(sc);
+    Model m = make_empty_model_sc1();
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+
+    std::istringstream iss(oss.str());
+    std::string line;
+    while (std::getline(iss, line)) {
+        // First data row of the displacement table: gid 5 right-justified
+        // in cols 2-15 followed by the coordinate-system id.
+        if (line.rfind("              5        0", 0) == 0) break;
+        line.clear();
+    }
+    ASSERT_FALSE(line.empty());
+    EXPECT_EQ(line.substr(7, 8), "       5");
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(25, 13)), 1.5);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(39, 13)), -2.5);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(95, 13)), 3.25e-4);
 }
 
 TEST(F06Writer, StaticSubcaseHeaderMatchesParserFormat) {
@@ -364,11 +411,12 @@ TEST(F06Writer, Quad4StressTablePresent) {
     std::ostringstream oss;
     F06Writer::write(res, m, oss);
     std::string out = oss.str();
-    EXPECT_NE(out.find("C Q U A D 4"), std::string::npos);
-    EXPECT_NE(out.find("MAJOR"), std::string::npos);
-    EXPECT_NE(out.find("MINOR"), std::string::npos);
-    EXPECT_NE(out.find("ANGLE"), std::string::npos);
-    EXPECT_NE(out.find("VON MISES"), std::string::npos);
+    EXPECT_NE(out.find("E L E M E N T   S T R E S S E S   I N   L O C A L   E L E M E N T   C O O R D I N A T E   S Y S T E M"), std::string::npos);
+    EXPECT_NE(out.find("F O R   E L E M E N T   T Y P E   Q U A D 4"), std::string::npos);
+    EXPECT_NE(out.find("Major"), std::string::npos);
+    EXPECT_NE(out.find("Minor"), std::string::npos);
+    EXPECT_NE(out.find("Angle"), std::string::npos);
+    EXPECT_NE(out.find("von Mises"), std::string::npos);
 }
 
 TEST(F06Writer, Tria3StressTablePresent) {
@@ -381,7 +429,7 @@ TEST(F06Writer, Tria3StressTablePresent) {
     std::ostringstream oss;
     F06Writer::write(res, m, oss);
     std::string out = oss.str();
-    EXPECT_NE(out.find("C T R I A 3"), std::string::npos);
+    EXPECT_NE(out.find("F O R   E L E M E N T   T Y P E   T R I A 3"), std::string::npos);
 }
 
 TEST(F06Writer, Quad4AndTria3TablesSeparate) {
@@ -396,11 +444,11 @@ TEST(F06Writer, Quad4AndTria3TablesSeparate) {
     std::ostringstream oss;
     F06Writer::write(res, m, oss);
     std::string out = oss.str();
-    EXPECT_NE(out.find("C Q U A D 4"), std::string::npos);
-    EXPECT_NE(out.find("C T R I A 3"), std::string::npos);
+    EXPECT_NE(out.find("T Y P E   Q U A D 4"), std::string::npos);
+    EXPECT_NE(out.find("T Y P E   T R I A 3"), std::string::npos);
     // The two table headers should be at different positions
-    auto pos_q = out.find("C Q U A D 4");
-    auto pos_t = out.find("C T R I A 3");
+    auto pos_q = out.find("T Y P E   Q U A D 4");
+    auto pos_t = out.find("T Y P E   T R I A 3");
     EXPECT_NE(pos_q, pos_t);
 }
 
@@ -415,8 +463,8 @@ TEST(F06Writer, OnlyTria3NoQuad4Table) {
     std::ostringstream oss;
     F06Writer::write(res, m, oss);
     std::string out = oss.str();
-    EXPECT_EQ(out.find("C Q U A D 4"), std::string::npos);
-    EXPECT_NE(out.find("C T R I A 3"), std::string::npos);
+    EXPECT_EQ(out.find("T Y P E   Q U A D 4"), std::string::npos);
+    EXPECT_NE(out.find("T Y P E   T R I A 3"), std::string::npos);
 }
 
 TEST(F06Writer, OutputFlagSuppressesDisplacement) {
@@ -441,7 +489,7 @@ TEST(F06Writer, OutputFlagSuppressesStress) {
     std::ostringstream oss;
     F06Writer::write(res, m, oss);
     std::string out = oss.str();
-    EXPECT_EQ(out.find("C Q U A D 4"), std::string::npos);
+    EXPECT_EQ(out.find("T Y P E   Q U A D 4"), std::string::npos);
 }
 
 TEST(F06Writer, Quad4PrincipalStressValues) {
@@ -461,10 +509,95 @@ TEST(F06Writer, Quad4PrincipalStressValues) {
     F06Writer::write(res, m, oss);
     std::string out = oss.str();
     // major = 100, should appear in scientific notation with leading digits "1.000000"
-    EXPECT_NE(out.find("1.000000e+02"), std::string::npos);
+    EXPECT_NE(out.find("1.00000E+02"), std::string::npos);
 }
 
-TEST(F06Writer, LineStressTablePresent) {
+TEST(F06Writer, Quad4CenterRowMatchesParserColumns) {
+    // Parser windows for QUAD4 stress rows: eid cols 2-9, CENTER at 12-17,
+    // XX 35-46, YY 48-59, XY 61-72, angle 75-80, major 82-93, minor 95-106,
+    // von Mises 108-119, ZX 121-132, YZ 134-145.
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    PlateStress ps;
+    ps.eid   = ElementId{7};
+    ps.etype = ElementType::CQUAD4;
+    ps.sx = 100.0; ps.sy = -50.0; ps.sxy = 25.0;
+    ps.mx = 0.0; ps.my = 0.0; ps.mxy = 0.0; // no thickness info → membrane only
+    ps.von_mises = 0.0;
+    sc.plate_stresses.push_back(ps);
+    res.subcases.push_back(sc);
+    Model m = make_empty_model_sc1();
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+
+    std::istringstream iss(oss.str());
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.size() >= 17 && line.substr(11, 6) == "CENTER") break;
+        line.clear();
+    }
+    ASSERT_FALSE(line.empty());
+    EXPECT_EQ(line.substr(1, 8), "       7");
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(34, 12)), 100.0);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(47, 12)), -50.0);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(60, 12)), 25.0);
+    double major, minor, angle;
+    compute_principal_2d(100.0, -50.0, 25.0, major, minor, angle);
+    EXPECT_NEAR(std::stod(line.substr(74, 6)), angle, 0.005);
+    EXPECT_NEAR(std::stod(line.substr(81, 12)), major, std::abs(major) * 1e-5);
+    EXPECT_NEAR(std::stod(line.substr(94, 12)), minor, std::abs(minor) * 1e-5);
+}
+
+TEST(F06Writer, Quad4FiberStressesFromBendingMoment) {
+    // With thickness t from PSHELL, fiber stresses are
+    // sigma(z) = membrane + (12*z/t^3)*moment, z1=-t/2, z2=+t/2.
+    Model m = make_empty_model_sc1();
+    PShell ps_prop;
+    ps_prop.pid = PropertyId{10};
+    ps_prop.t = 0.1; // z1 = -0.05, z2 = +0.05
+    m.properties[PropertyId{10}] = ps_prop;
+    ElementData elem;
+    elem.id = ElementId{7};
+    elem.type = ElementType::CQUAD4;
+    elem.pid = PropertyId{10};
+    elem.nodes = {NodeId{1}, NodeId{2}, NodeId{3}, NodeId{4}};
+    m.elements.push_back(elem);
+
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    PlateStress ps;
+    ps.eid   = ElementId{7};
+    ps.etype = ElementType::CQUAD4;
+    ps.sx = 10.0; ps.sy = 0.0; ps.sxy = 0.0;
+    ps.mx = 1.0; ps.my = 0.0; ps.mxy = 0.0;
+    sc.plate_stresses.push_back(ps);
+    res.subcases.push_back(sc);
+
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+
+    // 12*z/t^3 at z=-0.05, t=0.1: 12*(-0.05)/0.001 = -600 → XX(Z1) = 10 - 600
+    // At z=+0.05: XX(Z2) = 10 + 600.
+    std::istringstream iss(oss.str());
+    std::string z1_line, z2_line;
+    while (std::getline(iss, z1_line)) {
+        if (z1_line.size() >= 17 && z1_line.substr(11, 6) == "CENTER") {
+            std::getline(iss, z2_line);
+            break;
+        }
+    }
+    ASSERT_FALSE(z1_line.empty());
+    EXPECT_NEAR(std::stod(z1_line.substr(34, 12)), 10.0 - 600.0,
+                std::abs(10.0 - 600.0) * 1e-5);
+    EXPECT_NEAR(std::stod(z2_line.substr(34, 12)), 10.0 + 600.0,
+                std::abs(10.0 + 600.0) * 1e-5);
+}
+
+TEST(F06Writer, BarStressTableMatchesParserColumns) {
+    // Parser windows: eid cols 2-9, SA/SB1-4 at 11/25/39/53, axial at 67,
+    // each 13 wide.
     SolverResults res;
     SubCaseResults sc;
     sc.id = 1;
@@ -475,14 +608,29 @@ TEST(F06Writer, LineStressTablePresent) {
     std::ostringstream oss;
     F06Writer::write(res, m, oss);
     const std::string out = oss.str();
+    EXPECT_NE(out.find("F O R   E L E M E N T   T Y P E   B A R"), std::string::npos);
 
-    EXPECT_NE(out.find("B A R / B E A M"), std::string::npos);
-    EXPECT_NE(out.find("CBAR"), std::string::npos);
-    EXPECT_NE(out.find("101"), std::string::npos);
-    EXPECT_NE(out.find("102"), std::string::npos);
+    std::istringstream iss(out);
+    std::string row_a, row_b;
+    while (std::getline(iss, row_a)) {
+        if (row_a.size() >= 9 && row_a.substr(1, 8) == "      42") break;
+        row_a.clear();
+    }
+    ASSERT_FALSE(row_a.empty());
+    ASSERT_TRUE(std::getline(iss, row_b));
+    EXPECT_EQ(row_a.substr(1, 8), "      42");
+    EXPECT_DOUBLE_EQ(std::stod(row_a.substr(10, 13)), 1.25);
+    EXPECT_DOUBLE_EQ(std::stod(row_a.substr(24, 13)), -2.5);
+    EXPECT_DOUBLE_EQ(std::stod(row_a.substr(38, 13)), 3.75);
+    EXPECT_DOUBLE_EQ(std::stod(row_a.substr(52, 13)), -4.5);
+    EXPECT_DOUBLE_EQ(std::stod(row_a.substr(66, 13)), 5.125);
+    EXPECT_DOUBLE_EQ(std::stod(row_b.substr(10, 13)), 8.5);
+    EXPECT_DOUBLE_EQ(std::stod(row_b.substr(52, 13)), -11.5);
 }
 
-TEST(F06Writer, Quad4CornerStressTablePresent) {
+TEST(F06Writer, Quad4CornerRowsInMystranTable) {
+    // With STRESS(CORNER), the QUAD4 table contains CENTER plus 4 GRD rows
+    // with grid IDs in cols 15-22.
     SolverResults res;
     SubCaseResults sc;
     sc.id = 1;
@@ -502,11 +650,136 @@ TEST(F06Writer, Quad4CornerStressTablePresent) {
     F06Writer::write(res, m, oss);
     const std::string out = oss.str();
 
-    EXPECT_NE(out.find("C O R N E R   S T R E S S E S"), std::string::npos);
-    EXPECT_EQ(out.find("P R I N C I P A L"), std::string::npos);
-    EXPECT_NE(out.find("MOMENT-X"), std::string::npos);
-    EXPECT_NE(out.find("11"), std::string::npos);
-    EXPECT_NE(out.find("14"), std::string::npos);
+    EXPECT_NE(out.find("Principal Stresses (Zero Shear)"), std::string::npos);
+    // GRD rows: location at cols 12-14, gid right-justified in cols 15-22.
+    EXPECT_NE(out.find("           GRD      11"), std::string::npos);
+    EXPECT_NE(out.find("           GRD      14"), std::string::npos);
+}
+
+TEST(F06Writer, SolidStressTableMatchesParserColumns) {
+    // Parser windows: eid cols 2-9, CENTER 12-17, GRD gid 15-22, values at
+    // 29/43/57/71/85/99/113 each 13 wide.
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    sc.solid_stresses.push_back(make_solid_stress(ElementId{8}));
+    res.subcases.push_back(sc);
+    Model m = make_empty_model_sc1();
+
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+    const std::string out = oss.str();
+    EXPECT_NE(out.find("E L E M E N T   S T R E S S E S   I N   M A T E R I A L   C O O R D I N A T E   S Y S T E M"), std::string::npos);
+    EXPECT_NE(out.find("F O R   E L E M E N T   T Y P E   T E T R A"), std::string::npos);
+
+    std::istringstream iss(out);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.size() >= 17 && line.substr(11, 6) == "CENTER") break;
+        line.clear();
+    }
+    ASSERT_FALSE(line.empty());
+    EXPECT_EQ(line.substr(1, 8), "       8");
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(28, 13)), 1.0);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(42, 13)), 2.0);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(56, 13)), 3.0);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(70, 13)), 4.0);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(84, 13)), 5.0);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(98, 13)), 6.0);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(112, 13)), 7.0);
+
+    // First GRD corner row (no corner output requested here → none present).
+    // With stress_corner_print the rows follow; covered in the test below.
+}
+
+TEST(F06Writer, SolidCornerRowsWithGids) {
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    sc.solid_stresses.push_back(make_solid_stress(ElementId{8}));
+    res.subcases.push_back(sc);
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].stress_print = true;
+    m.analysis.subcases[0].stress_corner_print = true;
+
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+    const std::string out = oss.str();
+    // GRD rows carry grid id in cols 15-22 and first component in 29-41.
+    EXPECT_NE(out.find("           GRD    9001"), std::string::npos);
+    EXPECT_NE(out.find("           GRD    9004"), std::string::npos);
+
+    std::istringstream iss(out);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.size() >= 14 && line.substr(11, 3) == "GRD") break;
+        line.clear();
+    }
+    ASSERT_FALSE(line.empty());
+    EXPECT_EQ(line.substr(14, 8), "    9001");
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(28, 13)), 11.0);
+}
+
+TEST(F06Writer, ModalEigenvalueAndEigenvectorBlocks) {
+    // The parser requires " OUTPUT FOR EIGENVECTOR" (leading space, mode
+    // number in cols 25-32) immediately preceded by " OUTPUT FOR SUBCASE",
+    // and eigenvalue rows with mode at cols 2-9, eigenvalue at 25-37 and
+    // cycles at 65-77.
+    ModalSolverResults res;
+    ModalSubCaseResults msc;
+    msc.id = 1;
+    msc.eigvec_print = true;
+    ModeResult mode;
+    mode.mode_number = 1;
+    mode.eigenvalue = 2.5e6;
+    mode.radians_per_sec = std::sqrt(2.5e6);
+    mode.cycles_per_sec = std::sqrt(2.5e6) / (2.0 * std::numbers::pi);
+    mode.gen_mass = 1.0;
+    NodeDisplacement nd;
+    nd.node = NodeId{5};
+    nd.d = {1.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    mode.shape.push_back(nd);
+    msc.modes.push_back(mode);
+    res.subcases.push_back(msc);
+
+    Model m = make_empty_model_sc1();
+    std::ostringstream oss;
+    F06Writer::write_modal(res, m, oss);
+    const std::string out = oss.str();
+
+    EXPECT_NE(out.find("R E A L   E I G E N V A L U E S"), std::string::npos);
+    EXPECT_NE(out.find("E I G E N V E C T O R"), std::string::npos);
+
+    std::istringstream iss(out);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.size() >= 25 && line.rfind(" OUTPUT FOR EIGENVECTOR", 0) == 0)
+            break;
+        line.clear();
+    }
+    ASSERT_FALSE(line.empty());
+    EXPECT_EQ(line.substr(24, 8), "       1");
+
+    // The immediately preceding line must be the subcase header.
+    const auto ev_pos = out.find(" OUTPUT FOR EIGENVECTOR");
+    const auto sc_pos = out.rfind(" OUTPUT FOR SUBCASE", ev_pos);
+    ASSERT_NE(sc_pos, std::string::npos);
+    EXPECT_EQ(out.substr(sc_pos, ev_pos - sc_pos),
+              " OUTPUT FOR SUBCASE        1\n");
+
+    // Eigenvalue table data row.
+    std::istringstream iss2(out);
+    std::string ev_row;
+    while (std::getline(iss2, ev_row)) {
+        if (ev_row.size() >= 40 && ev_row.substr(1, 8) == "       1" &&
+            ev_row.find("E+") != std::string::npos)
+            break;
+        ev_row.clear();
+    }
+    ASSERT_FALSE(ev_row.empty());
+    EXPECT_DOUBLE_EQ(std::stod(ev_row.substr(24, 13)), 2.5e6);
+    EXPECT_NEAR(std::stod(ev_row.substr(64, 13)),
+                std::sqrt(2.5e6) / (2.0 * std::numbers::pi), 1e-4);
 }
 
 TEST(F06Writer, CtetrA10GpstressTableIncludesMidsideRows) {

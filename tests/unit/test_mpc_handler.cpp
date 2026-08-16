@@ -4,6 +4,7 @@
 #include "core/dof_map.hpp"
 #include "core/mpc_handler.hpp"
 #include "core/model.hpp"
+#include "elements/rbe_constraints.hpp"
 #include "io/bdf_parser.hpp"
 #include <gtest/gtest.h>
 #include <cmath>
@@ -143,7 +144,7 @@ TEST(MpcHandler, MultiTermConstraint) {
     ASSERT_EQ(dof_map.num_free_dofs(), 3);
 
     // MPC: 1*u1 + 2*u2 + 3*u3 = 0
-    // Largest |coeff| is 3 → node3 is dependent
+    // Nastran defines the first term (node1) as dependent.
     Mpc mpc;
     mpc.sid = MpcSetId{1};
     mpc.terms = {
@@ -159,10 +160,9 @@ TEST(MpcHandler, MultiTermConstraint) {
     EXPECT_EQ(handler.num_reduced(), 2);
     EXPECT_TRUE(handler.has_constraints());
 
-    // Verify elimination: u3 = -(1/3)*u1 - (2/3)*u2
-    // The dependent DOF (node3 T1) should have CONSTRAINED_DOF in reduced map
-    EqIndex eq3 = handler.full_dof_map().eq_index(NodeId{3}, 0);
-    EXPECT_EQ(handler.reduced_index(eq3), CONSTRAINED_DOF);
+    // Verify elimination: u1 = -2*u2 - 3*u3.
+    EqIndex eq1 = handler.full_dof_map().eq_index(NodeId{1}, 0);
+    EXPECT_EQ(handler.reduced_index(eq1), CONSTRAINED_DOF);
 }
 
 // ── Test 4: Recover dependent DOFs after mock solve ──────────────────────────
@@ -232,8 +232,8 @@ TEST(MpcHandler, SpcAndMpcNoOverlap) {
     EXPECT_EQ(handler.num_reduced(), 1);
 }
 
-// ── Test 6: Cycle detection ────────────────────────────────────────────────────
-TEST(MpcHandler, CycleDetection) {
+// ── Test 6: Redundant circular equation ───────────────────────────────────────
+TEST(MpcHandler, RedundantCircularEquationIsIgnored) {
     // MPC 1: u1 = u2
     // MPC 2: u2 = u1  (circular!)
     // → both u1 and u2 would be dependent on each other.
@@ -257,9 +257,12 @@ TEST(MpcHandler, CycleDetection) {
 
     MpcHandler handler;
     std::vector<const Mpc*> ptrs = {&mpc1, &mpc2};
-    // Two MPCs both trying to constrain their respective dep DOFs creates a cycle
-    // (node1 dep on node2, node2 dep on node1)
-    EXPECT_THROW(handler.build(ptrs, dof_map), SolverError);
+    handler.build(ptrs, dof_map);
+    ASSERT_EQ(handler.num_reduced(), 1);
+    std::vector<double> full(2, 0.0);
+    handler.recover_dependent_dofs(full, {3.0});
+    EXPECT_DOUBLE_EQ(full[0], 3.0);
+    EXPECT_DOUBLE_EQ(full[1], 3.0);
 }
 
 // ── Test 7: BdfParser MPC multi-line card ────────────────────────────────────
@@ -284,6 +287,142 @@ ENDDATA
     EXPECT_NEAR(mpc.terms[2].coeff, -0.5, 1e-12);
 }
 
+TEST(MpcHandler, BdfParserFixedFieldMpcContinuation) {
+    const std::string bdf = R"(
+BEGIN BULK
+MPC            1      28       1  -1.0+0      24       1   2.5-1        +
++                      4       1   2.5-1      25       1   2.5-1        +
++                     27       1   2.5-1
+ENDDATA
+)";
+    const Model model = BdfParser::parse_string(bdf);
+    ASSERT_EQ(model.mpcs.size(), 1u);
+    ASSERT_EQ(model.mpcs[0].terms.size(), 5u);
+    EXPECT_EQ(model.mpcs[0].terms[2].node.value, 4);
+    EXPECT_EQ(model.mpcs[0].terms[4].node.value, 27);
+}
+
+TEST(MpcHandler, ChainedConstraintsAreSubstituted) {
+    Model model = make_model_n_nodes(3);
+    DofMap dof_map = make_full_dof_map(model);
+    std::vector<std::pair<NodeId, int>> constrained;
+    for (int node = 1; node <= 3; ++node)
+        for (int dof = 1; dof < 6; ++dof)
+            constrained.emplace_back(NodeId{node}, dof);
+    dof_map.constrain_batch(constrained);
+
+    Mpc mpc1, mpc2;
+    mpc1.terms = {{NodeId{1}, 1, 1.0}, {NodeId{2}, 1, -1.0}};
+    mpc2.terms = {{NodeId{2}, 1, 1.0}, {NodeId{3}, 1, -2.0}};
+    std::vector<const Mpc*> ptrs{&mpc1, &mpc2};
+    MpcHandler handler;
+    handler.build(ptrs, dof_map);
+
+    ASSERT_EQ(handler.num_reduced(), 1);
+    std::vector<double> full(3, 0.0);
+    handler.recover_dependent_dofs(full, {4.0});
+    EXPECT_DOUBLE_EQ(full[2], 4.0);
+    EXPECT_DOUBLE_EQ(full[1], 8.0);
+    EXPECT_DOUBLE_EQ(full[0], 8.0);
+}
+
+TEST(MpcHandler, SharedPreferredDependentUsesAnotherPivot) {
+    Model model = make_model_n_nodes(3);
+    DofMap dof_map = make_full_dof_map(model);
+    std::vector<std::pair<NodeId, int>> constrained;
+    for (int node = 1; node <= 3; ++node)
+        for (int dof = 1; dof < 6; ++dof)
+            constrained.emplace_back(NodeId{node}, dof);
+    dof_map.constrain_batch(constrained);
+
+    Mpc first, second;
+    first.terms = {{NodeId{1}, 1, 1.0}, {NodeId{2}, 1, -1.0}};
+    second.terms = {{NodeId{1}, 1, 1.0}, {NodeId{3}, 1, -1.0}};
+    std::vector<const Mpc*> ptrs{&first, &second};
+    MpcHandler handler;
+    handler.build(ptrs, dof_map);
+
+    ASSERT_EQ(handler.num_reduced(), 1);
+    std::vector<double> full(3, 0.0);
+    handler.recover_dependent_dofs(full, {7.0});
+    EXPECT_DOUBLE_EQ(full[0], 7.0);
+    EXPECT_DOUBLE_EQ(full[1], 7.0);
+    EXPECT_DOUBLE_EQ(full[2], 7.0);
+}
+
+TEST(MpcHandler, CoupledFullRankDependenciesUsePivotedSolve) {
+    Model model = make_model_n_nodes(4);
+    DofMap dof_map = make_full_dof_map(model);
+    std::vector<std::pair<NodeId, int>> constrained;
+    for (int node = 1; node <= 4; ++node)
+        for (int dof = 1; dof < 6; ++dof)
+            constrained.emplace_back(NodeId{node}, dof);
+    dof_map.constrain_batch(constrained);
+
+    Mpc first, second;
+    first.terms = {{NodeId{1}, 1, 1.0}, {NodeId{2}, 1, -1.0},
+                   {NodeId{3}, 1, -1.0}};
+    second.terms = {{NodeId{1}, 1, 1.0}, {NodeId{2}, 1, 1.0},
+                    {NodeId{4}, 1, -1.0}};
+    std::vector<const Mpc*> ptrs{&first, &second};
+    MpcHandler handler;
+    handler.build(ptrs, dof_map);
+
+    ASSERT_EQ(handler.num_reduced(), 2);
+    std::vector<double> full(4, 0.0);
+    handler.recover_dependent_dofs(full, {2.0, 6.0});
+    EXPECT_DOUBLE_EQ(full[0], 4.0);
+    EXPECT_DOUBLE_EQ(full[1], 2.0);
+    EXPECT_DOUBLE_EQ(full[2], 2.0);
+    EXPECT_DOUBLE_EQ(full[3], 6.0);
+}
+
+TEST(MpcHandler, InconsistentDuplicateAffineEquationIsRejected) {
+    Model model = make_model_n_nodes(1);
+    DofMap dof_map = make_full_dof_map(model);
+    for (int dof = 1; dof < 6; ++dof)
+        dof_map.constrain(NodeId{1}, dof);
+
+    Mpc first, second;
+    first.terms = {{NodeId{1}, 1, 1.0}};
+    first.rhs = 1.0;
+    second.terms = {{NodeId{1}, 1, 1.0}};
+    second.rhs = 0.0;
+    std::vector<const Mpc*> ptrs{&first, &second};
+    MpcHandler handler;
+    EXPECT_THROW(handler.build(ptrs, dof_map), SolverError);
+}
+
+TEST(MpcHandler, AffineConstraintRecoveryAndLoad) {
+    Model model = make_model_n_nodes(2);
+    DofMap dof_map = make_full_dof_map(model);
+    std::vector<std::pair<NodeId, int>> constrained;
+    for (int node = 1; node <= 2; ++node)
+        for (int dof = 1; dof < 6; ++dof)
+            constrained.emplace_back(NodeId{node}, dof);
+    dof_map.constrain_batch(constrained);
+
+    Mpc prescribed;
+    prescribed.terms = {{NodeId{1}, 1, 1.0}};
+    prescribed.rhs = 2.0;
+    MpcHandler handler;
+    std::vector<const Mpc*> ptrs{&prescribed};
+    handler.build(ptrs, dof_map);
+
+    const EqIndex eq1 = handler.full_dof_map().eq_index(NodeId{1}, 0);
+    const EqIndex eq2 = handler.full_dof_map().eq_index(NodeId{2}, 0);
+    const std::array<EqIndex, 2> gdofs{eq1, eq2};
+    const std::array<double, 4> stiffness{1.0, -1.0, -1.0, 1.0};
+    std::vector<double> force(1, 0.0);
+    handler.apply_prescribed_displacement_load(gdofs, stiffness, force);
+    EXPECT_DOUBLE_EQ(force[0], 2.0);
+
+    std::vector<double> full(2, 0.0);
+    handler.recover_dependent_dofs(full, {2.0});
+    EXPECT_DOUBLE_EQ(full[0], 2.0);
+    EXPECT_DOUBLE_EQ(full[1], 2.0);
+}
+
 // ── Test 8: BdfParser MPCADD merges sets ─────────────────────────────────────
 TEST(MpcHandler, BdfParser_MPCADD) {
     const std::string bdf = R"(
@@ -297,4 +436,49 @@ ENDDATA
     // After MPCADD, set 99 should contain 2 MPCs (merged from sets 10 and 20)
     auto v = model.mpcs_for_set(MpcSetId{99});
     EXPECT_EQ(v.size(), 2u);
+}
+
+TEST(Rbe3Expansion, TranslationalWeightsProduceAverage) {
+    Model model = make_model_n_nodes(3);
+    model.nodes.at(NodeId{1}).position = Vec3{0.0, 0.0, 0.0};
+    model.nodes.at(NodeId{2}).position = Vec3{-1.0, 0.0, 0.0};
+    model.nodes.at(NodeId{3}).position = Vec3{1.0, 0.0, 0.0};
+    Rbe3 rbe;
+    rbe.eid = ElementId{10};
+    rbe.ref_node = NodeId{1};
+    rbe.refc = DofSet::from_nastran_string("1");
+    rbe.weight_groups.push_back(
+        {1.0, DofSet::from_nastran_string("1"), {NodeId{2}, NodeId{3}}});
+
+    std::vector<Mpc> equations;
+    expand_rbe3(rbe, model, equations);
+    ASSERT_EQ(equations.size(), 1u);
+    ASSERT_EQ(equations[0].terms.size(), 3u);
+    EXPECT_EQ(equations[0].terms[0].node, NodeId{1});
+    EXPECT_NEAR(equations[0].terms[0].coeff, 2.0, 1e-12);
+    EXPECT_NEAR(equations[0].terms[1].coeff, -1.0, 1e-12);
+    EXPECT_NEAR(equations[0].terms[2].coeff, -1.0, 1e-12);
+}
+
+TEST(Rbe3Expansion, TranslationsDetermineReferenceRotation) {
+    Model model = make_model_n_nodes(3);
+    model.nodes.at(NodeId{1}).position = Vec3{0.0, 0.0, 0.0};
+    model.nodes.at(NodeId{2}).position = Vec3{0.0, 1.0, 0.0};
+    model.nodes.at(NodeId{3}).position = Vec3{0.0, -1.0, 0.0};
+    Rbe3 rbe;
+    rbe.eid = ElementId{11};
+    rbe.ref_node = NodeId{1};
+    rbe.refc = DofSet::from_nastran_string("6");
+    rbe.weight_groups.push_back(
+        {1.0, DofSet::from_nastran_string("1"), {NodeId{2}, NodeId{3}}});
+
+    std::vector<Mpc> equations;
+    expand_rbe3(rbe, model, equations);
+    ASSERT_EQ(equations.size(), 1u);
+    ASSERT_EQ(equations[0].terms.size(), 3u);
+    EXPECT_EQ(equations[0].terms[0].node, NodeId{1});
+    EXPECT_EQ(equations[0].terms[0].dof, 6);
+    EXPECT_NEAR(equations[0].terms[0].coeff, 2.0, 1e-12);
+    EXPECT_NEAR(equations[0].terms[1].coeff, 1.0, 1e-12);
+    EXPECT_NEAR(equations[0].terms[2].coeff, -1.0, 1e-12);
 }

@@ -2,14 +2,16 @@
   - build the project by running `ninja` from the build directory. Don't specify -j, ninja default behavior is a parallel build.
 - The build directory is always named 'build'.
 - There's a build target for cppcheck, you can run it from the build directory with `ninja cppcheck`.
-- When you're finished with a change, always run cppcheck and correct any errors before committing/submitting. 
+- When you're finished with a change, always run cppcheck and correct any errors before committing/submitting.
   - Note: We've attempted to reduce/eliminate false positives, but there's always a chance. If you believe there is a false positive, report it to the user and, if applicable, the git commit.
   - There is currently one false positive in an Eigen header file.
   - unused function warnings likely mean that function is desired for some planned use, but not currently tested. You should add tests for any functions that are present but unused. Make a note in the function description comment that it is only used in a test.
 - If you use a function in the main codebase that has a comment about being unused, remove that comment. You do not need to explain where any functions are used, the LSP does that for us.
 - We use C++20, but generally prefer error values to exceptions.
-- NEVER use exceptions for intentional control flow, you should ALWAYS prefer an error value, optional, or variant over an exception as control flow. 
+- NEVER use exceptions for intentional control flow, you should ALWAYS prefer an error value, optional, or variant over an exception as control flow.
 - Exceptions should only be used for unrecoverable errors. Any time an exception is thrown you must include as much information as possible, so the developer can debug the exception. We expect that exceptions should not happen in production.
-- All tests must be relevant and useful for proving the correctness of the business logic or mathematical model. Tests that only check superficial or obvious cases are both insufficient and unacceptable. 
+- All tests must be relevant and useful for proving the correctness of the business logic or mathematical model. Tests that only check superficial or obvious cases are both insufficient and unacceptable.
 - It can be acceptable to edit the criteria of a test that's failing, if you believe it is appropriate, make sure to document your reasoning in the commit message.
 - All commit messages should provide a detailed description of changes.
+
+- If you need to spawn an agent for exploration or research, select a model appropriate for the task. If it's not obvious which model to select, you should ask instead of guessing.
