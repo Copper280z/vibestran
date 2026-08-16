@@ -2482,7 +2482,13 @@ void BdfParser::process_qhbdy(ParseContext &ctx,
         "Line {}: QHBDY geometry must be POINT, LINE, REV, AREA3, or AREA4",
         ctx.line_num));
   }
-  q.af = (f.size() > 4 && !f[4].empty()) ? parse_double(f[4], ctx.line_num) : 1.0;
+  q.af = (f.size() > 4 && !f[4].empty()) ? parse_double(f[4], ctx.line_num) : 0.0;
+  // NASTRAN-95 IFS1P: AF is mandatory (and must be > 0) for POINT and LINE,
+  // whose area cannot be derived from the grid points; REV/AREA3/AREA4 take
+  // their area geometrically and ignore AF.
+  if ((q.geom == ChbdyType::POINT || q.geom == ChbdyType::LINE) && q.af <= 0.0)
+    throw ParseError(std::format(
+        "Line {}: QHBDY POINT/LINE requires a positive AF field", ctx.line_num));
   const int n_required = chbdy_required_grids(q.geom);
   for (int i = 0; i < n_required; ++i) {
     const int idx = 5 + i;

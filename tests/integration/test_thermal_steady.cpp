@@ -744,6 +744,33 @@ TEST(ThermalSteady, QhbdyRejectsUnsupportedGeometry) {
   EXPECT_THROW((void)BdfParser::parse_string(bdf), ParseError);
 }
 
+TEST(ThermalSteady, Qhbdy_PointAndLineRequireAreaFactor) {
+  // NASTRAN-95 IFS1P requires a positive AF for POINT/LINE (their area is
+  // not derivable from grids); a blank or non-positive AF is a parse error.
+  const std::string point_no_af =
+      "BEGIN BULK\n"
+      "QHBDY,7,POINT,500.0,,1\n"
+      "ENDDATA\n";
+  EXPECT_THROW((void)BdfParser::parse_string(point_no_af), ParseError);
+
+  const std::string line_zero_af =
+      "BEGIN BULK\n"
+      "QHBDY,7,LINE,500.0,0.0,1,2\n"
+      "ENDDATA\n";
+  EXPECT_THROW((void)BdfParser::parse_string(line_zero_af), ParseError);
+
+  // AREA4 computes its area geometrically; a blank AF stays legal there.
+  const std::string area4_blank_af =
+      "BEGIN BULK\n"
+      "GRID,1,,0.0,0.0,0.0\n"
+      "GRID,2,,1.0,0.0,0.0\n"
+      "GRID,3,,1.0,1.0,0.0\n"
+      "GRID,4,,0.0,1.0,0.0\n"
+      "QHBDY,7,AREA4,500.0,,1,2,3,4\n"
+      "ENDDATA\n";
+  EXPECT_NO_THROW((void)BdfParser::parse_string(area4_blank_af));
+}
+
 // ── CPENTA6 ────────────────────────────────────────────────────────────────
 
 TEST(ThermalSteady, CPenta6_LinearFieldReproduction) {
@@ -827,16 +854,22 @@ TEST(ThermalSteady, CPenta6_StackedBar1DConduction) {
 // ── Semantics / edge cases ─────────────────────────────────────────────────
 
 TEST(ThermalSteady, Tempd_IsNotADirichletDefault) {
-  // TEMPD provides a *default* temperature, never a boundary condition.  Deck
-  // pins only the x=0 face at 0 with SPC and declares both TEMPD,1,50 and an
-  // unrelated TEMP value of 75 at node 2. With no heat sources every free node
-  // must solve to 0; neither temperature-field card is a Dirichlet condition.
+  // TEMPD provides a *default* temperature and TEMP defines temperature
+  // *fields* (initial conditions / material evaluation) — neither is a
+  // Dirichlet BC in steady heat transfer.  The deck pins the x=0 face at 100
+  // via thermal SPCs and declares both TEMPD,1,50 and an unrelated TEMP,1,2
+  // at node 2 with value 75.  With no heat sources the steady state is a
+  // uniform 100 everywhere, which discriminates every failure mode:
+  //   - SPCs ignored      → no Dirichlet at all → singular system
+  //   - TEMP as Dirichlet → node 2 solves to 75
+  //   - TEMPD as Dirichlet→ free nodes solve to 50
   const auto bulk = std::string("TEMPD,1,50.0\n")
                   + "TEMP,1,2,75.0\n"
-                  + "SPC1,1,0,1,4,5,8\n";
+                  + "SPC,1,1,0,100.0,4,0,100.0\n"
+                  + "SPC,1,5,0,100.0,8,0,100.0\n";
   const auto r = run_thermal(cube_deck(50.0, bulk));
   for (int nid : {2, 3, 6, 7})
-    EXPECT_NEAR(temp_at(r, nid), 0.0, 1e-9) << "free node " << nid;
+    EXPECT_NEAR(temp_at(r, nid), 100.0, 1e-6) << "free node " << nid;
 }
 
 TEST(ThermalSteady, OrphanGrid_IsConstrainedAndDoesNotPerturbSolve) {
@@ -899,6 +932,68 @@ TEST(ThermalSteady, ChbdyGeometry_Area4AreaNormalAndPointAreaFactor) {
   // POINT geometry: area comes from the PHBDY area factor AF = 2.
   const ChbdyElementImpl point(m.chbdy_elements[1], m);
   EXPECT_NEAR(point.area(), 2.0, 1e-12);
+}
+
+TEST(ThermalSteady, ChbdyGeometry_Area4RejectsNonConvexQuad) {
+  // Node 3 pulled inside the triangle of the other three corners makes the
+  // quad reentrant.  NASTRAN-95 HBDYS aborts with fatal 3090 before forming
+  // the H/48 conductance; the (S − Ai)/12 tributary areas would otherwise
+  // come out negative at the reentrant corner.
+  const std::string bdf =
+      "SOL 153\n"
+      "CEND\n"
+      "SUBCASE 1\n"
+      "BEGIN BULK\n"
+      "MAT4,2,10.0\n"
+      "GRID,1,,0.0,0.0,0.0\n"
+      "GRID,2,,1.0,0.0,0.0\n"
+      "GRID,3,,0.1,0.1,0.0\n"
+      "GRID,4,,0.0,1.0,0.0\n"
+      "CHBDY,101,2,AREA4,1,2,3,4\n"
+      "ENDDATA\n";
+  const Model m = BdfParser::parse_string(bdf);
+  ASSERT_EQ(m.chbdy_elements.size(), 1U);
+  EXPECT_THROW((void)ChbdyElementImpl(m.chbdy_elements[0], m), SolverError);
+}
+
+TEST(ThermalSteady, ChbdyGeometry_Area4TrapezoidAreaAndLumping) {
+  // Convexity guard must not reject tapered quads: for this trapezoid the
+  // analytic area is (b1 + b2)/2 · h = 0.75 and the HBDYS tributary areas
+  // (S − Ai)/12 differ per node — node 1's opposite twice-area is the
+  // largest, so it must receive the smallest fraction.
+  const std::string bdf =
+      "SOL 153\n"
+      "CEND\n"
+      "SUBCASE 1\n"
+      "BEGIN BULK\n"
+      "MAT4,2,10.0\n"
+      "PHBDY,2,2\n"
+      "GRID,1,,0.00,0.0,0.0\n"
+      "GRID,2,,1.00,0.0,0.0\n"
+      "GRID,3,,0.75,1.0,0.0\n"
+      "GRID,4,,0.25,1.0,0.0\n"
+      "CHBDY,101,2,AREA4,1,2,3,4\n"
+      "ENDDATA\n";
+  const Model m = BdfParser::parse_string(bdf);
+  const ChbdyElementImpl trap(m.chbdy_elements[0], m);
+  EXPECT_NEAR(trap.area(), 0.75, 1e-12);
+  // Convection row sums equal H·∫N_i dA = H·(S − Ai)/12; their total is
+  // H·Area.  Symmetric node pairs (1,2) and (3,4) lump equally; the wide
+  // bottom edge (nodes 1,2) carries more area than the top.
+  const Eigen::MatrixXd conv = trap.convection_conductance();
+  const Eigen::VectorXd row_sums = conv.rowwise().sum();
+  EXPECT_NEAR(row_sums.sum(), 10.0 * 0.75, 1e-12);
+  EXPECT_NEAR(row_sums(0), row_sums(1), 1e-12);
+  EXPECT_NEAR(row_sums(2), row_sums(3), 1e-12);
+  EXPECT_GT(row_sums(0), row_sums(2));
+}
+
+TEST(ThermalSteady, HeatSubcaseRejectsStructuralSpcComponents) {
+  // A HEAT subcase that selects an SPC set containing structural components
+  // (here dof 3) must fail loudly instead of silently skipping the entry or
+  // misreading a displacement as a temperature.
+  const auto bulk = std::string("SPC,1,1,3,0.5\n");
+  EXPECT_THROW((void)run_thermal(cube_deck(50.0, bulk)), SolverError);
 }
 
 TEST(ThermalSteady, Mat5LineConductivityProjectsOntoElementAxis) {

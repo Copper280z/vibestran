@@ -66,8 +66,11 @@ augmented_convection(const ChbdyElementImpl &cb) {
 }
 
 // Collect prescribed nodal temperatures from the selected SPC set. Thermal
-// SPC component 0 is represented by an empty DofSet; component 1 is accepted
-// as the scalar temperature DOF for compatibility with common decks.
+// SPC component 0 (empty DofSet) is the scalar temperature DOF; component 1
+// is accepted for compatibility with decks that number the thermal DOF 1.
+// Structural components (2-6 or multi-component masks) are rejected loudly:
+// a HEAT subcase that accidentally selects a reused structural SPC set must
+// not silently skip — or worse, misread — displacement constraints.
 [[nodiscard]] std::unordered_map<NodeId, double>
 collect_prescribed_temperatures(const Model &model, const SubCase &sc) {
   std::unordered_map<NodeId, double> out;
@@ -76,6 +79,11 @@ collect_prescribed_temperatures(const Model &model, const SubCase &sc) {
   for (const Spc *spc : model.spcs_for_set(sc.spc_set)) {
     if (spc->dofs.mask == 0 || spc->dofs.mask == 1)
       out[spc->node] = spc->value;
+    else
+      throw SolverError(std::format(
+          "Subcase {}: SPC on node {} uses structural component(s) invalid "
+          "for a prescribed temperature (thermal SPCs use component 0)",
+          sc.id, spc->node.value));
   }
   return out;
 }

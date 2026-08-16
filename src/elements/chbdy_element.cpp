@@ -93,9 +93,19 @@ void ChbdyElementImpl::compute_geometry() {
     // for tapered and mildly warped quadrilaterals.
     const std::array<Vec3, 4> edge{
         r3 - r2, r4 - r3, r1 - r4, r2 - r1};
+    const std::array<Vec3, 4> cross{
+        edge[0].cross(edge[1]), edge[1].cross(edge[2]),
+        edge[2].cross(edge[3]), edge[3].cross(edge[0])};
+    // Convexity guard (NASTRAN-95 HBDYS fatal 3090): the H/48 conductance
+    // and (S − Ai)/12 tributary areas are only valid for convex quads; a
+    // reentrant corner would produce negative areas.
+    const double convex = cross[0].dot(cross[1]) * cross[0].dot(cross[2]) *
+                          cross[0].dot(cross[3]);
+    if (convex <= 0.0)
+      throw SolverError(std::format(
+          "CHBDY {} AREA4 is non-convex or degenerate", data_.eid.value));
     const std::array<double, 4> opposite_twice_area{
-        edge[0].cross(edge[1]).norm(), edge[1].cross(edge[2]).norm(),
-        edge[2].cross(edge[3]).norm(), edge[3].cross(edge[0]).norm()};
+        cross[0].norm(), cross[1].norm(), cross[2].norm(), cross[3].norm()};
     const double area_sum = std::accumulate(opposite_twice_area.begin(),
                                             opposite_twice_area.end(), 0.0);
     area_frac_.resize(4);
