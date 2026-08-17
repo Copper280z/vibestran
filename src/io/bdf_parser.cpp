@@ -171,6 +171,7 @@ Model BdfParser::parse_stream(std::istream &in) {
              sc.t_ref != 0.0 ||
              sc.disp_print || sc.disp_plot ||
              sc.has_any_stress_output() ||
+             sc.spc_force_print || sc.spc_force_plot ||
              sc.eigrl_id != 0 ||
              sc.eigvec_print || sc.eigvec_plot;
     };
@@ -251,7 +252,8 @@ Model BdfParser::parse_stream(std::istream &in) {
         try {
           sc.mpc_set = MpcSetId(std::stoi(kw.substr(eq + 1)));
         } catch (...) {}
-      } else if (kw.starts_with("SPC") && !kw.starts_with("SPCADD")) {
+      } else if (kw.starts_with("SPC") && !kw.starts_with("SPCADD") &&
+                 !kw.starts_with("SPCFORCE")) {
         SubCase& sc = current_subcase();
         size_t eq = kw.find('=');
         if (eq != std::string::npos)
@@ -388,6 +390,26 @@ Model BdfParser::parse_stream(std::istream &in) {
                 parse_print_plot_modifiers(kw, /*default_print=*/true);
             sc.gpstress_print = sc.gpstress_print || do_print;
             sc.gpstress_plot = sc.gpstress_plot || do_plot;
+          }
+        }
+      } else if (kw.starts_with("SPCFORCE") || kw.starts_with("SPCFORCES")) {
+        SubCase& sc = current_subcase();
+        // Syntax: SPCFORCE[(PRINT[,PLOT])] = ALL|NONE|<set_id>
+        // SPCFORCES is an accepted alias for SPCFORCE. Requesting the forces
+        // at the SPC'd DOFs of the active SPC set.
+        size_t eq = kw.find('=');
+        if (eq != std::string::npos) {
+          std::string val = kw.substr(eq + 1);
+          size_t ns = val.find_first_not_of(" \t");
+          if (ns != std::string::npos) val = val.substr(ns);
+          if (val.starts_with("NONE")) {
+            sc.spc_force_print = false;
+            sc.spc_force_plot = false;
+          } else {
+            const auto [do_print, do_plot] =
+                parse_print_plot_modifiers(kw, /*default_print=*/true);
+            sc.spc_force_print = sc.spc_force_print || do_print;
+            sc.spc_force_plot = sc.spc_force_plot || do_plot;
           }
         }
       } else if (kw.starts_with("ANALYSIS")) {

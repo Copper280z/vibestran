@@ -2,6 +2,7 @@
 #include "io/results.hpp"
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <cmath>
 #include <numbers>
@@ -266,8 +267,10 @@ void F06Writer::write(const SolverResults& results, const Model& model,
             (msc->stress_print || msc->stress_corner_print);
         const bool do_corner = (msc != nullptr) && msc->stress_corner_print;
         const bool do_gpstress = (msc != nullptr) && msc->gpstress_print;
+        const bool do_spc_force = (msc != nullptr) && msc->spc_force_print;
 
         if (do_disp) write_displacement_table(sc, out);
+        if (do_spc_force) write_spc_force_table(sc, out);
         if (do_stress_any) {
             write_bar_stress_table(sc, out);
             write_shell_stress_table(sc, out, ElementType::CQUAD4, do_corner,
@@ -342,6 +345,85 @@ void F06Writer::write_displacement_table(const SubCaseResults& sc,
         out << std::nouppercase;
         out << "\n";
     }
+    out << "\n";
+}
+
+void F06Writer::write_spc_force_table(const SubCaseResults& sc,
+                                         std::ostream& out) {
+    if (sc.spc_forces.empty()) return;
+
+    // MYSTRAN layout (the validation suite parser reads the value row
+    // windows: GRID cols 8-15, COORD SYS cols 16-24, then T1/R1... at cols
+    // 26/40/54/68/82/96, each 13 wide).  A single space separates the coord
+    // column from the first value field, as in MYSTRAN's FORMAT 9902.
+    write_subcase_header(out, sc.id);
+    if (!sc.label.empty())
+        out << " " << sc.label << "\n";
+    out << "\n";
+    out << "                                                          S P C   F O R C E S\n";
+    out << "                                              (in global coordinate system at each grid)\n";
+    out << "           GRID     COORD      T1            T2            T3            R1            R2            R3\n";
+    out << "                     SYS\n";
+
+    // Each value occupies 14 columns (13-wide right-justified value plus a
+    // trailing space), so the validation parser's 13-wide windows, which
+    // start at every 14th column, capture exactly the value.
+    auto put_value = [&](const double v) {
+        out << std::right;
+        if (v == 0.0) {
+            out << " 0.0          ";
+        } else {
+            out << std::uppercase << std::setw(13) << std::setprecision(6)
+                << std::scientific << v << ' ';
+        }
+    };
+
+    std::array<double, 6> sum{}, max{}, min{};
+    std::fill(max.begin(), max.end(), -std::numeric_limits<double>::infinity());
+    std::fill(min.begin(), min.end(), std::numeric_limits<double>::infinity());
+
+    for (const auto& sf : sc.spc_forces) {
+        out << std::right << std::setw(15) << sf.node.value;
+        out << std::setw(9) << 0; // global coordinate system
+        out << " ";
+        for (int i = 0; i < 6; ++i)
+            put_value(sf.f[static_cast<size_t>(i)]);
+        out << std::nouppercase;
+        out << "\n";
+        for (int i = 0; i < 6; ++i) {
+            const double v = sf.f[static_cast<size_t>(i)];
+            sum[static_cast<size_t>(i)] += v;
+            max[static_cast<size_t>(i)] = std::max(max[static_cast<size_t>(i)], v);
+            min[static_cast<size_t>(i)] = std::min(min[static_cast<size_t>(i)], v);
+        }
+    }
+
+    auto write_summary_row = [&](std::string_view label,
+                                 const std::array<double, 6>& vals) {
+        out << "                " << std::right << std::setw(6) << label << ":  ";
+        for (int i = 0; i < 6; ++i)
+            put_value(vals[static_cast<size_t>(i)]);
+        out << std::nouppercase << "\n";
+    };
+
+    std::array<double, 6> abs{};
+    for (int i = 0; i < 6; ++i)
+        abs[static_cast<size_t>(i)] =
+            std::max(std::abs(max[static_cast<size_t>(i)]),
+                     std::abs(min[static_cast<size_t>(i)]));
+
+    out << "                         ------------- ------------- ------------- ------------- ------------- -------------\n";
+    write_summary_row("MAX*", max);
+    write_summary_row("MIN*", min);
+    out << "\n";
+    write_summary_row("ABS*", abs);
+    out << "                *for output set\n";
+    out << "                         ------------- ------------- ------------- ------------- ------------- -------------\n";
+    out << "     SPC FORCE TOTALS:  ";
+    for (int i = 0; i < 6; ++i)
+        put_value(sum[static_cast<size_t>(i)]);
+    out << std::nouppercase << "\n";
+    out << "     (for output set)\n";
     out << "\n";
 }
 

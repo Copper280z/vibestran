@@ -25,6 +25,34 @@
 
 namespace vibestran {
 
+/// Map each local DOF index of an element to its (node, component) identity.
+/// Scalar elements (CELAS/CMASS) have one DOF per node on an explicit
+/// component; shell/line elements have 6 DOFs per node; solids have 3.
+std::vector<std::pair<NodeId, int>> local_dof_identity(const ElementData &elem) {
+  const bool scalar = elem.type == ElementType::CELAS1 ||
+                      elem.type == ElementType::CELAS2 ||
+                      elem.type == ElementType::CMASS1 ||
+                      elem.type == ElementType::CMASS2;
+  const bool solid = elem.type == ElementType::CHEXA8 ||
+                     elem.type == ElementType::CHEXA20 ||
+                     elem.type == ElementType::CTETRA4 ||
+                     elem.type == ElementType::CTETRA10 ||
+                     elem.type == ElementType::CPENTA6;
+  std::vector<std::pair<NodeId, int>> result;
+  if (scalar) {
+    result.reserve(elem.nodes.size());
+    for (size_t i = 0; i < elem.nodes.size(); ++i)
+      result.emplace_back(elem.nodes[i], elem.components[static_cast<size_t>(i)] - 1);
+    return result;
+  }
+  const int dpn = solid ? 3 : 6;
+  result.reserve(elem.nodes.size() * static_cast<size_t>(dpn));
+  for (NodeId nid : elem.nodes)
+    for (int d = 0; d < dpn; ++d)
+      result.emplace_back(nid, d);
+  return result;
+}
+
 namespace {
 
 [[nodiscard]] MaterialId property_material_id(const Property &prop) {
@@ -318,6 +346,15 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
                                          u_free);
   const auto t7 = Clock::now();
   spdlog::debug("[subcase {}] recover_results: {:.3f} ms", sc.id, Ms(t7 - t6).count());
+
+  // 7. SPC forces (only when requested)
+  if (sc.spc_force_print || sc.spc_force_plot) {
+    result.spc_forces = compute_spc_forces(model, sc, mpc_handler, u_free);
+    const auto t8 = Clock::now();
+    spdlog::debug("[subcase {}] compute_spc_forces: {:.3f} ms", sc.id,
+                  Ms(t8 - t7).count());
+  }
+
   spdlog::debug("[subcase {}] total: {:.3f} ms", sc.id, Ms(t7 - t0).count());
 
   return result;
@@ -581,6 +618,368 @@ void LinearStaticSolver::apply_thermal_loads(
 
     mpc_handler.apply_to_force(gdofs, fe_vec, F);
   }
+}
+
+namespace {
+
+/// The (node, component) -> enforced-displacement map for the active SPC set.
+/// Component is 0-based (0=T1 .. 5=R3).  Values are in the basic frame.
+std::unordered_map<NodeId, std::array<SpcDofState, 6>>
+active_spc_state(const Model &model, const SubCase &sc) {
+  std::unordered_map<NodeId, std::array<SpcDofState, 6>> spc;
+  for (const Spc *spc_c : model.spcs_for_set(sc.spc_set)) {
+    auto node_it = model.nodes.find(spc_c->node);
+    if (node_it == model.nodes.end())
+      continue;
+    const GridPoint &gp = node_it->second;
+
+    // Basic-frame enforced displacement vector at this node.
+    std::array<double, 6> u_spc{};
+    for (int d = 0; d < 6; ++d)
+      if (spc_c->dofs.has(d + 1))
+        u_spc[static_cast<size_t>(d)] = spc_c->value;
+
+    if (gp.cd.value != 0) {
+      auto cs_it = model.coord_systems.find(gp.cd);
+      if (cs_it != model.coord_systems.end()) {
+        // u_basic = R * u_cd for translations and rotations separately.
+        const Mat3 T3 = rotation_matrix(cs_it->second, gp.position);
+        std::array<double, 6> u_basic{};
+        for (int comp = 0; comp < 3; ++comp) {
+          double t = 0.0;
+          for (int j = 0; j < 3; ++j)
+            t += T3(comp, j) * u_spc[static_cast<size_t>(j)];
+          u_basic[static_cast<size_t>(comp)] = t;
+          t = 0.0;
+          for (int j = 0; j < 3; ++j)
+            t += T3(comp, j) * u_spc[static_cast<size_t>(j + 3)];
+          u_basic[static_cast<size_t>(comp + 3)] = t;
+        }
+        u_spc = u_basic;
+      }
+    }
+
+    std::array<SpcDofState, 6> &state = spc[spc_c->node];
+    for (int d = 0; d < 6; ++d) {
+      if (spc_c->dofs.has(d + 1)) {
+        state[static_cast<size_t>(d)].active = true;
+        state[static_cast<size_t>(d)].value = u_spc[static_cast<size_t>(d)];
+      }
+    }
+  }
+  return spc;
+}
+
+/// Subtract applied point loads (FORCE/MOMENT) at SPC'd DOFs from `react`.
+/// Memory: `react` is keyed by (node, component).
+void subtract_spc_point_loads(const Model &model, const SubCase &sc,
+                              const std::unordered_map<NodeId,
+                                  std::array<SpcDofState, 6>> &spc,
+                              std::unordered_map<NodeId,
+                                  std::array<double, 6>> &react) {
+  for (const auto &[lp, load_scale] : model.loads_for_set(sc.load_set)) {
+    std::visit(
+        [&](const auto &load) {
+          using T = std::decay_t<decltype(load)>;
+          if constexpr (std::is_same_v<T, ForceLoad>) {
+            Vec3 force{load_scale * load.scale * load.direction.x,
+                       load_scale * load.scale * load.direction.y,
+                       load_scale * load.scale * load.direction.z};
+            if (load.cid.value != 0) {
+              auto cs_it = model.coord_systems.find(load.cid);
+              if (cs_it != model.coord_systems.end()) {
+                const Vec3 &node_pos = model.node(load.node).position;
+                force = apply_rotation(rotation_matrix(cs_it->second, node_pos),
+                                       force);
+              }
+            }
+            auto spc_it = spc.find(load.node);
+            if (spc_it == spc.end())
+              return;
+            for (int d = 0; d < 3; ++d) {
+              if (!spc_it->second[static_cast<size_t>(d)].active)
+                continue;
+              const double v = (d == 0) ? force.x : ((d == 1) ? force.y : force.z);
+              react[load.node][static_cast<size_t>(d)] -= v;
+            }
+          } else if constexpr (std::is_same_v<T, MomentLoad>) {
+            Vec3 moment{load_scale * load.scale * load.direction.x,
+                        load_scale * load.scale * load.direction.y,
+                        load_scale * load.scale * load.direction.z};
+            if (load.cid.value != 0) {
+              auto cs_it = model.coord_systems.find(load.cid);
+              if (cs_it != model.coord_systems.end()) {
+                const Vec3 &node_pos = model.node(load.node).position;
+                moment = apply_rotation(rotation_matrix(cs_it->second, node_pos),
+                                        moment);
+              }
+            }
+            auto spc_it = spc.find(load.node);
+            if (spc_it == spc.end())
+              return;
+            for (int d = 3; d < 6; ++d) {
+              if (!spc_it->second[static_cast<size_t>(d)].active)
+                continue;
+              const double v = (d == 3) ? moment.x
+                               : ((d == 4) ? moment.y : moment.z);
+              react[load.node][static_cast<size_t>(d)] -= v;
+            }
+          }
+        },
+        *lp);
+  }
+}
+
+/// Subtract inertial (GRAV/ACCEL1) loads at SPC'd DOFs from `react`.
+void subtract_spc_inertial_loads(const Model &model, const SubCase &sc,
+                                 const std::unordered_map<NodeId,
+                                     std::array<SpcDofState, 6>> &spc,
+                                 std::unordered_map<NodeId,
+                                     std::array<double, 6>> &react) {
+  const double wtmass = wtmass_scale(model);
+  std::unordered_map<NodeId, Vec3> nodal_accels;
+  bool has_inertial_load = false;
+
+  auto add_accel = [&](NodeId nid, const Vec3 &accel) {
+    nodal_accels[nid] = nodal_accels[nid] + accel;
+  };
+
+  for (const auto &[lp, load_scale] : model.loads_for_set(sc.load_set)) {
+    std::visit(
+        [&](const auto &load) {
+          using T = std::decay_t<decltype(load)>;
+          if constexpr (std::is_same_v<T, GravLoad>) {
+            has_inertial_load = true;
+            for (const auto &[nid, gp] : model.nodes) {
+              const Vec3 accel = load_direction_in_basic(
+                  model, load.cid, load.direction * (load_scale * load.scale),
+                  gp.position);
+              add_accel(nid, accel);
+            }
+          } else if constexpr (std::is_same_v<T, Accel1Load>) {
+            has_inertial_load = true;
+            for (NodeId nid : load.nodes) {
+              const Vec3 accel = load_direction_in_basic(
+                  model, load.cid, load.direction * (load_scale * load.scale),
+                  model.node(nid).position);
+              add_accel(nid, accel);
+            }
+          }
+        },
+        *lp);
+  }
+  if (!has_inertial_load)
+    return;
+
+  for (const auto &elem_data : model.elements) {
+    auto elem = make_element(elem_data, model);
+    LocalKe mass = elem->mass_matrix();
+    if (mass.rows() == 0)
+      continue;
+    mass *= wtmass;
+    if (mass.cwiseAbs().maxCoeff() < 1e-30)
+      continue;
+
+    LocalFe accel = LocalFe::Zero(elem->num_dofs());
+    switch (elem_data.type) {
+    case ElementType::CQUAD4:
+    case ElementType::CTRIA3:
+    case ElementType::CBAR:
+    case ElementType::CBEAM:
+    case ElementType::CBUSH:
+      for (size_t i = 0; i < elem_data.nodes.size(); ++i) {
+        const Vec3 a = nodal_accels[elem_data.nodes[i]];
+        accel(6 * static_cast<int>(i) + 0) = a.x;
+        accel(6 * static_cast<int>(i) + 1) = a.y;
+        accel(6 * static_cast<int>(i) + 2) = a.z;
+      }
+      break;
+    case ElementType::CHEXA8:
+    case ElementType::CHEXA20:
+    case ElementType::CTETRA4:
+    case ElementType::CTETRA10:
+    case ElementType::CPENTA6:
+      for (size_t i = 0; i < elem_data.nodes.size(); ++i) {
+        const Vec3 a = nodal_accels[elem_data.nodes[i]];
+        accel(3 * static_cast<int>(i) + 0) = a.x;
+        accel(3 * static_cast<int>(i) + 1) = a.y;
+        accel(3 * static_cast<int>(i) + 2) = a.z;
+      }
+      break;
+    case ElementType::CELAS1:
+    case ElementType::CELAS2:
+      break;
+    case ElementType::CMASS1:
+    case ElementType::CMASS2:
+      for (size_t i = 0; i < elem_data.nodes.size(); ++i) {
+        const auto it = nodal_accels.find(elem_data.nodes[i]);
+        if (it == nodal_accels.end())
+          continue;
+        accel(static_cast<int>(i)) =
+            component_value(it->second, elem_data.components[i]);
+      }
+      break;
+    case ElementType::CHBDY:
+      continue;
+    }
+
+    const LocalFe fe = mass * accel;
+    if (fe.cwiseAbs().maxCoeff() < 1e-30)
+      continue;
+
+    const auto identity = local_dof_identity(elem_data);
+    for (int li = 0; li < elem->num_dofs(); ++li) {
+      const auto [nid, comp] = identity[static_cast<size_t>(li)];
+      const auto spc_it = spc.find(nid);
+      if (spc_it == spc.end() ||
+          !spc_it->second[static_cast<size_t>(comp)].active)
+        continue;
+      react[nid][static_cast<size_t>(comp)] -=
+          fe(static_cast<Eigen::Index>(li));
+    }
+  }
+}
+
+/// Subtract thermal element loads at SPC'd DOFs from `react`.
+void subtract_spc_thermal_loads(const Model &model, const SubCase &sc,
+                                const std::unordered_map<NodeId,
+                                    std::array<SpcDofState, 6>> &spc,
+                                std::unordered_map<NodeId,
+                                    std::array<double, 6>> &react) {
+  int temp_set = sc.temp_load_set;
+  if (temp_set == 0)
+    temp_set = sc.load_set.value;
+
+  std::unordered_map<NodeId, double> nodal_temps;
+  for (const auto &load : model.loads) {
+    if (const TempLoad *tl = std::get_if<TempLoad>(&load)) {
+      if (tl->sid == LoadSetId(temp_set))
+        nodal_temps[tl->node] = tl->temperature;
+    }
+  }
+  auto tempd_it = model.tempd.find(temp_set);
+  if (tempd_it != model.tempd.end()) {
+    const double T_default = tempd_it->second;
+    for (const auto &[nid, _] : model.nodes) {
+      if (!nodal_temps.contains(nid))
+        nodal_temps[nid] = T_default;
+    }
+  }
+  if (nodal_temps.empty())
+    return;
+
+  for (const auto &elem_data : model.elements) {
+    auto elem = make_element(elem_data, model);
+    auto node_ids = elem->node_ids();
+    const int nn = static_cast<int>(node_ids.size());
+
+    MaterialId mid{0};
+    if (elem_data.type != ElementType::CELAS2 &&
+        elem_data.type != ElementType::CMASS2) {
+      const auto &prop = model.property(elem_data.pid);
+      mid = property_material_id(prop);
+    }
+    const double elem_t_ref =
+        (mid.value != 0) ? model.material(mid).ref_temp : 0.0;
+
+    std::vector<double> temps(static_cast<size_t>(nn));
+    for (int i = 0; i < nn; ++i) {
+      auto it = nodal_temps.find(node_ids[static_cast<size_t>(i)]);
+      temps[static_cast<size_t>(i)] =
+          (it != nodal_temps.end()) ? it->second : elem_t_ref;
+    }
+
+    const LocalFe fe = elem->thermal_load(temps, elem_t_ref);
+    const auto identity = local_dof_identity(elem_data);
+    for (int li = 0; li < elem->num_dofs(); ++li) {
+      const auto [nid, comp] = identity[static_cast<size_t>(li)];
+      const auto spc_it = spc.find(nid);
+      if (spc_it == spc.end() ||
+          !spc_it->second[static_cast<size_t>(comp)].active)
+        continue;
+      react[nid][static_cast<size_t>(comp)] -=
+          fe(static_cast<Eigen::Index>(li));
+    }
+  }
+}
+
+} // namespace
+
+std::vector<SpcForce>
+LinearStaticSolver::compute_spc_forces(const Model &model, const SubCase &sc,
+                                       const MpcHandler &mpc_handler,
+                                       const std::vector<double> &u_free) {
+  const DofMap &dof_map = mpc_handler.full_dof_map();
+
+  const auto spc = active_spc_state(model, sc);
+  if (spc.empty())
+    return {};
+
+  // Internal force at SPC'd DOFs: sum over elements of Ke * ue, taking only
+  // the rows corresponding to constrained DOFs.  This is the MYSTRAN
+  // quantity QSK + QSYS (K_SF*u_F + K_SSe*YSe).
+  std::unordered_map<NodeId, std::array<double, 6>> react;
+  react.reserve(spc.size());
+
+  for (const auto &elem_data : model.elements) {
+    auto elem = make_element(elem_data, model);
+    const auto gdofs = elem->global_dof_indices(dof_map);
+    const auto identity = local_dof_identity(elem_data);
+    const int ndof = elem->num_dofs();
+
+    Eigen::VectorXd ue = Eigen::VectorXd::Zero(ndof);
+    for (int li = 0; li < ndof; ++li) {
+      const EqIndex eq = gdofs[static_cast<size_t>(li)];
+      if (eq != CONSTRAINED_DOF &&
+          eq < static_cast<EqIndex>(u_free.size())) {
+        ue(static_cast<Eigen::Index>(li)) = u_free[static_cast<size_t>(eq)];
+      } else {
+        const auto [nid, comp] = identity[static_cast<size_t>(li)];
+        const auto spc_it = spc.find(nid);
+        if (spc_it != spc.end() &&
+            spc_it->second[static_cast<size_t>(comp)].active)
+          ue(static_cast<Eigen::Index>(li)) =
+              spc_it->second[static_cast<size_t>(comp)].value;
+      }
+    }
+
+    const LocalKe ke = elem->stiffness_matrix();
+    const Eigen::VectorXd fe = ke * ue;
+    for (int li = 0; li < ndof; ++li) {
+      const auto [nid, comp] = identity[static_cast<size_t>(li)];
+      const auto spc_it = spc.find(nid);
+      if (spc_it == spc.end() ||
+          !spc_it->second[static_cast<size_t>(comp)].active)
+        continue;
+      react[nid][static_cast<size_t>(comp)] +=
+          fe(static_cast<Eigen::Index>(li));
+    }
+  }
+
+  // Subtract applied loads at the SPC'd DOFs (P_s term in MYSTRAN).
+  subtract_spc_point_loads(model, sc, spc, react);
+  subtract_spc_inertial_loads(model, sc, spc, react);
+  subtract_spc_thermal_loads(model, sc, spc, react);
+  compute_spc_pressure_loads(model, sc, dof_map, spc, react);
+
+  // Build per-node result in node-ID order.
+  std::vector<NodeId> sorted_nodes;
+  sorted_nodes.reserve(spc.size());
+  for (const auto &[nid, _] : spc)
+    sorted_nodes.push_back(nid);
+  std::sort(sorted_nodes.begin(), sorted_nodes.end());
+
+  std::vector<SpcForce> result;
+  result.reserve(sorted_nodes.size());
+  for (NodeId nid : sorted_nodes) {
+    SpcForce sf;
+    sf.node = nid;
+    const auto it = react.find(nid);
+    if (it != react.end())
+      sf.f = it->second;
+    result.push_back(std::move(sf));
+  }
+  return result;
 }
 
 SubCaseResults

@@ -102,6 +102,92 @@ ENDDATA
     EXPECT_NEAR(get_disp(results, 2, 0), 2.0, 1e-12);
 }
 
+static const SpcForce* get_spc_force(const SolverResults& res, int node_id) {
+    for (const auto& sc : res.subcases)
+        for (const auto& sf : sc.spc_forces)
+            if (sf.node.value == node_id) // cppcheck-suppress useStlAlgorithm
+                return &sf;
+    return nullptr;
+}
+
+TEST(Integration, SpcReactionBalancesAppliedPointLoad) {
+    // Node 1 is fully fixed; a CELAS2 spring connects node 1 to node 2, and a
+    // +10 x-force is applied at node 2.  The SPC reaction at node 1 must
+    // equal -10 to balance the applied load, and the spring force must equal
+    // the applied load.
+    const SolverResults results = run_analysis(R"(
+SOL 101
+CEND
+SUBCASE 1
+  SPC = 1
+  LOAD = 1
+  SPCFORCES = ALL
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,1.,0.,0.
+CELAS2,1,100.,1,1,2,1
+SPC1,1,123456,1
+FORCE,1,2,,10.,1.,0.,0.
+ENDDATA
+)");
+
+    EXPECT_NEAR(get_disp(results, 2, 0), 0.1, 1e-12);
+
+    const SpcForce* sf = get_spc_force(results, 1);
+    ASSERT_NE(sf, nullptr);
+    EXPECT_NEAR(sf->f[0], -10.0, 1e-9);
+    EXPECT_NEAR(sf->f[1], 0.0, 1e-9);
+    EXPECT_NEAR(sf->f[2], 0.0, 1e-9);
+}
+
+TEST(Integration, EnforcedDisplacementCreatesSpcReaction) {
+    // Node 1 is SPC-enforced to u=2.0 (non-zero SPC D value), node 2 is pulled
+    // back with a force so the spring is stretched by the enforcement:
+    // 100*(u2 - 2) = -300  =>  u2 = -1.  The reaction at node 1 equals the
+    // spring force the constraint must supply: 100*(u1 - u2) = +300.
+    const SolverResults results = run_analysis(R"(
+SOL 101
+CEND
+SUBCASE 1
+  SPC = 1
+  LOAD = 1
+  SPCFORCES = ALL
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,1.,0.,0.
+CELAS2,1,100.,1,1,2,1
+SPC,1,1,1,2.0
+FORCE,1,2,,300.,-1.,0.,0.
+ENDDATA
+)");
+
+    EXPECT_NEAR(get_disp(results, 2, 0), -1.0, 1e-9);
+
+    const SpcForce* sf = get_spc_force(results, 1);
+    ASSERT_NE(sf, nullptr);
+    EXPECT_NEAR(sf->f[0], 300.0, 1e-6);
+}
+
+TEST(Integration, SpcForcesNotComputedWithoutRequest) {
+    const SolverResults results = run_analysis(R"(
+SOL 101
+CEND
+SUBCASE 1
+  SPC = 1
+  LOAD = 1
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,1.,0.,0.
+CELAS2,1,100.,1,1,2,1
+SPC1,1,123456,1
+FORCE,1,2,,10.,1.,0.,0.
+ENDDATA
+)");
+
+    for (const auto& sc : results.subcases)
+        EXPECT_TRUE(sc.spc_forces.empty());
+}
+
 static std::string make_single_cquad4_pressure_bdf(const std::string& load_cards) {
     std::ostringstream bdf;
     bdf << "SOL 101\n"

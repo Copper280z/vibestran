@@ -48,6 +48,7 @@ vibestran/
 - **Properties**: PSHELL, PSOLID, PBAR, PBARL (`ROD`, `TUBE`, `BAR`), PBEAM, PBUSH (`K` section), PELAS, PMASS
 - **Loads**: FORCE, MOMENT, TEMP/TEMPD, PLOAD, PLOAD1 (CBAR/CBEAM), PLOAD2, PLOAD4, GRAV, ACCEL1
 - **Constraints**: SPC, SPC1, MPC, RBE2, RBE3
+- **Reaction output**: SPCFORCE(S) in F06 (MYSTRAN-compatible `S P C   F O R C E S` block)
 - **Coordinate systems**: CORD1R/C/S, CORD2R/C/S
 - **Input formats**: Nastran BDF (`.bdf`) and CalculiX/Abaqus (`.inp`, experimental)
 - **Solutions**: SOL 101 (Linear Static), SOL 103 (Normal Modes / Modal Analysis)

@@ -555,6 +555,8 @@ struct SubCase {
   bool stress_corner_plot{false};  // STRESS(PLOT,CORNER)=ALL
   bool gpstress_print{false};      // GPSTRESS(PRINT)=ALL
   bool gpstress_plot{false};       // GPSTRESS(PLOT)=ALL
+  bool spc_force_print{false};     // SPCFORCE(PRINT)=ALL or SPCFORCE=ALL
+  bool spc_force_plot{false};      // SPCFORCE(PLOT)=ALL
 
   // Modal analysis (SOL 103) output selection
   int eigrl_id{0};        // METHOD = <sid>  references an EIGRL card

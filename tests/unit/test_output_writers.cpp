@@ -386,6 +386,74 @@ TEST(F06Writer, DisplacementRowMatchesParserColumns) {
     EXPECT_DOUBLE_EQ(std::stod(line.substr(95, 13)), 3.25e-4);
 }
 
+TEST(F06Writer, SpcForceTableEmittedWhenRequested) {
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    SpcForce sf;
+    sf.node = NodeId{7};
+    sf.f = {1.5, -2.5, 0.0, 0.0, 0.0, 3.25e-4};
+    sc.spc_forces.push_back(sf);
+    res.subcases.push_back(sc);
+
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].spc_force_print = true;
+
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+    std::string out = oss.str();
+    EXPECT_NE(out.find("S P C   F O R C E S"), std::string::npos);
+    EXPECT_NE(out.find("SPC FORCE TOTALS"), std::string::npos);
+}
+
+TEST(F06Writer, SpcForceRowMatchesParserColumns) {
+    // Parser windows: gid cols 8-15, TX 26-38, TY 40-52, TZ 54-66,
+    // RX 68-80, RY 82-94, RZ 96-108.
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    SpcForce sf;
+    sf.node = NodeId{7};
+    sf.f = {1.5, -2.5, 0.0, 0.0, 0.0, 3.25e-4};
+    sc.spc_forces.push_back(sf);
+    res.subcases.push_back(sc);
+
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].spc_force_print = true;
+
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+
+    std::istringstream iss(oss.str());
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.rfind("              7        0", 0) == 0) break;
+        line.clear();
+    }
+    ASSERT_FALSE(line.empty());
+    EXPECT_EQ(line.substr(7, 8), "       7");
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(25, 13)), 1.5);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(39, 13)), -2.5);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(95, 13)), 3.25e-4);
+}
+
+TEST(F06Writer, SpcForceTableSuppressedWithoutRequest) {
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    SpcForce sf;
+    sf.node = NodeId{7};
+    sf.f = {1.5, -2.5, 0.0, 0.0, 0.0, 3.25e-4};
+    sc.spc_forces.push_back(sf);
+    res.subcases.push_back(sc);
+
+    Model m = make_empty_model_sc1();  // spc_force_print defaults false
+
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+    EXPECT_EQ(oss.str().find("S P C   F O R C E S"), std::string::npos);
+}
+
 TEST(F06Writer, StaticSubcaseHeaderMatchesParserFormat) {
     SolverResults res;
     SubCaseResults sc = make_sc_with_disps();
@@ -1228,6 +1296,83 @@ ENDDATA
     EXPECT_FALSE(sc.stress_corner_print);
     EXPECT_TRUE(sc.stress_corner_plot);
 }
+
+TEST(BdfParser, SpcForceAllSetsPrintOnly) {
+    // No modifier → PRINT (F06) only; OP2 remains off
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+  SPCFORCES = ALL
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_TRUE(sc.spc_force_print);
+    EXPECT_FALSE(sc.spc_force_plot);
+}
+
+TEST(BdfParser, SpcForcePrintPlotAllSetsBoth) {
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+  SPCFORCE(PRINT,PLOT) = ALL
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_TRUE(sc.spc_force_print);
+    EXPECT_TRUE(sc.spc_force_plot);
+}
+
+TEST(BdfParser, SpcForceNoneClearsBoth) {
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+  SPCFORCE(PRINT) = ALL
+  SPCFORCE = NONE
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_FALSE(sc.spc_force_print);
+    EXPECT_FALSE(sc.spc_force_plot);
+}
+
+TEST(BdfParser, SpcForceDoesNotClobberSpcSet) {
+    // SPCFORCES is a different case-control card than SPC; the SPC set must
+    // still be parsed.
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 5
+  SPCFORCES = ALL
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_EQ(sc.spc_set, SpcSetId{5});
+    EXPECT_TRUE(sc.spc_force_print);
+}
+
 
 TEST(BdfParser, GpstressDefaultsToPrint) {
     const std::string bdf = R"(

@@ -17,8 +17,22 @@
 #include "io/results.hpp"
 #include "solver/solver_backend.hpp"
 #include <memory>
+#include <utility>
+#include <vector>
 
 namespace vibestran {
+
+/// Per-DOF state for SPC force recovery: whether the DOF is constrained by
+/// the active SPC set and the enforced basic-frame displacement value.
+struct SpcDofState {
+  bool active{false};
+  double value{0.0};
+};
+
+/// Map each local DOF index of an element to its (node, component) identity.
+/// Scalar elements (CELAS/CMASS) have one DOF per node on an explicit
+/// component; shell/line elements have 6 DOFs per node; solids have 3.
+std::vector<std::pair<NodeId, int>> local_dof_identity(const ElementData& elem);
 
 class LinearStaticSolver {
 public:
@@ -77,6 +91,23 @@ private:
                                    const SubCase& sc,
                                    const DofMap& dof_map,
                                    const std::vector<double>& u_free);
+
+    /// Compute SPC constraint forces (global frame) at the active SPC set's
+    /// constrained DOFs: f = (K·u − F) restricted to those DOFs. Only called
+    /// when SPC force output was requested for the subcase.
+    std::vector<SpcForce>
+    compute_spc_forces(const Model& model, const SubCase& sc,
+                       const MpcHandler& mpc_handler,
+                       const std::vector<double>& u_free);
+
+    /// Accumulate pressure-applied nodal loads at the given SPC'd DOFs into
+    /// `react` (global/basic frame), for SPC force recovery.  Defined in
+    /// linear_static_pressure.cpp so it can reuse the face-integration
+    /// helpers.
+    void compute_spc_pressure_loads(
+        const Model& model, const SubCase& sc, const DofMap& dof_map,
+        const std::unordered_map<NodeId, std::array<SpcDofState, 6>>& spc,
+        std::unordered_map<NodeId, std::array<double, 6>>& react) const;
 };
 
 } // namespace vibestran

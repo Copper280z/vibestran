@@ -586,6 +586,39 @@ void apply_element_force_vector(const ElementData &elem_data, const Model &model
   mpc_handler.apply_to_force(gdofs, fe, F);
 }
 
+/// Accumulate an element nodal-force vector into the SPC reaction map,
+/// taking only rows that belong to SPC'd DOFs (from `spc`).
+void add_spc_element_force(
+    const ElementData &elem_data, const std::vector<double> &fe,
+    const std::unordered_map<NodeId, std::array<SpcDofState, 6>> &spc,
+    std::unordered_map<NodeId, std::array<double, 6>> &react) {
+  const auto identity = local_dof_identity(elem_data);
+  for (size_t li = 0; li < identity.size(); ++li) {
+    const auto [nid, comp] = identity[li];
+    const auto spc_it = spc.find(nid);
+    if (spc_it == spc.end() || !spc_it->second[static_cast<size_t>(comp)].active)
+      continue;
+    react[nid][static_cast<size_t>(comp)] += fe[li];
+  }
+}
+
+/// Add a nodal force (translations) at node to the SPC reaction map if any
+/// of its DOFs are SPC'd.
+void add_spc_node_force(
+    const NodeId node, const Vec3 &force,
+    const std::unordered_map<NodeId, std::array<SpcDofState, 6>> &spc,
+    std::unordered_map<NodeId, std::array<double, 6>> &react) {
+  auto spc_it = spc.find(node);
+  if (spc_it == spc.end())
+    return;
+  for (int d = 0; d < 3; ++d) {
+    if (!spc_it->second[static_cast<size_t>(d)].active)
+      continue;
+    const double v = (d == 0) ? force.x : ((d == 1) ? force.y : force.z);
+    react[node][static_cast<size_t>(d)] += v;
+  }
+}
+
 Vec3 pload_triangle_force(const std::array<Vec3, 3> &coords,
                           const double pressure) {
   return scaled((coords[1] - coords[0]).cross(coords[2] - coords[0]),
@@ -779,6 +812,207 @@ void LinearStaticSolver::apply_pressure_loads(const Model &model,
                 apply_element_force_vector(
                     elem, model, dof_map, mpc_handler,
                     solid_face_force_vector(elem, face, forces), F);
+              } else {
+                throw SolverError(std::format(
+                    "PLOAD4 element {} resolved an unsupported face size {}",
+                    elem.id.value, face.size()));
+              }
+            } else {
+              throw SolverError(std::format(
+                  "PLOAD4 on element {} uses unsupported element type",
+                  elem.id.value));
+            }
+          }
+        },
+        *lp);
+  }
+}
+
+// cppcheck-suppress unusedFunction -- called from linear_static.cpp
+void LinearStaticSolver::compute_spc_pressure_loads(
+    const Model &model, const SubCase &sc, const DofMap & /*dof_map*/,
+    const std::unordered_map<NodeId, std::array<SpcDofState, 6>> &spc,
+    std::unordered_map<NodeId, std::array<double, 6>> &react) const {
+  std::unordered_map<ElementId, const ElementData *> elements_by_id;
+  elements_by_id.reserve(model.elements.size());
+  for (const auto &elem : model.elements)
+    elements_by_id.emplace(elem.id, &elem);
+
+  for (const auto &[lp, load_scale] : model.loads_for_set(sc.load_set)) {
+    std::visit(
+        [&](const auto &load) {
+          using T = std::decay_t<decltype(load)>;
+
+          if constexpr (std::is_same_v<T, PloadLoad>) {
+            const double scale = load_scale * load.pressure;
+            if (load.nodes.size() == 3) {
+              const std::array<Vec3, 3> coords{
+                  model.node(load.nodes[0]).position,
+                  model.node(load.nodes[1]).position,
+                  model.node(load.nodes[2]).position,
+              };
+              const Vec3 total_force =
+                  pload_triangle_force(coords, scale);
+              for (NodeId nid : load.nodes)
+                add_spc_node_force(nid, scaled(total_force, 1.0 / 3.0), spc,
+                                   react);
+            } else {
+              const std::array<Vec3, 4> coords{
+                  model.node(load.nodes[0]).position,
+                  model.node(load.nodes[1]).position,
+                  model.node(load.nodes[2]).position,
+                  model.node(load.nodes[3]).position,
+              };
+              const Vec3 total_force = pload_quad_force(coords, scale);
+              for (NodeId nid : load.nodes)
+                add_spc_node_force(nid, scaled(total_force, 0.25), spc, react);
+            }
+
+          } else if constexpr (std::is_same_v<T, Pload1Load>) {
+            const auto it = elements_by_id.find(load.element);
+            if (it == elements_by_id.end()) {
+              throw SolverError(std::format(
+                  "PLOAD1 references undefined element {}",
+                  load.element.value));
+            }
+            const ElementData &elem = *it->second;
+            const LocalFe fe = compute_pload1_equivalent_load(elem, model, load);
+            const std::vector<double> fe_vec(fe.data(), fe.data() + fe.size());
+            add_spc_element_force(elem, fe_vec, spc, react);
+
+          } else if constexpr (std::is_same_v<T, Pload2Load>) {
+            const auto it = elements_by_id.find(load.element);
+            if (it == elements_by_id.end()) {
+              throw SolverError(std::format(
+                  "PLOAD2 references undefined element {}",
+                  load.element.value));
+            }
+            const ElementData &elem = *it->second;
+
+            if (elem.type == ElementType::CQUAD4) {
+              const std::array<Vec3, 4> coords{
+                  model.node(elem.nodes[0]).position,
+                  model.node(elem.nodes[1]).position,
+                  model.node(elem.nodes[2]).position,
+                  model.node(elem.nodes[3]).position,
+              };
+              const double p = load_scale * load.pressure;
+              const std::array<double, 4> pressures{p, p, p, p};
+              const auto nodal_forces = integrate_quad_surface_load(
+                  coords, pressures, model, std::nullopt, 1.0,
+                  std::format("PLOAD2 element {}", elem.id.value));
+              const std::vector<Vec3> forces(nodal_forces.begin(),
+                                             nodal_forces.end());
+              add_spc_element_force(elem, shell_force_vector(elem, forces),
+                                    spc, react);
+            } else if (elem.type == ElementType::CTRIA3) {
+              const std::array<Vec3, 3> coords{
+                  model.node(elem.nodes[0]).position,
+                  model.node(elem.nodes[1]).position,
+                  model.node(elem.nodes[2]).position,
+              };
+              const double p = load_scale * load.pressure;
+              const std::array<double, 3> pressures{p, p, p};
+              const auto nodal_forces = integrate_tri3_surface_load(
+                  coords, pressures, model, std::nullopt, 1.0,
+                  std::format("PLOAD2 element {}", elem.id.value));
+              const std::vector<Vec3> forces(nodal_forces.begin(),
+                                             nodal_forces.end());
+              add_spc_element_force(elem, shell_force_vector(elem, forces),
+                                    spc, react);
+            } else {
+              throw SolverError(std::format(
+                  "PLOAD2 on element {} is only supported for CQUAD4 and "
+                  "CTRIA3",
+                  elem.id.value));
+            }
+
+          } else if constexpr (std::is_same_v<T, Pload4Load>) {
+            const auto it = elements_by_id.find(load.element);
+            if (it == elements_by_id.end()) {
+              throw SolverError(std::format(
+                  "PLOAD4 references undefined element {}",
+                  load.element.value));
+            }
+            const ElementData &elem = *it->second;
+            const std::optional<DirectionSpec> direction =
+                load.use_vector
+                    ? std::optional<DirectionSpec>{
+                          DirectionSpec{load.cid, load.direction}}
+                    : std::nullopt;
+            const std::string context =
+                std::format("PLOAD4 element {}", elem.id.value);
+
+            const std::array<double, 4> scaled_pressures{
+                load_scale * load.pressures[0],
+                load_scale * load.pressures[1],
+                load_scale * load.pressures[2],
+                load_scale * load.pressures[3]};
+            if (elem.type == ElementType::CQUAD4) {
+              const std::array<Vec3, 4> coords{
+                  model.node(elem.nodes[0]).position,
+                  model.node(elem.nodes[1]).position,
+                  model.node(elem.nodes[2]).position,
+                  model.node(elem.nodes[3]).position,
+              };
+              const auto nodal_forces = integrate_quad_surface_load(
+                  coords, scaled_pressures, model, direction, 1.0, context);
+              const std::vector<Vec3> forces(nodal_forces.begin(),
+                                             nodal_forces.end());
+              add_spc_element_force(elem, shell_force_vector(elem, forces),
+                                    spc, react);
+            } else if (elem.type == ElementType::CTRIA3) {
+              const std::array<Vec3, 3> coords{
+                  model.node(elem.nodes[0]).position,
+                  model.node(elem.nodes[1]).position,
+                  model.node(elem.nodes[2]).position,
+              };
+              const std::array<double, 3> tri_pressures{
+                  scaled_pressures[0], scaled_pressures[1],
+                  scaled_pressures[2]};
+              const auto nodal_forces = integrate_tri3_surface_load(
+                  coords, tri_pressures, model, direction, 1.0, context);
+              const std::vector<Vec3> forces(nodal_forces.begin(),
+                                             nodal_forces.end());
+              add_spc_element_force(elem, shell_force_vector(elem, forces),
+                                    spc, react);
+            } else if (is_supported_solid_pressure_element(elem.type)) {
+              const std::vector<int> face =
+                  select_solid_face(elem, model, load);
+
+              if (face.size() == 4) {
+                const auto coords = quad_face_coords(elem, model, face);
+                const auto nodal_forces = integrate_quad_surface_load(
+                    coords, scaled_pressures, model, direction, -1.0, context);
+                const std::vector<Vec3> forces(nodal_forces.begin(),
+                                               nodal_forces.end());
+                add_spc_element_force(
+                    elem, solid_face_force_vector(elem, face, forces), spc,
+                    react);
+              } else if (face.size() == 3) {
+                const auto coords = tri3_face_coords(elem, model, face);
+                const std::array<double, 3> tri_pressures{
+                    scaled_pressures[0], scaled_pressures[1],
+                    scaled_pressures[2]};
+                const auto nodal_forces = integrate_tri3_surface_load(
+                    coords, tri_pressures, model, direction, -1.0, context);
+                const std::vector<Vec3> forces(nodal_forces.begin(),
+                                               nodal_forces.end());
+                add_spc_element_force(
+                    elem, solid_face_force_vector(elem, face, forces), spc,
+                    react);
+              } else if (face.size() == 6) {
+                const auto coords = tri6_face_coords(elem, model, face);
+                const std::array<double, 3> tri_pressures{
+                    scaled_pressures[0], scaled_pressures[1],
+                    scaled_pressures[2]};
+                const auto nodal_forces = integrate_tri6_surface_load(
+                    coords, tri_pressures, model, direction, -1.0, context);
+                const std::vector<Vec3> forces(nodal_forces.begin(),
+                                               nodal_forces.end());
+                add_spc_element_force(
+                    elem, solid_face_force_vector(elem, face, forces), spc,
+                    react);
               } else {
                 throw SolverError(std::format(
                     "PLOAD4 element {} resolved an unsupported face size {}",

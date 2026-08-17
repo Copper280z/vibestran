@@ -95,11 +95,19 @@ struct ElementHeatFlux {
   double magnitude{0.0};
 };
 
+/// Constraint reaction force at an SPC'd DOF set (global/basic frame).
+struct SpcForce {
+  constexpr SpcForce() = default;
+  NodeId node{0};
+  std::array<double, 6> f{}; // indexed 0-5 (T1,R1...)
+};
+
 struct SubCaseResults {
   int id{1};
   std::string label;
 
   std::vector<NodeDisplacement> displacements;
+  std::vector<SpcForce> spc_forces;
   std::vector<LineStress> line_stresses;
   std::vector<PlateStress> plate_stresses;
   std::vector<SolidStress> solid_stresses;
@@ -184,6 +192,8 @@ private:
   static void write_subcase_header(std::ostream& out, int subcase_id);
   static void write_displacement_table(const SubCaseResults& sc,
                                        std::ostream& out);
+  static void write_spc_force_table(const SubCaseResults& sc,
+                                    std::ostream& out);
   static void write_shell_stress_table(
       const SubCaseResults& sc, std::ostream& out, ElementType etype,
       bool corners,
