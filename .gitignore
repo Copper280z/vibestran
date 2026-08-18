@@ -2,3 +2,24 @@
 build/
 subprojects/*/
 .venv/
+
+# Root-level solver decks and the outputs they generate (tracked decks live
+# under example_cases/ and tests/, which these anchored patterns do not touch)
+/*.bdf
+/*.bdf.zip
+/*.dat
+/*.inp
+/*.f06
+/*.F06
+/*.op2
+/*.OP2
+/*.err
+/*.ERR
+/*.ou1
+/*.OU1
+/*.neu
+/*.NEU
+
+# Local scratch case directories
+/mitc4_cases/
+/test_cases/

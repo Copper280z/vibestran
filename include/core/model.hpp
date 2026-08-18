@@ -553,6 +553,8 @@ struct SubCase {
   bool stress_plot{false};  // STRESS(PLOT)=ALL
   bool stress_corner_print{false}; // STRESS(PRINT,CORNER)=ALL
   bool stress_corner_plot{false};  // STRESS(PLOT,CORNER)=ALL
+  bool strain_print{false};        // STRAIN(PRINT)=ALL  or  STRAIN=ALL
+  bool strain_corner_print{false}; // STRAIN(PRINT,CORNER)=ALL
   bool gpstress_print{false};      // GPSTRESS(PRINT)=ALL
   bool gpstress_plot{false};       // GPSTRESS(PLOT)=ALL
   bool spc_force_print{false};     // SPCFORCE(PRINT)=ALL or SPCFORCE=ALL
@@ -573,6 +575,10 @@ struct SubCase {
 
   [[nodiscard]] bool has_any_stress_output() const noexcept {
     return has_any_stress_print() || has_any_stress_plot();
+  }
+
+  [[nodiscard]] bool has_any_strain_output() const noexcept {
+    return strain_print || strain_corner_print;
   }
 };
 

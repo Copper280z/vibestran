@@ -336,7 +336,41 @@ Model BdfParser::parse_stream(std::istream &in) {
             }
           }
         }
-      } else if (kw.starts_with("STRESS") || kw.starts_with("STRAIN")) {
+      } else if (kw.starts_with("STRAIN")) {
+        SubCase& sc = current_subcase();
+        // Syntax: STRAIN[(PRINT[,PLOT][,CORNER])] = ALL|NONE|<set_id>
+        // No PRINT/PLOT modifier defaults to PRINT.
+        // CORNER requests vertex strains in addition to the centroidal STRAIN
+        // output.  STRAIN is an independent output channel from STRESS (MYSTRAN
+        // semantics); PLOT is folded into the print channel because strain has
+        // no OP2 output path.
+        size_t eq = kw.find('=');
+        if (eq != std::string::npos) {
+          std::string val = kw.substr(eq + 1);
+          size_t ns = val.find_first_not_of(" \t");
+          if (ns != std::string::npos) val = val.substr(ns);
+          if (val.starts_with("NONE")) {
+            sc.strain_print = false;
+            sc.strain_corner_print = false;
+          } else {
+            const auto [do_print, do_plot] =
+                parse_print_plot_modifiers(kw, /*default_print=*/true);
+            const bool want = do_print || do_plot;
+            sc.strain_print = sc.strain_print || want;
+
+            const size_t lp = kw.find('(');
+            const size_t rp = kw.find(')');
+            if (lp != std::string::npos && rp != std::string::npos && rp > lp) {
+              const std::string mods = kw.substr(lp + 1, rp - lp - 1);
+              const bool want_corner = (mods.find("CORNER") != std::string::npos) ||
+                                       (mods.find("BILIN") != std::string::npos);
+              if (want_corner) {
+                sc.strain_corner_print = sc.strain_corner_print || want;
+              }
+            }
+          }
+        }
+      } else if (kw.starts_with("STRESS")) {
         SubCase& sc = current_subcase();
         // Syntax: STRESS[(PRINT[,PLOT][,CORNER])] = ALL|NONE|<set_id>
         // No PRINT/PLOT modifier defaults to PRINT.

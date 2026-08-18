@@ -60,6 +60,25 @@ struct SolidStress {
   std::vector<SolidStressPoint> nodal;
 };
 
+/// Element strain for solid elements (at centroid and corners)
+struct SolidStrainPoint {
+  constexpr SolidStrainPoint() = default;
+  NodeId node{0};
+  double ex{0}, ey{0}, ez{0};
+  double exy{0}, eyz{0}, ezx{0};
+  double von_mises{0};
+};
+
+struct SolidStrain {
+  constexpr SolidStrain() = default;
+  ElementId eid{0};
+  ElementType etype{ElementType::CHEXA8};
+  double ex{0}, ey{0}, ez{0};
+  double exy{0}, eyz{0}, ezx{0};
+  double von_mises{0};
+  std::vector<SolidStrainPoint> nodal;
+};
+
 struct LineStressEnd {
   constexpr LineStressEnd() = default;
   NodeId node{0};
@@ -111,6 +130,7 @@ struct SubCaseResults {
   std::vector<LineStress> line_stresses;
   std::vector<PlateStress> plate_stresses;
   std::vector<SolidStress> solid_stresses;
+  std::vector<SolidStrain> solid_strains;
 
   // Heat-transfer (SOL 153) outputs
   std::vector<NodeTemperature> temperatures;
@@ -199,6 +219,9 @@ private:
       bool corners,
       const std::unordered_map<ElementId, const PShell*>& shell_props);
   static void write_solid_stress_table(const SubCaseResults& sc,
+                                       std::ostream& out, ElementType etype,
+                                       bool corners);
+  static void write_solid_strain_table(const SubCaseResults& sc,
                                        std::ostream& out, ElementType etype,
                                        bool corners);
   static void write_bar_stress_table(const SubCaseResults& sc,

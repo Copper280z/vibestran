@@ -196,6 +196,21 @@ make_solid_stress_point(const NodeId node,
   return point;
 }
 
+[[nodiscard]] SolidStrainPoint
+make_solid_strain_point(const NodeId node,
+                        const Eigen::Matrix<double, 6, 1> &eps) {
+  SolidStrainPoint point;
+  point.node = node;
+  point.ex = eps(0);
+  point.ey = eps(1);
+  point.ez = eps(2);
+  point.exy = eps(3);
+  point.eyz = eps(4);
+  point.ezx = eps(5);
+  point.von_mises = solid_von_mises(eps);
+  return point;
+}
+
 [[nodiscard]] PlateStressPoint
 make_plate_stress_point(const NodeId node,
                         const Eigen::Vector3d &membrane_stress,
@@ -214,16 +229,29 @@ make_plate_stress_point(const NodeId node,
   return point;
 }
 
-[[nodiscard]] Eigen::Matrix<double, 6, 1>
-solid_sigma_from_B(const Eigen::Matrix<double, 6, 6> &D,
-                   const Eigen::MatrixXd &B, const Eigen::VectorXd &ue,
-                   const double alpha, const double temperature,
-                   const double reference_temperature) {
+/// Mechanical stress and total strain at one evaluation point of a solid
+/// element.  Strain is total strain (B*u, including thermal expansion) to
+/// match MYSTRAN, which reports STRAIN = B*U; the free thermal strain is
+/// subtracted for stress only.
+struct SolidStressStrain {
+  Eigen::Matrix<double, 6, 1> sigma{Eigen::Matrix<double, 6, 1>::Zero()};
+  Eigen::Matrix<double, 6, 1> eps{Eigen::Matrix<double, 6, 1>::Zero()};
+};
+
+[[nodiscard]] SolidStressStrain
+solid_stress_strain_from_B(const Eigen::Matrix<double, 6, 6> &D,
+                           const Eigen::MatrixXd &B,
+                           const Eigen::VectorXd &ue, const double alpha,
+                           const double temperature,
+                           const double reference_temperature) {
   Eigen::Matrix<double, 6, 1> eps_th;
   eps_th << alpha * (temperature - reference_temperature),
       alpha * (temperature - reference_temperature),
       alpha * (temperature - reference_temperature), 0.0, 0.0, 0.0;
-  return D * (B * ue - eps_th);
+  SolidStressStrain out;
+  out.eps = B * ue;
+  out.sigma = D * (out.eps - eps_th);
+  return out;
 }
 
 } // namespace
@@ -1039,7 +1067,7 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
   const std::unordered_map<NodeId, double> nodal_temps_rec =
       build_nodal_temperature_map(model, sc);
 
-  if (sc.has_any_stress_output()) {
+  if (sc.has_any_stress_output() || sc.has_any_strain_output()) {
     std::set<std::string> unsupported_types;
     for (const auto &elem_data : model.elements) {
       switch (elem_data.type) {
@@ -1240,12 +1268,17 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
       ss.eid   = elem_data.id;
       ss.etype = elem_data.type;
 
+      SolidStrain strain;
+      strain.eid   = elem_data.id;
+      strain.etype = elem_data.type;
+
       const auto &psol_ = std::get<PSolid>(model.property(elem_data.pid));
       const Mat1 &mat_ = model.material(psol_.mid);
       const Eigen::Matrix<double, 6, 6> D_ = solid_constitutive_matrix(mat_);
 
-      Eigen::Matrix<double, 6, 1> sigma;
-      sigma.setZero();
+      const bool want_strain = sc.has_any_strain_output();
+
+      SolidStressStrain center;
       auto eval_ctetra4 = [&]() {
         auto nc = [&]() -> std::array<Vec3, 4> {
           std::array<Vec3, 4> c;
@@ -1298,7 +1331,8 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         }
         const double temp =
             average_temperature(elem_data.nodes, nodal_temps_rec, mat_.ref_temp);
-        return solid_sigma_from_B(D_, B, ue, mat_.A, temp, mat_.ref_temp);
+        return solid_stress_strain_from_B(D_, B, ue, mat_.A, temp,
+                                         mat_.ref_temp);
       };
 
       struct Tetra10ShapeData {
@@ -1411,7 +1445,8 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         double point_temp = 0.0;
         for (int n = 0; n < 10; ++n)
           point_temp += sd.N[static_cast<size_t>(n)] * temp[static_cast<size_t>(n)];
-        return solid_sigma_from_B(D_, B, ue, mat_.A, point_temp, mat_.ref_temp);
+        return solid_stress_strain_from_B(D_, B, ue, mat_.A, point_temp,
+                                         mat_.ref_temp);
       };
 
       auto eval_cpenta6 = [&](const double L1, const double L2,
@@ -1472,7 +1507,8 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         double point_temp = 0.0;
         for (int n = 0; n < 6; ++n)
           point_temp += sd.N[static_cast<size_t>(n)] * temp[static_cast<size_t>(n)];
-        return solid_sigma_from_B(D_, B, ue, mat_.A, point_temp, mat_.ref_temp);
+        return solid_stress_strain_from_B(D_, B, ue, mat_.A, point_temp,
+                                         mat_.ref_temp);
       };
 
       auto eval_chexa8 = [&](const double xi, const double eta,
@@ -1533,15 +1569,20 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         double point_temp = 0.0;
         for (int n = 0; n < 8; ++n)
           point_temp += sd.N[static_cast<size_t>(n)] * temp[static_cast<size_t>(n)];
-        return solid_sigma_from_B(D_, B, ue, mat_.A, point_temp, mat_.ref_temp);
+        return solid_stress_strain_from_B(D_, B, ue, mat_.A, point_temp,
+                                         mat_.ref_temp);
       };
 
       if (elem_data.type == ElementType::CTETRA4) {
-        sigma = eval_ctetra4();
-        for (NodeId nid : elem_data.nodes)
-          ss.nodal.push_back(make_solid_stress_point(nid, sigma));
+        center = eval_ctetra4();
+        for (NodeId nid : elem_data.nodes) {
+          ss.nodal.push_back(make_solid_stress_point(nid, center.sigma));
+          if (want_strain)
+            strain.nodal.push_back(
+                make_solid_strain_point(nid, center.eps));
+        }
       } else if (elem_data.type == ElementType::CTETRA10) {
-        sigma = eval_ctetra10(0.25, 0.25, 0.25);
+        center = eval_ctetra10(0.25, 0.25, 0.25);
         static constexpr std::array<std::array<double, 3>, 10> kTet10Coords{{
             {1.0, 0.0, 0.0},
             {0.0, 1.0, 0.0},
@@ -1561,10 +1602,13 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
                             kTet10Coords[static_cast<size_t>(n)][2]);
           ss.nodal.push_back(
               make_solid_stress_point(elem_data.nodes[static_cast<size_t>(n)],
-                                      point));
+                                      point.sigma));
+          if (want_strain)
+            strain.nodal.push_back(make_solid_strain_point(
+                elem_data.nodes[static_cast<size_t>(n)], point.eps));
         }
       } else if (elem_data.type == ElementType::CPENTA6) {
-        sigma = eval_cpenta6(1.0 / 3.0, 1.0 / 3.0, 0.0);
+        center = eval_cpenta6(1.0 / 3.0, 1.0 / 3.0, 0.0);
         static constexpr std::array<std::array<double, 3>, 6> kPentaCoords{{
             {1.0, 0.0, -1.0},
             {0.0, 1.0, -1.0},
@@ -1580,10 +1624,13 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
                            kPentaCoords[static_cast<size_t>(n)][2]);
           ss.nodal.push_back(
               make_solid_stress_point(elem_data.nodes[static_cast<size_t>(n)],
-                                      point));
+                                      point.sigma));
+          if (want_strain)
+            strain.nodal.push_back(make_solid_strain_point(
+                elem_data.nodes[static_cast<size_t>(n)], point.eps));
         }
       } else {
-        sigma = eval_chexa8(0.0, 0.0, 0.0);
+        center = eval_chexa8(0.0, 0.0, 0.0);
         static constexpr std::array<std::array<double, 3>, 8> kHexCoords{{
             {-1.0, -1.0, -1.0},
             {1.0, -1.0, -1.0},
@@ -1601,18 +1648,32 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
                           kHexCoords[static_cast<size_t>(n)][2]);
           ss.nodal.push_back(
               make_solid_stress_point(elem_data.nodes[static_cast<size_t>(n)],
-                                      point));
+                                      point.sigma));
+          if (want_strain)
+            strain.nodal.push_back(make_solid_strain_point(
+                elem_data.nodes[static_cast<size_t>(n)], point.eps));
         }
       }
 
-      ss.sx = sigma(0);
-      ss.sy = sigma(1);
-      ss.sz = sigma(2);
-      ss.sxy = sigma(3);
-      ss.syz = sigma(4);
-      ss.szx = sigma(5);
-      ss.von_mises = solid_von_mises(sigma);
+      ss.sx = center.sigma(0);
+      ss.sy = center.sigma(1);
+      ss.sz = center.sigma(2);
+      ss.sxy = center.sigma(3);
+      ss.syz = center.sigma(4);
+      ss.szx = center.sigma(5);
+      ss.von_mises = solid_von_mises(center.sigma);
       res.solid_stresses.push_back(ss);
+
+      if (want_strain) {
+        strain.ex = center.eps(0);
+        strain.ey = center.eps(1);
+        strain.ez = center.eps(2);
+        strain.exy = center.eps(3);
+        strain.eyz = center.eps(4);
+        strain.ezx = center.eps(5);
+        strain.von_mises = solid_von_mises(center.eps);
+        res.solid_strains.push_back(strain);
+      }
     }
   }
 

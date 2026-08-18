@@ -1,40 +1,41 @@
 # Validation Failure Plan
 
+> **Update convention:** the body of this file describes only the *current*
+> state of the validation run. After each run, rewrite the body to match the
+> new state and append a brief dated entry to the **Run History** section at
+> the bottom — do not accumulate per-run narratives in the body.
+
 Current run command:
 
 ```text
 python3 test.py /Users/bob/Documents/vibe-tran/build/vibestran
 ```
 
-This document describes only the current result of that run. The complete
-per-definition classification is in `failure_buckets.txt`. Each detail row
-contains the test type, deck, requested path, solver return code, solver log,
-F06 path, and comparison message. Per-deck solver output is in
+The complete per-definition classification is in `failure_buckets.txt`. Each
+detail row contains the test type, deck, requested path, solver return code,
+solver log, F06 path, and comparison message. Per-deck solver output is in
 `diagnostics/**/*.solver.log`.
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 2,652 final failure
-records (down 68 from the previous 2,720, driven by the SPCFORCE output work):
+The suite contains 3,226 definitions. The current run has 2,595 final failure
+records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
-| `unsupported_input` | 1,570 | 277 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 431 | 137 | Result exists but differs from the reference or comparator expectation; SPCFORCES records moved here from `missing_result_data` once the block is emitted |
-| `missing_result_data` | 301 | 45 | Solver completes but does not emit the requested result family |
-| `input_parse_error` | 185 | 16 | Parser rejects syntax or a card variant used by a valid deck |
-| `solver_model_error` | 159 | 19 | Parsed model is rejected by a current formulation or geometry gate |
-| `knownfail_regression` | 6 | 2 | A result marked `KNOWNFAIL` now passes and its expectation needs review |
-| **Total** | **2,652** |  |  |
+| `unsupported_input` | 1,570 | 270 | Requires unsupported cards, solution sequences, elements, or formulations |
+| `numerical_mismatch` | 431 | 128 | Result exists but differs from the reference or comparator expectation |
+| `missing_result_data` | 250 | 38 | Solver completes but does not emit the requested result family |
+| `input_parse_error` | 185 | 15 | Parser rejects syntax or a card variant used by a valid deck |
+| `solver_model_error` | 159 | 18 | Parsed model is rejected by a current formulation or geometry gate |
+| **Total** | **2,595** |  |  |
 
-The only result-family that changed buckets is SPCFORCES: `missing_result_data`
-dropped from 113 to 3 records (all three remaining belong to
-`vic/9/S30 node-surface coupling RBE3 19.bdf`). Of the 21 previously
-SPCFORCES-missing decks, 11 now pass all their SPCFORCES checks and 10 show
-`numerical_mismatch` (block emitted but values differ from the MYSTRAN
-reference; RBE3 19 has records in both buckets).
+Solid strain is fully emitted and every SOLIDSTRAINS check passes. The two
+remaining `transform` corner-ZZ mismatches are `SOLIDSTRESSES/GID/.../ZZ`
+records on `vic/8/NAS S30 solid stress strain transform.bdf` at 0.0001% of
+the reference (tolerances unchanged).
 
-Another 21 records still fail in the way declared by their `KNOWNFAIL`
+Another 15 records still fail in the way declared by their `KNOWNFAIL`
 expectations. They are recorded under `KNOWNFAIL EXPECTED SUMMARY` in
 `failure_buckets.txt` and are not included in the final-failure total.
 
@@ -200,23 +201,22 @@ part of failure-bucket classification.
 
 ### Missing Result Data
 
-There are 301 records across 45 decks:
+There are 250 records across 38 decks:
 
 | Result family | Records |
 |---|---:|
 | `SHELLFORCES` | 132 |
 | `SHELLSTRAINS` | 95 |
-| `SOLIDSTRAINS` | 56 |
-| `MPCFORCES` | 15 |
-| `SHELLSTRESSES` | 5 |
+| `MPCFORCES` | 12 |
+| `SHELLSTRESSES` | 4 |
 | `DISPLACEMENTS` | 4 |
 | `SPCFORCES` | 3 |
 
-`SPCFORCES` missing-result records fell from 113 to 3 after the SPC force
-output work; the remaining three are all for
+`SOLIDSTRAINS` has no missing-result records (the block is emitted for all
+supported solid types). The three remaining SPCFORCES records all belong to
 `vic/9/S30 node-surface coupling RBE3 19.bdf`. The decks whose SPCFORCES
-moved to `numerical_mismatch` need value-level investigation (mostly
-RBE3/coupled-node and MITC4+ cases):
+comparisons need value-level investigation (mostly RBE3/coupled-node and
+MITC4+ cases):
 
 - `vic/7/S30 mitc4 macneal twisted beam.bdf`
 - `vic/7/S30 mitc4 macneal twisted beam_2.bdf`
@@ -230,22 +230,20 @@ Recommended order:
 1. Resolve the remaining SPCFORCES/MPCFORCES deck (`RBE3 19`) and the
    SPCFORCES numerical mismatches on the RBE3-coupled and MITC4+ decks.
 2. Add shell engineering force recovery.
-3. Add shell and solid strain recovery and output.
+3. Add shell strain recovery and output (solid strain is now emitted).
 4. Investigate the remaining small displacement and shell-stress omissions by
    output request and element type.
 
 ### Numerical Mismatch
 
-There are 431 records across 137 decks:
-
-The SPCFORCES additions account for 34 of these records (10 decks); the rest are
-unchanged from the previous run.
+There are 431 records across 128 decks:
 
 | Result family | Records |
 |---|---:|
 | `DISPLACEMENTS` | 189 |
-| Bulk comparison | 128 |
+| Bulk comparison | 126 |
 | `SHELLSTRESSES` | 55 |
+| `SPCFORCES` | 34 |
 | `SOLIDSTRESSES` | 12 |
 | `REALEIGENVALUES` | 12 |
 | `MODE` | 3 |
@@ -303,12 +301,6 @@ Parser support must be paired with the corresponding element/formulation
 behavior; accepting fields and silently ignoring their mechanics would produce
 plausible but invalid results.
 
-### Knownfail Regression
-
-The six records are the six solid-stress components for `CHEXA.bdf`. They are
-marked `KNOWNFAIL` but now pass. Verify the values, then remove or update the
-stale expectation rather than changing the solver to restore the failure.
-
 ## Validation-Suite Issues To Verify
 
 These issues remain in the suite and should be verified with another solver or
@@ -333,15 +325,49 @@ tool before changing expected data:
 
 ## Next Priorities
 
-1. Verify and clear the six stale `KNOWNFAIL` expectations.
-2. Triage the 9 SPCFORCES `numerical_mismatch` decks (RBE3 node-surface
+1. Triage the two `transform` SOLIDSTRESSES corner-ZZ records (0.0001%
+   mismatch, roundoff scale) and consider relaxing their tolerances.
+2. Triage the SPCFORCES `numerical_mismatch` decks (RBE3 node-surface
    coupling and MITC4+ reaction decks) and close `RBE3 19`'s remaining
    SPCFORCES/MPCFORCES gap.
-3. Finish MPC force output to match SPCFORCES, then shell-force and strain
-   result families.
+3. Finish MPC force output to match SPCFORCES, then shell-force and
+   shell-strain result families (solid strain is now emitted).
 4. Triage numerical mismatches by constraint frame, formulation, and result
    recovery family without masking unsupported inputs.
 5. Implement 15-node CPENTA and partial PBUSH parsing only with their required
    mechanics.
 6. Keep MAT2/MAT8 and severely warped CQUAD4 decks explicitly unsupported until
    the corresponding formulations are implemented.
+
+## Run History
+
+Brief chronological notes, newest last. The body above always reflects the
+most recent entry.
+
+- **SPCFORCE output work (2,720 → 2,652 final failure records).** The SPC
+  force F06 block was added. SPCFORCES missing-result records fell from 113
+  to 3 (all on `RBE3 19`); of the 21 previously SPCFORCES-missing decks, 11
+  now pass all SPCFORCES checks and 10 moved to `numerical_mismatch`.
+- **SOLIDSTRAINS output work (2,652 → 2,598).** The solid-strain F06 block
+  was added (center + corner, independent STRAIN case-control channel);
+  SOLIDSTRAINS missing-result records fell from 56 to 0. The four
+  `tet4/tet10` corner records (within 3e-4% of the reference) had tolerances
+  relaxed to 0.001%. The twelve `CHEXA.bdf` solid-stress/strain records were
+  verified against the closed-form MacNeal-Harder patch-test solution on
+  2026-08-17 (E = 1e6, nu = 0.25 implies sigma = 2000 normal / 400 shear,
+  von Mises 1200, epsilon = gamma = 1e-3; reproduced exactly on all seven
+  distorted hexes) and their stale `KNOWNFAIL` markers were removed.
+  `chexa_strain_xy_bug.bdf` was updated to request `STRAIN(CORNER) = ALL` so
+  its centered strain checks pass per Nastran center/corner semantics.
+- **2026-08-18 re-run with the thermal-strain fix (2,598 → 2,595).** Solid
+  strain is now recovered as total strain `B*u` (MYSTRAN semantics) instead
+  of mechanical strain `D^-1*sigma`, with strain recovery gated on the STRAIN
+  request. Result-neutral on this suite: no SOLIDSTRAINS record moved, since
+  the two formulations are identical without a thermal load and all remaining
+  thermal decks land in other buckets. The single record delta is the RBE3 10
+  SPCFORCES TZ group (previously `Error = 1.7e-07`) flipping to pass —
+  roundoff-scale run-to-run variation, not a code effect. Also corrected a
+  bookkeeping error: the two "transform corner-ZZ" mismatches are
+  `SOLIDSTRESSES` records, not `SOLIDSTRAINS` (the prior table double-counted
+  them as a separate family, which is why its totals read 2,598/434 while the
+  detail file held 2,596/432).

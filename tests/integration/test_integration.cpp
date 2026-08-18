@@ -261,6 +261,14 @@ static const SolidStress* get_solid_stress(const SolverResults& res, int elem_id
     return nullptr;
 }
 
+static const SolidStrain* get_solid_strain(const SolverResults& res, int elem_id) {
+    for (const auto& sc : res.subcases)
+        for (const auto& st : sc.solid_strains)
+            if (st.eid.value == elem_id) // cppcheck-suppress useStlAlgorithm
+                return &st;
+    return nullptr;
+}
+
 static const LineStress* get_line_stress(const SolverResults& res, int elem_id) {
     for (const auto& sc : res.subcases)
         for (const auto& ls : sc.line_stresses)
@@ -3216,6 +3224,97 @@ TEST(Integration, ShellSolidInterconnectionThermalLoadProducesZeroStress) {
         expect_plate_stress_near_zero(*ps, stress_tol);
         expect_plate_nodal_stress_near_zero(*ps, stress_tol);
     }
+}
+
+TEST(Integration, HexaThermalStrainIsTotalStrainNotMechanical) {
+    // Two stacked CHEXA8 under uniform free thermal expansion.  The exact
+    // solution is u = alpha*dT*(x,y,z), which trilinear hexes represent
+    // exactly, so total strain is alpha*dT in each normal component (zero
+    // shear, zero von Mises) while mechanical stress is identically zero.
+    // Strain recovered as D^-1*sigma instead of B*u would report zero
+    // normal strain here, so this test pins the MYSTRAN total-strain
+    // semantics for thermal loads.
+    constexpr double alpha = 1.2e-5;
+    constexpr double dT = 100.0;
+    constexpr double expected_strain = alpha * dT;
+    constexpr double stress_tol = 1.0e-6 * 1.0e6 * alpha * dT;
+
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  SPC  = 1
+  TEMPERATURE(LOAD) = 3
+  STRESS(CORNER) = ALL
+  STRAIN(CORNER) = ALL
+BEGIN BULK
+GRID,1,,0.0,0.0,0.0
+GRID,2,,1.0,0.0,0.0
+GRID,3,,1.0,1.0,0.0
+GRID,4,,0.0,1.0,0.0
+GRID,5,,0.0,0.0,1.0
+GRID,6,,1.0,0.0,1.0
+GRID,7,,1.0,1.0,1.0
+GRID,8,,0.0,1.0,1.0
+GRID,9,,0.0,0.0,2.0
+GRID,10,,1.0,0.0,2.0
+GRID,11,,1.0,1.0,2.0
+GRID,12,,0.0,1.0,2.0
+MAT1,1,1.0E6,,0.25,,1.2E-5,0.0
+PSOLID,1,1
+CHEXA,1,1,1,2,3,4,5,6,7,8
+CHEXA,2,1,5,6,7,8,9,10,11,12
+$ Minimal BCs consistent with u = alpha*dT*(x,y,z): fix z on the base face,
+$ all translations at the origin node, and y at node 2 (y = 0 there).
+SPC1,1,3,1,2,3,4
+SPC1,1,12,1
+SPC1,1,2,2
+TEMPD,3,100.0
+ENDDATA
+)";
+
+    Model model = BdfParser::parse_string(bdf);
+    const SolverResults res = run_analysis(model);
+
+    // Free-expansion tip displacement: w = alpha*dT*L with L = 2.
+    EXPECT_NEAR(get_disp(res, 9, 2), 2.0 * expected_strain, 1e-10);
+    EXPECT_NEAR(get_disp(res, 12, 2), 2.0 * expected_strain, 1e-10);
+
+    for (int eid : {1, 2}) {
+        const SolidStrain* st = get_solid_strain(res, eid);
+        ASSERT_NE(st, nullptr);
+        ASSERT_EQ(st->nodal.size(), 8u) << "corner strains missing for eid " << eid;
+
+        auto expect_total_strain = [&](const auto& p) {
+            EXPECT_NEAR(p.ex, expected_strain, 1e-10);
+            EXPECT_NEAR(p.ey, expected_strain, 1e-10);
+            EXPECT_NEAR(p.ez, expected_strain, 1e-10);
+            EXPECT_NEAR(p.exy, 0.0, 1e-12);
+            EXPECT_NEAR(p.eyz, 0.0, 1e-12);
+            EXPECT_NEAR(p.ezx, 0.0, 1e-12);
+            // Uniform free expansion is hydrostatic, so von Mises strain is 0.
+            EXPECT_NEAR(p.von_mises, 0.0, 1e-12);
+        };
+        expect_total_strain(*st);
+        for (const auto& point : st->nodal)
+            expect_total_strain(point);
+
+        const SolidStress* ss = get_solid_stress(res, eid);
+        ASSERT_NE(ss, nullptr);
+        expect_solid_stress_near_zero(*ss, stress_tol);
+        expect_solid_nodal_stress_near_zero(*ss, stress_tol);
+    }
+
+    // Strain recovery is gated on the STRAIN request: the same model with
+    // the strain channel off must still produce solid stresses but no
+    // solid strains.
+    Model stress_only = model;
+    stress_only.analysis.subcases[0].strain_print = false;
+    stress_only.analysis.subcases[0].strain_corner_print = false;
+    const SolverResults gated = run_analysis(stress_only);
+    ASSERT_FALSE(gated.subcases.empty());
+    EXPECT_TRUE(gated.subcases[0].solid_strains.empty());
+    EXPECT_FALSE(gated.subcases[0].solid_stresses.empty());
 }
 
 TEST(Integration, BeamSolidInterconnectionThermalLoadProducesZeroStress) {

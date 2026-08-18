@@ -71,6 +71,12 @@ bool contains_solid_nodal_stress_type(const SubCaseResults& sc, ElementType etyp
         [&](const auto& ss) { return ss.etype == etype && !ss.nodal.empty(); });
 }
 
+bool contains_solid_strain_type(const SubCaseResults& sc, ElementType etype) {
+    return std::any_of(
+        sc.solid_strains.begin(), sc.solid_strains.end(),
+        [&](const auto& ss) { return ss.etype == etype; });
+}
+
 int plate_vertex_count(const ElementType etype) {
     return (etype == ElementType::CQUAD4) ? 4 : 3;
 }
@@ -268,6 +274,10 @@ void F06Writer::write(const SolverResults& results, const Model& model,
         const bool do_corner = (msc != nullptr) && msc->stress_corner_print;
         const bool do_gpstress = (msc != nullptr) && msc->gpstress_print;
         const bool do_spc_force = (msc != nullptr) && msc->spc_force_print;
+        const bool do_strain_any =
+            (msc != nullptr) &&
+            (msc->strain_print || msc->strain_corner_print);
+        const bool do_strain_corner = (msc != nullptr) && msc->strain_corner_print;
 
         if (do_disp) write_displacement_table(sc, out);
         if (do_spc_force) write_spc_force_table(sc, out);
@@ -282,6 +292,13 @@ void F06Writer::write(const SolverResults& results, const Model& model,
             write_solid_stress_table(sc, out, ElementType::CTETRA10,
                                      do_corner);
             write_solid_stress_table(sc, out, ElementType::CPENTA6, do_corner);
+        }
+        if (do_strain_any) {
+            write_solid_strain_table(sc, out, ElementType::CHEXA8, do_strain_corner);
+            write_solid_strain_table(sc, out, ElementType::CTETRA4, do_strain_corner);
+            write_solid_strain_table(sc, out, ElementType::CTETRA10,
+                                     do_strain_corner);
+            write_solid_strain_table(sc, out, ElementType::CPENTA6, do_strain_corner);
         }
         if (do_gpstress) {
             write_quad4_gpstress_table(sc, out);
@@ -673,6 +690,71 @@ void F06Writer::write_solid_stress_table(const SubCaseResults& sc,
                 grd.put(15, 8, std::to_string(pt.node.value));
                 write_stress_values(grd, pt.sx, pt.sy, pt.sz, pt.sxy,
                                     pt.syz, pt.szx, pt.von_mises);
+            }
+        }
+    }
+    out << "                            ------------- ------------- ------------- ------------- ------------- ------------- -------------\n";
+    out << "\n";
+}
+
+void F06Writer::write_solid_strain_table(const SubCaseResults& sc,
+                                          std::ostream& out,
+                                          const ElementType etype,
+                                          const bool corners) {
+    if (!contains_solid_strain_type(sc, etype))
+        return;
+
+    const char* type_name = "S O L I D";
+    switch (etype) {
+    case ElementType::CHEXA8:   type_name = "H E X A";   break;
+    case ElementType::CTETRA4:  type_name = "T E T R A"; break;
+    case ElementType::CTETRA10: type_name = "T E T R A"; break;
+    case ElementType::CPENTA6:  type_name = "P E N T A"; break;
+    default: break;
+    }
+
+    write_subcase_header(out, sc.id);
+    if (!sc.label.empty())
+        out << " " << sc.label << "\n";
+    out << "\n";
+    out << "                                E L E M E N T   S T R A I N S   I N   M A T E R I A L   C O O R D I N A T E   S Y S T E M\n";
+    out << "                                 F O R   E L E M E N T   T Y P E   " << type_name << "\n";
+    out << "    Elem  Location             Epsilon-xx     Epsilon-yy     Epsilon-zz        G-xy          G-yz          G-zx       von Mises\n";
+    out << "     ID\n";
+
+    auto write_strain_values = [&](const F06Row& loc, double xx, double yy,
+                                   double zz, double xy, double yz, double zx,
+                                   double vm) {
+        F06Row row = loc;
+        row.put(29, 13, fmt_e(xx));
+        row.put(43, 13, fmt_e(yy));
+        row.put(57, 13, fmt_e(zz));
+        row.put(71, 13, fmt_e(xy));
+        row.put(85, 13, fmt_e(yz));
+        row.put(99, 13, fmt_e(zx));
+        row.put(113, 13, fmt_e(vm));
+        out << row.str() << "\n";
+    };
+
+    for (const auto& ss : sc.solid_strains) {
+        if (ss.etype != etype) continue;
+
+        F06Row cen;
+        cen.put(2, 8, std::to_string(ss.eid.value));
+        cen.put_left(12, "CENTER");
+        write_strain_values(cen, ss.ex, ss.ey, ss.ez, ss.exy, ss.eyz,
+                            ss.ezx, ss.von_mises);
+
+        if (corners) {
+            const int limit = std::min<int>(solid_vertex_count(etype),
+                                            static_cast<int>(ss.nodal.size()));
+            for (int i = 0; i < limit; ++i) {
+                const auto& pt = ss.nodal[static_cast<std::size_t>(i)];
+                F06Row grd;
+                grd.put_left(12, "GRD");
+                grd.put(15, 8, std::to_string(pt.node.value));
+                write_strain_values(grd, pt.ex, pt.ey, pt.ez, pt.exy,
+                                    pt.eyz, pt.ezx, pt.von_mises);
             }
         }
     }

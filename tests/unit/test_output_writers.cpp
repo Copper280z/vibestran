@@ -154,6 +154,37 @@ static SolidStress make_ctetra10_solid_stress(ElementId eid) {
     return ss;
 }
 
+static SolidStrain make_solid_strain(ElementId eid) {
+    SolidStrain st;
+    st.eid = eid;
+    st.etype = ElementType::CTETRA4;
+    st.ex = 0.1;
+    st.ey = 0.2;
+    st.ez = 0.3;
+    st.exy = 0.4;
+    st.eyz = 0.5;
+    st.ezx = 0.6;
+    st.von_mises = 0.7;
+    auto add_point = [&](int node_id, double ex, double ey, double ez,
+                         double exy, double eyz, double ezx, double vm) {
+        SolidStrainPoint pt;
+        pt.node = NodeId{node_id};
+        pt.ex = ex;
+        pt.ey = ey;
+        pt.ez = ez;
+        pt.exy = exy;
+        pt.eyz = eyz;
+        pt.ezx = ezx;
+        pt.von_mises = vm;
+        st.nodal.push_back(pt);
+    };
+    add_point(9001, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7);
+    add_point(9002, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7);
+    add_point(9003, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7);
+    add_point(9004, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7);
+    return st;
+}
+
 static std::vector<std::byte> run_op2_writer(const SolverResults& res,
                                              const Model& model) {
     namespace fs = std::filesystem;
@@ -788,6 +819,101 @@ TEST(F06Writer, SolidCornerRowsWithGids) {
     EXPECT_DOUBLE_EQ(std::stod(line.substr(28, 13)), 11.0);
 }
 
+TEST(F06Writer, SolidStrainTableMatchesParserColumns) {
+    // Same column layout as SOLIDSTRESSES: eid 2-8, CENTER at col 12, values
+    // at 29/43/57/71/85/99/113 each 13 wide.
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    sc.solid_strains.push_back(make_solid_strain(ElementId{8}));
+    res.subcases.push_back(sc);
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].stress_print = false;
+    m.analysis.subcases[0].stress_corner_print = false;
+    m.analysis.subcases[0].strain_print = true;
+    m.analysis.subcases[0].strain_corner_print = true;
+
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+    const std::string out = oss.str();
+    EXPECT_NE(out.find("E L E M E N T   S T R A I N S   I N   M A T E R I A L   C O O R D I N A T E   S Y S T E M"), std::string::npos);
+    EXPECT_NE(out.find("F O R   E L E M E N T   T Y P E   T E T R A"), std::string::npos);
+
+    std::istringstream iss(out);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.size() >= 17 && line.substr(11, 6) == "CENTER") break;
+        line.clear();
+    }
+    ASSERT_FALSE(line.empty());
+    EXPECT_EQ(line.substr(1, 8), "       8");
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(28, 13)), 0.1);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(42, 13)), 0.2);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(56, 13)), 0.3);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(70, 13)), 0.4);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(84, 13)), 0.5);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(98, 13)), 0.6);
+    EXPECT_DOUBLE_EQ(std::stod(line.substr(112, 13)), 0.7);
+}
+
+TEST(F06Writer, SolidStrainCornerRowsWithGids) {
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    sc.solid_strains.push_back(make_solid_strain(ElementId{8}));
+    res.subcases.push_back(sc);
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].stress_print = false;
+    m.analysis.subcases[0].stress_corner_print = false;
+    m.analysis.subcases[0].strain_print = true;
+    m.analysis.subcases[0].strain_corner_print = true;
+
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+    const std::string out = oss.str();
+    EXPECT_NE(out.find("           GRD    9001"), std::string::npos);
+    EXPECT_NE(out.find("           GRD    9004"), std::string::npos);
+}
+
+TEST(F06Writer, StressFlagsDoNotEmitStrainTable) {
+    // STRAIN and STRESS are independent: stress-only flags must not emit a
+    // SOLIDSTRAINS block.
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    sc.solid_strains.push_back(make_solid_strain(ElementId{8}));
+    res.subcases.push_back(sc);
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].strain_print = false;
+    m.analysis.subcases[0].strain_corner_print = false;
+
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+    const std::string out = oss.str();
+    EXPECT_EQ(out.find("S T R A I N S   I N   M A T E R I A L"), std::string::npos);
+}
+
+TEST(F06Writer, StrainFlagsEmitStrainNotStress) {
+    // Strain-only flags must emit SOLIDSTRAINS without SOLIDSTRESSES.
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    sc.solid_strains.push_back(make_solid_strain(ElementId{8}));
+    sc.solid_stresses.push_back(make_solid_stress(ElementId{8}));
+    res.subcases.push_back(sc);
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].stress_print = false;
+    m.analysis.subcases[0].stress_corner_print = false;
+    m.analysis.subcases[0].strain_print = true;
+    m.analysis.subcases[0].strain_corner_print = true;
+
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+    const std::string out = oss.str();
+    EXPECT_NE(out.find("S T R A I N S   I N   M A T E R I A L"), std::string::npos);
+    EXPECT_EQ(out.find("S T R E S S E S   I N   M A T E R I A L"), std::string::npos);
+}
+
 TEST(F06Writer, ModalEigenvalueAndEigenvectorBlocks) {
     // The parser requires " OUTPUT FOR EIGENVECTOR" (leading space, mode
     // number in cols 25-32) immediately preceded by " OUTPUT FOR SUBCASE",
@@ -1295,6 +1421,96 @@ ENDDATA
     EXPECT_TRUE(sc.stress_plot);
     EXPECT_FALSE(sc.stress_corner_print);
     EXPECT_TRUE(sc.stress_corner_plot);
+}
+
+TEST(BdfParser, StrainAllSetsPrintOnly) {
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+  STRAIN = ALL
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_TRUE(sc.strain_print);
+    EXPECT_FALSE(sc.strain_corner_print);
+    // STRAIN must NOT leak into the stress channel.
+    EXPECT_FALSE(sc.stress_print);
+    EXPECT_FALSE(sc.stress_corner_print);
+}
+
+TEST(BdfParser, StrainCornerDefaultsToPrintAndSetsCornerFlags) {
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+  STRAIN(CORNER) = ALL
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_TRUE(sc.strain_print);
+    EXPECT_TRUE(sc.strain_corner_print);
+    EXPECT_FALSE(sc.stress_corner_print);
+}
+
+TEST(BdfParser, StressAndStrainAreIndependentChannels) {
+    // A single deck that requests both STRESS and STRAIN must set each
+    // channel's flags independently, and STRESS(CORNER) must not enable
+    // strain corners (and vice versa).
+    const std::string bdf = R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC  = 1
+  STRESS = ALL
+  STRAIN(CORNER) = ALL
+BEGIN BULK
+ENDDATA
+)";
+    Model m = BdfParser::parse_string(bdf);
+    ASSERT_FALSE(m.analysis.subcases.empty());
+    const auto& sc = m.analysis.subcases[0];
+    EXPECT_TRUE(sc.stress_print);
+    EXPECT_FALSE(sc.stress_corner_print);
+    EXPECT_TRUE(sc.strain_print);
+    EXPECT_TRUE(sc.strain_corner_print);
+}
+
+TEST(Model, HasAnyStrainOutputReflectsStrainFlagsOnly) {
+    // The solid-recovery gate depends on this helper. It must track ONLY the
+    // strain channel and stay independent of the stress channel.
+    SubCase sc;
+    EXPECT_FALSE(sc.has_any_strain_output());
+
+    sc.strain_print = true;
+    EXPECT_TRUE(sc.has_any_strain_output());
+    sc.strain_print = false;
+
+    sc.strain_corner_print = true;
+    EXPECT_TRUE(sc.has_any_strain_output());
+    sc.strain_corner_print = false;
+
+    // Enabling every stress flag must not flip the strain gate.
+    sc.stress_print = true;
+    sc.stress_plot = true;
+    sc.stress_corner_print = true;
+    sc.stress_corner_plot = true;
+    EXPECT_FALSE(sc.has_any_strain_output());
+
+    // Any single strain flag is sufficient.
+    sc.strain_print = true;
+    EXPECT_TRUE(sc.has_any_strain_output());
 }
 
 TEST(BdfParser, SpcForceAllSetsPrintOnly) {
