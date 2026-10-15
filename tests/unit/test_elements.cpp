@@ -14,6 +14,8 @@
 #include <cmath>
 #include <gtest/gtest.h>
 #include <numbers>
+#include <optional>
+#include <span>
 
 using namespace vibestran;
 
@@ -2304,6 +2306,191 @@ TEST(CBar, StressRecoveryUsesEndForcesAndRecoveryPoints) {
   EXPECT_NEAR(r.end_a.s[1], 0.0, 1e-8 * P * L * c / I1);
   EXPECT_NEAR(r.end_b.s[0], 0.0, 1e-8 * P * L * c / I1);
   EXPECT_NEAR(r.end_a.smax, P * L * c / I1, 1e-8 * P * L * c / I1);
+}
+
+namespace {
+
+/// Bar of length L in the basic x-y plane at angle `deg` from x, with the
+/// element y axis also in that plane (v = (-sin, cos, 0)) and z = basic z.
+Model inclined_bar_model(double L, double deg, const PBar &p) {
+  Model m;
+  add_mat1(m, 1, 2.0e7, 0.3);
+  m.properties[p.pid] = p;
+  const double a = deg * std::numbers::pi / 180.0;
+  add_grid(m, 1, 0.0, 0.0, 0.0);
+  add_grid(m, 2, L * std::cos(a), L * std::sin(a), 0.0);
+  return m;
+}
+
+ElementData inclined_bar(double deg) {
+  const double a = deg * std::numbers::pi / 180.0;
+  return bar_data(ElementType::CBAR, 1, 2, Vec3{-std::sin(a), std::cos(a), 0.0});
+}
+
+Pload1Load pload1(const char *type, const char *scale, double x1, double p1,
+                  std::optional<double> x2, std::optional<double> p2) {
+  Pload1Load l;
+  l.sid = LoadSetId{1};
+  l.element = ElementId{1};
+  l.load_type = type;
+  l.scale_type = scale;
+  l.x1 = x1;
+  l.p1 = p1;
+  l.x2 = x2;
+  l.p2 = p2;
+  return l;
+}
+
+/// Resultant force and moment about grid 1 of a global 12-entry load vector
+/// for grids at the given basic positions.
+std::pair<Eigen::Vector3d, Eigen::Vector3d>
+resultant(const LocalFe &f, const Vec3 &x1, const Vec3 &x2) {
+  Eigen::Vector3d F = f.segment<3>(0) + f.segment<3>(6);
+  const Eigen::Vector3d r2{x2.x - x1.x, x2.y - x1.y, x2.z - x1.z};
+  Eigen::Vector3d M = f.segment<3>(3) + f.segment<3>(9) +
+                      r2.cross(Eigen::Vector3d(f.segment<3>(6)));
+  return {F, M};
+}
+
+} // namespace
+
+TEST(Pload1, ConcentratedLoadGivesExactFixedEndForces) {
+  // X2 blank means a concentrated load P1 at X1.  For a fixed-fixed beam
+  // with P at x = a (b = L - a) the end reactions are
+  //   R_A = P b^2 (3a + b) / L^3,  M_A = P a b^2 / L^2,
+  //   R_B = P a^2 (a + 3b) / L^3,  M_B = -P a^2 b / L^2.
+  const double L = 8.0, a = 3.0, b = L - a, P = 120.0;
+  const Model m = inclined_bar_model(L, 0.0, make_pbar(1.0, 0.5, 0.5, 0.5));
+  const LocalFe f = compute_pload1_fixed_end_local(
+      inclined_bar(0.0), m, pload1("FYE", "LE", a, P, std::nullopt, std::nullopt));
+  EXPECT_NEAR(f(1), P * b * b * (3 * a + b) / (L * L * L), 1e-10);
+  EXPECT_NEAR(f(5), P * a * b * b / (L * L), 1e-10);
+  EXPECT_NEAR(f(7), P * a * a * (a + 3 * b) / (L * L * L), 1e-10);
+  EXPECT_NEAR(f(11), -P * a * a * b / (L * L), 1e-10);
+  for (const int i : {0, 2, 3, 4, 6, 8, 9, 10})
+    EXPECT_EQ(f(i), 0.0);
+}
+
+TEST(Pload1, BasicDirectionLoadIsResolvedIntoElementAxes) {
+  // Bar at 30 degrees in the x-y plane, uniform basic-FY load q.  In the
+  // element frame basic y = (sin30, cos30, 0): the axial share is q sin30
+  // (q sin30 L / 2 per end) and the transverse share q cos30 gives
+  // q cos30 L / 2 shear and +-q cos30 L^2 / 12 moments.  The element-axis
+  // type FYE puts everything into transverse load.
+  const double L = 6.0, q = 40.0, s = 0.5, c = std::sqrt(3.0) / 2.0;
+  const Model m = inclined_bar_model(L, 30.0, make_pbar(1.0, 0.5, 0.5, 0.5));
+  const LocalFe fy = compute_pload1_fixed_end_local(
+      inclined_bar(30.0), m, pload1("FY", "LE", 0.0, q, L, q));
+  EXPECT_NEAR(fy(0), q * s * L / 2.0, 1e-9);
+  EXPECT_NEAR(fy(6), q * s * L / 2.0, 1e-9);
+  EXPECT_NEAR(fy(1), q * c * L / 2.0, 1e-9);
+  EXPECT_NEAR(fy(5), q * c * L * L / 12.0, 1e-9);
+  EXPECT_NEAR(fy(11), -q * c * L * L / 12.0, 1e-9);
+
+  const LocalFe fye = compute_pload1_fixed_end_local(
+      inclined_bar(30.0), m, pload1("FYE", "LE", 0.0, q, L, q));
+  EXPECT_NEAR(fye(0), 0.0, 1e-12);
+  EXPECT_NEAR(fye(1), q * L / 2.0, 1e-9);
+
+  // In the basic frame the FY load totals q L along +y with its moment
+  // about grid 1 equal to the resultant at mid-span.
+  const LocalFe g = compute_pload1_equivalent_load(
+      inclined_bar(30.0), m, pload1("FY", "LE", 0.0, q, L, q));
+  const auto [F, M] = resultant(g, m.node(NodeId{1}).position,
+                                m.node(NodeId{2}).position);
+  EXPECT_NEAR(F(0), 0.0, 1e-9);
+  EXPECT_NEAR(F(1), q * L, 1e-9);
+  EXPECT_NEAR(M(2), q * L * (L / 2.0) * c, 1e-8); // lever arm x = L/2 cos30
+}
+
+TEST(Pload1, ProjectedScaleUsesLengthNormalToLoad) {
+  // LEPR: intensity per unit projected length normal to the load.  For basic
+  // FY on a bar at 30 degrees from x, the projection onto the x axis is
+  // L cos30, so the total load is q L cos30.
+  const double L = 6.0, q = 40.0, c = std::sqrt(3.0) / 2.0;
+  const Model m = inclined_bar_model(L, 30.0, make_pbar(1.0, 0.5, 0.5, 0.5));
+  const LocalFe g = compute_pload1_equivalent_load(
+      inclined_bar(30.0), m, pload1("FY", "LEPR", 0.0, q, L, q));
+  const auto [F, M] = resultant(g, m.node(NodeId{1}).position,
+                                m.node(NodeId{2}).position);
+  EXPECT_NEAR(F(1), q * L * c, 1e-9);
+  EXPECT_NEAR(F(0), 0.0, 1e-9);
+  // FRPR with the same span is identical.
+  const LocalFe g_fr = compute_pload1_equivalent_load(
+      inclined_bar(30.0), m, pload1("FY", "FRPR", 0.0, q, 1.0, q));
+  EXPECT_LT((g - g_fr).cwiseAbs().maxCoeff(), 1e-9);
+}
+
+TEST(Pload1, PartialLinearLoadIsStaticallyEquivalent) {
+  // FR stations 0.25..0.75 with intensity 10 -> 30: total = 20 * L/2, and the
+  // centroid of the trapezoid sits at x = L/4 + (L/2)(1 + 2*3)/(3*(1 + 3)).
+  const double L = 8.0, p1 = 10.0, p2 = 30.0;
+  const Model m = inclined_bar_model(L, 0.0, make_pbar(1.0, 0.5, 0.5, 0.5));
+  const LocalFe g = compute_pload1_equivalent_load(
+      inclined_bar(0.0), m, pload1("FZE", "FR", 0.25, p1, 0.75, p2));
+  const auto [F, M] = resultant(g, m.node(NodeId{1}).position,
+                                m.node(NodeId{2}).position);
+  const double total = 0.5 * (p1 + p2) * (L / 2.0);
+  const double xc = L / 4.0 + (L / 2.0) * (p1 + 2.0 * p2) / (3.0 * (p1 + p2));
+  EXPECT_NEAR(F(2), total, 1e-9);
+  EXPECT_NEAR(M(1), -total * xc, 1e-8); // z force at +x gives -My
+}
+
+TEST(Pload1, ConcentratedMomentIsSelfEquilibratedCouple) {
+  // A concentrated element-z moment M0 at mid-span: the consistent loads
+  // carry no net force and a net moment M0 about z.
+  const double L = 5.0, M0 = 75.0;
+  const Model m = inclined_bar_model(L, 0.0, make_pbar(1.0, 0.5, 0.5, 0.5));
+  const LocalFe g = compute_pload1_equivalent_load(
+      inclined_bar(0.0), m, pload1("MZE", "FR", 0.5, M0, std::nullopt, std::nullopt));
+  const auto [F, M] = resultant(g, m.node(NodeId{1}).position,
+                                m.node(NodeId{2}).position);
+  EXPECT_NEAR(F.norm(), 0.0, 1e-10);
+  EXPECT_NEAR(M(2), M0, 1e-10);
+  EXPECT_NEAR(M(0), 0.0, 1e-12);
+}
+
+TEST(Pload1, RejectsInvalidStationsAndProjectedElementTypes) {
+  const Model m = inclined_bar_model(4.0, 0.0, make_pbar(1.0, 0.5, 0.5, 0.5));
+  const ElementData bar = inclined_bar(0.0);
+  for (const Pload1Load &bad : {
+           pload1("FYE", "LEPR", 0.0, 1.0, 4.0, 1.0),  // projection needs basic
+           pload1("FY", "LE", 3.0, 1.0, 1.0, 1.0),     // X2 < X1
+           pload1("FY", "FR", 0.0, 1.0, 1.5, 1.0),     // beyond the element
+           pload1("FW", "LE", 0.0, 1.0, 4.0, 1.0),     // unknown type
+           pload1("FY", "XX", 0.0, 1.0, 4.0, 1.0),     // unknown scale
+       }) {
+    EXPECT_THROW({ (void)compute_pload1_fixed_end_local(bar, m, bad); },
+                 SolverError)
+        << bad.load_type << " " << bad.scale_type;
+  }
+}
+
+TEST(Pload1, PinnedEndRecoversProppedCantileverForces) {
+  // Fixed at A, PB = 6 releases theta_z at B, both grids held: a propped
+  // cantilever.  Uniform upward q gives M1(A) = q L^2 / 8, M1(B) = 0 and end
+  // A shear 5 q L / 8.  All grid displacements are zero, so the forces come
+  // entirely from the condensed fixed-end loads.
+  const double L = 4.0, q = 30.0;
+  const Model m = inclined_bar_model(L, 0.0, make_pbar(1.0, 0.5, 0.5, 0.5));
+  ElementData data = inclined_bar(0.0);
+  data.pin_flags[1] = 1u << 5;
+  const CBarBeamElement elem(data, m);
+  const LocalFe f = compute_pload1_fixed_end_local(
+      data, m, pload1("FYE", "LE", 0.0, q, L, q));
+  const std::array<double, 12> u{};
+  const auto r = elem.recover_stress(
+      u, 0.0, 0.0, std::span<const double>(f.data(), 12));
+  EXPECT_NEAR(r.forces.m1a, q * L * L / 8.0, 1e-9);
+  EXPECT_NEAR(r.forces.m1b, 0.0, 1e-9);
+  EXPECT_NEAR(r.forces.v1, 5.0 * q * L / 8.0, 1e-9);
+  // The equivalent grid loads put 5qL/8 and 3qL/8 on the two grids.
+  const LocalFe g = compute_pload1_equivalent_load(
+      data, m, pload1("FYE", "LE", 0.0, q, L, q));
+  EXPECT_NEAR(g(1), 5.0 * q * L / 8.0, 1e-9);
+  EXPECT_NEAR(g(7), 3.0 * q * L / 8.0, 1e-9);
+  EXPECT_NEAR(g(5), q * L * L / 8.0, 1e-9);
+  EXPECT_NEAR(g(11), 0.0, 1e-9);
 }
 
 TEST(CBeam, ThermalLoadIsAxialAndSelfEquilibrated) {

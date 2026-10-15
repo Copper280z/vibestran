@@ -658,49 +658,80 @@ void add_coupled_bending_stiffness(LocalKe &K, const LineSection &section,
   return result;
 }
 
-[[nodiscard]] std::array<double, 4> plane_shape_values(const std::string &type,
-                                                       const HermiteData &h) {
-  if (type == "FY" || type == "FZ") {
-    if (type == "FY")
-      return h.N;
-    return {h.N[0], -h.N[1], h.N[2], -h.N[3]};
-  }
-  if (type == "MY")
-    return {-h.dN_dx[0], h.dN_dx[1], -h.dN_dx[2], h.dN_dx[3]};
-  return {h.dN_dx[0], h.dN_dx[1], h.dN_dx[2], h.dN_dx[3]};
-}
+/// Decoded PLOAD1 TYPE/SCALE (Nastran QRG): FX..MZ act in basic directions,
+/// FXE..MZE in element directions; LE/FR give X1/X2 as length or fraction of
+/// the element, and the PR variants give the intensity per unit length
+/// projected normal to the load direction (basic-direction types only).
+struct Pload1Kind {
+  bool moment{false};
+  bool element_axes{false};
+  int axis{0}; // 0 = x, 1 = y, 2 = z
+  bool fractional{false};
+  bool projected{false};
+};
 
-// cppcheck-suppress constParameterReference -- Eigen vectors are mutated via operator()
-void add_plane_load(LocalFe &fe, const std::array<int, 4> &indices,
-                    const std::array<double, 4> &shape, const double value,
-                    const double weight) {
-  for (int i = 0; i < 4; ++i)
-    fe(indices[i]) += shape[i] * value * weight;
-}
-
-[[nodiscard]] std::pair<double, double>
-load_interval(const Pload1Load &load, const double L) {
-  double x1 = load.x1;
-  double x2 = load.x2.value_or((uppercase_copy(load.scale_type) == "FR") ? 1.0 : L);
-  if (uppercase_copy(load.scale_type) == "FR") {
-    x1 *= L;
-    x2 *= L;
-  } else if (uppercase_copy(load.scale_type) != "LE") {
+[[nodiscard]] Pload1Kind decode_pload1(const Pload1Load &load) {
+  const std::string type = uppercase_copy(load.load_type);
+  const std::string scale = uppercase_copy(load.scale_type);
+  Pload1Kind kind;
+  const bool valid_type =
+      (type.size() == 2 || (type.size() == 3 && type[2] == 'E')) &&
+      (type[0] == 'F' || type[0] == 'M') &&
+      (type[1] == 'X' || type[1] == 'Y' || type[1] == 'Z');
+  if (!valid_type) {
     throw SolverError(std::format(
-        "PLOAD1 on element {}: scale type '{}' is not supported",
+        "PLOAD1 on element {}: load type '{}' is not supported (expected "
+        "FX, FY, FZ, MX, MY, MZ or the element-axis forms FXE..MZE)",
+        load.element.value, load.load_type));
+  }
+  kind.moment = (type[0] == 'M');
+  kind.axis = type[1] - 'X';
+  kind.element_axes = (type.size() == 3);
+  if (scale == "LE" || scale == "FR" || scale == "LEPR" || scale == "FRPR") {
+    kind.fractional = scale.starts_with("FR");
+    kind.projected = scale.ends_with("PR");
+  } else {
+    throw SolverError(std::format(
+        "PLOAD1 on element {}: scale type '{}' is not supported (expected "
+        "LE, FR, LEPR or FRPR)",
         load.element.value, load.scale_type));
   }
-  if (x2 < x1)
-    std::swap(x1, x2);
-  if (x1 < -1e-12 || x2 > L + 1e-12) {
+  if (kind.projected && kind.element_axes) {
     throw SolverError(std::format(
-        "PLOAD1 on element {}: load stations [{:.6g}, {:.6g}] lie outside the "
-        "element span [0, {:.6g}]",
-        load.element.value, x1, x2, L));
+        "PLOAD1 on element {}: projected scale '{}' requires a basic-direction "
+        "load type, got '{}'",
+        load.element.value, load.scale_type, load.load_type));
   }
-  x1 = std::clamp(x1, 0.0, L);
-  x2 = std::clamp(x2, 0.0, L);
-  return {x1, x2};
+  return kind;
+}
+
+/// Add the consistent nodal loads of a force vector and a moment vector
+/// (element frame) acting at station x, scaled by `weight`.  Axial force and
+/// torque use linear shapes; transverse loads use the Hermite shapes of the
+/// bending stiffness, with theta_z = dv/dx and theta_y = -dw/dx.  For a
+/// point load these are the exact Euler-Bernoulli fixed-end forces.
+void add_station_load(LocalFe &fe, const double x, const double L,
+                      const Eigen::Vector3d &force,
+                      const Eigen::Vector3d &moment, const double weight) {
+  const auto nlin = linear_shape(x, L);
+  const HermiteData h = hermite_shape(x, L);
+  const std::array<int, 4> v_dofs{1, 5, 7, 11};
+  const std::array<int, 4> w_dofs{2, 4, 8, 10};
+  const std::array<double, 4> v_force{h.N[0], h.N[1], h.N[2], h.N[3]};
+  const std::array<double, 4> w_force{h.N[0], -h.N[1], h.N[2], -h.N[3]};
+  const std::array<double, 4> v_moment{h.dN_dx[0], h.dN_dx[1], h.dN_dx[2],
+                                       h.dN_dx[3]};
+  const std::array<double, 4> w_moment{-h.dN_dx[0], h.dN_dx[1], -h.dN_dx[2],
+                                       h.dN_dx[3]};
+
+  fe(0) += nlin[0] * force(0) * weight;
+  fe(6) += nlin[1] * force(0) * weight;
+  fe(3) += nlin[0] * moment(0) * weight;
+  fe(9) += nlin[1] * moment(0) * weight;
+  for (size_t i = 0; i < 4; ++i) {
+    fe(v_dofs[i]) += (v_force[i] * force(1) + v_moment[i] * moment(2)) * weight;
+    fe(w_dofs[i]) += (w_force[i] * force(2) + w_moment[i] * moment(1)) * weight;
+  }
 }
 
 } // namespace
@@ -986,51 +1017,65 @@ LocalFe compute_pload1_fixed_end_local(const ElementData &elem,
         "PLOAD1 on element {} is only supported for CBAR and CBEAM",
         elem.id.value));
   }
+  const Pload1Kind kind = decode_pload1(load);
 
-  // The load acts along the element span between the (offset) ends.
+  // The load acts along the element span between the (offset) ends; X is
+  // measured from end A.
   const LineFrame frame = build_bar_geometry(elem, model).frame;
-  const auto [xa, xb] = load_interval(load, frame.length);
-  if (std::abs(xb - xa) < 1e-12)
-    return LocalFe::Zero(12);
+  const double L = frame.length;
 
-  const std::string load_type = uppercase_copy(load.load_type);
-  const double p2 = load.p2.value_or(load.p1);
+  // Unit load direction in the element frame.  Basic directions are
+  // rotated in; frame.rotation has the element axes as columns.
+  Eigen::Vector3d dir = Eigen::Vector3d::Zero();
+  dir(kind.axis) = 1.0;
+  if (!kind.element_axes)
+    dir = frame.rotation.transpose() * dir;
+  // Projected intensity: per unit length of the element's projection onto
+  // the plane normal to the load, i.e. scaled by |sin| of the angle between
+  // the element axis and the load direction.
+  const double intensity_scale =
+      kind.projected ? std::sqrt(std::max(0.0, 1.0 - dir(0) * dir(0))) : 1.0;
+  const Eigen::Vector3d force_dir =
+      kind.moment ? Eigen::Vector3d::Zero() : Eigen::Vector3d(dir);
+  const Eigen::Vector3d moment_dir =
+      kind.moment ? Eigen::Vector3d(dir) : Eigen::Vector3d::Zero();
+
+  const double station_scale = kind.fractional ? L : 1.0;
+  const double x1 = load.x1 * station_scale;
+  const bool concentrated =
+      !load.x2.has_value() || *load.x2 == load.x1;
+  const double x2 = concentrated ? x1 : *load.x2 * station_scale;
+  const double tol = 1e-9 * L;
+  if (x2 < x1 || x1 < -tol || x2 > L + tol) {
+    throw SolverError(std::format(
+        "PLOAD1 on element {}: stations X1 = {:.6g}, X2 = {:.6g} must satisfy "
+        "0 <= X1 <= X2 <= {} (element length {:.6g}, scale {})",
+        load.element.value, x1, x2, kind.fractional ? "1" : "L", L,
+        load.scale_type));
+  }
+
   LocalFe fe_local = LocalFe::Zero(12);
+  if (concentrated) {
+    add_station_load(fe_local, std::clamp(x1, 0.0, L), L, force_dir,
+                     moment_dir, load.p1 * intensity_scale);
+    return fe_local;
+  }
 
+  // Linear intensity times cubic shapes is quintic: 4-point Gauss is exact.
   static constexpr std::array<double, 4> gauss_pts{
       -0.8611363115940526, -0.3399810435848563, 0.3399810435848563,
       0.8611363115940526};
   static constexpr std::array<double, 4> gauss_wts{
       0.3478548451374538, 0.6521451548625461, 0.6521451548625461,
       0.3478548451374538};
-
-  for (int gp = 0; gp < 4; ++gp) {
-    const double x = 0.5 * (xb - xa) * (gauss_pts[gp] + 1.0) + xa;
-    const double jac = 0.5 * (xb - xa) * gauss_wts[gp];
-    const double xi = (xb > xa) ? (x - xa) / (xb - xa) : 0.0;
+  const double p2 = load.p2.value_or(load.p1);
+  for (size_t gp = 0; gp < 4; ++gp) {
+    const double xi = 0.5 * (gauss_pts[gp] + 1.0);
+    const double x = std::clamp(x1 + (x2 - x1) * xi, 0.0, L);
     const double q = load.p1 + (p2 - load.p1) * xi;
-    const auto nlin = linear_shape(x, frame.length);
-    const HermiteData h = hermite_shape(x, frame.length);
-
-    if (load_type == "FX") {
-      fe_local(0) += nlin[0] * q * jac;
-      fe_local(6) += nlin[1] * q * jac;
-    } else if (load_type == "MX") {
-      fe_local(3) += nlin[0] * q * jac;
-      fe_local(9) += nlin[1] * q * jac;
-    } else if (load_type == "FY" || load_type == "MZ") {
-      const auto shape = plane_shape_values(load_type, h);
-      add_plane_load(fe_local, {1, 5, 7, 11}, shape, q, jac);
-    } else if (load_type == "FZ" || load_type == "MY") {
-      const auto shape = plane_shape_values(load_type, h);
-      add_plane_load(fe_local, {2, 4, 8, 10}, shape, q, jac);
-    } else {
-      throw SolverError(std::format(
-          "PLOAD1 on element {}: load type '{}' is not supported",
-          elem.id.value, load.load_type));
-    }
+    add_station_load(fe_local, x, L, force_dir, moment_dir,
+                     q * intensity_scale * 0.5 * (x2 - x1) * gauss_wts[gp]);
   }
-
   return fe_local;
 }
 

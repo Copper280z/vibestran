@@ -35,6 +35,7 @@ reference is a MYSTRAN run.
 | PBAR with both a nonzero I12 and K1/K2 shear factors | No deck (2 decks use I12, 13 use K1/K2, none both) | Cantilever with a rotated rectangular section described by I1/I2/I12 and K1 = K2; must equal the same bar described in principal axes (vibestran unit test `CBar.ProductOfInertiaMatchesRotatedPrincipalSection` does this; MYSTRAN's BAR1 drops shear flexibility when I12 != 0, so it cannot serve as the reference) |
 | CBAR pin flags combined with end offsets | No deck (18 use pin flags, 10 use offsets, none both) | Offset bar with a moment release at the offset end; the released moment must be zero at the offset point, not at the grid |
 | PLOAD1 (any type) | No `PLOAD1` card | Simply supported and cantilever bars with uniform and linearly varying `FYE`/`FZE` and basic-direction `FY` loads; closed-form end moments and deflections |
+| PLOAD1 basic-direction types on inclined bars, projected scales (`LEPR`/`FRPR`), concentrated loads and moments (X2 blank) | No `PLOAD1` card | Inclined cantilever under basic `FY` with `LE` and `LEPR` (total load q L vs q L sin(angle)); point load at mid-span with blank X2 (fixed-end forces P/2, PL/8) |
 | PLOAD1 combined with pin flags or offsets | No `PLOAD1` card | Propped cantilever (pin flag at one end) under uniform load: reaction 3wL/8 and fixed-end moment wL^2/8 |
 | PLOAD1 under a `LOAD` combination with a scale factor | No `PLOAD1` card | Same as above with `LOAD` scale != 1 |
 

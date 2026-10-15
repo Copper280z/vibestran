@@ -28,6 +28,7 @@
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <format>
 #include <numbers>
 #include <sstream>
 
@@ -3697,4 +3698,38 @@ ENDDATA
 )");
     EXPECT_NEAR(get_disp(res, 2, 1), P * L * L * L / (3.0 * E * I2), 1e-14);
     EXPECT_NEAR(get_disp(res, 4, 1), P * L * L * L / (3.0 * E * I1), 1e-12);
+}
+
+TEST(Integration, Pload1BasicDirectionOnInclinedCantileverWithLoadScale) {
+    // Cantilever at 30 degrees in the x-y plane under a uniform basic-FY
+    // PLOAD1, applied through LOAD with overall scale 2 and factor 1.5
+    // (net 3).  The load splits into axial q sin30 and transverse q cos30:
+    //   axial tip extension  = 3 q sin30 L^2 / (2 E A)
+    //   transverse tip deflection = 3 q cos30 L^4 / (8 E I1)
+    // and the basic tip y displacement is their projection onto y.
+    constexpr double E = 1.0e7, A = 2.0, I1 = 0.5, L = 10.0, q = 4.0;
+    const double s = 0.5, c = std::sqrt(3.0) / 2.0;
+    const std::string bdf = std::format(R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 10
+  SPC = 1
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,{:.17g},{:.17g},0.
+MAT1,1,1.0E7,,0.3
+PBAR,1,1,2.,0.5,0.8,0.6
+CBAR,1,1,1,2,-0.5,{:.17g},0.
+SPC1,1,123456,1
+LOAD,10,2.,1.5,1
+PLOAD1,1,1,FY,FR,0.,4.,1.,4.
+ENDDATA
+)", L * c, L * s, c);
+    const SolverResults res = run_analysis(bdf);
+    const double axial = 3.0 * q * s * L * L / (2.0 * E * A);
+    const double transverse = 3.0 * q * c * std::pow(L, 4) / (8.0 * E * I1);
+    // Element x = (c, s), element y = (-s, c).
+    EXPECT_NEAR(get_disp(res, 2, 0), axial * c - transverse * s, 1e-12);
+    EXPECT_NEAR(get_disp(res, 2, 1), axial * s + transverse * c, 1e-12);
 }

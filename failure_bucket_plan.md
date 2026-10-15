@@ -435,3 +435,8 @@ most recent entry.
   moved from `unsupported_input` to `numerical_mismatch` /
   `missing_result_data`. The +1 is the RBE3 10 SPCFORCES TZ group again
   (`Error = 1.8e-07`), which flips at roundoff level between runs.
+- **PLOAD1 semantics (2,532, neutral; no deck uses PLOAD1).** `FX..MZ` are
+  now basic directions and `FXE..MZE` element directions, `LEPR`/`FRPR`
+  projected intensities are supported, and a blank X2 is a concentrated load
+  (it was previously spread to the end of the bar). Verified only by
+  closed-form unit and integration tests.
