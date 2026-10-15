@@ -28,6 +28,9 @@
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <string_view>
+#include <tuple>
+#include <type_traits>
+#include <vector>
 
 #ifdef HAVE_ACCELERATE
 #include <Eigen/AccelerateSupport>
@@ -142,6 +145,11 @@ public:
     }
 
     void set_shift(const Scalar& sigma) {
+        // Spectra calls this from every solver constructor; reuse the
+        // factorization when a solve is retried with the same shift.
+        if (active_backend_ != ActiveBackend::None && factored_sigma_ == sigma)
+            return;
+        factored_sigma_ = sigma;
         shift_ = SparseMatrix(K_.template triangularView<Eigen::Lower>());
         SparseMatrix M_lower(M_.template triangularView<Eigen::Lower>());
         shift_ -= sigma * M_lower;
@@ -309,6 +317,7 @@ private:
     const Index n_;
     SparseMatrix shift_;
     ActiveBackend active_backend_{ActiveBackend::None};
+    Scalar factored_sigma_{0.0};
     std::string backend_label_{"uninitialized"};
     const FactorRatioCheckPolicy* factor_ratio_policy_{nullptr};
 
@@ -339,53 +348,161 @@ std::vector<EigenPair> SpectraEigensolverBackend::solve(
     if (nd >= n)
         nd = n - 1; // Spectra requires nd < n
 
-    // Lanczos basis size: must satisfy nd < ncv <= n
-    int ncv = std::min(n, std::max(2 * nd + 10, 3 * nd));
-
     // The Lanczos iteration itself is mostly serial, but the shift-invert
     // factorization and triangular solves dominate runtime for large models.
     // Use the same sparse direct backend priority as the static CPU solver:
     // Apple Accelerate on macOS, CHOLMOD when available, otherwise Eigen's
     // simplicial factorizations. This avoids Spectra's default SparseLU path.
-    using OpType  = SpectraDirectShiftInvert;
-    using BOpType = Spectra::SparseSymMatProd<double>;
+    //
+    // Massless DOFs.  Shift-invert Lanczos requires a positive definite M.
+    // With lumped mass, rotations carry no inertia and M has zero rows; a
+    // Lanczos run in that semi-definite M inner product produces spurious
+    // Ritz pairs and misses genuine ones.  Those DOFs are condensed out
+    // exactly instead: with M_00 = 0 and M_0m = 0 the reduced problem is
+    //   K_red phi_m = lambda M_mm phi_m,  K_red = K_mm - K_m0 K_00^-1 K_0m,
+    // and (K_red - sigma M_mm)^-1 is precisely the massed-DOF block of
+    // (K - sigma M)^-1.  Lanczos therefore runs on the massed DOFs using the
+    // full factorization (no Schur-complement fill-in), and each full
+    // eigenvector is recovered exactly as (lambda - sigma)(K - sigma M)^-1 M phi.
+    // Without massless DOFs this is the ordinary shift-invert solve.
+    using FullOp = SpectraDirectShiftInvert;
+    FullOp full_op(K, M, factor_ratio_policy);
 
-    OpType op(K, M, factor_ratio_policy);
-    BOpType Bop(M);
-    std::optional<Spectra::SymGEigsShiftSolver<
-        OpType, BOpType, Spectra::GEigsMode::ShiftInvert>> solver;
-    try {
-        solver.emplace(op, Bop, nd, ncv, sigma);
-    } catch (const std::exception& e) {
+    std::vector<int> massed;
+    massed.reserve(static_cast<size_t>(n));
+    {
+        Eigen::VectorXd diag = Eigen::VectorXd::Zero(n);
+        for (int col = 0; col < M.outerSize(); ++col)
+            for (Eigen::SparseMatrix<double>::InnerIterator it(M, col); it; ++it)
+                if (it.row() == it.col())
+                    diag(it.row()) = it.value();
+        for (int i = 0; i < n; ++i)
+            if (diag(i) > 0.0)
+                massed.push_back(i);
+    }
+    const int nm = static_cast<int>(massed.size());
+    if (nm < 2) {
         throw SolverError(std::format(
-            "Spectra eigensolver setup failed for sigma={:.16g}: {}",
-            sigma, e.what()));
+            "Eigensolver: only {} of {} free DOFs carry mass; at least 2 are "
+            "required", nm, n));
+    }
+    if (nd >= nm)
+        nd = nm - 1; // finite eigenvalues = massed DOFs; Spectra needs nd < nm
+    const bool reduced = (nm < n);
+
+    // M restricted to the massed DOFs (lower triangle, like M).
+    Eigen::SparseMatrix<double> M_mm;
+    if (reduced) {
+        std::vector<int> position(static_cast<size_t>(n), -1);
+        for (int i = 0; i < nm; ++i)
+            position[static_cast<size_t>(massed[static_cast<size_t>(i)])] = i;
+        std::vector<Eigen::Triplet<double>> trips;
+        for (int col = 0; col < M.outerSize(); ++col) {
+            for (Eigen::SparseMatrix<double>::InnerIterator it(M, col); it; ++it) {
+                const int r = position[static_cast<size_t>(it.row())];
+                const int c = position[static_cast<size_t>(it.col())];
+                if (r >= 0 && c >= 0 && r >= c)
+                    trips.emplace_back(r, c, it.value());
+            }
+        }
+        M_mm.resize(nm, nm);
+        M_mm.setFromTriplets(trips.begin(), trips.end());
+        M_mm.makeCompressed();
     }
 
-    spdlog::info("Spectra shift-invert factorization backend: {}",
-                 op.backend_label());
+    /// Spectra operation y = (K_red - sigma M_mm)^-1 x on the massed DOFs,
+    /// evaluated as the massed block of the full shift-invert solve.
+    class ReducedShiftInvert {
+    public:
+        using Scalar = double;
+        ReducedShiftInvert(FullOp &full, const std::vector<int> &massed, int n)
+            : full_(full), massed_(massed), n_(n),
+              rhs_(Eigen::VectorXd::Zero(n)), sol_(n) {}
+        [[nodiscard]] Eigen::Index rows() const {
+            return static_cast<Eigen::Index>(massed_.size());
+        }
+        [[nodiscard]] Eigen::Index cols() const { return rows(); }
+        void set_shift(const Scalar &sigma) { full_.set_shift(sigma); }
+        void perform_op(const Scalar *x_in, Scalar *y_out) const {
+            rhs_.setZero();
+            for (size_t i = 0; i < massed_.size(); ++i)
+                rhs_(massed_[i]) = x_in[i];
+            full_.perform_op(rhs_.data(), sol_.data());
+            for (size_t i = 0; i < massed_.size(); ++i)
+                y_out[i] = sol_(massed_[i]);
+        }
+    private:
+        FullOp &full_;
+        const std::vector<int> &massed_;
+        int n_;
+        mutable Eigen::VectorXd rhs_;
+        mutable Eigen::VectorXd sol_;
+    };
 
-    solver->init();
-    // LargestMagn selection: keep Ritz pairs with largest |ν| during restarts,
-    // matching the natural convergence of the shift-inverted Lanczos.
-    // SmallestAlge sorting: after ν→λ conversion, sort final results ascending by λ.
-    int nconv = solver->compute(Spectra::SortRule::LargestMagn, 1000, 1e-10,
-                                Spectra::SortRule::SmallestAlge);
+    const auto run = [&](auto &op, const Eigen::SparseMatrix<double> &B,
+                         const int size) {
+        using OpT = std::remove_reference_t<decltype(op)>;
+        using BOpType = Spectra::SparseSymMatProd<double>;
+        BOpType Bop(B);
+        // Lanczos basis size: must satisfy nd < ncv <= size
+        const int ncv = std::min(size, std::max(2 * nd + 10, 3 * nd));
+        std::optional<Spectra::SymGEigsShiftSolver<
+            OpT, BOpType, Spectra::GEigsMode::ShiftInvert>> solver;
+        try {
+            solver.emplace(op, Bop, nd, ncv, sigma);
+        } catch (const std::exception& e) {
+            throw SolverError(std::format(
+                "Spectra eigensolver setup failed for sigma={:.16g}: {}",
+                sigma, e.what()));
+        }
+        spdlog::info("Spectra shift-invert factorization backend: {}",
+                     full_op.backend_label());
+        solver->init();
+        // LargestMagn selection: keep Ritz pairs with largest |nu| during
+        // restarts, matching the natural convergence of the shift-inverted
+        // Lanczos.  SmallestAlge sorting: after nu -> lambda conversion,
+        // sort final results ascending by lambda.
+        const int nconv = solver->compute(Spectra::SortRule::LargestMagn, 1000,
+                                          1e-10, Spectra::SortRule::SmallestAlge);
+        if (solver->info() != Spectra::CompInfo::Successful || nconv < 1)
+            throw SolverError(std::format(
+                "Spectra eigensolver: converged only {}/{} eigenvalues (info={})",
+                nconv, nd, static_cast<int>(solver->info())));
+        return std::pair<Eigen::VectorXd, Eigen::MatrixXd>{
+            solver->eigenvalues(), solver->eigenvectors()};
+    };
 
-    if (solver->info() != Spectra::CompInfo::Successful || nconv < 1)
-        throw SolverError(std::format(
-            "Spectra eigensolver: converged only {}/{} eigenvalues (info={})",
-            nconv, nd, static_cast<int>(solver->info())));
-
-    Eigen::VectorXd eigenvalues  = solver->eigenvalues();
-    Eigen::MatrixXd eigenvectors = solver->eigenvectors();
+    Eigen::VectorXd eigenvalues;
+    Eigen::MatrixXd eigenvectors;
+    if (reduced) {
+        spdlog::info("Spectra: {} of {} DOFs are massless and are condensed "
+                     "out of the eigenproblem", n - nm, n);
+        ReducedShiftInvert op(full_op, massed, n);
+        std::tie(eigenvalues, eigenvectors) = run(op, M_mm, nm);
+    } else {
+        std::tie(eigenvalues, eigenvectors) = run(full_op, M, n);
+    }
 
     std::vector<EigenPair> results;
-    results.reserve(nconv);
-    for (int i = 0; i < nconv; ++i) {
+    results.reserve(static_cast<size_t>(eigenvalues.size()));
+    for (Eigen::Index i = 0; i < eigenvalues.size(); ++i) {
         EigenPair ep;
-        ep.eigenvalue  = eigenvalues(i);
-        ep.eigenvector = eigenvectors.col(i);
+        ep.eigenvalue = eigenvalues(i);
+        if (!reduced) {
+            ep.eigenvector = eigenvectors.col(i);
+        } else {
+            // Expand: phi = (lambda - sigma)(K - sigma M)^-1 M phi, where
+            // M phi only involves the massed components.  The caller
+            // mass-normalizes the vector.
+            Eigen::VectorXd phi_m_full = Eigen::VectorXd::Zero(n);
+            for (int k = 0; k < nm; ++k)
+                phi_m_full(massed[static_cast<size_t>(k)]) = eigenvectors(k, i);
+            const Eigen::VectorXd m_phi =
+                M.selfadjointView<Eigen::Lower>() * phi_m_full;
+            Eigen::VectorXd phi(n);
+            full_op.perform_op(m_phi.data(), phi.data());
+            ep.eigenvector = phi * (eigenvalues(i) - sigma);
+        }
         results.push_back(std::move(ep));
     }
     return results;

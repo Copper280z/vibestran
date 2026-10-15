@@ -297,10 +297,11 @@ Their remaining mismatches are mostly not in the bar element itself:
   MYSTRAN to all printed digits.
 - `V30 beam released dof *` modal decks compare a CBAR pin flag against an
   equivalent MPC hinge. The identity is exact only when rotations are
-  massless (Nastran's default lumped mass, `COUPMASS` off). vibestran uses a
-  consistent bar mass and statically condenses the released DOF, so the two
-  models differ at the discretization level (0.02-0.2% in frequency, up to
-  ~1% for an axial release). Resolving this needs a lumped-mass option.
+  massless (Nastran's default lumped mass). vibestran deliberately defaults
+  to consistent mass, so the two models differ at the discretization level
+  (0.02-0.2% in frequency, up to ~1% for an axial release). With
+  `PARAM,COUPMASS,-1` added, vibestran reproduces MYSTRAN's `released dof
+  y-n` frequencies exactly and every pair matches; the decks do not set it.
 
 Current investigation priorities are constraint coordinate systems, remaining
 RBE2/RBE3 cases, shell material axes and recovery, solid recovery, and modal
@@ -370,12 +371,10 @@ values encode MYSTRAN behaviour and are not a correctness oracle.
    bar end forces are already recovered (`CBarBeamElement::EndForces`);
    shell forces are the largest missing-result family.
 2. CONM2 (ignored today; affects mass and inertial-load decks).
-3. A lumped-mass option (`PARAM,COUPMASS`) matching the Nastran default, which
-   the pin-flag hinge-equivalence modal decks depend on.
-4. CROD/PROD and CQUAD8.
-5. Triage the SPCFORCES `numerical_mismatch` decks (RBE3 node-surface
+3. CROD/PROD and CQUAD8.
+4. Triage the SPCFORCES `numerical_mismatch` decks (RBE3 node-surface
    coupling and MITC4+ reaction decks) and MPC force output.
-6. Implement 15-node CPENTA and partial PBUSH parsing only with their required
+5. Implement 15-node CPENTA and partial PBUSH parsing only with their required
    mechanics; keep MAT2/MAT8 and severely warped CQUAD4 decks explicitly
    unsupported until the corresponding formulations are implemented.
 
@@ -440,3 +439,11 @@ most recent entry.
   projected intensities are supported, and a blank X2 is a concentrated load
   (it was previously spread to the end of the bar). Verified only by
   closed-form unit and integration tests.
+- **Lumped mass, massless-DOF eigensolver, CTETRA10 mass (2,532, neutral).**
+  `PARAM,COUPMASS <= 0` selects lumped mass (consistent remains the
+  default). The Spectra shift-invert solver now condenses massless DOFs
+  exactly instead of running Lanczos in a semi-definite inner product,
+  which produced spurious modes and missed genuine ones. The CTETRA10
+  consistent mass was rank-deficient (4-point degree-2 rule, 8-digit
+  constants: 18 of 30 eigenvalues zero) and now uses an exact rule. No
+  validation deck sets COUPMASS or runs a CTETRA10 modal analysis.

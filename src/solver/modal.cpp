@@ -220,8 +220,8 @@ void ModalSolver::assemble_mass(const Model& model,
                                 double wtmass) {
     detail::assemble_element_matrix(
         model, mpc_handler, M_builder,
-        [wtmass](const ElementBase& elem) {
-            LocalKe mass = elem.mass_matrix();
+        [wtmass, &model](const ElementBase& elem) {
+            LocalKe mass = element_mass_matrix(elem, model);
             if (wtmass != 1.0)
                 mass *= wtmass;
             return mass;

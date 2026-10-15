@@ -54,6 +54,7 @@ vibestran/
 - **Coordinate systems**: CORD1R/C/S, CORD2R/C/S
 - **Input formats**: Nastran BDF (`.bdf`) and CalculiX/Abaqus (`.inp`, experimental)
 - **Solutions**: SOL 101 (Linear Static), SOL 103 (Normal Modes / Modal Analysis)
+- **Mass**: consistent (default) or lumped with `PARAM,COUPMASS` <= 0 (HRZ diagonal lumping for continuum elements; translational end masses for CBAR/CBEAM); massless DOFs are condensed exactly in the eigensolver
 
 Notable current limitations:
 
@@ -62,7 +63,7 @@ Notable current limitations:
 - Stress recovery is not yet implemented for CBUSH, CELAS1/2, and CMASS1/2.
 - CBAR offsets in the element system (OFFT `xGO`/`xOG`/`xOO`) are not yet supported.
 - GRID and GRDSET SEID (superelements) are not supported.
-- Bar mass is consistent (Hermite); Nastran's default lumped mass (`COUPMASS` off) is not yet available.
+- Mass is consistent by default (unlike Nastran, whose default is lumped); `PARAM,COUPMASS,-1` selects lumped mass.
 
 ## SOL 103 — Normal Modes (Modal Analysis)
 

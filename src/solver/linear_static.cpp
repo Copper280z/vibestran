@@ -536,7 +536,7 @@ void LinearStaticSolver::apply_inertial_loads(const Model &model,
   const DofMap &dof_map = mpc_handler.full_dof_map();
   for (const auto &elem_data : model.elements) {
     auto elem = make_element(elem_data, model);
-    LocalKe mass = elem->mass_matrix();
+    LocalKe mass = element_mass_matrix(*elem, model);
     if (mass.rows() == 0)
       continue;
     mass *= wtmass;
@@ -812,7 +812,7 @@ void subtract_spc_inertial_loads(const Model &model, const SubCase &sc,
 
   for (const auto &elem_data : model.elements) {
     auto elem = make_element(elem_data, model);
-    LocalKe mass = elem->mass_matrix();
+    LocalKe mass = element_mass_matrix(*elem, model);
     if (mass.rows() == 0)
       continue;
     mass *= wtmass;

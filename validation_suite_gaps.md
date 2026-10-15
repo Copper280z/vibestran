@@ -44,3 +44,11 @@ reference is a MYSTRAN run.
 | Feature | Check | Suggested deck |
 |---|---|---|
 | CBEAM / PBEAM (any use) | No `CBEAM` or `PBEAM` card | Cantilever with tip loads in both planes and a nonzero I12; compare against the closed-form unsymmetric bending solution |
+
+## Mass and modal analysis
+
+| Feature | Check | Suggested deck |
+|---|---|---|
+| `PARAM,COUPMASS` (lumped mass; vibestran defaults to consistent mass) | No deck sets COUPMASS | Copy the `V30 beam released dof *` decks with `PARAM,COUPMASS,-1`: the pin-flag and MPC-hinge structures must then give identical frequency pairs (vibestran reproduces MYSTRAN's `released dof y-n` frequencies exactly this way) |
+| Modal analysis with massless DOFs (lumped mass, rotations without inertia) | No deck exercises it | Same decks; checks that no spurious modes appear and none are missed |
+| CTETRA10 consistent mass in modal or inertial-load analysis | 12 decks use CTETRA10, none in SOL 103 | Free-free or cantilevered tet10 block in SOL 103, compared with a refined CHEXA/CTETRA4 reference, plus a GRAV case checking total reaction = rho*V*g |

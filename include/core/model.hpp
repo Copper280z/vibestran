@@ -804,6 +804,20 @@ public:
     return result;
   }
 
+  /// Mass formulation.  PARAM,COUPMASS <= 0 selects lumped mass (Nastran's
+  /// default); a positive value, or no PARAM, selects consistent mass, which
+  /// is vibestran's default.
+  [[nodiscard]] bool use_lumped_mass() const {
+    const auto it = params.find("COUPMASS");
+    if (it == params.end() || it->second.empty())
+      return false;
+    try {
+      return std::stod(it->second) <= 0.0;
+    } catch (...) {
+      return false;
+    }
+  }
+
   /// Retrieve all MPCs for a given set
   std::vector<const Mpc *> mpcs_for_set(MpcSetId sid) const {
     std::vector<const Mpc *> result;

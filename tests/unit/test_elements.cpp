@@ -2493,6 +2493,125 @@ TEST(Pload1, PinnedEndRecoversProppedCantileverForces) {
   EXPECT_NEAR(g(11), 0.0, 1e-9);
 }
 
+TEST(LumpedMass, HrzKeepsTetra10MassPositiveAndConserved) {
+  // Row-sum lumping of a quadratic tetrahedron's consistent mass gives
+  // non-positive corner masses (-1/20 of the total each); HRZ diagonal scaling
+  // must give strictly positive masses that sum to rho*V in every direction,
+  // with no off-diagonal coupling between DOFs.
+  Model m = make_solid_model();
+  const double rho = 7.8;
+  m.materials.at(MaterialId{1}).rho = rho;
+  // Corners ordered for a positive Jacobian; midsides on edges 1-2, 2-3,
+  // 1-3, 1-4, 2-4, 3-4.
+  add_grid(m, 1, 0, 0, 0);
+  add_grid(m, 2, 0, 1, 0);
+  add_grid(m, 3, 2, 0, 0);
+  add_grid(m, 4, 0, 0, 3);
+  add_grid(m, 5, 0, 0.5, 0);
+  add_grid(m, 6, 1, 0.5, 0);
+  add_grid(m, 7, 1, 0, 0);
+  add_grid(m, 8, 0, 0, 1.5);
+  add_grid(m, 9, 0, 0.5, 1.5);
+  add_grid(m, 10, 1, 0, 1.5);
+  const std::array<NodeId, 10> nodes{NodeId{1}, NodeId{2}, NodeId{3}, NodeId{4},
+                                     NodeId{5}, NodeId{6}, NodeId{7}, NodeId{8},
+                                     NodeId{9}, NodeId{10}};
+  const CTetra10 elem(ElementId{1}, PropertyId{1}, nodes, m);
+  const LocalKe Mc = elem.mass_matrix();
+  const LocalKe Ml = elem.lumped_mass_matrix();
+  const double volume = 2.0 * 1.0 * 3.0 / 6.0;
+
+  // Row sums of the consistent x-block at the corners are not positive.
+  double corner_row_sum = 0.0;
+  for (int b = 0; b < 10; ++b)
+    corner_row_sum += Mc(0, 3 * b);
+  EXPECT_LE(corner_row_sum, 1e-12 * rho * volume);
+
+  EXPECT_LT((Ml - LocalKe(Ml.diagonal().asDiagonal())).cwiseAbs().maxCoeff(),
+            1e-15);
+  for (int d = 0; d < 3; ++d) {
+    double total = 0.0;
+    for (int a = 0; a < 10; ++a) {
+      EXPECT_GT(Ml(3 * a + d, 3 * a + d), 0.0);
+      total += Ml(3 * a + d, 3 * a + d);
+    }
+    EXPECT_NEAR(total, rho * volume, 1e-12 * rho * volume);
+  }
+}
+
+TEST(CTetra10, ConsistentMassIsExactForQuadraticFieldsAndFullRank) {
+  // A tet10 interpolates u = x^2 exactly, so u^T M u = rho * int x^4 dV.
+  // For a tetrahedron, int (sum lambda_i x_i)^4 dV = V h4(x_1..x_4) / 35
+  // (Dirichlet integral; h4 the complete homogeneous symmetric polynomial).
+  // With vertex x-coordinates (0, 0, 2, 0): h4 = 16, V = 1.  This degree-4
+  // integrand needs a quadrature rule beyond degree 2; the matrix must also
+  // be positive definite (a low-order rule leaves 18 zero eigenvalues).
+  Model m = make_solid_model();
+  const double rho = 2.5;
+  m.materials.at(MaterialId{1}).rho = rho;
+  const std::array<std::array<double, 3>, 10> xyz{{{0, 0, 0}, {0, 1, 0},
+      {2, 0, 0}, {0, 0, 3}, {0, 0.5, 0}, {1, 0.5, 0}, {1, 0, 0}, {0, 0, 1.5},
+      {0, 0.5, 1.5}, {1, 0, 1.5}}};
+  for (int i = 0; i < 10; ++i)
+    add_grid(m, i + 1, xyz[i][0], xyz[i][1], xyz[i][2]);
+  std::array<NodeId, 10> nodes{NodeId{1}, NodeId{2}, NodeId{3}, NodeId{4},
+                               NodeId{5}, NodeId{6}, NodeId{7}, NodeId{8},
+                               NodeId{9}, NodeId{10}};
+  const CTetra10 elem(ElementId{1}, PropertyId{1}, nodes, m);
+  const LocalKe M = elem.mass_matrix();
+
+  Eigen::VectorXd u = Eigen::VectorXd::Zero(30);
+  for (int i = 0; i < 10; ++i)
+    u(3 * i) = xyz[i][0] * xyz[i][0];
+  EXPECT_NEAR(u.dot(M * u), rho * 16.0 / 35.0, 1e-12);
+
+  const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(M);
+  EXPECT_GT(es.eigenvalues().minCoeff(), 1e-4 * es.eigenvalues().maxCoeff());
+}
+
+TEST(LumpedMass, CbarPlacesHalfMassAtEachOffsetEnd) {
+  // Lumped bar mass is (rho*A + nsm)*L/2 on the translations of each element
+  // end with no rotational inertia.  With end offsets the masses sit at the
+  // offset points, so a rigid rotation omega about grid 1 has kinetic
+  // "energy" u^T M u = sum m_end |omega x r_end|^2.
+  PBar p = make_pbar(0.4, 0.2, 0.3, 0.1);
+  p.nsm = 0.25;
+  Model m = bar_model(5.0, p);
+  m.materials.at(MaterialId{1}).rho = 2.0;
+  ElementData data = bar_data(ElementType::CBAR, 1, 2, Vec3{0.0, 0.0, 1.0});
+  const LocalKe plain = CBarBeamElement(data, m).lumped_mass_matrix();
+  const double half = 0.5 * 5.0 * (2.0 * 0.4 + 0.25);
+  for (const int dof : {0, 1, 2, 6, 7, 8})
+    EXPECT_NEAR(plain(dof, dof), half, 1e-12);
+  for (const int dof : {3, 4, 5, 9, 10, 11})
+    EXPECT_EQ(plain(dof, dof), 0.0);
+
+  // Offsets of (0, d, 0) at both ends; L between offset ends is unchanged.
+  const double d = 0.6;
+  data.offsets = {Vec3{0.0, d, 0.0}, Vec3{0.0, d, 0.0}};
+  const LocalKe Mo = CBarBeamElement(data, m).lumped_mass_matrix();
+  Eigen::VectorXd u = Eigen::VectorXd::Zero(12);
+  // Rigid rotation about z through grid 1: grid 2 moves (0, 5, 0) per rad.
+  u(5) = 1.0;
+  u(11) = 1.0;
+  u(7) = 5.0;
+  // Offset ends at (0, d) and (5, d): |omega x r|^2 = d^2 and 25 + d^2.
+  EXPECT_NEAR(u.dot(Mo * u), half * (d * d) + half * (25.0 + d * d), 1e-10);
+}
+
+TEST(LumpedMass, CoupmassParamSelectsFormulation) {
+  // Consistent mass is vibestran's default; PARAM,COUPMASS <= 0 (Nastran's
+  // lumped setting) selects lumped mass, and a positive value consistent.
+  Model m;
+  EXPECT_FALSE(m.use_lumped_mass());
+  m.params["COUPMASS"] = "-1";
+  EXPECT_TRUE(m.use_lumped_mass());
+  m.params["COUPMASS"] = "0";
+  EXPECT_TRUE(m.use_lumped_mass());
+  m.params["COUPMASS"] = "1";
+  EXPECT_FALSE(m.use_lumped_mass());
+}
+
 TEST(CBeam, ThermalLoadIsAxialAndSelfEquilibrated) {
   Model m;
   add_mat1(m, 1, 3.0e7, 0.25, 0.0, 1.2e-5);

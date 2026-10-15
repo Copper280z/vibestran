@@ -796,6 +796,17 @@ LocalKe CBarBeamElement::mass_matrix() const {
   return map.transpose() * m_local * map;
 }
 
+LocalKe CBarBeamElement::lumped_mass_matrix() const {
+  const BarSystem sys = build_bar_system(data_, model_);
+  const double half_mass = 0.5 * sys.geom.frame.length *
+                           (sys.section.rho * sys.section.A + sys.section.nsm);
+  LocalKe m_local = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+  for (const int dof : {0, 1, 2, 6, 7, 8})
+    m_local(dof, dof) = half_mass;
+  const Eigen::Matrix<double, 12, 12> map = sys.pins.C * sys.geom.T;
+  return map.transpose() * m_local * map;
+}
+
 LocalFe CBarBeamElement::thermal_load(std::span<const double> temperatures,
                                       double t_ref) const {
   const BarSystem sys = build_bar_system(data_, model_);

@@ -29,6 +29,10 @@ public:
 
   [[nodiscard]] LocalKe stiffness_matrix() const override;
   [[nodiscard]] LocalKe mass_matrix() const override;
+  /// Lumped mass: (rho*A + NSM)*L/2 on the translations of each element end
+  /// (at the offset points), no rotational inertia, mapped to the grids
+  /// through the same offset and pin-flag transforms as the stiffness.
+  [[nodiscard]] LocalKe lumped_mass_matrix() const override;
   [[nodiscard]] LocalFe thermal_load(std::span<const double> temperatures,
                                      double t_ref) const override;
   struct StressRecoveryEnd {

@@ -46,6 +46,12 @@ public:
     /// Compute local consistent mass matrix Me (num_dofs × num_dofs)
     [[nodiscard]] virtual LocalKe mass_matrix() const = 0;
 
+    /// Lumped (diagonal, translational) mass matrix, used when the model
+    /// selects lumped mass (PARAM,COUPMASS <= 0).  The default applies HRZ
+    /// diagonal scaling to the translational block of mass_matrix(); see
+    /// hrz_lumped_mass().  Elements with a natural lumped form override it.
+    [[nodiscard]] virtual LocalKe lumped_mass_matrix() const;
+
     /// Compute local thermal load vector fe (num_dofs), given nodal temperatures
     /// and reference temperature.
     /// temperatures[i] = temperature at local node i
@@ -59,5 +65,19 @@ public:
     /// Node IDs in local ordering
     [[nodiscard]] virtual std::span<const NodeId> node_ids() const noexcept = 0;
 };
+
+/// HRZ (Hinton-Rock-Zienkiewicz) lumping of a consistent element mass.
+/// For each translational direction d the diagonal entries of that direction
+/// are scaled so they sum to the direction's total mass 1^T M_dd 1; rotational
+/// DOFs and all off-diagonal terms are dropped.  Unlike row-sum lumping it
+/// stays positive for quadratic elements (e.g. CTETRA10 corners).  Requires a
+/// uniform layout of `dofs_per_node` DOFs per node with translations first;
+/// layouts with fewer than 3 DOFs per node are returned unchanged.
+[[nodiscard]] LocalKe hrz_lumped_mass(const LocalKe &consistent,
+                                      int dofs_per_node);
+
+/// The element mass matrix selected by the model's mass formulation.
+[[nodiscard]] LocalKe element_mass_matrix(const ElementBase &element,
+                                          const Model &model);
 
 } // namespace vibestran

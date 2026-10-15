@@ -3733,3 +3733,95 @@ ENDDATA
     EXPECT_NEAR(get_disp(res, 2, 0), axial * c - transverse * s, 1e-12);
     EXPECT_NEAR(get_disp(res, 2, 1), axial * s + transverse * c, 1e-12);
 }
+
+// ── Lumped mass (PARAM,COUPMASS) ─────────────────────────────────────────────
+
+TEST(Integration, LumpedMassAxialBarMatchesDiscreteClosedForm) {
+    // Two CBARs of length a, fixed at grid 1, axial motion only.  Lumped
+    // masses rho*A*a (middle) and rho*A*a/2 (tip) with K = EA/a [[2,-1],[-1,1]]
+    // give lambda = (2 - sqrt2) E / (rho a^2).  Consistent mass gives a
+    // different (higher) value, so the formulation switch is observable.
+    constexpr double E = 2.0e7, rho = 3.0, a = 2.0;
+    const std::string deck = R"(
+SOL 103
+CEND
+METHOD = 1
+SPC = 1
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,2.,0.,0.
+GRID,3,,4.,0.,0.
+MAT1,1,2.0E7,,0.3,3.0
+PBAR,1,1,0.5,0.1,0.1,0.1
+CBAR,1,1,1,2,0.,1.,0.
+CBAR,2,1,2,3,0.,1.,0.
+SPC1,1,123456,1
+SPC1,1,23456,2,3
+EIGRL,1,,,1
+)";
+    const ModalSolverResults lumped = run_modal(deck + "PARAM,COUPMASS,-1\nENDDATA\n");
+    const ModalSolverResults consistent = run_modal(deck + "ENDDATA\n");
+    const double lambda = (2.0 - std::sqrt(2.0)) * E / (rho * a * a);
+    const double f_expected = std::sqrt(lambda) / (2.0 * std::numbers::pi);
+    EXPECT_NEAR(get_freq(lumped, 0), f_expected, 1e-9 * f_expected);
+    EXPECT_GT(get_freq(consistent, 0), 1.01 * f_expected);
+}
+
+TEST(Integration, LumpedMassMakesPinFlagEquivalentToMpcHinge) {
+    // Two identical two-bar beams, fixed at the root and propped in y at the
+    // tip (so the internal hinge is not a mechanism): one hinged by a CBAR
+    // pin flag (PA = 6 on the outer bar), the other by a separate grid tied
+    // with an MPC on every component except R3.  With lumped mass the rotations are
+    // massless, so condensing the released rotation is exact and every
+    // frequency appears as an identical pair.  This also exercises the
+    // eigensolver on a singular mass matrix (spurious Ritz pairs must be
+    // rejected).  With consistent mass the released rotation has inertia
+    // and the pairs split.
+    const std::string deck = R"(
+SOL 103
+CEND
+METHOD = 1
+SPC = 1
+MPC = 1
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,1.,0.,0.
+GRID,3,,2.,0.,0.
+GRID,11,,0.,5.,0.
+GRID,12,,1.,5.,0.
+GRID,13,,1.,5.,0.
+GRID,14,,2.,5.,0.
+MAT1,1,2.0E11,,0.3,7800.
+PBAR,1,1,0.005,4.0E-6,1.0E-6,3.0E-6
+CBAR,1,1,1,2,0.,1.,0.
+CBAR,2,1,2,3,0.,1.,0.,,6
+CBAR,11,1,11,12,0.,1.,0.
+CBAR,12,1,13,14,0.,1.,0.
+SPC1,1,123456,1,11
+SPC1,1,2,3,14
+MPC,1,13,1,1.,12,1,-1.
+MPC,1,13,2,1.,12,2,-1.
+MPC,1,13,3,1.,12,3,-1.
+MPC,1,13,4,1.,12,4,-1.
+MPC,1,13,5,1.,12,5,-1.
+EIGRL,1,,,8
+)";
+    const ModalSolverResults lumped = run_modal(deck + "PARAM,COUPMASS,-1\nENDDATA\n");
+    ASSERT_EQ(lumped.subcases.size(), 1u);
+    ASSERT_EQ(lumped.subcases[0].modes.size(), 8u);
+    for (int k = 0; k < 4; ++k) {
+        const double f0 = get_freq(lumped, 2 * k);
+        const double f1 = get_freq(lumped, 2 * k + 1);
+        EXPECT_GT(f0, 0.0);
+        EXPECT_NEAR(f0, f1, 1e-9 * f0) << "pair " << k;
+    }
+
+    const ModalSolverResults consistent = run_modal(deck + "ENDDATA\n");
+    double max_split = 0.0;
+    for (int k = 0; k < 4; ++k) {
+        const double f0 = get_freq(consistent, 2 * k);
+        const double f1 = get_freq(consistent, 2 * k + 1);
+        max_split = std::max(max_split, std::abs(f1 - f0) / f0);
+    }
+    EXPECT_GT(max_split, 1e-6);
+}

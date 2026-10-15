@@ -8,6 +8,7 @@
 #include <cmath>
 #include <format>
 #include <iterator>
+#include <vector>
 
 namespace vibestran {
 
@@ -916,29 +917,61 @@ LocalKe CTetra10::stiffness_matrix() const {
     return Ke;
 }
 
+namespace {
+
+/// Quadrature on the unit tetrahedron in volume coordinates (L1, L2, L3),
+/// weights summing to 1/6, exact for polynomials of total degree <= 7.
+/// Built from 5-point Gauss-Legendre rules through the collapsed (Duffy)
+/// map L1 = u, L2 = (1-u) v, L3 = (1-u)(1-v) w with Jacobian (1-u)^2 (1-v):
+/// a degree-p integrand becomes degree p+2 in u, so 5 points (exact to 9)
+/// cover p = 7.
+[[nodiscard]] const std::vector<std::array<double, 4>> &
+tetrahedron_collapsed_rule() {
+  static const std::vector<std::array<double, 4>> rule = [] {
+    static constexpr std::array<double, 5> x{
+        -0.9061798459386640, -0.5384693101056831, 0.0, 0.5384693101056831,
+        0.9061798459386640};
+    static constexpr std::array<double, 5> w{
+        0.2369268850561891, 0.4786286704993665, 0.5688888888888889,
+        0.4786286704993665, 0.2369268850561891};
+    std::vector<std::array<double, 4>> pts;
+    pts.reserve(125);
+    for (size_t i = 0; i < 5; ++i) {
+      const double u = 0.5 * (x[i] + 1.0);
+      for (size_t j = 0; j < 5; ++j) {
+        const double v = 0.5 * (x[j] + 1.0);
+        for (size_t k = 0; k < 5; ++k) {
+          const double t = 0.5 * (x[k] + 1.0);
+          const double weight = 0.125 * w[i] * w[j] * w[k] * (1.0 - u) *
+                                (1.0 - u) * (1.0 - v);
+          pts.push_back({u, (1.0 - u) * v, (1.0 - u) * (1.0 - v) * t, weight});
+        }
+      }
+    }
+    return pts;
+  }();
+  return rule;
+}
+
+} // namespace
+
 LocalKe CTetra10::mass_matrix() const {
     LocalKe Me = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
     const double rho = material().rho;
     if (rho == 0.0) return Me;
 
-    // 4-point Gauss quadrature for tetrahedron (exact for degree-3 polynomials,
-    // needed for quadratic shape function products which are degree 4 — slightly
-    // under-integrated, but standard practice for CTetra10 mass).
-    // Points and weights from Dunavant, 1985 (barycentric coordinates)
-    static const double gL[4][4] = {
-        {0.13819660,0.13819660,0.13819660,0.58541020},
-        {0.13819660,0.13819660,0.58541020,0.13819660},
-        {0.13819660,0.58541020,0.13819660,0.13819660},
-        {0.58541020,0.13819660,0.13819660,0.13819660}
-    };
-    static const double gW[4] = {0.04166667, 0.04166667, 0.04166667, 0.04166667};
+    // The consistent mass integrates N_a N_b det(J): degree 4 for a
+    // straight-sided tet10, plus up to degree 3 from det(J) when midside
+    // nodes are off-centre.  A low-order rule (e.g. the 4-point degree-2
+    // rule used for stiffness) makes the matrix rank-deficient - 18 of its
+    // 30 eigenvalues vanish - so use the collapsed-coordinate rule, exact to
+    // degree 7.
+    const auto &rule = tetrahedron_collapsed_rule();
 
     auto coords = node_coords();
 
-    for (int gi = 0; gi < 4; ++gi) {
-        double L1 = gL[gi][0], L2 = gL[gi][1], L3 = gL[gi][2];
-        // L4 = gL[gi][3] but unused in shape_functions (derived as 1-L1-L2-L3)
-
+    for (const auto &qp : rule) {
+        const double L1 = qp[0], L2 = qp[1], L3 = qp[2];
         auto sd = shape_functions(L1, L2, L3);
 
         // Jacobian: maps (dL1,dL2,dL3) → (dx,dy,dz)
@@ -953,7 +986,7 @@ LocalKe CTetra10::mass_matrix() const {
         if (detJ <= 0)
             throw SolverError(std::format("CTetra10 {}: non-positive Jacobian in mass_matrix det={:.6g}", eid_.value, detJ));
 
-        double weight = gW[gi];
+        const double weight = qp[3];
         for (int a = 0; a < 10; ++a)
             for (int b = 0; b < 10; ++b) {
                 double v = rho * sd.N[a] * sd.N[b] * detJ * weight;
