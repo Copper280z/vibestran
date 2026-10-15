@@ -7,6 +7,7 @@
 #include "core/coord_sys.hpp"
 #include "core/logger.hpp"
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <format>
@@ -14,6 +15,7 @@
 #include <numbers>
 #include <set>
 #include <sstream>
+#include <string_view>
 
 namespace vibestran {
 
@@ -27,6 +29,51 @@ namespace {
     keyword.pop_back();
   }
   return keyword;
+}
+
+/// Expand an abbreviated case-control command to its canonical spelling.
+///
+/// Nastran accepts most case-control commands shortened to their first four
+/// or more characters (DISP, STRE, SPCF, METH, ...).  Only commands whose
+/// four-character prefix is unambiguous among Nastran case-control commands
+/// are listed; e.g. SUBCASE is omitted because SUBC also abbreviates SUBCOM.
+/// Aliases (ELSTRESS) are mapped to the command they are equivalent to.
+/// `line` must already be upper-case and left-trimmed; the rest of the line
+/// (modifiers, '=', value) is preserved verbatim.
+[[nodiscard]] std::string
+canonicalize_case_control_command(const std::string &line) {
+  const size_t end = line.find_first_of(" =(,\t");
+  const std::string word = line.substr(0, end);
+  if (word.size() < 4)
+    return line;
+
+  struct Command {
+    std::string_view canonical;
+    std::string_view alias;
+  };
+  static constexpr std::array<Command, 12> kCommands{{
+      {"DISPLACEMENT", "DISPLACEMENT"},
+      {"EIGENVECTOR", "EIGENVECTOR"},
+      {"VECTOR", "VECTOR"},
+      {"STRESS", "STRESS"},
+      {"STRESS", "ELSTRESS"},
+      {"STRAIN", "STRAIN"},
+      {"GPSTRESS", "GPSTRESS"},
+      {"SPCFORCES", "SPCFORCES"},
+      {"METHOD", "METHOD"},
+      {"ANALYSIS", "ANALYSIS"},
+      {"THERMAL", "THERMAL"},
+      {"LABEL", "LABEL"},
+  }};
+  const auto match = std::find_if(
+      kCommands.begin(), kCommands.end(), [&word](const Command &cmd) {
+        return word.size() <= cmd.alias.size() && cmd.alias.starts_with(word);
+      });
+  if (match == kCommands.end())
+    return line;
+  const std::string rest =
+      (end == std::string::npos) ? std::string{} : line.substr(end);
+  return std::string(match->canonical) + rest;
 }
 
 [[nodiscard]] std::string join_keywords(const std::set<std::string> &keywords) {
@@ -210,7 +257,7 @@ Model BdfParser::parse_stream(std::istream &in) {
       size_t first = upper.find_first_not_of(" \t");
       if (first == std::string::npos)
         continue;
-      std::string kw = upper.substr(first);
+      std::string kw = canonicalize_case_control_command(upper.substr(first));
       bool handled = true;
 
       if (kw.starts_with("SUBCASE")) {
@@ -246,7 +293,7 @@ Model BdfParser::parse_stream(std::istream &in) {
           } catch (...) {
           }
       } else if (kw.starts_with("MPC") && kw.find('=') != std::string::npos
-                 && !kw.starts_with("MPCADD")) {
+                 && !kw.starts_with("MPCADD") && !kw.starts_with("MPCF")) {
         SubCase& sc = current_subcase();
         size_t eq = kw.find('=');
         try {

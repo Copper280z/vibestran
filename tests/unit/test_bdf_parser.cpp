@@ -1276,6 +1276,55 @@ ENDDATA
     EXPECT_TRUE(sc.disp_print);
 }
 
+TEST(BdfParser, CaseControlAbbreviationsMapToCanonicalCommands) {
+    // Nastran accepts case-control commands shortened to four or more
+    // characters.  Each abbreviation must drive exactly the same request as
+    // its long form, including per-subcase scoping, modifiers, and NONE.
+    const std::string bdf = R"(
+SOL 101
+CEND
+DISP = ALL
+SPCF(PLOT) = ALL
+METH = 7
+SUBCASE 1
+  LOAD = 1
+  SPC = 1
+  STRE(PLOT,CORNER) = ALL
+  STRA = ALL
+SUBCASE 2
+  LOAD = 1
+  SPC = 1
+  DISPL = NONE
+  ELSTRESS = ALL
+  MPCFORCE = ALL
+BEGIN BULK
+GRID,1,,0.,0.,0.
+ENDDATA
+)";
+    const Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.analysis.subcases.size(), 2u);
+
+    const SubCase& sc1 = m.analysis.subcases[0];
+    EXPECT_TRUE(sc1.disp_print);           // DISP inherited from global
+    EXPECT_FALSE(sc1.spc_force_print);     // SPCF(PLOT): plot channel only
+    EXPECT_TRUE(sc1.spc_force_plot);
+    EXPECT_EQ(sc1.eigrl_id, 7);            // METH
+    EXPECT_FALSE(sc1.stress_print);        // STRE(PLOT,CORNER)
+    EXPECT_TRUE(sc1.stress_plot);
+    EXPECT_TRUE(sc1.stress_corner_plot);
+    EXPECT_TRUE(sc1.strain_print);         // STRA is STRAIN, not STRESS
+    EXPECT_EQ(sc1.spc_set.value, 1);
+    EXPECT_EQ(sc1.mpc_set.value, 0);
+
+    const SubCase& sc2 = m.analysis.subcases[1];
+    EXPECT_FALSE(sc2.disp_print);          // DISPL = NONE overrides global
+    EXPECT_FALSE(sc2.disp_plot);
+    EXPECT_TRUE(sc2.stress_print);         // ELSTRESS alias
+    EXPECT_FALSE(sc2.strain_print);
+    // MPCFORCE is an output request, not an MPC set selection.
+    EXPECT_EQ(sc2.mpc_set.value, 0);
+}
+
 TEST(BdfParser, LegacySol3SelectsModalAnalysis) {
     const Model model = BdfParser::parse_string(
         "SOL 3\nCEND\nBEGIN BULK\nENDDATA\n");
