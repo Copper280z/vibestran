@@ -50,7 +50,8 @@ vibestran/
 - **Loads**: FORCE, MOMENT, TEMP/TEMPD, PLOAD, PLOAD1 (CBAR/CBEAM), PLOAD2, PLOAD4, GRAV, ACCEL1
 - **Constraints**: SPC, SPC1, GRID PS (permanent SPCs, in the grid's CD frame), MPC, RBE2, RBE3
 - **Defaults**: GRDSET (CP/CD/PS for blank GRID fields), BAROR (PID/orientation/OFFT for blank CBAR fields)
-- **Reaction output**: SPCFORCE(S) in F06 (MYSTRAN-compatible `S P C   F O R C E S` block)
+- **Reaction output**: SPCFORCE(S) and MPCFORCE(S) in F06, in each grid's global (CD) system (MYSTRAN-compatible blocks)
+- **Grid point force balance**: GPFORCE for linear statics (applied, thermal, SPC, MPC, and per-element rows; MYSTRAN layout)
 - **Coordinate systems**: CORD1R/C/S, CORD2R/C/S
 - **Input formats**: Nastran BDF (`.bdf`) and CalculiX/Abaqus (`.inp`, experimental)
 - **Solutions**: SOL 101 (Linear Static), SOL 103 (Normal Modes / Modal Analysis)
@@ -63,6 +64,7 @@ Notable current limitations:
 - Stress recovery is not yet implemented for CBUSH, CELAS1/2, and CMASS1/2.
 - CBAR offsets in the element system (OFFT `xGO`/`xOG`/`xOO`) are not yet supported.
 - GRID and GRDSET SEID (superelements) are not supported.
+- GPFORCE is written for linear statics only (no modal inertia-force rows yet).
 - Mass is consistent by default (unlike Nastran, whose default is lumped); `PARAM,COUPMASS,-1` selects lumped mass.
 
 ## SOL 103 — Normal Modes (Modal Analysis)

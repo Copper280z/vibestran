@@ -18,17 +18,17 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 2,528 final failure
+The suite contains 3,226 definitions. The current run has 2,512 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
-| `unsupported_input` | 1,484 | 223 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 484 | 172 | Result exists but differs from the reference or comparator expectation |
-| `missing_result_data` | 260 | 44 | Solver completes but does not emit the requested result family |
+| `unsupported_input` | 1,440 | 218 | Requires unsupported cards, solution sequences, elements, or formulations |
+| `numerical_mismatch` | 483 | 174 | Result exists but differs from the reference or comparator expectation |
+| `missing_result_data` | 245 | 42 | Solver completes but does not emit the requested result family |
 | `input_parse_error` | 185 | 15 | Parser rejects syntax or a card variant used by a valid deck |
-| `solver_model_error` | 115 | 13 | Parsed model is rejected by a current formulation or geometry gate |
-| **Total** | **2,528** |  |  |
+| `solver_model_error` | 159 | 18 | Parsed model is rejected by a current formulation or geometry gate |
+| **Total** | **2,512** |  |  |
 
 GRID PS, GRDSET, and BAROR are now applied. The decks they unblocked solve
 (the SB-BAR I12/PINFLAG/OFFSET displacements and stresses match MYSTRAN
@@ -362,10 +362,11 @@ The goal is feature compatibility with correct, modern formulations, not
 numerical agreement with MYSTRAN; the suite's tolerances and some expected
 values encode MYSTRAN behaviour and are not a correctness oracle.
 
-1. Grid point force balance (`GPFORCE`), the first blocker of most
-   Benchmark bulk comparisons, and element force output (`FORCE`/`ELFORCE`):
-   bar end forces are already recovered (`CBarBeamElement::EndForces`);
-   shell forces are the largest missing-result family.
+1. Element force output (`FORCE`/`ELFORCE`), now the first blocker of
+   most Benchmark bulk comparisons (BARFORCES, SHELLFORCES): bar end forces
+   are already recovered (`CBarBeamElement::EndForces`); shell forces are the
+   largest missing-result family. Then modal GPFORCE (inertia-force rows;
+   34 decks request GPFORCE in SOL 103).
 2. CROD/PROD and CQUAD8.
 3. Triage the SPCFORCES `numerical_mismatch` decks (RBE3 node-surface
    coupling and MITC4+ reaction decks) and MPC force output.
@@ -454,3 +455,14 @@ most recent entry.
   components of the full residual (they were previously the basic
   components with the same index). SB/SS-CONM2A now pass SPCFORCES and stop
   at GPFORCE.
+- **MPCFORCES and GPFORCE (2,528 -> 2,512, no new failures).** Forces of
+  multipoint constraint (the residual K u - F at MPC/RBE grids, beyond the
+  SPC-owned components) and the statics grid point force balance (MYSTRAN
+  layout) are written, both in each grid's CD system; both match MYSTRAN on
+  SB-BAR-PINFLAG and SB-RBE2-01-CBAR-01. RBE3 19 (9 records) and "all zero
+  MPC forces" (6) now pass. 44 records moved from `unsupported_input` to
+  `solver_model_error` because MPCFORCE is no longer an ignored card and
+  those decks' first remaining blocker is a formulation gate. Bulk
+  comparisons now mostly stop at BARFORCES/SHELLFORCES. A second flaky
+  record was identified: "V20 Constraint Equations shared masters" MODE/1
+  (rigid-body mode whose vector varies run to run).

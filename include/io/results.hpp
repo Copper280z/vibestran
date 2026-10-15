@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <optional>
 #include <ostream>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -124,12 +125,36 @@ struct SpcForce {
   CoordId coord{0};          // frame of f: the grid's displacement system
 };
 
+/// One contribution to the force balance at a grid (GPFORCE), in the grid's
+/// global (CD) system.  Rows follow MYSTRAN's layout: APPLIED holds every
+/// equivalent grid load including the thermal one, which the THERMAL row
+/// ("MINUS EQUIV THERM LOAD") then backs out; ELEMENT rows are the force each
+/// element exerts on the grid, -(K_e u_e - f_e,thermal).  Rows sum to zero.
+struct GridForceContribution {
+  enum class Kind { Applied, Thermal, Spc, Mpc, Element };
+  Kind kind{Kind::Applied};
+  ElementType etype{ElementType::CBAR}; ///< Element rows only
+  ElementId eid{0};                     ///< Element rows only
+  std::array<double, 6> f{};
+};
+
+struct GridPointForceBalance {
+  NodeId node{0};
+  CoordId coord{0};
+  std::vector<GridForceContribution> rows;
+  std::array<double, 6> totals{}; ///< Sum of rows; zero up to roundoff
+};
+
 struct SubCaseResults {
   int id{1};
   std::string label;
 
   std::vector<NodeDisplacement> displacements;
   std::vector<SpcForce> spc_forces;
+  /// Forces of multipoint constraint (MPC/RBE) at the grids they connect,
+  /// in each grid's global (CD) system.
+  std::vector<SpcForce> mpc_forces;
+  std::vector<GridPointForceBalance> gp_forces;
   std::vector<LineStress> line_stresses;
   std::vector<PlateStress> plate_stresses;
   std::vector<SolidStress> solid_stresses;
@@ -215,6 +240,14 @@ private:
   static void write_subcase_header(std::ostream& out, int subcase_id);
   static void write_displacement_table(const SubCaseResults& sc,
                                        std::ostream& out);
+  static void write_constraint_force_table(
+      const SubCaseResults& sc, std::ostream& out,
+      const std::vector<SpcForce>& forces, std::string_view title,
+      std::string_view totals_label);
+  static void write_mpc_force_table(const SubCaseResults& sc,
+                                    std::ostream& out);
+  static void write_gpforce_table(const SubCaseResults& sc,
+                                  std::ostream& out);
   static void write_spc_force_table(const SubCaseResults& sc,
                                     std::ostream& out);
   static void write_shell_stress_table(

@@ -386,12 +386,28 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   const auto t7 = Clock::now();
   spdlog::debug("[subcase {}] recover_results: {:.3f} ms", sc.id, Ms(t7 - t6).count());
 
-  // 7. SPC forces (only when requested)
-  if (sc.spc_force_print || sc.spc_force_plot) {
-    result.spc_forces = compute_spc_forces(model, sc, mpc_handler, u_free);
+  // 7. SPC forces, MPC forces, and grid point force balance (when requested;
+  //    the force balance needs the SPC forces for its SPC rows).
+  const bool want_mpc = sc.mpc_force_print || sc.mpc_force_plot;
+  const bool want_gp = sc.gpforce_print || sc.gpforce_plot;
+  if (sc.spc_force_print || sc.spc_force_plot || want_gp) {
+    std::vector<SpcForce> spc_forces =
+        compute_spc_forces(model, sc, mpc_handler, u_free);
     const auto t8 = Clock::now();
     spdlog::debug("[subcase {}] compute_spc_forces: {:.3f} ms", sc.id,
                   Ms(t8 - t7).count());
+    if (want_mpc || want_gp) {
+      GridForceOutput gf = compute_grid_forces(model, sc, mpc_handler, u_free,
+                                               spc_forces, want_mpc, want_gp);
+      result.mpc_forces = std::move(gf.mpc_forces);
+      result.gp_forces = std::move(gf.gp_forces);
+    }
+    if (sc.spc_force_print || sc.spc_force_plot)
+      result.spc_forces = std::move(spc_forces);
+  } else if (want_mpc) {
+    GridForceOutput gf =
+        compute_grid_forces(model, sc, mpc_handler, u_free, {}, true, false);
+    result.mpc_forces = std::move(gf.mpc_forces);
   }
 
   spdlog::debug("[subcase {}] total: {:.3f} ms", sc.id, Ms(t7 - t0).count());
@@ -899,11 +915,10 @@ void subtract_spc_inertial_loads(const Model &model, const SubCase &sc,
 }
 
 /// Subtract thermal element loads at SPC'd DOFs from `react`.
-void subtract_spc_thermal_loads(const Model &model, const SubCase &sc,
-                                const std::unordered_map<NodeId,
-                                    std::array<SpcDofState, 6>> &spc,
-                                std::unordered_map<NodeId,
-                                    std::array<double, 6>> &react) {
+/// Nodal temperatures of a subcase's thermal load set (TEMP, with TEMPD as
+/// the default for unlisted grids); empty when the subcase has none.
+std::unordered_map<NodeId, double>
+subcase_thermal_temperatures(const Model &model, const SubCase &sc) {
   int temp_set = sc.temp_load_set;
   if (temp_set == 0)
     temp_set = sc.load_set.value;
@@ -923,32 +938,49 @@ void subtract_spc_thermal_loads(const Model &model, const SubCase &sc,
         nodal_temps[nid] = T_default;
     }
   }
+  return nodal_temps;
+}
+
+/// Equivalent thermal load vector of one element (element DOF order, basic
+/// frame) for the given nodal temperatures.
+LocalFe element_thermal_vector(const ElementBase &elem,
+                               const ElementData &elem_data, const Model &model,
+                               const std::unordered_map<NodeId, double> &nodal_temps) {
+  auto node_ids = elem.node_ids();
+  const int nn = static_cast<int>(node_ids.size());
+
+  MaterialId mid{0};
+  if (elem_data.type != ElementType::CELAS2 &&
+      elem_data.type != ElementType::CMASS2 &&
+      elem_data.type != ElementType::CONM2) {
+    const auto &prop = model.property(elem_data.pid);
+    mid = property_material_id(prop);
+  }
+  const double elem_t_ref =
+      (mid.value != 0) ? model.material(mid).ref_temp : 0.0;
+
+  std::vector<double> temps(static_cast<size_t>(nn));
+  for (int i = 0; i < nn; ++i) {
+    auto it = nodal_temps.find(node_ids[static_cast<size_t>(i)]);
+    temps[static_cast<size_t>(i)] =
+        (it != nodal_temps.end()) ? it->second : elem_t_ref;
+  }
+  return elem.thermal_load(temps, elem_t_ref);
+}
+
+void subtract_spc_thermal_loads(const Model &model, const SubCase &sc,
+                                const std::unordered_map<NodeId,
+                                    std::array<SpcDofState, 6>> &spc,
+                                std::unordered_map<NodeId,
+                                    std::array<double, 6>> &react) {
+  const auto nodal_temps = subcase_thermal_temperatures(model, sc);
   if (nodal_temps.empty())
     return;
 
   for (const auto &elem_data : model.elements) {
     auto elem = make_element(elem_data, model);
-    auto node_ids = elem->node_ids();
-    const int nn = static_cast<int>(node_ids.size());
-
-    MaterialId mid{0};
-    if (elem_data.type != ElementType::CELAS2 &&
-        elem_data.type != ElementType::CMASS2 &&
-        elem_data.type != ElementType::CONM2) {
-      const auto &prop = model.property(elem_data.pid);
-      mid = property_material_id(prop);
-    }
-    const double elem_t_ref =
-        (mid.value != 0) ? model.material(mid).ref_temp : 0.0;
-
-    std::vector<double> temps(static_cast<size_t>(nn));
-    for (int i = 0; i < nn; ++i) {
-      auto it = nodal_temps.find(node_ids[static_cast<size_t>(i)]);
-      temps[static_cast<size_t>(i)] =
-          (it != nodal_temps.end()) ? it->second : elem_t_ref;
-    }
-
-    const LocalFe fe = elem->thermal_load(temps, elem_t_ref);
+    const LocalFe fe =
+        element_thermal_vector(*elem, elem_data, model, nodal_temps);
     const auto identity = local_dof_identity(elem_data);
     for (int li = 0; li < elem->num_dofs(); ++li) {
       const auto [nid, comp] = identity[static_cast<size_t>(li)];
@@ -960,6 +992,31 @@ void subtract_spc_thermal_loads(const Model &model, const SubCase &sc,
           fe(static_cast<Eigen::Index>(li));
     }
   }
+}
+
+/// Rotate a basic-frame grid 6-vector (forces, moments) into the grid's
+/// global (CD) system.
+std::array<double, 6> to_grid_frame(const Model &model, const NodeId nid,
+                                    const std::array<double, 6> &v) {
+  const GridPoint &gp = model.node(nid);
+  if (gp.cd.value == 0)
+    return v;
+  const auto cs_it = model.coord_systems.find(gp.cd);
+  if (cs_it == model.coord_systems.end()) {
+    throw SolverError(std::format(
+        "GRID {}: displacement coordinate system {} not found", nid.value,
+        gp.cd.value));
+  }
+  const Mat3 T3 = rotation_matrix(cs_it->second, gp.position);
+  std::array<double, 6> out{};
+  for (int block = 0; block < 2; ++block)
+    for (int i = 0; i < 3; ++i) {
+      double x = 0.0;
+      for (int j = 0; j < 3; ++j)
+        x += T3(j, i) * v[static_cast<size_t>(3 * block + j)];
+      out[static_cast<size_t>(3 * block + i)] = x;
+    }
+  return out;
 }
 
 } // namespace
@@ -1072,6 +1129,212 @@ LinearStaticSolver::compute_spc_forces(const Model &model, const SubCase &sc,
     result.push_back(std::move(sf));
   }
   return result;
+}
+
+LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
+    const Model &model, const SubCase &sc, const MpcHandler &mpc_handler,
+    const std::vector<double> &u_free, const std::vector<SpcForce> &spc_forces,
+    const bool want_mpc, const bool want_gp) const {
+  GridForceOutput out;
+  const DofMap &dof_map = mpc_handler.full_dof_map();
+
+  // Enforced values for constrained DOFs, and an "every component of every
+  // grid" map so the load helpers assemble the full applied load vector.
+  const auto spc = active_spc_state(model, sc);
+  std::unordered_map<NodeId, std::array<SpcDofState, 6>> all;
+  all.reserve(model.nodes.size());
+  for (const auto &[nid, _] : model.nodes) {
+    std::array<SpcDofState, 6> st{};
+    const auto it = spc.find(nid);
+    for (int d = 0; d < 6; ++d) {
+      st[static_cast<size_t>(d)].active = true;
+      if (it != spc.end() && it->second[static_cast<size_t>(d)].active)
+        st[static_cast<size_t>(d)].value = it->second[static_cast<size_t>(d)].value;
+    }
+    all.emplace(nid, st);
+  }
+
+  const auto nodal_temps = subcase_thermal_temperatures(model, sc);
+
+  // Element internal forces K_e u_e - f_e,thermal (basic), per element and
+  // grid, and their sum per grid.
+  struct ElementForceAtGrid {
+    ElementType etype;
+    ElementId eid;
+    std::array<double, 6> f{};
+  };
+  std::unordered_map<NodeId, std::vector<ElementForceAtGrid>> elem_rows;
+  std::unordered_map<NodeId, std::array<double, 6>> internal;
+  std::vector<const ElementData *> sorted_elements;
+  sorted_elements.reserve(model.elements.size());
+  for (const auto &e : model.elements)
+    sorted_elements.push_back(&e);
+  std::sort(sorted_elements.begin(), sorted_elements.end(),
+            [](const ElementData *a, const ElementData *b) { return a->id < b->id; });
+
+  for (const ElementData *ep : sorted_elements) {
+    const ElementData &elem_data = *ep;
+    auto elem = make_element(elem_data, model);
+    const LocalKe ke = elem->stiffness_matrix();
+    if (ke.size() == 0 || ke.cwiseAbs().maxCoeff() == 0.0)
+      continue; // mass-only elements carry no internal force
+    const auto gdofs = elem->global_dof_indices(dof_map);
+    const auto identity = local_dof_identity(elem_data);
+    const int ndof = elem->num_dofs();
+
+    Eigen::VectorXd ue = Eigen::VectorXd::Zero(ndof);
+    for (int li = 0; li < ndof; ++li) {
+      const EqIndex eq = gdofs[static_cast<size_t>(li)];
+      if (eq != CONSTRAINED_DOF && eq < static_cast<EqIndex>(u_free.size())) {
+        ue(li) = u_free[static_cast<size_t>(eq)];
+      } else {
+        const auto [nid, comp] = identity[static_cast<size_t>(li)];
+        const auto it = spc.find(nid);
+        if (it != spc.end() && it->second[static_cast<size_t>(comp)].active)
+          ue(li) = it->second[static_cast<size_t>(comp)].value;
+      }
+    }
+    Eigen::VectorXd fe = ke * ue;
+    if (!nodal_temps.empty())
+      fe -= element_thermal_vector(*elem, elem_data, model, nodal_temps);
+
+    std::unordered_map<NodeId, std::array<double, 6>> per_grid;
+    for (int li = 0; li < ndof; ++li) {
+      const auto [nid, comp] = identity[static_cast<size_t>(li)];
+      per_grid[nid][static_cast<size_t>(comp)] += fe(li);
+      internal[nid][static_cast<size_t>(comp)] += fe(li);
+    }
+    if (want_gp) {
+      for (const NodeId nid : elem_data.nodes) {
+        const auto it = per_grid.find(nid);
+        if (it == per_grid.end())
+          continue;
+        elem_rows[nid].push_back({elem_data.type, elem_data.id, it->second});
+        per_grid.erase(it); // a grid listed twice gets one row
+      }
+    }
+  }
+
+  // Applied equivalent loads (mechanical) and thermal equivalent loads, per
+  // grid in basic.  The helpers subtract into their map, so negate.
+  std::unordered_map<NodeId, std::array<double, 6>> neg_applied, neg_thermal;
+  subtract_spc_point_loads(model, sc, all, neg_applied);
+  subtract_spc_inertial_loads(model, sc, all, neg_applied);
+  compute_spc_pressure_loads(model, sc, dof_map, all, neg_applied);
+  subtract_spc_thermal_loads(model, sc, all, neg_thermal);
+
+  auto get = [](const std::unordered_map<NodeId, std::array<double, 6>> &m,
+                const NodeId nid) {
+    const auto it = m.find(nid);
+    return (it != m.end()) ? it->second : std::array<double, 6>{};
+  };
+
+  // Grids coupled by multipoint constraints of this subcase.
+  std::set<NodeId> mpc_grids;
+  if (sc.mpc_set.value != 0)
+    for (const Mpc *mpc : model.mpcs_for_set(sc.mpc_set))
+      for (const auto &t : mpc->terms)
+        mpc_grids.insert(t.node);
+  for (const auto &rbe2 : model.rbe2s) {
+    mpc_grids.insert(rbe2.gn);
+    mpc_grids.insert(rbe2.gm.begin(), rbe2.gm.end());
+  }
+  for (const auto &rbe3 : model.rbe3s) {
+    mpc_grids.insert(rbe3.ref_node);
+    for (const auto &wg : rbe3.weight_groups)
+      mpc_grids.insert(wg.nodes.begin(), wg.nodes.end());
+  }
+
+  std::unordered_map<NodeId, const SpcForce *> spc_by_grid;
+  for (const auto &sf : spc_forces)
+    spc_by_grid.emplace(sf.node, &sf);
+  std::unordered_map<NodeId, DofSet> constrained;
+  for (const Spc &c : model.structural_spcs(sc.spc_set))
+    constrained[c.node].mask |= c.dofs.mask;
+
+  std::vector<NodeId> grids;
+  grids.reserve(model.nodes.size());
+  for (const auto &[nid, _] : model.nodes)
+    grids.push_back(nid);
+  std::sort(grids.begin(), grids.end());
+
+  auto any_nonzero = [](const std::array<double, 6> &v) {
+    return std::any_of(v.begin(), v.end(), [](double x) { return x != 0.0; });
+  };
+
+  for (const NodeId nid : grids) {
+    // R = K u - F = sum(K_e u_e - f_th) - F_applied (the thermal part of F
+    // is already inside the element terms).
+    const auto f_app = get(neg_applied, nid);  // = -F_applied
+    const auto f_th = get(neg_thermal, nid);   // = -F_thermal
+    std::array<double, 6> residual = get(internal, nid);
+    for (size_t d = 0; d < 6; ++d)
+      residual[d] += f_app[d];
+
+    std::array<double, 6> mpc_force{};
+    bool has_mpc = false;
+    if (mpc_grids.contains(nid)) {
+      mpc_force = to_grid_frame(model, nid, residual);
+      const auto c_it = constrained.find(nid);
+      for (int d = 0; d < 6; ++d)
+        if (c_it != constrained.end() && c_it->second.has(d + 1))
+          mpc_force[static_cast<size_t>(d)] = 0.0; // owned by the SPC force
+      has_mpc = true;
+      if (want_mpc) {
+        SpcForce mf;
+        mf.node = nid;
+        mf.f = mpc_force;
+        mf.coord = model.node(nid).cd;
+        out.mpc_forces.push_back(mf);
+      }
+    }
+
+    if (!want_gp)
+      continue;
+    GridPointForceBalance gb;
+    gb.node = nid;
+    gb.coord = model.node(nid).cd;
+    auto add_row = [&](GridForceContribution::Kind kind,
+                       const std::array<double, 6> &f, ElementType etype,
+                       ElementId eid) {
+      gb.rows.push_back({kind, etype, eid, f});
+      for (size_t d = 0; d < 6; ++d)
+        gb.totals[d] += f[d];
+    };
+    // APPLIED holds every equivalent load including the thermal one, which
+    // the THERMAL row then backs out (MYSTRAN's layout).
+    std::array<double, 6> applied{};
+    std::array<double, 6> minus_thermal{};
+    for (size_t d = 0; d < 6; ++d) {
+      applied[d] = -f_app[d] - f_th[d];
+      minus_thermal[d] = f_th[d];
+    }
+    if (any_nonzero(applied))
+      add_row(GridForceContribution::Kind::Applied,
+              to_grid_frame(model, nid, applied), ElementType::CBAR, ElementId{0});
+    if (any_nonzero(minus_thermal))
+      add_row(GridForceContribution::Kind::Thermal,
+              to_grid_frame(model, nid, minus_thermal), ElementType::CBAR,
+              ElementId{0});
+    if (const auto it = spc_by_grid.find(nid); it != spc_by_grid.end())
+      add_row(GridForceContribution::Kind::Spc, it->second->f, ElementType::CBAR,
+              ElementId{0});
+    if (has_mpc && any_nonzero(mpc_force))
+      add_row(GridForceContribution::Kind::Mpc, mpc_force, ElementType::CBAR,
+              ElementId{0});
+    if (const auto it = elem_rows.find(nid); it != elem_rows.end()) {
+      for (const auto &row : it->second) {
+        std::array<double, 6> on_grid{};
+        for (size_t d = 0; d < 6; ++d)
+          on_grid[d] = -row.f[d];
+        add_row(GridForceContribution::Kind::Element,
+                to_grid_frame(model, nid, on_grid), row.etype, row.eid);
+      }
+    }
+    if (!gb.rows.empty())
+      out.gp_forces.push_back(std::move(gb));
+  }
+  return out;
 }
 
 SubCaseResults

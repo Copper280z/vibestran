@@ -3957,3 +3957,178 @@ ENDDATA
     // with x_c = 1: My(reaction) = -(r x F)_y = +20.
     EXPECT_NEAR(a->f[4] + b->f[4], 20.0, 1e-8);
 }
+
+// ── GPFORCE / MPCFORCES ──────────────────────────────────────────────────────
+
+static const GridPointForceBalance* get_gp_force(const SolverResults& res, int node_id) {
+    for (const auto& sc : res.subcases)
+        for (const auto& gb : sc.gp_forces)
+            if (gb.node.value == node_id) // cppcheck-suppress useStlAlgorithm
+                return &gb;
+    return nullptr;
+}
+
+static const GridForceContribution* find_row(const GridPointForceBalance& gb,
+                                             GridForceContribution::Kind kind,
+                                             int eid = 0) {
+    for (const auto& r : gb.rows)
+        if (r.kind == kind && (eid == 0 || r.eid.value == eid)) // cppcheck-suppress useStlAlgorithm
+            return &r;
+    return nullptr;
+}
+
+TEST(Integration, GridPointForceBalanceOfTwoBarCantilever) {
+    // Two bars of length 5 along x, fixed at grid 1, tip load P = 100 in +y
+    // at grid 3.  At the middle grid 2 the inner bar pulls with -P and the
+    // moment of the outer span, the outer bar with +P; at the root the SPC
+    // row is the reaction (-P, -P L).  Every grid balances to zero.
+    constexpr double P = 100.0, a = 5.0;
+    const SolverResults res = run_analysis(R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC = 1
+  GPFORCE = ALL
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,5.,0.,0.
+GRID,3,,10.,0.,0.
+MAT1,1,1.0E7,,0.3
+PBAR,1,1,1.,0.1,0.2,0.3
+CBAR,10,1,1,2,0.,1.,0.
+CBAR,20,1,2,3,0.,1.,0.
+SPC1,1,123456,1
+FORCE,1,3,,100.,0.,1.,0.
+ENDDATA
+)");
+    for (int g : {1, 2, 3}) {
+        const GridPointForceBalance* gb = get_gp_force(res, g);
+        ASSERT_NE(gb, nullptr) << g;
+        for (double t : gb->totals)
+            EXPECT_NEAR(t, 0.0, 1e-8) << "grid " << g;
+    }
+    const auto* root = get_gp_force(res, 1);
+    const auto* spc = find_row(*root, GridForceContribution::Kind::Spc);
+    ASSERT_NE(spc, nullptr);
+    EXPECT_NEAR(spc->f[1], -P, 1e-9);
+    EXPECT_NEAR(spc->f[5], -2.0 * P * a, 1e-8);
+    const auto* bar10_at_root = find_row(*root, GridForceContribution::Kind::Element, 10);
+    ASSERT_NE(bar10_at_root, nullptr);
+    EXPECT_NEAR(bar10_at_root->f[1], P, 1e-9);
+
+    const auto* mid = get_gp_force(res, 2);
+    const auto* inner = find_row(*mid, GridForceContribution::Kind::Element, 10);
+    const auto* outer = find_row(*mid, GridForceContribution::Kind::Element, 20);
+    ASSERT_NE(inner, nullptr);
+    ASSERT_NE(outer, nullptr);
+    EXPECT_NEAR(inner->f[1], -P, 1e-9);
+    EXPECT_NEAR(outer->f[1], P, 1e-9);
+    // The outer bar transmits the tip load's moment about grid 2: P a.
+    EXPECT_NEAR(outer->f[5], P * a, 1e-8);
+    EXPECT_NEAR(inner->f[5], -P * a, 1e-8);
+    EXPECT_EQ(find_row(*mid, GridForceContribution::Kind::Applied), nullptr);
+
+    const auto* tip = get_gp_force(res, 3);
+    const auto* applied = find_row(*tip, GridForceContribution::Kind::Applied);
+    ASSERT_NE(applied, nullptr);
+    EXPECT_NEAR(applied->f[1], P, 1e-12);
+}
+
+TEST(Integration, GridPointForceBalanceOfFreeThermalExpansion) {
+    // A bar fixed at one end and free at the other, heated uniformly: it
+    // expands freely, so the element carries no internal force.  The APPLIED
+    // row holds the thermal equivalent load (+-E A alpha dT) and the
+    // MINUS EQUIV THERM LOAD row backs it out exactly; the SPC reaction is 0.
+    constexpr double E = 1.0e7, A = 2.0, alpha = 1.0e-5, dT = 40.0;
+    const SolverResults res = run_analysis(R"(
+SOL 101
+CEND
+SUBCASE 1
+  SPC = 1
+  TEMPERATURE(LOAD) = 2
+  GPFORCE = ALL
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,3.,0.,0.
+MAT1,1,1.0E7,,0.3,,1.0E-5,0.
+PBAR,1,1,2.,0.1,0.2,0.3
+CBAR,10,1,1,2,0.,1.,0.
+SPC1,1,123456,1
+TEMPD,2,40.
+ENDDATA
+)");
+    const double thermal = E * A * alpha * dT;
+    const auto* tip = get_gp_force(res, 2);
+    ASSERT_NE(tip, nullptr);
+    const auto* app = find_row(*tip, GridForceContribution::Kind::Applied);
+    const auto* th = find_row(*tip, GridForceContribution::Kind::Thermal);
+    const auto* bar = find_row(*tip, GridForceContribution::Kind::Element, 10);
+    ASSERT_NE(app, nullptr);
+    ASSERT_NE(th, nullptr);
+    ASSERT_NE(bar, nullptr);
+    EXPECT_NEAR(app->f[0], thermal, 1e-9 * thermal);
+    EXPECT_NEAR(th->f[0], -thermal, 1e-9 * thermal);
+    for (double v : bar->f)
+        EXPECT_NEAR(v, 0.0, 1e-8 * thermal);
+    for (double t : tip->totals)
+        EXPECT_NEAR(t, 0.0, 1e-8 * thermal);
+    const auto* root = get_gp_force(res, 1);
+    ASSERT_NE(root, nullptr);
+    const auto* spc = find_row(*root, GridForceContribution::Kind::Spc);
+    ASSERT_NE(spc, nullptr);
+    for (double v : spc->f)
+        EXPECT_NEAR(v, 0.0, 1e-8 * thermal);
+}
+
+TEST(Integration, MpcForcesOfRbe2TransferTipLoad) {
+    // Cantilever bar to grid 2; RBE2 from grid 2 (independent) to grid 3,
+    // offset d = 2 along x.  A load P = 50 in +y at grid 3 is carried
+    // entirely by the rigid link: the MPC force at grid 3 is -P (it holds
+    // the load), and at grid 2 it delivers +P plus the moment P d to the bar.
+    // MPC forces of the link balance: sum F = 0, sum M about grid 2 = 0.
+    constexpr double P = 50.0, d = 2.0;
+    const SolverResults res = run_analysis(R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC = 1
+  MPCF = ALL
+  GPFO = ALL
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,4.,0.,0.
+GRID,3,,6.,0.,0.
+MAT1,1,1.0E7,,0.3
+PBAR,1,1,1.,0.1,0.2,0.3
+CBAR,10,1,1,2,0.,1.,0.
+RBE2,20,2,123456,3
+SPC1,1,123456,1
+FORCE,1,3,,50.,0.,1.,0.
+ENDDATA
+)");
+    ASSERT_EQ(res.subcases.size(), 1u);
+    const auto& mpc = res.subcases[0].mpc_forces;
+    auto find_mpc = [&](int nid) -> const SpcForce* {
+        for (const auto& f : mpc)
+            if (f.node.value == nid) // cppcheck-suppress useStlAlgorithm
+                return &f;
+        return nullptr;
+    };
+    const SpcForce* m2 = find_mpc(2);
+    const SpcForce* m3 = find_mpc(3);
+    ASSERT_NE(m2, nullptr);
+    ASSERT_NE(m3, nullptr);
+    EXPECT_NEAR(m3->f[1], -P, 1e-9);
+    EXPECT_NEAR(m2->f[1], P, 1e-9);
+    EXPECT_NEAR(m2->f[5], P * d, 1e-8);
+    for (int k : {0, 2, 3, 4, 5})
+        EXPECT_NEAR(m3->f[static_cast<size_t>(k)], 0.0, 1e-9);
+    for (int g : {1, 2, 3}) {
+        const GridPointForceBalance* gb = get_gp_force(res, g);
+        ASSERT_NE(gb, nullptr);
+        for (double t : gb->totals)
+            EXPECT_NEAR(t, 0.0, 1e-8) << "grid " << g;
+    }
+}

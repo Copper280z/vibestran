@@ -281,6 +281,8 @@ void F06Writer::write(const SolverResults& results, const Model& model,
 
         if (do_disp) write_displacement_table(sc, out);
         if (do_spc_force) write_spc_force_table(sc, out);
+        if (msc != nullptr && msc->mpc_force_print) write_mpc_force_table(sc, out);
+        if (msc != nullptr && msc->gpforce_print) write_gpforce_table(sc, out);
         if (do_stress_any) {
             write_bar_stress_table(sc, out);
             write_shell_stress_table(sc, out, ElementType::CQUAD4, do_corner,
@@ -367,7 +369,21 @@ void F06Writer::write_displacement_table(const SubCaseResults& sc,
 
 void F06Writer::write_spc_force_table(const SubCaseResults& sc,
                                          std::ostream& out) {
-    if (sc.spc_forces.empty()) return;
+    write_constraint_force_table(sc, out, sc.spc_forces, "S P C   F O R C E S",
+                                 "SPC FORCE TOTALS");
+}
+
+void F06Writer::write_mpc_force_table(const SubCaseResults& sc,
+                                      std::ostream& out) {
+    write_constraint_force_table(sc, out, sc.mpc_forces, "M P C   F O R C E S",
+                                 "MPC FORCE TOTALS");
+}
+
+void F06Writer::write_constraint_force_table(
+    const SubCaseResults& sc, std::ostream& out,
+    const std::vector<SpcForce>& forces, const std::string_view title,
+    const std::string_view totals_label) {
+    if (forces.empty()) return;
 
     // MYSTRAN layout (the validation suite parser reads the value row
     // windows: GRID cols 8-15, COORD SYS cols 16-24, then T1/R1... at cols
@@ -377,7 +393,7 @@ void F06Writer::write_spc_force_table(const SubCaseResults& sc,
     if (!sc.label.empty())
         out << " " << sc.label << "\n";
     out << "\n";
-    out << "                                                          S P C   F O R C E S\n";
+    out << "                                                          " << title << "\n";
     out << "                                              (in global coordinate system at each grid)\n";
     out << "           GRID     COORD      T1            T2            T3            R1            R2            R3\n";
     out << "                     SYS\n";
@@ -399,7 +415,7 @@ void F06Writer::write_spc_force_table(const SubCaseResults& sc,
     std::fill(max.begin(), max.end(), -std::numeric_limits<double>::infinity());
     std::fill(min.begin(), min.end(), std::numeric_limits<double>::infinity());
 
-    for (const auto& sf : sc.spc_forces) {
+    for (const auto& sf : forces) {
         out << std::right << std::setw(15) << sf.node.value;
         out << std::setw(9) << sf.coord.value; // grid's global (CD) system
         out << " ";
@@ -436,12 +452,92 @@ void F06Writer::write_spc_force_table(const SubCaseResults& sc,
     write_summary_row("ABS*", abs);
     out << "                *for output set\n";
     out << "                         ------------- ------------- ------------- ------------- ------------- -------------\n";
-    out << "     SPC FORCE TOTALS:  ";
+    out << "     " << totals_label << ":  ";
     for (int i = 0; i < 6; ++i)
         put_value(sum[static_cast<size_t>(i)]);
     out << std::nouppercase << "\n";
     out << "     (for output set)\n";
     out << "\n";
+}
+
+void F06Writer::write_gpforce_table(const SubCaseResults& sc,
+                                    std::ostream& out) {
+    if (sc.gp_forces.empty()) return;
+
+    // MYSTRAN layout (FORMATs 9200-9211 of GRID_POINT_FORCE_BALANCE): the
+    // validation parser reads the grid ID at cols 62-69 of the per-grid
+    // header, the element ID at cols 17-24, and the six values in 13-wide
+    // windows starting at cols 26/40/54/68/82/96.
+    write_subcase_header(out, sc.id);
+    if (!sc.label.empty())
+        out << " " << sc.label << "\n";
+    out << "\n\n";
+    out << "                                           G R I D   P O I N T   F O R C E   B A L A N C E\n";
+    out << "                                             (in global coordinate system at each grid)\n\n";
+
+    auto put_values = [&](const std::array<double, 6>& f) {
+        for (const double v : f) {
+            out << std::right << std::uppercase << std::setw(14)
+                << std::setprecision(6) << std::scientific << v;
+        }
+        out << std::nouppercase << "\n";
+    };
+    auto type_name = [](const ElementType t) -> std::string_view {
+        switch (t) {
+        case ElementType::CQUAD4:   return "QUAD4";
+        case ElementType::CTRIA3:   return "TRIA3";
+        case ElementType::CHEXA8:   return "HEXA8";
+        case ElementType::CHEXA20:  return "HEXA20";
+        case ElementType::CTETRA4:  return "TETRA4";
+        case ElementType::CTETRA10: return "TETRA10";
+        case ElementType::CPENTA6:  return "PENTA6";
+        case ElementType::CBAR:     return "BAR";
+        case ElementType::CBEAM:    return "BEAM";
+        case ElementType::CBUSH:    return "BUSH";
+        case ElementType::CELAS1:   return "ELAS1";
+        case ElementType::CELAS2:   return "ELAS2";
+        case ElementType::CMASS1:   return "MASS1";
+        case ElementType::CMASS2:   return "MASS2";
+        case ElementType::CONM2:    return "CONM2";
+        case ElementType::CHBDY:    return "HBDY";
+        }
+        return "ELEM";
+    };
+
+    for (const auto& gb : sc.gp_forces) {
+        out << "                                FORCE BALANCE FOR GRID POINT "
+            << std::setw(8) << gb.node.value << " IN GLOBAL COORD SYSTEM "
+            << std::setw(8) << gb.coord.value << "\n\n";
+        out << "                               T1            T2            T3            R1            R2            R3\n\n";
+        for (const auto& row : gb.rows) {
+            switch (row.kind) {
+            case GridForceContribution::Kind::Applied:
+                out << " APPLIED FORCE          ";
+                break;
+            case GridForceContribution::Kind::Thermal:
+                out << " MINUS EQUIV THERM LOAD ";
+                break;
+            case GridForceContribution::Kind::Spc:
+                out << " SPC FORCE              ";
+                break;
+            case GridForceContribution::Kind::Mpc:
+                out << " MPC FORCE              ";
+                break;
+            case GridForceContribution::Kind::Element: {
+                std::string label(type_name(row.etype));
+                label.resize(8, ' ');
+                out << " " << label << " ELEM " << std::right << std::setw(9)
+                    << row.eid.value;
+                break;
+            }
+            }
+            put_values(row.f);
+        }
+        out << "                         ------------- ------------- ------------- ------------- ------------- -------------\n";
+        out << " TOTALS                :";
+        put_values(gb.totals);
+        out << " (should all be 0)\n\n\n";
+    }
 }
 
 void F06Writer::write_bar_stress_table(const SubCaseResults& sc,

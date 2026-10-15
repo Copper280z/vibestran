@@ -53,7 +53,7 @@ canonicalize_case_control_command(const std::string &line) {
     std::string_view canonical;
     std::string_view alias;
   };
-  static constexpr std::array<Command, 12> kCommands{{
+  static constexpr std::array<Command, 14> kCommands{{
       {"DISPLACEMENT", "DISPLACEMENT"},
       {"EIGENVECTOR", "EIGENVECTOR"},
       {"VECTOR", "VECTOR"},
@@ -62,6 +62,8 @@ canonicalize_case_control_command(const std::string &line) {
       {"STRAIN", "STRAIN"},
       {"GPSTRESS", "GPSTRESS"},
       {"SPCFORCES", "SPCFORCES"},
+      {"MPCFORCES", "MPCFORCES"},
+      {"GPFORCE", "GPFORCE"},
       {"METHOD", "METHOD"},
       {"ANALYSIS", "ANALYSIS"},
       {"THERMAL", "THERMAL"},
@@ -255,6 +257,8 @@ Model BdfParser::parse_stream(std::istream &in) {
              sc.disp_print || sc.disp_plot ||
              sc.has_any_stress_output() ||
              sc.spc_force_print || sc.spc_force_plot ||
+             sc.mpc_force_print || sc.mpc_force_plot ||
+             sc.gpforce_print || sc.gpforce_plot ||
              sc.eigrl_id != 0 ||
              sc.eigvec_print || sc.eigvec_plot;
     };
@@ -507,6 +511,28 @@ Model BdfParser::parse_stream(std::istream &in) {
                 parse_print_plot_modifiers(kw, /*default_print=*/true);
             sc.gpstress_print = sc.gpstress_print || do_print;
             sc.gpstress_plot = sc.gpstress_plot || do_plot;
+          }
+        }
+      } else if (kw.starts_with("MPCFORCE") || kw.starts_with("GPFORCE")) {
+        SubCase& sc = current_subcase();
+        // Syntax: MPCFORCE[(PRINT[,PLOT])] = ALL|NONE|<set_id>  (MPCFORCES is
+        // an alias) and GPFORCE[(PRINT[,PLOT])] = ALL|NONE|<set_id>.
+        const bool gp = kw.starts_with("GPFORCE");
+        bool& want_print = gp ? sc.gpforce_print : sc.mpc_force_print;
+        bool& want_plot = gp ? sc.gpforce_plot : sc.mpc_force_plot;
+        size_t eq = kw.find('=');
+        if (eq != std::string::npos) {
+          std::string val = kw.substr(eq + 1);
+          size_t ns = val.find_first_not_of(" \t");
+          if (ns != std::string::npos) val = val.substr(ns);
+          if (val.starts_with("NONE")) {
+            want_print = false;
+            want_plot = false;
+          } else {
+            const auto [do_print, do_plot] =
+                parse_print_plot_modifiers(kw, /*default_print=*/true);
+            want_print = want_print || do_print;
+            want_plot = want_plot || do_plot;
           }
         }
       } else if (kw.starts_with("SPCFORCE") || kw.starts_with("SPCFORCES")) {

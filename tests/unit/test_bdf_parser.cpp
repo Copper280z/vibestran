@@ -1537,6 +1537,30 @@ ENDDATA
     EXPECT_FALSE(sc2.strain_print);
     // MPCFORCE is an output request, not an MPC set selection.
     EXPECT_EQ(sc2.mpc_set.value, 0);
+    EXPECT_TRUE(sc2.mpc_force_print);
+}
+
+TEST(BdfParser, MpcforceAndGpforceRequests) {
+    const Model m = BdfParser::parse_string(R"(
+SOL 101
+CEND
+SUBCASE 1
+  MPCFORCES(PLOT) = ALL
+  GPFO = ALL
+SUBCASE 2
+  MPCF = ALL
+  GPFORCE = NONE
+BEGIN BULK
+GRID,1,,0.,0.,0.
+ENDDATA
+)");
+    ASSERT_EQ(m.analysis.subcases.size(), 2u);
+    EXPECT_FALSE(m.analysis.subcases[0].mpc_force_print);
+    EXPECT_TRUE(m.analysis.subcases[0].mpc_force_plot);
+    EXPECT_TRUE(m.analysis.subcases[0].gpforce_print);
+    EXPECT_EQ(m.analysis.subcases[0].mpc_set.value, 0);
+    EXPECT_TRUE(m.analysis.subcases[1].mpc_force_print);
+    EXPECT_FALSE(m.analysis.subcases[1].gpforce_print);
 }
 
 TEST(BdfParser, LegacySol3SelectsModalAnalysis) {

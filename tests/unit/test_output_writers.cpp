@@ -506,6 +506,56 @@ TEST(F06Writer, CoordColumnShowsEachGridsGlobalSystem) {
     EXPECT_EQ(rows, 2);
 }
 
+TEST(F06Writer, GpforceBlockMatchesParserColumns) {
+    // Validation parser (1-based): grid ID at cols 62-69 of the per-grid
+    // header, element ID at cols 17-24 of an ELEM row, values at cols
+    // 26/40/54/68/82/96, each 13 wide.
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    GridPointForceBalance gb;
+    gb.node = NodeId{103};
+    gb.coord = CoordId{7};
+    gb.rows.push_back({GridForceContribution::Kind::Applied, ElementType::CBAR,
+                       ElementId{0}, {200.0, 300.0, 600.0, 0.0, 0.0, 0.0}});
+    gb.rows.push_back({GridForceContribution::Kind::Element, ElementType::CBAR,
+                       ElementId{23}, {-100.0, -300.0, -600.0, 0.0, -1.5e-3, 2.5e4}});
+    gb.totals = {100.0, 0.0, 0.0, 0.0, -1.5e-3, 2.5e4};
+    sc.gp_forces.push_back(gb);
+    res.subcases.push_back(sc);
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].gpforce_print = true;
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+    const std::string out = oss.str();
+    ASSERT_NE(out.find("G R I D   P O I N T   F O R C E   B A L A N C E"), std::string::npos);
+
+    auto field = [](const std::string& line, size_t start1, size_t len) {
+        return std::stod(line.substr(start1 - 1, len));
+    };
+    std::istringstream iss(out);
+    std::string line;
+    bool header = false, app = false, elem = false;
+    while (std::getline(iss, line)) {
+        if (line.find("FORCE BALANCE FOR GRID POINT") != std::string::npos) {
+            EXPECT_EQ(std::stoi(line.substr(61, 8)), 103);
+            EXPECT_NE(line.find("IN GLOBAL COORD SYSTEM        7"), std::string::npos);
+            header = true;
+        } else if (line.find("APPLIED FORCE") != std::string::npos) {
+            EXPECT_DOUBLE_EQ(field(line, 26, 13), 200.0);
+            EXPECT_DOUBLE_EQ(field(line, 54, 13), 600.0);
+            app = true;
+        } else if (line.find("ELEM") != std::string::npos) {
+            EXPECT_EQ(std::stoi(line.substr(16, 8)), 23);
+            EXPECT_DOUBLE_EQ(field(line, 40, 13), -300.0);
+            EXPECT_DOUBLE_EQ(field(line, 82, 13), -1.5e-3);
+            EXPECT_DOUBLE_EQ(field(line, 96, 13), 2.5e4);
+            elem = true;
+        }
+    }
+    EXPECT_TRUE(header && app && elem);
+}
+
 TEST(F06Writer, SpcForceTableSuppressedWithoutRequest) {
     SolverResults res;
     SubCaseResults sc;
