@@ -45,7 +45,8 @@ vibestran/
 
 - **Elements**: CQUAD4, CTRIA3, CHEXA8, CHEXA20, CTETRA4, CTETRA10, CPENTA6, CBAR, CBEAM, CBUSH, CELAS1, CELAS2, CMASS1, CMASS2
 - **Materials**: MAT1 (analysis), plus parser/model support for MAT2, MAT3, MAT4, MAT5, MAT6, and MAT8
-- **Properties**: PSHELL, PSOLID, PBAR, PBARL (`ROD`, `TUBE`, `BAR`), PBEAM, PBUSH (`K` section), PELAS, PMASS
+- **Properties**: PSHELL, PSOLID, PBAR (stress recovery points C-F, K1/K2 transverse shear, I12), PBARL (`ROD`, `TUBE`, `BAR`), PBEAM, PBUSH (`K` section), PELAS, PMASS
+- **CBAR end data**: pin flags (PA/PB, statically condensed), rigid end offsets (WA/WB), OFFT `GGG`/`BGG`
 - **Loads**: FORCE, MOMENT, TEMP/TEMPD, PLOAD, PLOAD1 (CBAR/CBEAM), PLOAD2, PLOAD4, GRAV, ACCEL1
 - **Constraints**: SPC, SPC1, MPC, RBE2, RBE3
 - **Reaction output**: SPCFORCE(S) in F06 (MYSTRAN-compatible `S P C   F O R C E S` block)
@@ -57,7 +58,10 @@ Notable current limitations:
 
 - `ACCEL` is parsed but not yet applied in the static solver.
 - PLOAD1 support is limited to CBAR and CBEAM.
-- Stress recovery is not yet implemented for CBAR, CBEAM, CBUSH, CELAS1/2, and CMASS1/2.
+- Stress recovery is not yet implemented for CBUSH, CELAS1/2, and CMASS1/2.
+- CBAR offsets in the element system (OFFT `xGO`/`xOG`/`xOO`) and BAROR are not yet supported.
+- GRID permanent single-point constraints (PS, field 8) and GRDSET are not yet applied.
+- Bar mass is consistent (Hermite); Nastran's default lumped mass (`COUPMASS` off) is not yet available.
 
 ## SOL 103 — Normal Modes (Modal Analysis)
 

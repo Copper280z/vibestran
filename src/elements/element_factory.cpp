@@ -74,10 +74,7 @@ std::unique_ptr<ElementBase> make_element(const ElementData& data, const Model& 
                 throw SolverError(std::format("{} {} needs 2 nodes, got {}",
                     (data.type == ElementType::CBAR) ? "CBAR" : "CBEAM",
                     data.id.value, data.nodes.size()));
-            std::array<NodeId,2> nids{data.nodes[0], data.nodes[1]};
-            return std::make_unique<CBarBeamElement>(data.type, data.id, data.pid,
-                                                     nids, model, data.orientation,
-                                                     data.g0);
+            return std::make_unique<CBarBeamElement>(data, model);
         }
         case ElementType::CBUSH: {
             if (data.nodes.size() != 2)

@@ -346,6 +346,64 @@ ENDDATA
     EXPECT_EQ(cmass1.components[1], 2);
 }
 
+TEST(BdfParser, ParsesFullPbarAndCbarEndData) {
+    // PBAR continuations carry recovery points C..F and K1/K2/I12; CBAR
+    // continuation carries pin flags and end offsets (fixed-field format as
+    // in the MYSTRAN benchmark decks).
+    const std::string bdf =
+        "BEGIN BULK\n"
+        "GRID    1               0.      0.      0.      \n"
+        "GRID    2               10.     0.      0.      \n"
+        "MAT1    1       1.+7            .3\n"
+        "PBAR    10      1       2.      5.      4.      3.              +PB1\n"
+        "+PB1    .2      -.3     .2      .3      -.2     .3      -.2     -.3     +PB2\n"
+        "+PB2    .85     .75     2.\n"
+        "CBAR    12      10      1       2       0.      1.      0.      BGG     +CB1\n"
+        "+CB1    23456   4       0.      2.0     0.0     0.0     -1.5    0.25\n"
+        "ENDDATA\n";
+    const Model m = BdfParser::parse_string(bdf);
+
+    const auto &pbar = std::get<PBar>(m.properties.at(PropertyId{10}));
+    EXPECT_DOUBLE_EQ(pbar.recovery_points[0][0], 0.2);
+    EXPECT_DOUBLE_EQ(pbar.recovery_points[0][1], -0.3);
+    EXPECT_DOUBLE_EQ(pbar.recovery_points[3][0], -0.2);
+    EXPECT_DOUBLE_EQ(pbar.recovery_points[3][1], -0.3);
+    EXPECT_DOUBLE_EQ(pbar.K1, 0.85);
+    EXPECT_DOUBLE_EQ(pbar.K2, 0.75);
+    EXPECT_DOUBLE_EQ(pbar.I12, 2.0);
+
+    ASSERT_EQ(m.elements.size(), 1u);
+    const ElementData &bar = m.elements[0];
+    EXPECT_TRUE(bar.orientation_in_basic);
+    EXPECT_EQ(bar.pin_flags[0], 0b111110);  // components 2-6
+    EXPECT_EQ(bar.pin_flags[1], 0b001000);  // component 4
+    EXPECT_DOUBLE_EQ(bar.offsets[0].y, 2.0);
+    EXPECT_DOUBLE_EQ(bar.offsets[1].y, -1.5);
+    EXPECT_DOUBLE_EQ(bar.offsets[1].z, 0.25);
+}
+
+TEST(BdfParser, RejectsInvalidBarEndDataAndSections) {
+    const std::string head =
+        "BEGIN BULK\nGRID,1,,0.,0.,0.\nGRID,2,,1.,0.,0.\nMAT1,1,1.+7,,.3\n";
+    // Pin flag digit outside 1-6, repeated component, element-frame offsets,
+    // and a section violating I1*I2 > I12^2 are all input errors.
+    const std::vector<std::string> bad{
+        "PBAR,1,1,1.,1.,1.,1.\nCBAR,1,1,1,2,0.,1.,0.,,7\n",
+        "PBAR,1,1,1.,1.,1.,1.\nCBAR,1,1,1,2,0.,1.,0.,,,455\n",
+        "PBAR,1,1,1.,1.,1.,1.\nCBAR,1,1,1,2,0.,1.,0.,GOO\n",
+        "PBAR    1       1       1.      1.      1.      1.              +P1\n"
+        "+P1                                                                     +P2\n"
+        "+P2                     1.5\n"
+        "CBAR,1,1,1,2,0.,1.,0.\n",
+    };
+    for (const auto &body : bad) {
+        EXPECT_THROW({
+            const Model ignored = BdfParser::parse_string(head + body + "ENDDATA\n");
+            (void)ignored;
+        }, ParseError) << body;
+    }
+}
+
 TEST(BdfParser, ParsesPbarlAndAccel1ByRange) {
     const std::string bdf = R"(
 BEGIN BULK

@@ -361,6 +361,17 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
         : std::sqrt(r_norm_sq);
     spdlog::info("[subcase {}] relative residual ||K*u - F|| / ||F|| = {:.3e}",
                  sc.id, rel_res);
+    // A large residual means the load is not in the range of K: the model
+    // has a mechanism (unrestrained DOFs) that the applied load excites, and
+    // the reported displacements do not equilibrate the loads.
+    constexpr double kResidualWarningThreshold = 1e-6;
+    if (rel_res > kResidualWarningThreshold) {
+      spdlog::warn(
+          "[subcase {}] solution does not satisfy K*u = F (relative residual "
+          "{:.3e} > {:.0e}); the model likely has an unrestrained mechanism "
+          "loaded by the applied forces, and results are not meaningful",
+          sc.id, rel_res, kResidualWarningThreshold);
+    }
   }
 
   // 5. Recover full displacement vector (free + dep DOFs)
@@ -1105,6 +1116,28 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
     }
   }
 
+  // ── Span loads (PLOAD1) per line element, for end-force recovery ────────
+  std::unordered_map<ElementId, LocalFe> line_span_loads;
+  {
+    std::unordered_map<ElementId, const ElementData *> line_elements;
+    for (const auto &elem : model.elements)
+      if (elem.type == ElementType::CBAR || elem.type == ElementType::CBEAM)
+        line_elements.emplace(elem.id, &elem);
+    for (const auto &[lp, load_scale] : model.loads_for_set(sc.load_set)) {
+      const auto *pload1 = std::get_if<Pload1Load>(lp);
+      if (pload1 == nullptr)
+        continue;
+      const auto it = line_elements.find(pload1->element);
+      if (it == line_elements.end())
+        continue; // invalid targets are reported when loads are applied
+      const LocalFe f =
+          load_scale * compute_pload1_fixed_end_local(*it->second, model, *pload1);
+      auto [slot, inserted] = line_span_loads.try_emplace(pload1->element, f);
+      if (!inserted)
+        slot->second += f;
+    }
+  }
+
   // ── Recover element stresses ──────────────────────────────────────────────
   for (const auto &elem_data : model.elements) {
     auto elem = make_element(elem_data, model);
@@ -1129,12 +1162,15 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
       for (int i = 0; i < CBarBeamElement::NUM_DOFS; ++i)
         line_u[static_cast<size_t>(i)] = ue(i);
 
-      CBarBeamElement line_elem(
-          elem_data.type, elem_data.id, elem_data.pid,
-          {elem_data.nodes[0], elem_data.nodes[1]}, model, elem_data.orientation,
-          elem_data.g0);
+      const CBarBeamElement line_elem(elem_data, model);
+      const auto span_it = line_span_loads.find(elem_data.id);
+      const std::span<const double> span_load =
+          (span_it != line_span_loads.end())
+              ? std::span<const double>(span_it->second.data(),
+                                        static_cast<size_t>(span_it->second.size()))
+              : std::span<const double>{};
       const auto recovery =
-          line_elem.recover_stress(line_u, avg_temp, mat_.ref_temp);
+          line_elem.recover_stress(line_u, avg_temp, mat_.ref_temp, span_load);
 
       LineStress ls;
       ls.eid = elem_data.id;

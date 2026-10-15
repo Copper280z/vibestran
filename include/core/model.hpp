@@ -5,6 +5,8 @@
 
 #include "core/types.hpp"
 #include "core/coord_sys.hpp"
+#include <array>
+#include <cstdint>
 #include <memory>
 #include <limits>
 #include <optional>
@@ -176,10 +178,17 @@ struct PBar {
   PropertyId pid{0};
   MaterialId mid{0};
   double A{0.0};
-  double I1{0.0};
-  double I2{0.0};
+  double I1{0.0};  ///< Bending inertia in plane 1 (element x-y plane), Izz
+  double I2{0.0};  ///< Bending inertia in plane 2 (element x-z plane), Iyy
   double J{0.0};
   double nsm{0.0};
+  /// Stress recovery points C, D, E, F as (y, z) in the element frame.
+  std::array<std::array<double, 2>, 4> recovery_points{};
+  /// Transverse shear area factors (shear stiffness K*A*G).  Zero (blank on
+  /// the card) means the bar is rigid in transverse shear.
+  double K1{0.0};
+  double K2{0.0};
+  double I12{0.0}; ///< Area product of inertia, integral of y*z dA
 };
 
 struct PBarL {
@@ -296,6 +305,15 @@ struct ElementData {
   std::optional<CoordId> cid{std::nullopt};
   std::array<int, 2> components{0, 0};
   double value{0.0};
+  /// CBAR/CBEAM pin flags (PA, PB): released element-frame DOFs at ends A
+  /// and B, as a bitmask where bit k releases component k+1.
+  std::array<std::uint8_t, 2> pin_flags{0, 0};
+  /// CBAR/CBEAM rigid end offsets (WA, WB) from GA/GB to the element ends,
+  /// expressed in the displacement coordinate system of the respective grid.
+  std::array<Vec3, 2> offsets{};
+  /// CBAR OFFT first character 'B': the orientation vector is in the basic
+  /// system instead of the displacement coordinate system of GA.
+  bool orientation_in_basic{false};
 };
 
 // ── Loads

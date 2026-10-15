@@ -936,6 +936,13 @@ static std::string make_line_on_solid_moment_bdf(const LineElementSpec& spec) {
     for (int iz = 0; iz <= 2; ++iz)
         for (int iy = 0; iy <= 2; ++iy)
             bdf << "SPC1,1,123456," << nid(0, iy, iz) << "\n";
+    // Solid grids have no rotational stiffness, so the line element can
+    // rotate rigidly about grid 10.  Soft grounded rotational springs make
+    // that mechanism finite and deterministic instead of leaving a singular
+    // system whose "solution" is solver roundoff.
+    bdf << "CELAS2,901,1.0E-6,10,4\n"
+        << "CELAS2,902,1.0E-6,10,5\n"
+        << "CELAS2,903,1.0E-6,10,6\n";
     bdf << "MOMENT,1,19,0,100.0,0.0,1.0,0.0\n"
         << "ENDDATA\n";
     return bdf.str();
@@ -2814,7 +2821,7 @@ ENDDATA
 
 TEST(Integration, CBeamPload1CantileverMatchesBeamTheory) {
     constexpr double E = 1.0e6;
-    constexpr double I1 = 0.02;
+    constexpr double I2 = 0.05;
     constexpr double L = 4.0;
     constexpr double q = 25.0;
 
@@ -2836,7 +2843,8 @@ ENDDATA
 )";
 
     const SolverResults res = run_analysis(bdf);
-    const double expected = q * std::pow(L, 4) / (8.0 * E * I1);
+    // A z load bends plane 2 (element x-z), which uses I2 (Nastran PBEAM).
+    const double expected = q * std::pow(L, 4) / (8.0 * E * I2);
     EXPECT_NEAR(get_disp(res, 2, 2), expected, 1e-10);
 }
 
@@ -2872,7 +2880,7 @@ ENDDATA
 
 TEST(Integration, CBeamGravityCantileverMatchesBeamTheory) {
     constexpr double E = 1.0e6;
-    constexpr double I1 = 0.02;
+    constexpr double I2 = 0.05;
     constexpr double rho = 5.0;
     constexpr double A = 2.0;
     constexpr double g = 10.0;
@@ -2897,7 +2905,8 @@ ENDDATA
 
     const SolverResults res = run_analysis(bdf);
     const double q = rho * A * g;
-    const double expected = -q * std::pow(L, 4) / (8.0 * E * I1);
+    // Gravity in -z bends plane 2 (element x-z), which uses I2.
+    const double expected = -q * std::pow(L, 4) / (8.0 * E * I2);
     EXPECT_NEAR(get_disp(res, 2, 2), expected, 5e-10);
 }
 
@@ -3435,6 +3444,10 @@ TEST(Integration, LineElementsOnSolidDoNotTransmitMoments) {
         const double shell_tip_disp = std::abs(get_disp(shell, 10, 2));
         const double shell_tip_rot = std::abs(get_disp(shell, 10, 4));
 
+        // On the solid only the 1e-6 springs resist the moment, so the
+        // attachment rotates by ~M/k = 1e8 (plus the bar's own flexibility).
+        EXPECT_NEAR(std::abs(get_disp(solid, 10, 4)), 100.0 / 1.0e-6,
+                    1e-3 * 100.0 / 1.0e-6);
         EXPECT_GT(solid_tip_disp, 1.0e6 * shell_tip_disp);
         EXPECT_GT(solid_tip_rot, 1.0e6 * shell_tip_rot);
     }

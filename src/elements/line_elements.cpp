@@ -28,6 +28,10 @@ struct LineSection {
   double I12{0.0};
   double J{0.0};
   double nsm{0.0};
+  /// Transverse shear area factors; K*A*G is the shear stiffness of the
+  /// plane.  Zero means rigid in shear (Euler-Bernoulli in that plane).
+  double K1{0.0};
+  double K2{0.0};
 };
 
 struct LineFrame {
@@ -83,18 +87,22 @@ struct HermiteData {
     const std::array<NodeId, 2> &nodes, const Model &model,
     const std::optional<Vec3> &orientation, const std::optional<NodeId> &g0,
     const std::optional<CoordId> &cid, const std::string &ctx,
-    const bool allow_coincident, const bool coincident_orientation_is_x) {
-  const Vec3 x1 = model.node(nodes[0]).position;
-  const Vec3 x2 = model.node(nodes[1]).position;
+    const bool allow_coincident, const bool coincident_orientation_is_x,
+    const std::array<Vec3, 2> &end_offsets_basic = {}) {
+  // The element axis runs between the (possibly offset) element ends; the
+  // orientation vector is anchored at grid GA, as in Nastran.
+  const Vec3 ga = model.node(nodes[0]).position;
+  const Vec3 x1 = ga + end_offsets_basic[0];
+  const Vec3 x2 = model.node(nodes[1]).position + end_offsets_basic[1];
   Vec3 axis = x2 - x1;
   double length = axis.norm();
 
   Vec3 ref_vec;
   if (g0.has_value()) {
-    ref_vec = model.node(*g0).position - x1;
+    ref_vec = model.node(*g0).position - ga;
   } else if (orientation.has_value()) {
     ref_vec = orientation_vector_in_basic(model, *orientation, cid.value_or(CoordId{0}),
-                                          x1, ctx);
+                                          ga, ctx);
   }
 
   if (length < kFrameTolerance) {
@@ -180,9 +188,11 @@ struct HermiteData {
       .A = prop.A,
       .I1 = prop.I1,
       .I2 = prop.I2,
-      .I12 = 0.0,
+      .I12 = prop.I12,
       .J = prop.J,
       .nsm = prop.nsm,
+      .K1 = prop.K1,
+      .K2 = prop.K2,
   };
 }
 
@@ -242,16 +252,20 @@ struct HermiteData {
 
 using RecoveryPoints = std::array<std::array<double, 2>, 4>;
 
-[[nodiscard]] RecoveryPoints default_recovery_points() {
-  return {{{0.0, 0.0}, {0.0, 0.0}, {0.0, 0.0}, {0.0, 0.0}}};
-}
-
+/// Stress recovery points C, D, E, F as (y, z) in the element frame.
+/// PBAR supplies them explicitly; PBARL derives them from the section
+/// dimensions; otherwise they are all at the neutral axis (zero bending
+/// stress), which is the Nastran behaviour for blank C1..F2.
 [[nodiscard]] RecoveryPoints recovery_points_from_property(const Property &prop) {
+  if (const auto *pbar = std::get_if<PBar>(&prop))
+    return pbar->recovery_points;
   if (const auto *pbarl = std::get_if<PBarL>(&prop)) {
     const std::string type = uppercase_copy(pbarl->section_type);
     if (type == "BAR" && pbarl->dimensions.size() == 2) {
-      const double half_y = 0.5 * pbarl->dimensions[0];
-      const double half_z = 0.5 * pbarl->dimensions[1];
+      // DIM1 spans element z and DIM2 spans element y, consistent with
+      // I1 = DIM1*DIM2^3/12 (plane 1 bends about z).
+      const double half_y = 0.5 * pbarl->dimensions[1];
+      const double half_z = 0.5 * pbarl->dimensions[0];
       return {{{half_y, half_z},
                {-half_y, half_z},
                {-half_y, -half_z},
@@ -266,35 +280,156 @@ using RecoveryPoints = std::array<std::array<double, 2>, 4>;
       return {{{r, 0.0}, {0.0, r}, {-r, 0.0}, {0.0, -r}}};
     }
   }
-  return default_recovery_points();
+  return {};
+}
+
+/// Bending stress at section point (y, z) for plane moments M1, M2 (Nastran
+/// sign convention, see add_coupled_bending_stiffness):
+///   sigma = -[y (I2 M1 - I12 M2) + z (I1 M2 - I12 M1)] / (I1 I2 - I12^2)
+/// which reduces to -M1 y / I1 - M2 z / I2 for I12 = 0.  A plane with zero
+/// inertia carries no bending stress.
+[[nodiscard]] double bending_stress(const LineSection &section, const double y,
+                                    const double z, const double m1,
+                                    const double m2) {
+  if (section.I12 != 0.0) {
+    const double den = section.I1 * section.I2 - section.I12 * section.I12;
+    return -(y * (section.I2 * m1 - section.I12 * m2) +
+             z * (section.I1 * m2 - section.I12 * m1)) /
+           den;
+  }
+  double sigma = 0.0;
+  if (section.I1 > 0.0)
+    sigma -= m1 * y / section.I1;
+  if (section.I2 > 0.0)
+    sigma -= m2 * z / section.I2;
+  return sigma;
 }
 
 [[nodiscard]] CBarBeamElement::StressRecoveryEnd
 recover_line_end_stress(const LineSection &section,
-                        const RecoveryPoints &points,
-                        const double axial_force,
-                        const double moment_y,
-                        const double moment_z) {
+                        const RecoveryPoints &points, const double axial_force,
+                        const double m1, const double m2) {
   CBarBeamElement::StressRecoveryEnd end;
   if (section.A > 0.0)
     end.axial = axial_force / section.A;
 
-  for (int i = 0; i < 4; ++i) {
-    const double y = points[static_cast<size_t>(i)][0];
-    const double z = points[static_cast<size_t>(i)][1];
-    double bending = 0.0;
-    if (section.I2 > 0.0)
-      bending -= moment_z * y / section.I2;
-    if (section.I1 > 0.0)
-      bending += moment_y * z / section.I1;
-    end.s[static_cast<size_t>(i)] = bending;
-  }
+  for (size_t i = 0; i < 4; ++i)
+    end.s[i] = bending_stress(section, points[i][0], points[i][1], m1, m2);
 
   const auto [smin_it, smax_it] =
       std::minmax_element(end.s.begin(), end.s.end());
   end.smax = end.axial + *smax_it;
   end.smin = end.axial + *smin_it;
   return end;
+}
+
+[[nodiscard]] Eigen::Matrix3d skew(const Vec3 &w) {
+  Eigen::Matrix3d S;
+  S << 0.0, -w.z, w.y,
+       w.z, 0.0, -w.x,
+       -w.y, w.x, 0.0;
+  return S;
+}
+
+/// Element frame plus the map from grid DOFs (basic) to element-end DOFs
+/// (local frame): u_end_local = T * u_grid_basic.  T combines the rigid end
+/// offsets (u_end = u_grid + theta x W) with the global-to-local rotation.
+struct BarGeometry {
+  LineFrame frame;
+  Eigen::Matrix<double, 12, 12> T{Eigen::Matrix<double, 12, 12>::Identity()};
+};
+
+[[nodiscard]] std::string line_element_context(const ElementData &data) {
+  return std::format("{} {}",
+                     (data.type == ElementType::CBAR) ? "CBAR" : "CBEAM",
+                     data.id.value);
+}
+
+[[nodiscard]] BarGeometry build_bar_geometry(const ElementData &data,
+                                             const Model &model) {
+  const std::string ctx = line_element_context(data);
+  const std::array<NodeId, 2> nodes{data.nodes[0], data.nodes[1]};
+
+  // Offsets are given in the displacement coordinate system of each grid.
+  std::array<Vec3, 2> offsets_basic{};
+  for (size_t end = 0; end < 2; ++end) {
+    const GridPoint &gp = model.node(nodes[end]);
+    offsets_basic[end] = orientation_vector_in_basic(
+        model, data.offsets[end], gp.cd, gp.position, ctx);
+  }
+  // The orientation vector is in the displacement system of GA unless OFFT
+  // selects the basic system.
+  const CoordId orientation_cid =
+      data.orientation_in_basic ? CoordId{0} : model.node(nodes[0]).cd;
+
+  BarGeometry geom;
+  geom.frame = build_line_frame(nodes, model, data.orientation, data.g0,
+                                orientation_cid, ctx, false, false,
+                                offsets_basic);
+  Eigen::Matrix<double, 12, 12> offset_map =
+      Eigen::Matrix<double, 12, 12>::Identity();
+  for (int end = 0; end < 2; ++end)
+    offset_map.block<3, 3>(6 * end, 6 * end + 3) =
+        -skew(offsets_basic[static_cast<size_t>(end)]);
+  geom.T = geom.frame.lambda * offset_map;
+  return geom;
+}
+
+/// Static condensation of pin-flag releases (PA/PB) on the local element-end
+/// DOFs.  For released set r and retained set k,
+///   u_r = K_rr^+ (f_r - K_rk u_k)
+/// so the full end displacement is u_full = C u + D f, the condensed
+/// stiffness is C^T K C, and an element load f enters the assembly as
+/// C^T f.  K_rr^+ is a minimum-norm pseudo-inverse: releasing a component at
+/// both ends (e.g. torsion) leaves K_rr singular, and because K is
+/// positive semi-definite the range of K_rk lies in the range of K_rr, so the
+/// released DOFs still carry zero force.
+struct PinCondensation {
+  Eigen::Matrix<double, 12, 12> C{Eigen::Matrix<double, 12, 12>::Identity()};
+  Eigen::Matrix<double, 12, 12> D{Eigen::Matrix<double, 12, 12>::Zero()};
+};
+
+[[nodiscard]] PinCondensation
+condense_pin_flags(const LocalKe &K, const std::array<std::uint8_t, 2> &pins) {
+  PinCondensation pc;
+  std::vector<int> released;
+  std::vector<int> retained;
+  for (int dof = 0; dof < 12; ++dof) {
+    const std::uint8_t mask = pins[static_cast<size_t>(dof / 6)];
+    if ((mask >> (dof % 6)) & 1u)
+      released.push_back(dof);
+    else
+      retained.push_back(dof);
+  }
+  if (released.empty())
+    return pc;
+
+  const auto nr = static_cast<Eigen::Index>(released.size());
+  const auto nk = static_cast<Eigen::Index>(retained.size());
+  Eigen::MatrixXd K_rr(nr, nr);
+  Eigen::MatrixXd K_rk(nr, nk);
+  for (Eigen::Index i = 0; i < nr; ++i) {
+    for (Eigen::Index j = 0; j < nr; ++j)
+      K_rr(i, j) = K(released[static_cast<size_t>(i)],
+                     released[static_cast<size_t>(j)]);
+    for (Eigen::Index j = 0; j < nk; ++j)
+      K_rk(i, j) = K(released[static_cast<size_t>(i)],
+                     retained[static_cast<size_t>(j)]);
+  }
+  const Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> cod(K_rr);
+  const Eigen::MatrixXd K_rr_pinv = cod.pseudoInverse();
+  const Eigen::MatrixXd slave = -K_rr_pinv * K_rk;
+
+  for (const int r : released)
+    pc.C(r, r) = 0.0;
+  for (Eigen::Index i = 0; i < nr; ++i) {
+    const int r = released[static_cast<size_t>(i)];
+    for (Eigen::Index j = 0; j < nk; ++j)
+      pc.C(r, retained[static_cast<size_t>(j)]) = slave(i, j);
+    for (Eigen::Index j = 0; j < nr; ++j)
+      pc.D(r, released[static_cast<size_t>(j)]) = K_rr_pinv(i, j);
+  }
+  return pc;
 }
 
 // cppcheck-suppress constParameterReference -- Eigen matrices are mutated via operator()
@@ -314,8 +449,85 @@ void add_plane_4x4(LocalKe &K, const std::array<int, 4> &idx,
       K(idx[i], idx[j]) += sub(i, j);
 }
 
+/// Bending stiffness of one plane in (v1, theta1, v2, theta2) order, with
+/// theta = dv/dx.  Timoshenko form: shear_stiffness = K*A*G; zero gives the
+/// Euler-Bernoulli matrix (phi = 0).
+[[nodiscard]] Eigen::Matrix4d timoshenko_plane_stiffness(const double EI,
+                                                         const double shear_stiffness,
+                                                         const double L) {
+  const double phi =
+      (shear_stiffness > 0.0) ? 12.0 * EI / (shear_stiffness * L * L) : 0.0;
+  const double c = EI / (L * L * L * (1.0 + phi));
+  const double L2 = L * L;
+  Eigen::Matrix4d k;
+  k << 12.0, 6.0 * L, -12.0, 6.0 * L,
+       6.0 * L, (4.0 + phi) * L2, -6.0 * L, (2.0 - phi) * L2,
+       -12.0, -6.0 * L, 12.0, -6.0 * L,
+       6.0 * L, (2.0 - phi) * L2, -6.0 * L, (4.0 + phi) * L2;
+  return c * k;
+}
+
+/// Coupled bending stiffness for a section with a nonzero product of
+/// inertia, from the exact flexibility of a cantilever fixed at end A.
+///
+/// Sign convention (Nastran): bending stress is
+///   sigma = -E (y kappa1 + z kappa2),  kappa1 = v'',  kappa2 = w''
+/// so the plane moments are [M1; M2] = E * Ibar * [kappa1; kappa2] with
+/// Ibar = [[I1, I12], [I12, I2]].  For tip loads p = [Vy, Vz, My, Mz] at
+/// end B the moments along the span are [M1; M2](x) = H(x) p with
+///   H = [[L-x, 0, 0, 1], [0, L-x, -1, 0]],
+/// and the conjugate tip displacements are [v, w, theta_y, theta_z].  The
+/// tip flexibility is F = int_0^L H^T (E Ibar)^-1 H dx, plus L/(K1*A*G) and
+/// L/(K2*A*G) on the v and w diagonals for transverse shear.  F^-1 is
+/// expanded to both ends through the rigid-body relation between end A and
+/// the tip, d = R u.
+void add_coupled_bending_stiffness(LocalKe &K, const LineSection &section,
+                                   const double L, const std::string &ctx) {
+  const double den = section.I1 * section.I2 - section.I12 * section.I12;
+  if (!(den > 0.0) || section.E <= 0.0) {
+    throw SolverError(std::format(
+        "{}: coupled bending requires E > 0 and I1*I2 > I12^2 (E={}, I1={}, "
+        "I2={}, I12={})",
+        ctx, section.E, section.I1, section.I2, section.I12));
+  }
+  Eigen::Matrix2d compliance;
+  compliance << section.I2, -section.I12, -section.I12, section.I1;
+  compliance /= section.E * den;
+
+  // H^T C H is quadratic in x; two-point Gauss-Legendre is exact.
+  Eigen::Matrix4d F = Eigen::Matrix4d::Zero();
+  const double g = 1.0 / std::sqrt(3.0);
+  for (const double xi : {-g, g}) {
+    const double x = 0.5 * L * (xi + 1.0);
+    Eigen::Matrix<double, 2, 4> H;
+    H << L - x, 0.0, 0.0, 1.0,
+         0.0, L - x, -1.0, 0.0;
+    F += H.transpose() * compliance * H * (0.5 * L);
+  }
+  const double shear1 = section.K1 * section.A * section.G;
+  const double shear2 = section.K2 * section.A * section.G;
+  if (shear1 > 0.0)
+    F(0, 0) += L / shear1;
+  if (shear2 > 0.0)
+    F(1, 1) += L / shear2;
+
+  // Tip deformation relative to the rigid-body motion of end A.
+  Eigen::Matrix<double, 4, 12> R = Eigen::Matrix<double, 4, 12>::Zero();
+  R(0, 7) = 1.0;  R(0, 1) = -1.0; R(0, 5) = -L;   // v_B - v_A - L*theta_zA
+  R(1, 8) = 1.0;  R(1, 2) = -1.0; R(1, 4) = L;    // w_B - w_A + L*theta_yA
+  R(2, 10) = 1.0; R(2, 4) = -1.0;                 // theta_yB - theta_yA
+  R(3, 11) = 1.0; R(3, 5) = -1.0;                 // theta_zB - theta_zA
+
+  const Eigen::Matrix4d K_tip = F.llt().solve(Eigen::Matrix4d::Identity());
+  K += R.transpose() * K_tip * R;
+}
+
+/// Local 12x12 stiffness at the element ends (before pin-flag condensation).
+/// Plane 1 (element x-y, DOFs v/theta_z) bends with I1 and shear factor K1;
+/// plane 2 (element x-z, DOFs w/theta_y) bends with I2 and K2.
 [[nodiscard]] LocalKe build_beam_local_stiffness(const LineSection &section,
-                                                 const double L) {
+                                                 const double L,
+                                                 const std::string &ctx) {
   LocalKe K = LocalKe::Zero(12, 12);
 
   const Eigen::Matrix2d axial =
@@ -328,29 +540,23 @@ void add_plane_4x4(LocalKe &K, const std::array<int, 4> &idx,
       (Eigen::Matrix2d() << 1.0, -1.0, -1.0, 1.0).finished();
   add_linear_2x2(K, 3, 9, torsion);
 
-  const double gauss_point = std::sqrt(3.0 / 5.0);
-  const std::array<double, 3> gauss_pts{-gauss_point, 0.0, gauss_point};
-  static constexpr std::array<double, 3> gauss_wts{5.0 / 9.0, 8.0 / 9.0,
-                                                   5.0 / 9.0};
-
-  Eigen::Matrix4d kv = Eigen::Matrix4d::Zero();
-  Eigen::Matrix4d kw = Eigen::Matrix4d::Zero();
-  for (int igp = 0; igp < 3; ++igp) {
-    const double x = 0.5 * L * (gauss_pts[igp] + 1.0);
-    const double jac = 0.5 * L * gauss_wts[igp];
-    const HermiteData h = hermite_shape(x, L);
-
-    Eigen::Matrix<double, 1, 4> bv;
-    bv << h.d2N_dx2[0], h.d2N_dx2[1], h.d2N_dx2[2], h.d2N_dx2[3];
-    kv += section.E * section.I2 * (bv.transpose() * bv) * jac;
-
-    Eigen::Matrix<double, 1, 4> bw;
-    bw << h.d2N_dx2[0], -h.d2N_dx2[1], h.d2N_dx2[2], -h.d2N_dx2[3];
-    kw += section.E * section.I1 * (bw.transpose() * bw) * jac;
+  if (section.I12 != 0.0) {
+    add_coupled_bending_stiffness(K, section, L, ctx);
+    return K;
   }
 
-  add_plane_4x4(K, {1, 5, 7, 11}, kv);
-  add_plane_4x4(K, {2, 4, 8, 10}, kw);
+  add_plane_4x4(K, {1, 5, 7, 11},
+                timoshenko_plane_stiffness(section.E * section.I1,
+                                           section.K1 * section.A * section.G,
+                                           L));
+  // Plane 2 uses theta_y = -dw/dx, so flip the rotation rows/columns.
+  const Eigen::Vector4d flip{1.0, -1.0, 1.0, -1.0};
+  add_plane_4x4(K, {2, 4, 8, 10},
+                flip.asDiagonal() *
+                    timoshenko_plane_stiffness(section.E * section.I2,
+                                               section.K2 * section.A * section.G,
+                                               L) *
+                    flip.asDiagonal());
   return K;
 }
 
@@ -499,116 +705,135 @@ load_interval(const Pload1Load &load, const double L) {
 
 } // namespace
 
-CBarBeamElement::CBarBeamElement(ElementType type, ElementId eid, PropertyId pid,
-                                 std::array<NodeId, 2> node_ids,
-                                 const Model &model,
-                                 std::optional<Vec3> orientation,
-                                 std::optional<NodeId> g0)
-    : type_(type), eid_(eid), pid_(pid), nodes_(node_ids), model_(model),
-      orientation_(std::move(orientation)), g0_(g0) {}
+CBarBeamElement::CBarBeamElement(const ElementData &data, const Model &model)
+    : data_(data), model_(model) {
+  if (data_.nodes.size() != NUM_NODES) {
+    throw SolverError(std::format("{} needs 2 nodes, got {}",
+                                  line_element_context(data_),
+                                  data_.nodes.size()));
+  }
+  nodes_ = {data_.nodes[0], data_.nodes[1]};
+}
+
+namespace {
+
+/// Everything needed to map between grid DOFs and local end forces for one
+/// CBAR/CBEAM: geometry, unreleased local stiffness, and pin condensation.
+struct BarSystem {
+  LineSection section;
+  BarGeometry geom;
+  LocalKe K_local;
+  PinCondensation pins;
+};
+
+[[nodiscard]] BarSystem build_bar_system(const ElementData &data,
+                                         const Model &model) {
+  BarSystem sys;
+  sys.section = resolve_line_section(model, data.pid, data.type, data.id);
+  sys.geom = build_bar_geometry(data, model);
+  sys.K_local = build_beam_local_stiffness(sys.section, sys.geom.frame.length,
+                                           line_element_context(data));
+  sys.pins = condense_pin_flags(sys.K_local, data.pin_flags);
+  return sys;
+}
+
+/// Local fixed-end load vector for a uniform temperature change: the axial
+/// thermal force E*A*alpha*dT pushes the ends apart.
+[[nodiscard]] LocalFe thermal_fixed_end_local(const LineSection &section,
+                                              const double dT) {
+  LocalFe f = LocalFe::Zero(12);
+  const double axial_force = section.E * section.A * section.alpha * dT;
+  f(0) = -axial_force;
+  f(6) = axial_force;
+  return f;
+}
+
+} // namespace
 
 LocalKe CBarBeamElement::stiffness_matrix() const {
-  const LineSection section = resolve_line_section(model_, pid_, type_, eid_);
-  const LineFrame frame = build_line_frame(nodes_, model_, orientation_, g0_,
-                                           std::nullopt,
-                                           std::format("{} {}", (type_ == ElementType::CBAR) ? "CBAR" : "CBEAM",
-                                                       eid_.value),
-                                           false, false);
-  const LocalKe k_local = build_beam_local_stiffness(section, frame.length);
-  return frame.lambda.transpose() * k_local * frame.lambda;
+  const BarSystem sys = build_bar_system(data_, model_);
+  const Eigen::Matrix<double, 12, 12> map = sys.pins.C * sys.geom.T;
+  return map.transpose() * sys.K_local * map;
 }
 
 LocalKe CBarBeamElement::mass_matrix() const {
-  const LineSection section = resolve_line_section(model_, pid_, type_, eid_);
-  const LineFrame frame = build_line_frame(nodes_, model_, orientation_, g0_,
-                                           std::nullopt,
-                                           std::format("{} {}", (type_ == ElementType::CBAR) ? "CBAR" : "CBEAM",
-                                                       eid_.value),
-                                           false, false);
-  const LocalKe m_local = build_beam_local_mass(section, frame.length);
-  return frame.lambda.transpose() * m_local * frame.lambda;
+  const BarSystem sys = build_bar_system(data_, model_);
+  const LocalKe m_local =
+      build_beam_local_mass(sys.section, sys.geom.frame.length);
+  // Released DOFs follow the same static slaving as the stiffness (Guyan).
+  const Eigen::Matrix<double, 12, 12> map = sys.pins.C * sys.geom.T;
+  return map.transpose() * m_local * map;
 }
 
 LocalFe CBarBeamElement::thermal_load(std::span<const double> temperatures,
                                       double t_ref) const {
-  const LineSection section = resolve_line_section(model_, pid_, type_, eid_);
-  const LineFrame frame = build_line_frame(nodes_, model_, orientation_, g0_,
-                                           std::nullopt,
-                                           std::format("{} {}", (type_ == ElementType::CBAR) ? "CBAR" : "CBEAM",
-                                                       eid_.value),
-                                           false, false);
-  if (section.alpha == 0.0)
+  const BarSystem sys = build_bar_system(data_, model_);
+  if (sys.section.alpha == 0.0)
     return zero_force(NUM_DOFS);
-
-  const double temp_avg = 0.5 * (temperatures[0] + temperatures[1]);
-  const double dT = temp_avg - t_ref;
-  LocalFe fe_local = LocalFe::Zero(NUM_DOFS);
-  const double axial_force = section.E * section.A * section.alpha * dT;
-  fe_local(0) = -axial_force;
-  fe_local(6) = axial_force;
-  return frame.lambda.transpose() * fe_local;
+  const double dT = 0.5 * (temperatures[0] + temperatures[1]) - t_ref;
+  const LocalFe f_local = thermal_fixed_end_local(sys.section, dT);
+  return sys.geom.T.transpose() * (sys.pins.C.transpose() * f_local);
 }
 
 // cppcheck-suppress unusedFunction
 CBarBeamElement::StressRecovery CBarBeamElement::recover_stress(
     std::span<const double> global_displacements,
-    const double average_temperature, const double t_ref) const {
+    const double average_temperature, const double t_ref,
+    std::span<const double> distributed_fixed_end_local) const {
+  const std::string ctx = line_element_context(data_);
   if (global_displacements.size() != static_cast<size_t>(NUM_DOFS)) {
     throw SolverError(std::format(
-        "{} {}: expected {} displacement entries for stress recovery, got {}",
-        (type_ == ElementType::CBAR) ? "CBAR" : "CBEAM", eid_.value, NUM_DOFS,
-        global_displacements.size()));
+        "{}: expected {} displacement entries for stress recovery, got {}",
+        ctx, NUM_DOFS, global_displacements.size()));
+  }
+  if (!distributed_fixed_end_local.empty() &&
+      distributed_fixed_end_local.size() != static_cast<size_t>(NUM_DOFS)) {
+    throw SolverError(std::format(
+        "{}: expected {} fixed-end load entries for stress recovery, got {}",
+        ctx, NUM_DOFS, distributed_fixed_end_local.size()));
   }
 
-  const LineSection section = resolve_line_section(model_, pid_, type_, eid_);
-  const LineFrame frame = build_line_frame(
-      nodes_, model_, orientation_, g0_, std::nullopt,
-      std::format("{} {}", (type_ == ElementType::CBAR) ? "CBAR" : "CBEAM",
-                  eid_.value),
-      false, false);
+  const BarSystem sys = build_bar_system(data_, model_);
   const RecoveryPoints points =
-      recovery_points_from_property(model_.property(pid_));
+      recovery_points_from_property(model_.property(data_.pid));
 
   Eigen::Matrix<double, 12, 1> u_global;
   for (int i = 0; i < NUM_DOFS; ++i)
     u_global(i) = global_displacements[static_cast<size_t>(i)];
-  const Eigen::Matrix<double, 12, 1> u_local = frame.lambda * u_global;
 
-  const double dT = average_temperature - t_ref;
-  const double axial_force =
-      section.E * section.A *
-      (((u_local(6) - u_local(0)) / frame.length) - section.alpha * dT);
+  // Fixed-end loads of everything applied inside the span (thermal +
+  // distributed), in the local end frame before pin condensation.
+  LocalFe f_fixed = thermal_fixed_end_local(
+      sys.section, average_temperature - t_ref);
+  for (size_t i = 0; i < distributed_fixed_end_local.size(); ++i)
+    f_fixed(static_cast<Eigen::Index>(i)) += distributed_fixed_end_local[i];
 
-  const HermiteData h_a = hermite_shape(0.0, frame.length);
-  const HermiteData h_b = hermite_shape(frame.length, frame.length);
+  // End forces acting on the element: p = K u_full - f, where u_full
+  // restores the released DOFs.  Released components come out as zero.
+  const Eigen::Matrix<double, 12, 1> u_end = sys.geom.T * u_global;
+  const Eigen::Matrix<double, 12, 1> u_full =
+      sys.pins.C * u_end + sys.pins.D * f_fixed;
+  const Eigen::Matrix<double, 12, 1> p = sys.K_local * u_full - f_fixed;
 
-  const Eigen::Matrix<double, 4, 1> v_dofs{
-      u_local(1), u_local(5), u_local(7), u_local(11)};
-  const Eigen::Matrix<double, 4, 1> w_dofs{
-      u_local(2), -u_local(4), u_local(8), -u_local(10)};
-
-  const double moment_z_a =
-      section.E * section.I2 *
-      (h_a.d2N_dx2[0] * v_dofs(0) + h_a.d2N_dx2[1] * v_dofs(1) +
-       h_a.d2N_dx2[2] * v_dofs(2) + h_a.d2N_dx2[3] * v_dofs(3));
-  const double moment_z_b =
-      section.E * section.I2 *
-      (h_b.d2N_dx2[0] * v_dofs(0) + h_b.d2N_dx2[1] * v_dofs(1) +
-       h_b.d2N_dx2[2] * v_dofs(2) + h_b.d2N_dx2[3] * v_dofs(3));
-  const double moment_y_a =
-      section.E * section.I1 *
-      (h_a.d2N_dx2[0] * w_dofs(0) + h_a.d2N_dx2[1] * w_dofs(1) +
-       h_a.d2N_dx2[2] * w_dofs(2) + h_a.d2N_dx2[3] * w_dofs(3));
-  const double moment_y_b =
-      section.E * section.I1 *
-      (h_b.d2N_dx2[0] * w_dofs(0) + h_b.d2N_dx2[1] * w_dofs(1) +
-       h_b.d2N_dx2[2] * w_dofs(2) + h_b.d2N_dx2[3] * w_dofs(3));
-
+  // Nastran force resultants: tension-positive axial force, plane moments
+  // positive when they produce positive curvature (compression at +y/+z).
   StressRecovery recovery;
-  recovery.end_a = recover_line_end_stress(section, points, axial_force,
-                                           moment_y_a, moment_z_a);
-  recovery.end_b = recover_line_end_stress(section, points, axial_force,
-                                           moment_y_b, moment_z_b);
+  EndForces &fr = recovery.forces;
+  fr.axial = -p(0);
+  fr.torque = -p(3);
+  fr.v1 = -p(1);
+  fr.v2 = -p(2);
+  fr.m1a = -p(5);
+  fr.m2a = p(4);
+  fr.m1b = p(11);
+  fr.m2b = -p(10);
+
+  recovery.end_a =
+      recover_line_end_stress(sys.section, points, fr.axial, fr.m1a, fr.m2a);
+  // Axial stress is reported at end A in Nastran; with no axial span load
+  // both ends agree.
+  recovery.end_b =
+      recover_line_end_stress(sys.section, points, fr.axial, fr.m1b, fr.m2b);
   return recovery;
 }
 
@@ -753,7 +978,7 @@ ScalarMassElement::global_dof_indices(const DofMap &dof_map) const {
   return result;
 }
 
-LocalFe compute_pload1_equivalent_load(const ElementData &elem,
+LocalFe compute_pload1_fixed_end_local(const ElementData &elem,
                                        const Model &model,
                                        const Pload1Load &load) {
   if (elem.type != ElementType::CBAR && elem.type != ElementType::CBEAM) {
@@ -762,10 +987,8 @@ LocalFe compute_pload1_equivalent_load(const ElementData &elem,
         elem.id.value));
   }
 
-  const std::array<NodeId, 2> nodes{elem.nodes[0], elem.nodes[1]};
-  const LineFrame frame = build_line_frame(
-      nodes, model, elem.orientation, elem.g0, std::nullopt,
-      std::format("PLOAD1 element {}", elem.id.value), false, false);
+  // The load acts along the element span between the (offset) ends.
+  const LineFrame frame = build_bar_geometry(elem, model).frame;
   const auto [xa, xb] = load_interval(load, frame.length);
   if (std::abs(xb - xa) < 1e-12)
     return LocalFe::Zero(12);
@@ -808,7 +1031,15 @@ LocalFe compute_pload1_equivalent_load(const ElementData &elem,
     }
   }
 
-  return frame.lambda.transpose() * fe_local;
+  return fe_local;
+}
+
+LocalFe compute_pload1_equivalent_load(const ElementData &elem,
+                                       const Model &model,
+                                       const Pload1Load &load) {
+  const LocalFe f_local = compute_pload1_fixed_end_local(elem, model, load);
+  const BarSystem sys = build_bar_system(elem, model);
+  return sys.geom.T.transpose() * (sys.pins.C.transpose() * f_local);
 }
 
 } // namespace vibestran

@@ -1210,6 +1210,77 @@ void parse_orientation_or_g0(const std::vector<std::string> &f,
     e.cid = *cid;
 }
 
+/// Parse a Nastran pin-flag field ("", "0", or up to six distinct digits
+/// 1-6) into a bitmask where bit k releases component k+1.
+std::uint8_t parse_pin_flags(const std::string &field, const int line_num,
+                             const std::string_view card,
+                             const std::string_view end) {
+  std::uint8_t mask = 0;
+  if (field.empty() || field == "0")
+    return mask;
+  for (const char c : field) {
+    if (c < '1' || c > '6') {
+      throw ParseError(std::format(
+          "Line {}: {} pin flag {} = '{}' must contain only digits 1-6",
+          line_num, card, end, field));
+    }
+    const auto bit = static_cast<std::uint8_t>(1u << (c - '1'));
+    if ((mask & bit) != 0) {
+      throw ParseError(std::format(
+          "Line {}: {} pin flag {} = '{}' repeats component {}", line_num,
+          card, end, field, c));
+    }
+    mask = static_cast<std::uint8_t>(mask | bit);
+  }
+  return mask;
+}
+
+/// Parse the CBAR/CBEAM OFFT field (8), pin flags PA/PB (9-10), and end
+/// offsets WA (11-13) / WB (14-16).
+void parse_line_element_ends(const std::vector<std::string> &f, ElementData &e,
+                             const int line_num, const std::string_view card) {
+  auto str = [&](const size_t i) -> std::string {
+    return (f.size() > i) ? uppercase_copy(f[i]) : std::string{};
+  };
+  auto num = [&](const size_t i) {
+    return (f.size() > i && !f[i].empty()) ? parse_double_field(f[i], line_num)
+                                           : 0.0;
+  };
+
+  const std::string offt = str(8);
+  if (!offt.empty()) {
+    if (field_is_integer_like(offt)) {
+      throw ParseError(std::format(
+          "Line {}: {} field 9 = '{}' (BIT) is not supported; only OFFT "
+          "strings are accepted",
+          line_num, card, offt));
+    }
+    const bool valid = offt.size() == 3 &&
+                       (offt[0] == 'G' || offt[0] == 'B') &&
+                       (offt[1] == 'G' || offt[1] == 'O') &&
+                       (offt[2] == 'G' || offt[2] == 'O');
+    if (!valid) {
+      throw ParseError(std::format(
+          "Line {}: {} OFFT = '{}' is invalid (expected [G|B][G|O][G|O])",
+          line_num, card, offt));
+    }
+    if (offt[1] == 'O' || offt[2] == 'O') {
+      throw ParseError(std::format(
+          "Line {}: {} OFFT = '{}': offsets in the element system (O) are "
+          "not yet supported",
+          line_num, card, offt));
+    }
+    e.orientation_in_basic = (offt[0] == 'B');
+  }
+
+  e.pin_flags[0] = parse_pin_flags(str(9), line_num, card, "PA");
+  e.pin_flags[1] = parse_pin_flags(str(10), line_num, card, "PB");
+  e.offsets[0] = Vec3{num(11), num(12), num(13)};
+  e.offsets[1] = Vec3{num(14), num(15), num(16)};
+  reject_nonblank_fields(f, 17, line_num, card,
+                         "has data beyond the WB offset fields");
+}
+
 void populate_pbarl_section(PBarL &p, const int line_num) {
   const std::string type = uppercase_copy(p.section_type);
   if (type == "ROD") {
@@ -1507,8 +1578,38 @@ void BdfParser::process_pbar(ParseContext &ctx,
   p.I2 = parse_double(f[5], ctx.line_num);
   p.J = (f.size() > 6 && !f[6].empty()) ? parse_double(f[6], ctx.line_num) : 0.0;
   p.nsm = (f.size() > 7 && !f[7].empty()) ? parse_double(f[7], ctx.line_num) : 0.0;
-  reject_nonblank_fields(f, 8, ctx.line_num, "PBAR",
-                         "advanced fields are not yet supported");
+  // Continuation 1: stress recovery points C1 C2 D1 D2 E1 E2 F1 F2.
+  // Continuation 2: K1 K2 I12.  Blank fields read as 0.0, which for K1/K2
+  // means "rigid in transverse shear" (Nastran default).
+  auto field = [&](const size_t i) {
+    return (f.size() > i) ? parse_double(f[i], ctx.line_num) : 0.0;
+  };
+  for (size_t pt = 0; pt < 4; ++pt) {
+    p.recovery_points[pt][0] = field(9 + 2 * pt);
+    p.recovery_points[pt][1] = field(10 + 2 * pt);
+  }
+  p.K1 = field(17);
+  p.K2 = field(18);
+  p.I12 = field(19);
+  reject_nonblank_fields(f, 20, ctx.line_num, "PBAR",
+                         "has data beyond the I12 field");
+  if (p.A < 0.0 || p.I1 < 0.0 || p.I2 < 0.0 || p.J < 0.0) {
+    throw ParseError(std::format(
+        "Line {}: PBAR {} requires A, I1, I2, J >= 0 (A={}, I1={}, I2={}, "
+        "J={})",
+        ctx.line_num, p.pid.value, p.A, p.I1, p.I2, p.J));
+  }
+  if (p.K1 < 0.0 || p.K2 < 0.0) {
+    throw ParseError(std::format(
+        "Line {}: PBAR {} shear factors must be >= 0 (K1={}, K2={})",
+        ctx.line_num, p.pid.value, p.K1, p.K2));
+  }
+  if (p.I12 != 0.0 && !(p.I1 * p.I2 > p.I12 * p.I12)) {
+    throw ParseError(std::format(
+        "Line {}: PBAR {} requires I1*I2 > I12^2 when I12 is nonzero "
+        "(I1={}, I2={}, I12={})",
+        ctx.line_num, p.pid.value, p.I1, p.I2, p.I12));
+  }
   ctx.model.properties[p.pid] = p;
 }
 
@@ -1773,9 +1874,7 @@ void BdfParser::process_cbar(ParseContext &ctx,
   e.nodes.push_back(NodeId(parse_int(f[3], ctx.line_num)));
   e.nodes.push_back(NodeId(parse_int(f[4], ctx.line_num)));
   parse_orientation_or_g0(f, e, 5, ctx.line_num, std::nullopt);
-  reject_nonblank_fields(
-      f, 8, ctx.line_num, "CBAR",
-      "offsets, releases, OFFT, and other advanced fields are not supported");
+  parse_line_element_ends(f, e, ctx.line_num, "CBAR");
   ctx.model.elements.push_back(std::move(e));
 }
 

@@ -18,17 +18,22 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 2,595 final failure
+The suite contains 3,226 definitions. The current run has 2,531 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
-| `unsupported_input` | 1,570 | 270 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 431 | 128 | Result exists but differs from the reference or comparator expectation |
-| `missing_result_data` | 250 | 38 | Solver completes but does not emit the requested result family |
+| `unsupported_input` | 1,503 | 237 | Requires unsupported cards, solution sequences, elements, or formulations |
+| `numerical_mismatch` | 476 | 164 | Result exists but differs from the reference or comparator expectation |
+| `missing_result_data` | 252 | 40 | Solver completes but does not emit the requested result family |
 | `input_parse_error` | 185 | 15 | Parser rejects syntax or a card variant used by a valid deck |
-| `solver_model_error` | 159 | 18 | Parsed model is rejected by a current formulation or geometry gate |
-| **Total** | **2,595** |  |  |
+| `solver_model_error` | 115 | 13 | Parsed model is rejected by a current formulation or geometry gate |
+| **Total** | **2,531** |  |  |
+
+CBAR/PBAR are now fully parsed (recovery points, K1/K2, I12, pin flags,
+offsets, OFFT `GGG`/`BGG`), so 50 bar decks moved out of `unsupported_input`
+and `input_parse_error`. Most of them now land in `numerical_mismatch` for
+reasons outside the bar element (see "Numerical Mismatch" below).
 
 Solid strain is fully emitted and every SOLIDSTRAINS check passes. The two
 remaining `transform` corner-ZZ mismatches are `SOLIDSTRESSES/GID/.../ZZ`
@@ -180,28 +185,37 @@ records, not a solver exit.
 
 ### Unsupported Input
 
-There are 1,570 records across 270 decks. By unique deck, the current logs show:
+There are 1,503 records across 237 decks. By unique deck, the current logs show:
 
 | Cause | Decks |
 |---|---:|
-| Ignored unsupported BDF or case-control card | 138 |
-| Explicitly unsupported field or formulation | 71 |
+| Ignored unsupported BDF or case-control card | 156 |
 | Unsupported solution type | 61 |
+| Explicitly unsupported field or formulation | 20 |
 
-The most widespread ignored keywords are `DISP` (48 decks), `CQUAD8` (43),
-`ECHO` (41), `FORCE` (41), `TITLE` (41), `DEBUG` (40), `ID` (40), `GPFORCE`
-(30), `OLOAD` (28), `ELFORCE` (28), `PROD` (26), `CROD` (26), `SUBT` (22),
-`GRDSET` (20), `MEFFMASS` (18), `EIGR` (16), `PCOMP` (15), and `TEMPERATURE`
-(15). A deck may contain more than one ignored keyword.
+The most widespread ignored keywords across all failing decks are `ECHO`
+(55), `TITLE` (55), `ID` (54), `DEBUG` (54), `MPCFORCE`/`MPCFORCES` (52/48),
+`CQUAD8` (43), `FORCE` (42), `OLOAD` (42), `GPFORCE` (38), `ELFORCE` (36),
+`CROD`/`PROD` (32), `MEFFMASS` (24), `EIGR` (22), `SUBT` (22), `GRDSET` (20),
+`PCOMP` (15), and `TEMPERATURE` (15). Abbreviated case-control commands
+(`DISP`, `STRE`, `SPCF`, ...) are now accepted and no longer appear.
 
-The main implementation work remains CQUAD8, PCOMP laminates, CROD/PROD,
-advanced case-control output, EIGR/reduction behavior, and unsupported solution
-sequences such as buckling. These are feature additions, not fixes to make as
-part of failure-bucket classification.
+Two gaps are **silent** and therefore missing from that list:
+
+- GRID field 8 (PS, permanent single-point constraints) is parsed but ignored.
+  59 decks use it; e.g. `SB-BAR-I12` and `SB-BAR-PINFLAG` fail with "no
+  constraints" for this reason alone (both match MYSTRAN exactly once the PS
+  constraints are rewritten as SPC1).
+- `BAROR` (default CBAR orientation) is ignored, so CBARs that rely on it get
+  an arbitrary element frame (`SB-BAR-GRAV`).
+
+The main implementation work remains GRID PS/GRDSET, CQUAD8, PCOMP laminates,
+CROD/PROD, element force output (`FORCE`/`ELFORCE`), MPC force output,
+EIGR/reduction behavior, and unsupported solution sequences such as buckling.
 
 ### Missing Result Data
 
-There are 250 records across 38 decks:
+There are 252 records across 40 decks:
 
 | Result family | Records |
 |---|---:|
@@ -211,6 +225,13 @@ There are 250 records across 38 decks:
 | `SHELLSTRESSES` | 4 |
 | `DISPLACEMENTS` | 4 |
 | `SPCFORCES` | 3 |
+| `MODE` | 2 |
+
+The two `MODE` records are `V30 beam released dof x-x` and `xyz-xyz`, which
+expect the solve to fail (eigenvector `ABSENT`): releasing the same component
+at both ends of a bar leaves a mechanism that MYSTRAN rejects. vibestran
+returns a zero-frequency mode instead, which is a valid modal answer; these
+records encode MYSTRAN behaviour rather than a correctness requirement.
 
 `SOLIDSTRAINS` has no missing-result records (the block is emitted for all
 supported solid types). The three remaining SPCFORCES records all belong to
@@ -236,34 +257,49 @@ Recommended order:
 
 ### Numerical Mismatch
 
-There are 431 records across 128 decks:
+There are 476 records across 164 decks:
 
 | Result family | Records |
 |---|---:|
-| `DISPLACEMENTS` | 189 |
-| Bulk comparison | 126 |
+| `DISPLACEMENTS` | 173 |
+| Bulk comparison | 160 |
 | `SHELLSTRESSES` | 55 |
 | `SPCFORCES` | 34 |
+| `REALEIGENVALUES` | 27 |
+| `MODE` | 15 |
 | `SOLIDSTRESSES` | 12 |
-| `REALEIGENVALUES` | 12 |
-| `MODE` | 3 |
 
 Element and constraint incidence overlaps when a deck contains multiple cards:
 
 | Card | Decks |
 |---|---:|
-| `CQUAD4` | 49 |
-| `CBAR` | 37 |
-| `CHEXA` | 26 |
-| `RBE3` | 20 |
-| `CTRIA3` | 16 |
+| `CBAR` | 73 |
+| `CQUAD4` | 51 |
+| `CHEXA` | 25 |
+| `RBE3` | 19 |
+| `CTRIA3` | 18 |
 | `RBE2` | 15 |
-| `CBUSH` | 11 |
-| `CONM2` | 8 |
+| `CBUSH` | 14 |
+| `CONM2` | 10 |
+| `CROD` | 8 |
 | `CTETRA` | 5 |
-| `CROD` | 5 |
 | `CPENTA` | 4 |
 | `CQUAD8` | 3 |
+
+The CBAR count rose because the bar benchmark decks now parse and solve.
+Their remaining mismatches are mostly not in the bar element itself:
+
+- Benchmark bulk comparisons (`bar_*`, `SB-*`, `*-ALL-ELEM-*`) compare the
+  whole F06, including blocks vibestran does not write (bar element forces,
+  OLOAD, GPFORCE) or writes in a different layout (the bar stress table has no
+  SA-Max/SA-Min/M.S. columns). `bar_01` and `bar_05` displacements match
+  MYSTRAN to all printed digits.
+- `V30 beam released dof *` modal decks compare a CBAR pin flag against an
+  equivalent MPC hinge. The identity is exact only when rotations are
+  massless (Nastran's default lumped mass, `COUPMASS` off). vibestran uses a
+  consistent bar mass and statically condenses the released DOF, so the two
+  models differ at the discretization level (0.02-0.2% in frequency, up to
+  ~1% for an axial release). Resolving this needs a lumped-mass option.
 
 Current investigation priorities are constraint coordinate systems, remaining
 RBE2/RBE3 cases, shell material axes and recovery, solid recovery, and modal
@@ -273,13 +309,12 @@ tolerances.
 
 ### Solver Model Errors
 
-There are 159 records across 19 decks:
+There are 115 records across 13 decks:
 
 | Current cause | Decks | Disposition |
 |---|---:|---|
-| MAT8 used by a formulation that currently requires MAT1 | 6 | Requires orthotropic constitutive, orientation, thermal, and recovery support |
-| CQUAD4 warp exceeds the 30 degree validity threshold | 10 | Requires a true warped-shell formulation rather than bypassing the gate |
-| MAT2 MID roles used by a formulation that currently requires MAT1 | 2 | Requires anisotropic MID1/MID2/MID3 support |
+| CQUAD4 warp exceeds the 30 degree validity threshold | 7 | Requires a true warped-shell formulation rather than bypassing the gate |
+| MAT2/MAT8 used by a formulation that currently requires MAT1 | 6 | Requires orthotropic/anisotropic constitutive, orientation, thermal, and recovery support |
 
 Unused entities, coincident nodes, aspect ratio, and taper are warnings. Fatal
 negative/inverted geometry checks remain enabled. Coincident nodes are not
@@ -288,7 +323,7 @@ position.
 
 ### Input Parse Errors
 
-There are 185 records across 16 decks. The unique deck causes are:
+There are 185 records across 15 decks. The unique deck causes are:
 
 | Parser gap | Decks |
 |---|---:|
@@ -325,19 +360,26 @@ tool before changing expected data:
 
 ## Next Priorities
 
-1. Triage the two `transform` SOLIDSTRESSES corner-ZZ records (0.0001%
-   mismatch, roundoff scale) and consider relaxing their tolerances.
-2. Triage the SPCFORCES `numerical_mismatch` decks (RBE3 node-surface
-   coupling and MITC4+ reaction decks) and close `RBE3 19`'s remaining
-   SPCFORCES/MPCFORCES gap.
-3. Finish MPC force output to match SPCFORCES, then shell-force and
-   shell-strain result families (solid strain is now emitted).
-4. Triage numerical mismatches by constraint frame, formulation, and result
-   recovery family without masking unsupported inputs.
-5. Implement 15-node CPENTA and partial PBUSH parsing only with their required
-   mechanics.
-6. Keep MAT2/MAT8 and severely warped CQUAD4 decks explicitly unsupported until
-   the corresponding formulations are implemented.
+The goal is feature compatibility with correct, modern formulations, not
+numerical agreement with MYSTRAN; the suite's tolerances and some expected
+values encode MYSTRAN behaviour and are not a correctness oracle.
+
+1. GRID PS permanent constraints and GRDSET defaults (59 and 20 decks; PS is
+   currently ignored silently), plus BAROR default bar orientation.
+2. Element force output (`FORCE`/`ELFORCE`): bar end forces are already
+   recovered (`CBarBeamElement::EndForces`); shell forces are the largest
+   missing-result family.
+3. A lumped-mass option (`PARAM,COUPMASS`) matching the Nastran default, which
+   the pin-flag hinge-equivalence modal decks depend on.
+4. CROD/PROD and CQUAD8.
+5. Triage the SPCFORCES `numerical_mismatch` decks (RBE3 node-surface
+   coupling and MITC4+ reaction decks) and MPC force output.
+6. Implement 15-node CPENTA and partial PBUSH parsing only with their required
+   mechanics; keep MAT2/MAT8 and severely warped CQUAD4 decks explicitly
+   unsupported until the corresponding formulations are implemented.
+
+Features vibestran supports that no deck exercises are tracked in
+`validation_suite_gaps.md`.
 
 ## Run History
 
@@ -371,3 +413,16 @@ most recent entry.
   `SOLIDSTRESSES` records, not `SOLIDSTRAINS` (the prior table double-counted
   them as a separate family, which is why its totals read 2,598/434 while the
   detail file held 2,596/432).
+- **Case-control abbreviations (2,596, neutral).** `DISP`, `STRE`, `SPCF`,
+  ... are now expanded to their canonical commands; every affected deck is
+  also blocked by another feature, so the total did not move. 44 records
+  moved from `solver_model_error` to `unsupported_input` because `MPCFORCE`
+  is now reported instead of being consumed as an MPC set.
+- **CBAR/PBAR completeness (2,596 -> 2,531, no new failures).** Fixed the
+  I1/I2 plane convention (vibestran bent plane 1 with I2), added PBAR
+  recovery points, K1/K2 shear flexibility, I12 coupling, CBAR pin flags,
+  offsets, and OFFT, and switched bar stress recovery to end forces.
+  65 records now pass (15 of them `beam section shapes no shear`, the rest
+  pin-flag modal checks); 50 bar decks moved from `unsupported_input` /
+  `input_parse_error` into `numerical_mismatch`, for the reasons listed under
+  "Numerical Mismatch".

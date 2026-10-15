@@ -684,7 +684,8 @@ void LinearStaticSolver::apply_pressure_loads(const Model &model,
                   load.element.value));
             }
             const ElementData &elem = *it->second;
-            const LocalFe fe = compute_pload1_equivalent_load(elem, model, load);
+            const LocalFe fe =
+                load_scale * compute_pload1_equivalent_load(elem, model, load);
             const std::vector<double> fe_vec(fe.data(), fe.data() + fe.size());
             apply_element_force_vector(elem, model, dof_map, mpc_handler, fe_vec,
                                        F);
@@ -876,7 +877,8 @@ void LinearStaticSolver::compute_spc_pressure_loads(
                   load.element.value));
             }
             const ElementData &elem = *it->second;
-            const LocalFe fe = compute_pload1_equivalent_load(elem, model, load);
+            const LocalFe fe =
+                load_scale * compute_pload1_equivalent_load(elem, model, load);
             const std::vector<double> fe_vec(fe.data(), fe.data() + fe.size());
             add_spc_element_force(elem, fe_vec, spc, react);
 

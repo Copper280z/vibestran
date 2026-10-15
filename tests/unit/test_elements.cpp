@@ -79,6 +79,17 @@ static void add_mat1(Model &m, int id, double E, double nu, double rho = 0.0,
   m.materials[mat.id] = mat;
 }
 
+/// CBAR/CBEAM element data between grids 1 and `gb` with property 1.
+static ElementData bar_data(ElementType type, int eid, int gb, Vec3 v) {
+  ElementData e;
+  e.id = ElementId{eid};
+  e.type = type;
+  e.pid = PropertyId{1};
+  e.nodes = {NodeId{1}, NodeId{gb}};
+  e.orientation = v;
+  return e;
+}
+
 // ── CQUAD4 tests
 // ──────────────────────────────────────────────────────────────
 
@@ -2016,9 +2027,8 @@ TEST(CBar, StiffnessIsSymmetricAndMatchesAxialEAOverL) {
   add_grid(m, 1, 0.0, 0.0, 0.0);
   add_grid(m, 2, 2.0, 0.0, 0.0);
 
-  CBarBeamElement elem(ElementType::CBAR, ElementId{1}, PropertyId{1},
-                       {NodeId{1}, NodeId{2}}, m, Vec3{0.0, 1.0, 0.0},
-                       std::nullopt);
+  CBarBeamElement elem(
+      bar_data(ElementType::CBAR, 1, 2, Vec3{0.0, 1.0, 0.0}), m);
 
   const LocalKe Ke = elem.stiffness_matrix();
   EXPECT_EQ(Ke.rows(), 12);
@@ -2031,6 +2041,269 @@ TEST(CBar, StiffnessIsSymmetricAndMatchesAxialEAOverL) {
   const double axial = 2.0e7 * 2.0 / 2.0;
   EXPECT_NEAR(f(0), -axial, 1e-8 * axial);
   EXPECT_NEAR(f(6), axial, 1e-8 * axial);
+}
+
+namespace {
+
+/// Cantilever along +x from grid 1 (fixed) to grid 2 at x = L: solve the
+/// 6x6 free block of K for a tip load and return the tip displacements.
+Eigen::Matrix<double, 6, 1> cantilever_tip(const LocalKe &K,
+                                           const Eigen::Matrix<double, 6, 1> &f) {
+  const Eigen::MatrixXd Kff = K.block(6, 6, 6, 6);
+  return Kff.fullPivLu().solve(f);
+}
+
+Model bar_model(double L, const PBar &p, double E = 2.0e7, double nu = 0.3) {
+  Model m;
+  add_mat1(m, 1, E, nu);
+  m.properties[p.pid] = p;
+  add_grid(m, 1, 0.0, 0.0, 0.0);
+  add_grid(m, 2, L, 0.0, 0.0);
+  return m;
+}
+
+PBar make_pbar(double A, double I1, double I2, double J) {
+  PBar p;
+  p.pid = PropertyId{1};
+  p.mid = MaterialId{1};
+  p.A = A;
+  p.I1 = I1;
+  p.I2 = I2;
+  p.J = J;
+  return p;
+}
+
+} // namespace
+
+TEST(CBar, PlaneOneBendsWithI1AndPlaneTwoWithI2) {
+  // Nastran: I1 is the inertia for bending in plane 1 (element x-y, i.e.
+  // y deflection) and I2 for plane 2 (x-z).  A strongly unequal section
+  // must give PL^3/(3 E I1) for a y tip load and PL^3/(3 E I2) for z.
+  const double L = 10.0, E = 1.0e7, I1 = 1.0, I2 = 100.0;
+  const Model m = bar_model(L, make_pbar(2.0, I1, I2, 5.0), E);
+  const CBarBeamElement elem(
+      bar_data(ElementType::CBAR, 1, 2, Vec3{0.0, 1.0, 0.0}), m);
+  const LocalKe K = elem.stiffness_matrix();
+
+  Eigen::Matrix<double, 6, 1> f = Eigen::Matrix<double, 6, 1>::Zero();
+  f(1) = 1.0;
+  f(2) = 1.0;
+  const auto u = cantilever_tip(K, f);
+  EXPECT_NEAR(u(1), L * L * L / (3.0 * E * I1), 1e-12);
+  EXPECT_NEAR(u(2), L * L * L / (3.0 * E * I2), 1e-14);
+  // Tip rotations: theta_z = +PL^2/(2EI1), theta_y = -PL^2/(2EI2).
+  EXPECT_NEAR(u(5), L * L / (2.0 * E * I1), 1e-12);
+  EXPECT_NEAR(u(4), -L * L / (2.0 * E * I2), 1e-14);
+}
+
+TEST(CBar, ShearFactorsAddTimoshenkoTipFlexibility) {
+  // Tip deflection of a Timoshenko cantilever is PL^3/(3EI) + PL/(K A G);
+  // K1 governs plane 1 and K2 plane 2.  A short, deep bar makes the shear
+  // term significant (here ~25-40% of the total).
+  const double L = 2.0, E = 3.0e7, nu = 0.3, A = 1.5;
+  const double I1 = 0.8, I2 = 0.5, K1 = 5.0 / 6.0, K2 = 0.6;
+  PBar p = make_pbar(A, I1, I2, 0.4);
+  p.K1 = K1;
+  p.K2 = K2;
+  const Model m = bar_model(L, p, E, nu);
+  const double G = E / (2.0 * (1.0 + nu));
+  const CBarBeamElement elem(
+      bar_data(ElementType::CBAR, 1, 2, Vec3{0.0, 1.0, 0.0}), m);
+  const LocalKe K = elem.stiffness_matrix();
+  EXPECT_LT((K - K.transpose()).cwiseAbs().maxCoeff(), 1e-9 * K.norm());
+
+  Eigen::Matrix<double, 6, 1> f = Eigen::Matrix<double, 6, 1>::Zero();
+  f(1) = 1000.0;
+  f(2) = -700.0;
+  const auto u = cantilever_tip(K, f);
+  const double v_expected =
+      1000.0 * (L * L * L / (3.0 * E * I1) + L / (K1 * A * G));
+  const double w_expected =
+      -700.0 * (L * L * L / (3.0 * E * I2) + L / (K2 * A * G));
+  EXPECT_NEAR(u(1), v_expected, 1e-10 * std::abs(v_expected));
+  EXPECT_NEAR(u(2), w_expected, 1e-10 * std::abs(w_expected));
+  // Shear deformation does not change the tip slope under a tip load.
+  EXPECT_NEAR(u(5), 1000.0 * L * L / (2.0 * E * I1), 1e-12);
+
+  // Rigid-body motions still produce no force.
+  Eigen::VectorXd rb = Eigen::VectorXd::Zero(12);
+  rb(5) = 1.0;           // rotation about z at grid 1 ...
+  rb(11) = 1.0;          // ... and grid 2,
+  rb(7) = L;             // with grid 2 translating accordingly.
+  EXPECT_LT((K * rb).cwiseAbs().maxCoeff(), 1e-8 * K.norm());
+}
+
+TEST(CBar, ProductOfInertiaMatchesRotatedPrincipalSection) {
+  // A section with principal inertias (Ip1, Ip2) whose principal axes are
+  // rotated by alpha about x has, in the element frame,
+  //   I1 = c^2 Ip1 + s^2 Ip2,  I2 = s^2 Ip1 + c^2 Ip2,  I12 = c s (Ip1 - Ip2).
+  // Describing the same bar with I12 (coupled flexibility path) or with its
+  // principal axes as the element frame (uncoupled Timoshenko path) must give
+  // the same global stiffness and the same stress at the same material point.
+  // K1 = K2 keeps the shear stiffness isotropic so it is frame-invariant.
+  const double L = 3.0, alpha = 0.47, Ip1 = 2.0, Ip2 = 0.35, K = 0.85;
+  const double c = std::cos(alpha), s = std::sin(alpha);
+  const std::array<std::array<double, 2>, 4> pts_principal{
+      {{0.6, 0.2}, {-0.6, 0.2}, {-0.6, -0.2}, {0.6, -0.2}}};
+
+  PBar coupled = make_pbar(1.2, c * c * Ip1 + s * s * Ip2,
+                           s * s * Ip1 + c * c * Ip2, 0.9);
+  coupled.I12 = c * s * (Ip1 - Ip2);
+  coupled.K1 = coupled.K2 = K;
+  // Material point (y', z') in principal axes is (c y' - s z', s y' + c z')
+  // in the element frame.
+  for (size_t i = 0; i < 4; ++i) {
+    const double yp = pts_principal[i][0], zp = pts_principal[i][1];
+    coupled.recovery_points[i] = {c * yp - s * zp, s * yp + c * zp};
+  }
+  PBar principal = make_pbar(1.2, Ip1, Ip2, 0.9);
+  principal.K1 = principal.K2 = K;
+  principal.recovery_points = pts_principal;
+
+  const Model m_coupled = bar_model(L, coupled);
+  const Model m_principal = bar_model(L, principal);
+  const CBarBeamElement e_coupled(
+      bar_data(ElementType::CBAR, 1, 2, Vec3{0.0, 1.0, 0.0}), m_coupled);
+  const CBarBeamElement e_principal(
+      bar_data(ElementType::CBAR, 1, 2, Vec3{0.0, c, s}), m_principal);
+
+  const LocalKe K_coupled = e_coupled.stiffness_matrix();
+  const LocalKe K_principal = e_principal.stiffness_matrix();
+  EXPECT_LT((K_coupled - K_principal).cwiseAbs().maxCoeff(),
+            1e-10 * K_principal.cwiseAbs().maxCoeff());
+
+  std::array<double, 12> u{};
+  for (size_t i = 0; i < 12; ++i)
+    u[i] = 1e-3 * std::sin(1.3 * static_cast<double>(i) + 0.2);
+  const auto r_coupled = e_coupled.recover_stress(u, 0.0, 0.0);
+  const auto r_principal = e_principal.recover_stress(u, 0.0, 0.0);
+  for (size_t i = 0; i < 4; ++i) {
+    const double scale = std::abs(r_principal.end_a.s[i]) + 1.0;
+    EXPECT_NEAR(r_coupled.end_a.s[i], r_principal.end_a.s[i], 1e-9 * scale);
+    EXPECT_NEAR(r_coupled.end_b.s[i], r_principal.end_b.s[i], 1e-9 * scale);
+  }
+  EXPECT_NEAR(r_coupled.forces.axial, r_principal.forces.axial,
+              1e-9 * std::abs(r_principal.forces.axial));
+}
+
+TEST(CBar, PinFlagCondensesToCantileverWithFreeTipRotation) {
+  // PB = 6 releases theta_z at end B.  With end A fixed, the remaining v_B
+  // stiffness is that of a cantilever whose tip rotates freely:
+  //   k = 1 / (L^3/(3 E I1) + L/(K1 A G))
+  // rather than the guided-tip 12 E I1 / L^3 (shear-free) value.
+  const double L = 4.0, E = 2.0e7, nu = 0.3, A = 2.0, I1 = 0.5, K1 = 0.8;
+  PBar p = make_pbar(A, I1, 0.7, 1.0);
+  p.K1 = K1;
+  const Model m = bar_model(L, p, E, nu);
+  const double G = E / (2.0 * (1.0 + nu));
+  ElementData data = bar_data(ElementType::CBAR, 1, 2, Vec3{0.0, 1.0, 0.0});
+  data.pin_flags[1] = 1u << 5; // component 6
+  const CBarBeamElement elem(data, m);
+  const LocalKe K = elem.stiffness_matrix();
+
+  EXPECT_LT(K.row(11).cwiseAbs().maxCoeff(), 1e-9 * K.norm());
+  EXPECT_LT(K.col(11).cwiseAbs().maxCoeff(), 1e-9 * K.norm());
+  const double k_expected = 1.0 / (L * L * L / (3.0 * E * I1) + L / (K1 * A * G));
+  EXPECT_NEAR(K(7, 7), k_expected, 1e-10 * k_expected);
+  // Plane 2 is untouched by a plane-1 release: guided-tip 12 E I2 / L^3.
+  EXPECT_NEAR(K(8, 8), 12.0 * E * 0.7 / (L * L * L), 1e-6);
+
+  // The released end carries no moment for any displacement state.
+  std::array<double, 12> u{};
+  for (size_t i = 0; i < 12; ++i)
+    u[i] = 1e-4 * std::cos(0.7 * static_cast<double>(i));
+  const auto r = elem.recover_stress(u, 0.0, 0.0);
+  EXPECT_NEAR(r.forces.m1b, 0.0, 1e-9 * (std::abs(r.forces.m1a) + 1.0));
+  EXPECT_GT(std::abs(r.forces.m1a), 1.0);
+}
+
+TEST(CBar, ReleasingTorsionAtBothEndsRemovesTorsionalStiffness) {
+  // PA = PB = 4 releases torsion at both ends: K_rr is singular, which the
+  // pseudo-inverse condensation must handle.  The element then has zero
+  // torsional stiffness while bending and axial terms are unchanged.
+  const Model m = bar_model(5.0, make_pbar(1.0, 0.3, 0.4, 0.6));
+  ElementData free_data = bar_data(ElementType::CBAR, 1, 2, Vec3{0.0, 1.0, 0.0});
+  ElementData pinned_data = free_data;
+  pinned_data.pin_flags = {1u << 3, 1u << 3};
+  const LocalKe K_free = CBarBeamElement(free_data, m).stiffness_matrix();
+  const LocalKe K_pin = CBarBeamElement(pinned_data, m).stiffness_matrix();
+
+  ASSERT_TRUE(K_pin.allFinite());
+  for (const int dof : {3, 9}) {
+    EXPECT_LT(K_pin.row(dof).cwiseAbs().maxCoeff(), 1e-9 * K_free.norm());
+  }
+  LocalKe diff = K_free - K_pin;
+  diff(3, 3) = diff(3, 9) = diff(9, 3) = diff(9, 9) = 0.0;
+  EXPECT_LT(diff.cwiseAbs().maxCoeff(), 1e-9 * K_free.norm());
+}
+
+TEST(CBar, EndOffsetsAreRigidLinksAndKeepRigidBodyModes) {
+  // Offsets WA = WB = (0, d, 0) move the neutral axis to y = d.  A rotation
+  // theta_z of grid 1 then moves end A by -theta*d in x, stretching the bar:
+  // the axial force on grid 2 is E A theta d / L.  All six rigid-body modes of
+  // the grid pair must remain force-free.
+  const double L = 6.0, d = 0.75, E = 2.0e7, A = 1.3;
+  const Model m = bar_model(L, make_pbar(A, 0.2, 0.3, 0.25), E);
+  ElementData data = bar_data(ElementType::CBAR, 1, 2, Vec3{0.0, 0.0, 1.0});
+  data.offsets = {Vec3{0.0, d, 0.0}, Vec3{0.0, d, 0.0}};
+  const LocalKe K = CBarBeamElement(data, m).stiffness_matrix();
+
+  Eigen::VectorXd u = Eigen::VectorXd::Zero(12);
+  u(5) = 1e-3;
+  const Eigen::VectorXd f = K * u;
+  EXPECT_NEAR(f(6), E * A * 1e-3 * d / L, 1e-9 * E * A * 1e-3 * d / L);
+
+  const std::array<Vec3, 2> pos{Vec3{0.0, 0.0, 0.0}, Vec3{L, 0.0, 0.0}};
+  for (int mode = 0; mode < 6; ++mode) {
+    Eigen::VectorXd rb = Eigen::VectorXd::Zero(12);
+    for (int n = 0; n < 2; ++n) {
+      if (mode < 3) {
+        rb(6 * n + mode) = 1.0;
+      } else {
+        Eigen::Vector3d w = Eigen::Vector3d::Zero();
+        w(mode - 3) = 1.0;
+        const Eigen::Vector3d r{pos[n].x, pos[n].y, pos[n].z};
+        rb.segment<3>(6 * n) = w.cross(r);
+        rb.segment<3>(6 * n + 3) = w;
+      }
+    }
+    EXPECT_LT((K * rb).cwiseAbs().maxCoeff(), 1e-8 * K.norm())
+        << "rigid-body mode " << mode;
+  }
+}
+
+TEST(CBar, StressRecoveryUsesEndForcesAndRecoveryPoints) {
+  // Cantilever, tip load P in +y: M1(x) = P (L - x), so at point C
+  // (y = c, z = 0) the stress is -P L c / I1 at end A and zero at end B.
+  // A uniform temperature rise on the free cantilever adds no stress.
+  const double L = 5.0, E = 1.0e7, I1 = 0.4, c = 0.3, P = 250.0;
+  PBar p = make_pbar(1.0, I1, 0.6, 0.5);
+  p.recovery_points = {{{c, 0.0}, {0.0, c}, {-c, 0.0}, {0.0, -c}}};
+  Model m = bar_model(L, p, E);
+  m.materials.at(MaterialId{1}).A = 1.0e-5;
+  const CBarBeamElement elem(
+      bar_data(ElementType::CBAR, 1, 2, Vec3{0.0, 1.0, 0.0}), m);
+  const LocalKe K = elem.stiffness_matrix();
+
+  Eigen::Matrix<double, 6, 1> f = Eigen::Matrix<double, 6, 1>::Zero();
+  f(1) = P;
+  const LocalFe f_th = elem.thermal_load(std::array<double, 2>{80.0, 80.0}, 0.0);
+  f += f_th.segment<6>(6);
+  const auto tip = cantilever_tip(K, f);
+  std::array<double, 12> u{};
+  for (size_t i = 0; i < 6; ++i)
+    u[6 + i] = tip(static_cast<Eigen::Index>(i));
+
+  const auto r = elem.recover_stress(u, 80.0, 0.0);
+  EXPECT_NEAR(r.forces.m1a, P * L, 1e-8 * P * L);
+  EXPECT_NEAR(r.forces.m1b, 0.0, 1e-8 * P * L);
+  EXPECT_NEAR(r.forces.v1, P, 1e-8 * P);
+  EXPECT_NEAR(r.forces.axial, 0.0, 1e-8 * P);
+  EXPECT_NEAR(r.end_a.s[0], -P * L * c / I1, 1e-8 * P * L * c / I1);
+  EXPECT_NEAR(r.end_a.s[2], P * L * c / I1, 1e-8 * P * L * c / I1);
+  EXPECT_NEAR(r.end_a.s[1], 0.0, 1e-8 * P * L * c / I1);
+  EXPECT_NEAR(r.end_b.s[0], 0.0, 1e-8 * P * L * c / I1);
+  EXPECT_NEAR(r.end_a.smax, P * L * c / I1, 1e-8 * P * L * c / I1);
 }
 
 TEST(CBeam, ThermalLoadIsAxialAndSelfEquilibrated) {
@@ -2049,9 +2322,8 @@ TEST(CBeam, ThermalLoadIsAxialAndSelfEquilibrated) {
   add_grid(m, 1, 0.0, 0.0, 0.0);
   add_grid(m, 2, 5.0, 0.0, 0.0);
 
-  CBarBeamElement elem(ElementType::CBEAM, ElementId{1}, PropertyId{1},
-                       {NodeId{1}, NodeId{2}}, m, Vec3{0.0, 1.0, 0.0},
-                       std::nullopt);
+  CBarBeamElement elem(
+      bar_data(ElementType::CBEAM, 1, 2, Vec3{0.0, 1.0, 0.0}), m);
 
   const LocalFe fe =
       elem.thermal_load(std::array<double, 2>{100.0, 100.0}, 0.0);
