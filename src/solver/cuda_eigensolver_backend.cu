@@ -35,6 +35,18 @@
 //   6. Release cuDSS factorization.
 //   7. Sort eigenvalues ascending and return.
 //
+// Massless DOFs (zero rows of M, e.g. rotations under lumped mass): the
+// M-inner product is then only semi-definite, and Lanczos run on the full
+// space returns spurious Ritz pairs and misses genuine ones.  The iteration
+// is instead confined to the massed DOFs: each solve z = C^{-1} w is masked
+// to zero at massless DOFs, and so is the starting vector.  That is exactly
+// the condensed operator (K_red - sigma M_mm)^{-1} M_mm embedded with zeros
+// (K_red the Schur complement eliminating the massless DOFs), whose M-inner
+// product is positive definite, while still using the full factorization.
+// The Rayleigh-Ritz step applies the unmasked C^{-1} M to the Ritz vectors,
+// which recovers the massless components exactly; without massless DOFs the
+// mask is never applied.
+//
 // Note: <format> / std::format intentionally absent — nvcc uses its bundled
 // g++-12 as host compiler, which does not ship <format>.  Use std::string
 // concatenation and std::to_string() for all error / log messages.
@@ -54,6 +66,7 @@
 #include <Eigen/SparseCore>
 
 #include <algorithm>
+#include <cstdint>
 #include <cmath>
 #include <memory>
 #include <numeric>
@@ -226,6 +239,20 @@ static void launch_subtract_diag_product(double *y, const double *diag,
                                                                        x, n);
 }
 
+__global__ static void apply_mask_kernel(double *x, const double *mask,
+                                         int n) {
+  int i = static_cast<int>(blockIdx.x) * blockDim.x +
+          static_cast<int>(threadIdx.x);
+  if (i < n)
+    x[i] *= mask[i];
+}
+
+/// x[i] *= mask[i] (mask entries are 1 for massed DOFs, 0 for massless).
+static void launch_apply_mask(double *x, const double *mask, int n) {
+  constexpr int kBlock = 256;
+  apply_mask_kernel<<<(n + kBlock - 1) / kBlock, kBlock>>>(x, mask, n);
+}
+
 static CsrDev upload(const Eigen::SparseMatrix<double, Eigen::RowMajor> &m) {
   CsrDev d;
   d.n = static_cast<int>(m.rows());
@@ -243,10 +270,20 @@ static Eigen::SparseMatrix<double, Eigen::RowMajor>
 lower_triangle_only(const Eigen::SparseMatrix<double> &input) {
   using RmSp = Eigen::SparseMatrix<double, Eigen::RowMajor>;
 
-  RmSp row(input);
-  row.makeCompressed();
-
-  RmSp lower(row.template triangularView<Eigen::Lower>());
+  // Filter explicitly instead of assigning from triangularView<Lower>():
+  // with nvcc as the compiler front end and Eigen 3.4.0, the TriangularView
+  // sparse InnerIterator's operator bool() recurses without bound (stack
+  // overflow on the first eigensolve).
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(input.nonZeros()));
+  for (int col = 0; col < input.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(input, col); it; ++it) {
+      if (it.row() >= it.col())
+        triplets.emplace_back(it.row(), it.col(), it.value());
+    }
+  }
+  RmSp lower(input.rows(), input.cols());
+  lower.setFromTriplets(triplets.begin(), triplets.end());
   lower.makeCompressed();
   return lower;
 }
@@ -515,6 +552,19 @@ std::string_view CudaEigensolverBackend::device_name() const noexcept {
 // ── solve
 // ─────────────────────────────────────────────────────────────────────
 
+/// Deterministic pseudo-random entries in [0.5, 1.5) on the massed DOFs (zero
+/// elsewhere).  `stream` selects an independent sequence, used for the
+/// initial vector (0) and for fresh directions after Lanczos breakdowns.
+static void fill_start_vector(Eigen::VectorXd &v, const std::vector<int> &massed,
+                              const unsigned stream) {
+  std::uint64_t state = 0x9E3779B97F4A7C15ull * (stream + 1u) + 0xD1B54A32D192ED03ull;
+  v.setZero();
+  for (const int i : massed) {
+    state = state * 6364136223846793005ull + 1442695040888963407ull;
+    v(i) = 0.5 + static_cast<double>(state >> 11) * 0x1.0p-53;
+  }
+}
+
 std::vector<EigenPair>
 CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
                               const Eigen::SparseMatrix<double> &M, int nd,
@@ -525,17 +575,27 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
     throw SolverError("CUDA eigensolver: system has no free DOFs");
   if (nd < 1)
     throw SolverError("CUDA eigensolver: nd must be >= 1");
-  if (nd > n)
-    nd = n;
+  // Massless DOFs are condensed out (see the header comment); the Krylov
+  // space then lives in the nm-dimensional massed subspace, which also
+  // bounds the number of finite eigenvalues.
+  const std::vector<int> massed = massed_dof_indices(M);
+  const int nm = static_cast<int>(massed.size());
+  if (nm < 1)
+    throw SolverError("CUDA eigensolver: no free DOF carries mass (n=" +
+                      std::to_string(n) + ")");
+  const bool has_massless = nm < n;
+  if (nd > nm)
+    nd = nm;
 
   // Implicitly restarted Lanczos uses a smaller basis than the old
   // no-restart approach (which needed max(2*nd+20, 4*nd)).
-  const int ncv = std::min(n, std::max(2 * nd + 10, 3 * nd));
+  const int ncv = std::min(nm, std::max(2 * nd + 10, 3 * nd));
   const int maxit = 300;
   const double tol = 1e-10;
 
   log_debug("[cuda-eig] n=" + std::to_string(n) + " nd=" + std::to_string(nd) +
-            " ncv=" + std::to_string(ncv) + " sigma=" + std::to_string(sigma) +
+            " ncv=" + std::to_string(ncv) + " massed=" + std::to_string(nm) +
+            " sigma=" + std::to_string(sigma) +
             " device='" + ctx_->device_name + "'");
 
   // ── 1. Build C = K - sigma*M and upload K, M, C ──────────────────────────
@@ -553,6 +613,15 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
   CsrDev d_M = upload(M_rm);
   EigDevBuf<double> d_M_diag(static_cast<std::size_t>(n));
   d_M_diag.upload(M_diag.data(), static_cast<std::size_t>(n));
+  std::vector<double> massed_mask(static_cast<std::size_t>(n), 0.0);
+  for (const int i : massed)
+    massed_mask[static_cast<std::size_t>(i)] = 1.0;
+  EigDevBuf<double> d_mask(static_cast<std::size_t>(n));
+  d_mask.upload(massed_mask.data(), static_cast<std::size_t>(n));
+  if (has_massless)
+    log_info("[cuda-eig] " + std::to_string(n - nm) + " of " +
+             std::to_string(n) +
+             " DOFs are massless and are condensed out of the eigenproblem");
   std::unique_ptr<CsrDev> d_C_full;
 
   const int M_nnz = d_M.nnz;
@@ -722,7 +791,12 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
 
   // ── 4. Initial Lanczos vector (constant, M-normalized on CPU) ────────────
   {
-    Eigen::VectorXd v0 = Eigen::VectorXd::Ones(n);
+    // Pseudo-random (deterministic) start on the massed DOFs.  A constant
+    // vector is orthogonal to every mode that is antisymmetric under a
+    // symmetry of the model, and holds a single direction of each repeated
+    // eigenvalue, so such modes were missed.
+    Eigen::VectorXd v0 = Eigen::VectorXd::Zero(n);
+    fill_start_vector(v0, massed, 0);
     double nm2 = v0.dot(M_rm.selfadjointView<Eigen::Lower>() * v0);
     if (nm2 <= 0.0)
       throw SolverError(
@@ -747,8 +821,10 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
       double *vk = d_V.ptr + static_cast<std::size_t>(k) * stride;
       double *wk = d_W.ptr + static_cast<std::size_t>(k) * stride;
 
-      // z = C^{-1} w_k
+      // z = C^{-1} w_k, confined to the massed subspace
       do_solve(wk, d_z.ptr);
+      if (has_massless)
+        launch_apply_mask(d_z.ptr, d_mask.ptr, n);
 
       // alpha_k = w_k · z
       double alpha_k = 0.0;
@@ -799,10 +875,61 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
          "cublasDdot(beta^2)");
       ck(cudaDeviceSynchronize(), "sync(beta)");
 
-      if (beta_sq <= 0.0 || std::sqrt(beta_sq) < 1e-14) {
-        nstep = k + 1;
-        log_debug("[cuda-eig] lucky breakdown at step " + std::to_string(k));
-        break;
+      // Invariant-subspace ("lucky") breakdown, judged relative to the size
+      // of this step's operator image so that stiff, high-frequency models
+      // (naturally tiny Ritz values nu = 1/(lambda - sigma)) are not
+      // mistaken for breakdowns.
+      const double step_scale =
+          std::abs(alpha_k) + (k > 0 ? beta[static_cast<std::size_t>(k - 1)] : 0.0);
+      if (beta_sq <= 0.0 || std::sqrt(beta_sq) <= 1e-12 * step_scale) {
+        if (k + 1 >= nm || k == to_m - 1) {
+          // The whole massed space is spanned, or the sweep ends here; the
+          // residual is zero and the Ritz pairs are exact.
+          nstep = k + 1;
+          beta[static_cast<std::size_t>(k)] = 0.0;
+          ck(cudaMemset(d_r.ptr, 0, stride * sizeof(double)), "cudaMemset(r)");
+          log_debug("[cuda-eig] invariant subspace at step " + std::to_string(k));
+          break;
+        }
+        // Continue with a fresh direction M-orthogonal to v_0..v_k (as
+        // ARPACK does), setting beta_k = 0.  Without this, an eigenvalue of
+        // multiplicity > 1 (e.g. identical substructures) is found once.
+        Eigen::VectorXd fresh(n);
+        fill_start_vector(fresh, massed, static_cast<unsigned>(k + 1));
+        ck(cudaMemcpy(d_r.ptr, fresh.data(), n * sizeof(double),
+                      cudaMemcpyHostToDevice),
+           "upload fresh Lanczos direction");
+        for (int pass = 0; pass < 2; ++pass) {
+          ck(cublasDgemv(ctx_->cublas, CUBLAS_OP_T, n, k + 1, &c1, d_W.ptr,
+                         static_cast<int>(stride), d_r.ptr, 1, &c0, d_co.ptr, 1),
+             "cublasDgemv(fresh reorth T)");
+          ck(cublasDgemv(ctx_->cublas, CUBLAS_OP_N, n, k + 1, &cn1, d_V.ptr,
+                         static_cast<int>(stride), d_co.ptr, 1, &c1, d_r.ptr, 1),
+             "cublasDgemv(fresh reorth N)");
+        }
+        spmv_Mv(d_r.ptr, w_next);
+        double fresh_sq = 0.0;
+        ck(cublasDdot(ctx_->cublas, n, d_r.ptr, 1, w_next, 1, &fresh_sq),
+           "cublasDdot(fresh norm)");
+        ck(cudaDeviceSynchronize(), "sync(fresh)");
+        if (!(fresh_sq > 0.0)) {
+          nstep = k + 1;
+          beta[static_cast<std::size_t>(k)] = 0.0;
+          log_debug("[cuda-eig] no independent direction left at step " +
+                    std::to_string(k));
+          break;
+        }
+        log_debug("[cuda-eig] breakdown at step " + std::to_string(k) +
+                  "; continuing with a fresh direction");
+        beta[static_cast<std::size_t>(k)] = 0.0;
+        double *v_next = d_V.ptr + static_cast<std::size_t>(k + 1) * stride;
+        ck(cudaMemcpy(v_next, d_r.ptr, stride * sizeof(double),
+                      cudaMemcpyDeviceToDevice),
+           "memcpy fresh->v_next");
+        const double inv_fresh = 1.0 / std::sqrt(fresh_sq);
+        ck(cublasDscal(ctx_->cublas, n, &inv_fresh, v_next, 1), "cublasDscal(fresh v)");
+        ck(cublasDscal(ctx_->cublas, n, &inv_fresh, w_next, 1), "cublasDscal(fresh w)");
+        continue;
       }
 
       const double bk = std::sqrt(beta_sq);
@@ -963,7 +1090,9 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
        "cublasDdot(f_new norm)");
     ck(cudaDeviceSynchronize(), "sync(f_new)");
 
-    if (beta_sq <= 0.0 || std::sqrt(beta_sq) < 1e-14) {
+    // Relative to the operator scale (largest |nu|), like the in-sweep test.
+    if (beta_sq <= 0.0 ||
+        std::sqrt(beta_sq) <= 1e-12 * ritz_val.cwiseAbs().maxCoeff()) {
       nstep = k;
       log_debug("[cuda-eig] breakdown after restart compression at k=" +
                 std::to_string(k));
@@ -1053,6 +1182,7 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
     EigDevBuf<double> d_xi(stride);
     EigDevBuf<double> d_mxi(stride);
     EigDevBuf<double> d_zi(stride);
+    int rr_completed = 0;
 
     for (int rr = 0; rr < nrr; ++rr) {
       // (a) Z[:,i] = C^{-1} M X[:,i]
@@ -1107,6 +1237,28 @@ CudaEigensolverBackend::solve(const Eigen::SparseMatrix<double> &K,
 
       log_debug("[cuda-eig] RR iter=" + std::to_string(rr) +
                 " lambda[0]=" + std::to_string(lambda_rr(0)));
+      ++rr_completed;
+    }
+
+    // The Lanczos Ritz vectors are zero at massless DOFs.  Refinement fills
+    // those components in through C^{-1} M; if it stopped before completing
+    // an iteration, recover them directly: for an eigenpair,
+    // phi = (lambda - sigma) C^{-1} M phi, and M phi only involves the
+    // massed components.
+    if (has_massless && rr_completed == 0) {
+      for (int i = 0; i < nd_rr; ++i) {
+        ck(cudaMemcpy(d_xi.ptr, X_rr.col(i).data(), n * sizeof(double),
+                      cudaMemcpyHostToDevice),
+           "recover upload x_i");
+        spmv_Mv(d_xi.ptr, d_mxi.ptr);
+        do_solve(d_mxi.ptr, d_zi.ptr);
+        Eigen::VectorXd z(n);
+        ck(cudaMemcpy(z.data(), d_zi.ptr, n * sizeof(double),
+                      cudaMemcpyDeviceToHost),
+           "recover download z_i");
+        X_rr.col(i) = z * (lambda_rr(i) - sigma);
+      }
+      log_debug("[cuda-eig] recovered massless DOF components without RR");
     }
   }
 

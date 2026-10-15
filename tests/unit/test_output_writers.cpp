@@ -16,6 +16,7 @@
 #include "io/bdf_parser.hpp"
 #include "core/model.hpp"
 #include <algorithm>
+#include <cstring>
 #include <sstream>
 #include <string>
 #include <cmath>

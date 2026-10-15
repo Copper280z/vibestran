@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "solver/eigensolver_backend.hpp"
+#include "lumped_beam_problem.hpp"
 
 #include <Eigen/Sparse>
 
@@ -102,4 +103,47 @@ TEST(SpectraEigensolverBackend, LowerTriangularStorageMatchesFullStorage) {
         EXPECT_NEAR(m_inner, 1.0, 1e-8)
             << "Mass-normalised eigenvector mismatch for mode " << mode + 1;
     }
+}
+
+TEST(SpectraEigensolverBackend, MasslessDofsAreCondensedExactly) {
+  // Lumped-mass beam: rotations are massless, so M is only semi-definite.
+  // Every returned pair must be a genuine eigenpair of the full problem
+  // (no spurious Ritz values, none missed, rotations recovered), matching
+  // the dense Schur-complement reference.
+  const auto p = vibestran::test::make_lumped_beam_problem(12);
+  const std::vector<int> massed = vibestran::massed_dof_indices(p.M);
+  ASSERT_EQ(massed.size(), 12u);
+  for (int i = 0; i < 12; ++i)
+    EXPECT_EQ(massed[static_cast<size_t>(i)], 2 * i);
+
+  vibestran::SpectraEigensolverBackend backend;
+  const int nd = 8;
+  const auto pairs = backend.solve(p.K, p.M, nd, -1.0);
+  ASSERT_EQ(static_cast<int>(pairs.size()), nd);
+  for (int i = 0; i < nd; ++i) {
+    const auto &ep = pairs[static_cast<size_t>(i)];
+    const double ref = p.reference_eigenvalues(i);
+    EXPECT_NEAR(ep.eigenvalue, ref, 1e-9 * ref) << "mode " << i;
+    const Eigen::VectorXd kx = p.K.selfadjointView<Eigen::Lower>() * ep.eigenvector;
+    const Eigen::VectorXd mx = p.M.selfadjointView<Eigen::Lower>() * ep.eigenvector;
+    EXPECT_LT((kx - ep.eigenvalue * mx).norm(), 1e-9 * kx.norm()) << "mode " << i;
+    // Bending modes rotate: the massless components must be recovered.
+    double rotation = 0.0;
+    for (int k = 1; k < ep.eigenvector.size(); k += 2)
+      rotation = std::max(rotation, std::abs(ep.eigenvector(k)));
+    EXPECT_GT(rotation, 1e-6 * ep.eigenvector.cwiseAbs().maxCoeff());
+  }
+}
+
+TEST(SpectraEigensolverBackend, RequestBeyondMassedDofsIsCapped) {
+  // Only the massed DOFs give finite eigenvalues; asking for more than
+  // exist returns every finite one (Spectra needs nd < nm) instead of
+  // inventing modes.
+  const auto p = vibestran::test::make_lumped_beam_problem(5);
+  vibestran::SpectraEigensolverBackend backend;
+  const auto pairs = backend.solve(p.K, p.M, 9, -1.0);
+  ASSERT_EQ(pairs.size(), 4u);
+  for (int i = 0; i < 4; ++i)
+    EXPECT_NEAR(pairs[static_cast<size_t>(i)].eigenvalue,
+                p.reference_eigenvalues(i), 1e-9 * p.reference_eigenvalues(i));
 }

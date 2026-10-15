@@ -771,8 +771,16 @@ static std::string make_beam_solid_interconnection_thermal_bdf(bool with_beams) 
     bdf << "SPC1,1,123456,1\n"
         << "SPC1,1,23,2\n"
         << "SPC1,1,13,4\n"
-        << "SPC1,1,12,7\n"
-        << "TEMPD,2,50.0\n"
+        << "SPC1,1,12,7\n";
+    if (with_beams) {
+        // Solid grids give the bars no torsional restraint, so each bar
+        // chain not through grid 1 has a free rigid twist (R1) mode and K is
+        // exactly singular.  The axial thermal load never excites it, but a
+        // sparse Cholesky (e.g. CHOLMOD) rightly refuses the factorization.
+        // Restrain R1 once per free chain; it cannot affect the answer.
+        bdf << "SPC1,1,4,4,7,10\n";
+    }
+    bdf << "TEMPD,2,50.0\n"
         << "ENDDATA\n";
     return bdf.str();
 }

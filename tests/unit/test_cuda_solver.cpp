@@ -276,6 +276,10 @@ TEST_F(CudaTest, ZeroForceSolvesCorrectly) {
 
 #ifdef HAVE_CUDA_EIGENSOLVER
 #include "solver/cuda_eigensolver_backend.hpp"
+#include "io/bdf_parser.hpp"
+#include "lumped_beam_problem.hpp"
+#include "solver/modal.hpp"
+#include <memory>
 
 using namespace vibestran;
 
@@ -684,6 +688,106 @@ TEST_F(CudaEigTest, ClusteredEigenvaluesConverge) {
         EXPECT_NEAR(cuda_pairs[static_cast<std::size_t>(i)].eigenvalue,
                     spectra_pairs[static_cast<std::size_t>(i)].eigenvalue, 1e-5)
             << "Clustered mode " << i+1 << " eigenvalue differs";
+    }
+}
+
+// ── Massless DOFs (lumped mass) ──────────────────────────────────────────────
+// Lumped-mass beam: rotations are massless, so M is only semi-definite.  The
+// GPU Lanczos is confined to the massed DOFs; every returned pair must be a
+// genuine eigenpair of the full problem matching the dense Schur-complement
+// reference, with the massless rotations recovered.
+
+TEST_F(CudaEigTest, MasslessDofsAreCondensedExactly) {
+    const auto p = vibestran::test::make_lumped_beam_problem(12);
+    const int nd = 8;
+    const auto pairs = backend_->solve(p.K, p.M, nd, -1.0);
+    ASSERT_EQ(static_cast<int>(pairs.size()), nd);
+    for (int i = 0; i < nd; ++i) {
+        const auto& ep = pairs[static_cast<std::size_t>(i)];
+        const double ref = p.reference_eigenvalues(i);
+        EXPECT_NEAR(ep.eigenvalue, ref, 1e-9 * ref) << "mode " << i;
+        const Eigen::VectorXd kx = p.K.selfadjointView<Eigen::Lower>() * ep.eigenvector;
+        const Eigen::VectorXd mx = p.M.selfadjointView<Eigen::Lower>() * ep.eigenvector;
+        EXPECT_LT((kx - ep.eigenvalue * mx).norm(), 1e-9 * kx.norm()) << "mode " << i;
+        double rotation = 0.0;
+        for (int k = 1; k < ep.eigenvector.size(); k += 2)
+            rotation = std::max(rotation, std::abs(ep.eigenvector(k)));
+        EXPECT_GT(rotation, 1e-6 * ep.eigenvector.cwiseAbs().maxCoeff());
+        // Mass-normalised, like the full-rank path.
+        EXPECT_NEAR(ep.eigenvector.dot(mx), 1.0, 1e-8) << "mode " << i;
+    }
+}
+
+TEST_F(CudaEigTest, MasslessDofsMatchSpectra) {
+    const auto p = vibestran::test::make_lumped_beam_problem(20);
+    const int nd = 10;
+    SpectraEigensolverBackend spectra;
+    const auto ref = spectra.solve(p.K, p.M, nd, -1.0);
+    const auto got = backend_->solve(p.K, p.M, nd, -1.0);
+    ASSERT_EQ(got.size(), ref.size());
+    for (std::size_t i = 0; i < ref.size(); ++i) {
+        EXPECT_NEAR(got[i].eigenvalue, ref[i].eigenvalue, 1e-9 * ref[i].eigenvalue);
+        const Eigen::VectorXd m_ref = p.M.selfadjointView<Eigen::Lower>() * ref[i].eigenvector;
+        const Eigen::VectorXd m_got = p.M.selfadjointView<Eigen::Lower>() * got[i].eigenvector;
+        const double overlap = std::abs(got[i].eigenvector.dot(m_ref)) /
+            std::sqrt(got[i].eigenvector.dot(m_got) * ref[i].eigenvector.dot(m_ref));
+        EXPECT_NEAR(overlap, 1.0, 1e-8) << "mode " << i;
+    }
+}
+
+TEST_F(CudaEigTest, LumpedMassPinFlagEquivalentToMpcHinge) {
+    // Same deck as the CPU integration test: with lumped mass a CBAR pin flag
+    // and an MPC hinge are exactly equivalent, so frequencies come in
+    // identical pairs.  Before massless-DOF condensation the GPU Lanczos
+    // returned unpaired modes here.
+    const std::string bdf = R"(
+SOL 103
+CEND
+METHOD = 1
+SPC = 1
+MPC = 1
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,1.,0.,0.
+GRID,3,,2.,0.,0.
+GRID,11,,0.,5.,0.
+GRID,12,,1.,5.,0.
+GRID,13,,1.,5.,0.
+GRID,14,,2.,5.,0.
+MAT1,1,2.0E11,,0.3,7800.
+PBAR,1,1,0.005,4.0E-6,1.0E-6,3.0E-6
+CBAR,1,1,1,2,0.,1.,0.
+CBAR,2,1,2,3,0.,1.,0.,,6
+CBAR,11,1,11,12,0.,1.,0.
+CBAR,12,1,13,14,0.,1.,0.
+SPC1,1,123456,1,11
+SPC1,1,2,3,14
+MPC,1,13,1,1.,12,1,-1.
+MPC,1,13,2,1.,12,2,-1.
+MPC,1,13,3,1.,12,3,-1.
+MPC,1,13,4,1.,12,4,-1.
+MPC,1,13,5,1.,12,5,-1.
+EIGRL,1,,,8
+PARAM,COUPMASS,-1
+ENDDATA
+)";
+    const Model model = BdfParser::parse_string(bdf);
+    ModalSolver gpu(std::make_unique<CudaEigensolverBackend>(std::move(*backend_)));
+    ModalSolver cpu(std::make_unique<SpectraEigensolverBackend>());
+    const ModalSolverResults g = gpu.solve(model);
+    const ModalSolverResults c = cpu.solve(model);
+    ASSERT_EQ(g.subcases.size(), 1u);
+    ASSERT_EQ(g.subcases[0].modes.size(), 8u);
+    ASSERT_EQ(c.subcases[0].modes.size(), 8u);
+    for (int k = 0; k < 8; ++k) {
+        const double fg = g.subcases[0].modes[static_cast<std::size_t>(k)].cycles_per_sec;
+        const double fc = c.subcases[0].modes[static_cast<std::size_t>(k)].cycles_per_sec;
+        EXPECT_NEAR(fg, fc, 1e-8 * fc) << "mode " << k;
+    }
+    for (int k = 0; k < 4; ++k) {
+        const double f0 = g.subcases[0].modes[static_cast<std::size_t>(2 * k)].cycles_per_sec;
+        const double f1 = g.subcases[0].modes[static_cast<std::size_t>(2 * k + 1)].cycles_per_sec;
+        EXPECT_NEAR(f0, f1, 1e-9 * f0) << "pair " << k;
     }
 }
 

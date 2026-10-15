@@ -334,6 +334,21 @@ private:
 
 } // namespace
 
+std::vector<int> massed_dof_indices(const Eigen::SparseMatrix<double>& M) {
+    const auto n = static_cast<int>(M.rows());
+    Eigen::VectorXd diag = Eigen::VectorXd::Zero(n);
+    for (int col = 0; col < M.outerSize(); ++col)
+        for (Eigen::SparseMatrix<double>::InnerIterator it(M, col); it; ++it)
+            if (it.row() == it.col())
+                diag(it.row()) += it.value();
+    std::vector<int> massed;
+    massed.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i)
+        if (diag(i) > 0.0)
+            massed.push_back(i);
+    return massed;
+}
+
 std::vector<EigenPair> SpectraEigensolverBackend::solve(
     const Eigen::SparseMatrix<double>& K,
     const Eigen::SparseMatrix<double>& M,
@@ -368,18 +383,7 @@ std::vector<EigenPair> SpectraEigensolverBackend::solve(
     using FullOp = SpectraDirectShiftInvert;
     FullOp full_op(K, M, factor_ratio_policy);
 
-    std::vector<int> massed;
-    massed.reserve(static_cast<size_t>(n));
-    {
-        Eigen::VectorXd diag = Eigen::VectorXd::Zero(n);
-        for (int col = 0; col < M.outerSize(); ++col)
-            for (Eigen::SparseMatrix<double>::InnerIterator it(M, col); it; ++it)
-                if (it.row() == it.col())
-                    diag(it.row()) = it.value();
-        for (int i = 0; i < n; ++i)
-            if (diag(i) > 0.0)
-                massed.push_back(i);
-    }
+    const std::vector<int> massed = massed_dof_indices(M);
     const int nm = static_cast<int>(massed.size());
     if (nm < 2) {
         throw SolverError(std::format(
