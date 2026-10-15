@@ -1398,6 +1398,31 @@ ENDDATA
     EXPECT_EQ(m.analysis.subcases[0].temp_load_set, 5);
 }
 
+TEST(BdfParser, TemperatureWithoutQualifierIsBoth) {
+    // TEMPERATURE = N and TEMP = N mean TEMPERATURE(BOTH) = N, which selects
+    // the thermal load set; TEMPERATURE(MATERIAL) does not, and a global
+    // request is inherited by the subcases.
+    const Model m = BdfParser::parse_string(R"(
+SOL 101
+CEND
+TEMPERATURE = 4
+SUBCASE 1
+SUBCASE 2
+  TEMP = 211
+SUBCASE 3
+  TEMPERATURE(BOTH) = 7
+SUBCASE 4
+  TEMPERATURE(MATERIAL) = 9
+BEGIN BULK
+ENDDATA
+)");
+    ASSERT_EQ(m.analysis.subcases.size(), 4u);
+    EXPECT_EQ(m.analysis.subcases[0].temp_load_set, 4);
+    EXPECT_EQ(m.analysis.subcases[1].temp_load_set, 211);
+    EXPECT_EQ(m.analysis.subcases[2].temp_load_set, 7);
+    EXPECT_EQ(m.analysis.subcases[3].temp_load_set, 4);
+}
+
 TEST(BdfParser, FixedWidth_GRID_NastranReals) {
     // Nastran-style real numbers in fixed-width GRID: no leading zero, trailing dot,
     // adjacent values without spaces (packed fields). Exact doublet.bdf column layout.

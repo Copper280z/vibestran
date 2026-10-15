@@ -18,17 +18,17 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 2,237 final failure
+The suite contains 3,226 definitions. The current run has 2,225 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
-| `unsupported_input` | 1,438 | 217 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 441 | 167 | Result exists but differs from the reference or comparator expectation |
+| `unsupported_input` | 1,305 | 208 | Requires unsupported cards, solution sequences, elements, or formulations |
+| `numerical_mismatch` | 429 | 165 | Result exists but differs from the reference or comparator expectation |
+| `solver_model_error` | 294 | 28 | Parsed model is rejected by a current formulation or geometry gate |
 | `input_parse_error` | 185 | 15 | Parser rejects syntax or a card variant used by a valid deck |
-| `solver_model_error` | 161 | 19 | Parsed model is rejected by a current formulation or geometry gate |
 | `missing_result_data` | 12 | 9 | Solver completes but does not emit the requested result family |
-| **Total** | **2,237** |  |  |
+| **Total** | **2,225** |  |  |
 
 Element engineering forces (`FORCE`/`ELFORCE`) and shell strains
 (`STRAIN`, STRCUR or FIBER form, von Mises or maximum shear) are written for
@@ -210,7 +210,8 @@ The most widespread ignored keywords across all failing decks are `ECHO`
 (55), `TITLE` (55), `ID` (54), `DEBUG` (54), `MPCFORCE`/`MPCFORCES` (52/48),
 `CQUAD8` (43), `FORCE` (42), `OLOAD` (42), `GPFORCE` (38), `ELFORCE` (36),
 `CROD`/`PROD` (32), `MEFFMASS` (24), `EIGR` (22), `SUBT` (22), `GRDSET` (20),
-`PCOMP` (15), and `TEMPERATURE` (15). Abbreviated case-control commands
+and `PCOMP` (15). Case-control `TEMPERATURE = n` is now accepted
+(as TEMPERATURE(BOTH)). Abbreviated case-control commands
 (`DISP`, `STRE`, `SPCF`, ...) are now accepted and no longer appear.
 
 The main implementation work remains CQUAD8, PCOMP laminates, CROD/PROD,
@@ -267,10 +268,13 @@ and made the twisted beam far too flexible, so warped shells need a proper
 formulation rather than a patch.
 
 The `SHELLSTRAINS` records are `S30 mitc3 strain` (transverse shear strain
-of CTRIA3, which is a Kirchhoff DKT element and reports zero) and the
-rectangle-cylinder thermal deck, which uses plain `TEMPERATURE = n` (Nastran
-TEMPERATURE(BOTH)); vibestran accepts only `TEMP(LOAD)`, so no thermal load
-is applied.
+of CTRIA3, which is a Kirchhoff DKT element and reports zero) and `S30
+mitc4 thermal strain free rectangle cylinder`. That deck is free thermal
+expansion of a faceted cylinder (uniform dT = 100, statically determinate
+supports); now that its thermal load is applied, the radial TZ is 36% off
+and a symmetry-plane TX is non-zero (0.18), so shell thermal loading on
+curved facet meshes needs investigation. Its two TX records passed before
+only because no load was applied.
 
 Of the `SHELLFORCES` records, the CTRIA3 transverse shear ones expect a
 non-zero Q where the DKT element reports zero, the quad4 corner QX ones are
@@ -319,12 +323,16 @@ tolerances.
 
 ### Solver Model Errors
 
-There are 115 records across 13 decks:
+There are 294 records across 28 decks:
 
 | Current cause | Decks | Disposition |
 |---|---:|---|
-| CQUAD4 warp exceeds the 30 degree validity threshold | 7 | Requires a true warped-shell formulation rather than bypassing the gate |
-| MAT2/MAT8 used by a formulation that currently requires MAT1 | 6 | Requires orthotropic/anisotropic constitutive, orientation, thermal, and recovery support |
+| MAT2/MAT8 used by a formulation that currently requires MAT1 | 17 | Requires orthotropic/anisotropic constitutive, orientation, thermal, and recovery support |
+| CQUAD4 warp exceeds the 30 degree validity threshold | 10 | Requires a true warped-shell formulation rather than bypassing the gate |
+| Empty stiffness matrix (no free DOFs) | 1 | Deck-specific; not yet triaged |
+
+Nine of the MAT8 decks reached this gate once case-control `TEMPERATURE = n`
+was accepted (they were `unsupported_input` before).
 
 Unused entities, coincident nodes, aspect ratio, and taper are warnings. Fatal
 negative/inverted geometry checks remain enabled. Coincident nodes are not
@@ -375,7 +383,8 @@ numerical agreement with MYSTRAN; the suite's tolerances and some expected
 values encode MYSTRAN behaviour and are not a correctness oracle.
 
 1. Warped CQUAD4 formulation (twisted beam 51-61% too stiff; diamond
-   cylinder), case-control `TEMPERATURE = n` as TEMPERATURE(BOTH), modal
+   cylinder), free thermal expansion of faceted shells (rectangle
+   cylinder), MAT8/MAT2 shell materials (17 decks), modal
    GPFORCE (inertia-force rows; 34 decks request GPFORCE in SOL 103), and a
    CTRIA3 transverse shear recovery (MITC3-style).
    Solid stress/strain output is in basic; PSOLID CORDM (MYSTRAN's
@@ -516,3 +525,10 @@ most recent entry.
   ring and the diamond cylinder stresses. Two records regress: the diamond
   cylinder pressure decks' grid 106 TY (3% -> 8.5%), a warped-element
   limitation described under Numerical Mismatch. The RBE3 10 flake recurs.
+- **Case-control TEMPERATURE = n (2,237 -> 2,225).** `TEMPERATURE = n`,
+  `TEMP = n` and `TEMPERATURE(BOTH) = n` select the thermal load set
+  (TEMPERATURE(MATERIAL) does not). "shell thermal stress" and "_2" now
+  pass; nine decks moved to the MAT8 gate (133 records from
+  `unsupported_input` to `solver_model_error`). Two rectangle-cylinder TX
+  records that passed with no load applied now fail (see Numerical
+  Mismatch).

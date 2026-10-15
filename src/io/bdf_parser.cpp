@@ -403,6 +403,30 @@ Model BdfParser::parse_stream(std::istream &in) {
         }
       } else if (kw.starts_with("TEMP(INIT)") || kw.starts_with("TEMPERATURE(INIT)")) {
         // Not used yet but consume gracefully
+      } else if (const std::string_view qualifier =
+                     kw.starts_with("TEMPERATURE") ? std::string_view(kw).substr(11)
+                     : kw.starts_with("TEMP")      ? std::string_view(kw).substr(4)
+                                                   : std::string_view{};
+                 kw.starts_with("TEMP") &&
+                 (qualifier.starts_with("=") || qualifier.starts_with(" ") ||
+                  qualifier.starts_with("(BOTH)") ||
+                  qualifier.starts_with("(MATERIAL)") ||
+                  qualifier.starts_with("(MATE)"))) {
+        // TEMPERATURE[(BOTH|MATERIAL)] = SID.  BOTH, the default, selects
+        // the thermal load and the temperatures for material properties;
+        // MATERIAL only the latter, which has no effect without
+        // temperature-dependent materials.  A non-numeric value (an output
+        // request in some codes) is not a temperature set and is ignored.
+        SubCase& sc = current_subcase();
+        const size_t eq = kw.find('=');
+        if (eq != std::string::npos && !qualifier.starts_with("(MAT")) {
+          std::string val = kw.substr(eq + 1);
+          const size_t ns = val.find_first_not_of(" \t");
+          if (ns != std::string::npos) val = val.substr(ns);
+          if (!val.empty() && std::isdigit(static_cast<unsigned char>(val[0]))) {
+            try { sc.temp_load_set = std::stoi(val); } catch (...) {}
+          }
+        }
       } else if (kw.starts_with("DISPLACEMENT")) {
         SubCase& sc = current_subcase();
         // Syntax: DISPLACEMENT[(PRINT[,PLOT])] = ALL|NONE|<set_id>
