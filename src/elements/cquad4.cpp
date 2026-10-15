@@ -262,13 +262,18 @@ MembraneB standard_membrane_B(const QuadPointData &q) {
   return B;
 }
 
+/// Curvature-displacement matrix on the plate DOFs [psi_x, psi_y, w] per
+/// node, where psi = (w_x, w_y) are the local slope rotations set up by the
+/// shell frame.  Nastran's sign convention is used: kappa = -[w_xx, w_yy,
+/// 2 w_xy], so a positive moment M = D kappa puts the +z fibre in tension
+/// (sigma = 12 M z / t^3).
 BendingB bending_B(const QuadPointData &q) {
   BendingB B = BendingB::Zero();
   for (int n = 0; n < 4; ++n) {
-    B(0, 3 * n) = q.dNdx(0, n);
-    B(1, 3 * n + 1) = q.dNdx(1, n);
-    B(2, 3 * n) = q.dNdx(1, n);
-    B(2, 3 * n + 1) = q.dNdx(0, n);
+    B(0, 3 * n) = -q.dNdx(0, n);
+    B(1, 3 * n + 1) = -q.dNdx(1, n);
+    B(2, 3 * n) = -q.dNdx(1, n);
+    B(2, 3 * n + 1) = -q.dNdx(0, n);
   }
   return B;
 }

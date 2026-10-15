@@ -466,3 +466,8 @@ most recent entry.
   comparisons now mostly stop at BARFORCES/SHELLFORCES. A second flaky
   record was identified: "V20 Constraint Equations shared masters" MODE/1
   (rigid-body mode whose vector varies run to run).
+- **CQUAD4 bending sign (2,512 -> 2,504, no new failures).** CQUAD4 shell
+  curvature used kappa = +w_xx, the opposite of Nastran's kappa = -w_xx, so
+  moments and bending fibre stresses had the wrong sign (an upward-loaded
+  cantilever showed tension in its top fibre at the root). Both "shell
+  stress components quad4" decks and "mitc4 reaction moment easy" now pass.

@@ -219,8 +219,10 @@ TEST(CQuad4, RecoveryUsesSeparateSectionMaterialsAndReportsMoments) {
     u(6) = 1.0;   // node 2 Tx
     u(12) = 1.0;  // node 3 Tx
 
-    // Curvature patch: θx_local = x  ->  κ_xx = 1.
-    // For a horizontal element DOF3_local = -Ry_global.
+    // Curvature patch: Ry = -x, i.e. slope w_x = x (w = x^2/2).  The fibre
+    // displacement u(z) = z Ry = -z x gives eps_xx(z) = -z: tension at -z.
+    // Nastran's convention (kappa = -w_xx, Mx = integral of sigma z dz) makes
+    // that kappa_xx = -1 and Mx < 0.
     u(10) = -1.0; // node 2 Ry
     u(16) = -1.0; // node 3 Ry
 
@@ -230,13 +232,13 @@ TEST(CQuad4, RecoveryUsesSeparateSectionMaterialsAndReportsMoments) {
         0.0);
 
     EXPECT_NEAR(response.membrane_strain(0), 1.0, 1e-12);
-    EXPECT_NEAR(response.curvature(0), 1.0, 1e-12);
+    EXPECT_NEAR(response.curvature(0), -1.0, 1e-12);
     EXPECT_NEAR(response.membrane_stress(0), 10.0, 1e-12);
     EXPECT_NEAR(response.membrane_stress(1), 0.0, 1e-12);
     EXPECT_NEAR(response.membrane_stress(2), 0.0, 1e-12);
 
-    // D_xx = E_bend * (12I/t^3) * t^3 / 12 = 120 * 2 / 12 = 20.
-    EXPECT_NEAR(response.bending_moment(0), 20.0, 1e-12);
+    // D_xx = E_bend * (12I/t^3) * t^3 / 12 = 120 * 2 / 12 = 20, Mx = -20.
+    EXPECT_NEAR(response.bending_moment(0), -20.0, 1e-12);
     EXPECT_NEAR(response.bending_moment(1), 0.0, 1e-12);
     EXPECT_NEAR(response.bending_moment(2), 0.0, 1e-12);
   };
