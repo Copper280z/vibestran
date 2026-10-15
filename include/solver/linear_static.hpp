@@ -100,8 +100,9 @@ private:
                        const MpcHandler& mpc_handler,
                        const std::vector<double>& u_free);
 
-    /// Accumulate pressure-applied nodal loads at the given SPC'd DOFs into
-    /// `react` (global/basic frame), for SPC force recovery.  Defined in
+    /// Subtract pressure-type equivalent nodal loads (PLOAD, PLOAD1, PLOAD2,
+    /// PLOAD4) at the given active DOFs from `react` (basic frame), so that
+    /// react = K u - F like the other load-subtraction helpers.  Defined in
     /// linear_static_pressure.cpp so it can reuse the face-integration
     /// helpers.
     void compute_spc_pressure_loads(

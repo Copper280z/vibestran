@@ -3922,3 +3922,38 @@ ENDDATA
     EXPECT_NEAR(get_disp(res, 2, 2), -mass * g * L * L * L / (3.0 * E * I2), 1e-12);
     EXPECT_NEAR(get_disp(res, 2, 3), -mass * g * d * L / (G * J), 1e-12);
 }
+
+TEST(Integration, SpcReactionsBalancePressureLoadAtConstrainedGrids) {
+    // PLOAD4 p = 10 on a 2 x 1 plate cantilevered along x = 0: total load
+    // p A = 20 in +z, a quarter of it applied directly at each fixed grid.
+    // The reactions must balance the whole load (sum Fz = -20) and its moment
+    // about the y axis through the support (sum My = +p A x_c = +20).
+    const SolverResults res = run_analysis(R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC = 1
+  SPCFORCES = ALL
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,2.,0.,0.
+GRID,3,,2.,1.,0.
+GRID,4,,0.,1.,0.
+MAT1,1,1.0E7,,0.3
+PSHELL,1,1,0.1,1
+CQUAD4,1,1,1,2,3,4
+SPC1,1,123456,1,4
+PLOAD4,1,1,10.
+ENDDATA
+)");
+    const SpcForce* a = get_spc_force(res, 1);
+    const SpcForce* b = get_spc_force(res, 4);
+    ASSERT_NE(a, nullptr);
+    ASSERT_NE(b, nullptr);
+    EXPECT_NEAR(a->f[2] + b->f[2], -20.0, 1e-9);
+    // Moment about the y axis of the reactions themselves is zero (they act
+    // at x = 0), so the support moments must carry the load's moment p A x_c
+    // with x_c = 1: My(reaction) = -(r x F)_y = +20.
+    EXPECT_NEAR(a->f[4] + b->f[4], 20.0, 1e-8);
+}

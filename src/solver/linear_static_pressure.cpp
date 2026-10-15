@@ -586,8 +586,8 @@ void apply_element_force_vector(const ElementData &elem_data, const Model &model
   mpc_handler.apply_to_force(gdofs, fe, F);
 }
 
-/// Accumulate an element nodal-force vector into the SPC reaction map,
-/// taking only rows that belong to SPC'd DOFs (from `spc`).
+/// Subtract an element's equivalent nodal load vector from the SPC reaction
+/// map (reaction = K u - F), taking only rows that belong to SPC'd DOFs.
 void add_spc_element_force(
     const ElementData &elem_data, const std::vector<double> &fe,
     const std::unordered_map<NodeId, std::array<SpcDofState, 6>> &spc,
@@ -598,12 +598,12 @@ void add_spc_element_force(
     const auto spc_it = spc.find(nid);
     if (spc_it == spc.end() || !spc_it->second[static_cast<size_t>(comp)].active)
       continue;
-    react[nid][static_cast<size_t>(comp)] += fe[li];
+    react[nid][static_cast<size_t>(comp)] -= fe[li];
   }
 }
 
-/// Add a nodal force (translations) at node to the SPC reaction map if any
-/// of its DOFs are SPC'd.
+/// Subtract a nodal load (translations) at node from the SPC reaction map
+/// (reaction = K u - F) if any of its DOFs are SPC'd.
 void add_spc_node_force(
     const NodeId node, const Vec3 &force,
     const std::unordered_map<NodeId, std::array<SpcDofState, 6>> &spc,
@@ -615,7 +615,7 @@ void add_spc_node_force(
     if (!spc_it->second[static_cast<size_t>(d)].active)
       continue;
     const double v = (d == 0) ? force.x : ((d == 1) ? force.y : force.z);
-    react[node][static_cast<size_t>(d)] += v;
+    react[node][static_cast<size_t>(d)] -= v;
   }
 }
 
