@@ -1530,6 +1530,11 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         ps.my = centroid.my;
         ps.mxy = centroid.mxy;
         ps.von_mises = centroid.von_mises;
+        ps.nx = response.membrane_resultant(0);
+        ps.ny = response.membrane_resultant(1);
+        ps.nxy = response.membrane_resultant(2);
+        ps.qx = response.transverse_shear(0);
+        ps.qy = response.transverse_shear(1);
 
         static constexpr std::array<std::pair<double, double>, 4>
             kQuadCornerCoords{{{-1.0, -1.0}, {1.0, -1.0},
@@ -1545,72 +1550,57 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
               kQuadCornerCoords[static_cast<size_t>(n)].first,
               kQuadCornerCoords[static_cast<size_t>(n)].second, point_temp,
               mat_.ref_temp);
-          ps.nodal.push_back(make_plate_stress_point(
-              nid, point.membrane_stress, point.bending_moment));
+          PlateStressPoint pt = make_plate_stress_point(
+              nid, point.membrane_stress, point.bending_moment);
+          pt.nx = point.membrane_resultant(0);
+          pt.ny = point.membrane_resultant(1);
+          pt.nxy = point.membrane_resultant(2);
+          pt.qx = point.transverse_shear(0);
+          pt.qy = point.transverse_shear(1);
+          ps.nodal.push_back(pt);
         }
       } else {
-        auto node_c = [&]() -> std::array<Vec3, 3> {
-          std::array<Vec3, 3> c;
-          for (int i = 0; i < 3; ++i)
-            c[i] = model.node(elem_data.nodes[i]).position;
-          return c;
-        }();
-        // Build local shell frame — same fix as CQUAD4: using global X,Y
-        // fails for elements not in the XY plane (e.g. XZ-plane elements
-        // have constant Y → A2 = 0 → NaN).
-        Vec3 v12_t = node_c[1] - node_c[0];
-        Vec3 v13_t = node_c[2] - node_c[0];
-        Vec3 e3_t  = v12_t.cross(v13_t).normalized();
-        Vec3 e1_t  = v12_t.normalized();
-        Vec3 e2_t  = e3_t.cross(e1_t);
-        std::array<double, 3> xl_t{}, yl_t{};
-        for (int n = 0; n < 3; ++n) {
-          xl_t[n] = node_c[n].dot(e1_t);
-          yl_t[n] = node_c[n].dot(e2_t);
-        }
-        double x1 = xl_t[0], y1 = yl_t[0];
-        double x2 = xl_t[1], y2 = yl_t[1];
-        double x3 = xl_t[2], y3 = yl_t[2];
-        double A2 = (x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1);
-        double b1 = y2 - y3, b2 = y3 - y1, b3 = y1 - y2;
-        double d1 = x3 - x2, d2 = x1 - x3, d3 = x2 - x1;
-        Eigen::MatrixXd Bm(3, 6);
-        Bm.setZero();
-        Bm(0, 0) = b1; Bm(0, 2) = b2; Bm(0, 4) = b3;
-        Bm(1, 1) = d1; Bm(1, 3) = d2; Bm(1, 5) = d3;
-        Bm(2, 0) = d1; Bm(2, 1) = b1; Bm(2, 2) = d2;
-        Bm(2, 3) = b2; Bm(2, 4) = d3; Bm(2, 5) = b3;
-        Bm /= A2;
         const auto &pshell_ = std::get<PShell>(model.property(elem_data.pid));
         const Mat1 &mat_ = model.material(pshell_.mid1);
-        double E_ = mat_.E, nu_ = mat_.nu, c_ = E_ / (1 - nu_ * nu_);
-        Eigen::Matrix3d Dm_;
-        Dm_ << c_, c_ * nu_, 0, c_ * nu_, c_, 0, 0, 0, c_ * (1 - nu_) / 2;
-        Eigen::VectorXd u_mem(6);
-        for (int n = 0; n < 3; ++n) {
-          Vec3 u_glob(ue(6 * n), ue(6 * n + 1), ue(6 * n + 2));
-          u_mem(2 * n)     = u_glob.dot(e1_t);
-          u_mem(2 * n + 1) = u_glob.dot(e2_t);
-        }
+        const CTria3 tria(elem_data.id, elem_data.pid,
+                          {elem_data.nodes[0], elem_data.nodes[1],
+                           elem_data.nodes[2]},
+                          model);
+        const std::span<const double> u_span(ue.data(),
+                                             static_cast<size_t>(ue.size()));
         const double T_avg3 =
             average_temperature(elem_data.nodes, nodal_temps_rec, mat_.ref_temp);
-        double dT3 = T_avg3 - mat_.ref_temp;
-        double alpha3 = mat_.A;
-        Eigen::Vector3d eps_th3{alpha3 * dT3, alpha3 * dT3, 0.0};
-
-        Eigen::Vector3d sigma = Dm_ * (Bm * u_mem - eps_th3);
+        const auto centre =
+            tria.recover_response(u_span, 1.0 / 3.0, 1.0 / 3.0, T_avg3, mat_.ref_temp);
         const PlateStressPoint centroid = make_plate_stress_point(
-            NodeId{0}, sigma, Eigen::Vector3d::Zero());
+            NodeId{0}, centre.membrane_stress, centre.bending_moment);
         ps.sx = centroid.sx;
         ps.sy = centroid.sy;
         ps.sxy = centroid.sxy;
-        ps.mx = 0.0;
-        ps.my = 0.0;
-        ps.mxy = 0.0;
+        ps.mx = centroid.mx;
+        ps.my = centroid.my;
+        ps.mxy = centroid.mxy;
         ps.von_mises = centroid.von_mises;
-        for (NodeId nid : elem_data.nodes)
-          ps.nodal.push_back(
-              make_plate_stress_point(nid, sigma, Eigen::Vector3d::Zero()));
+        ps.nx = centre.membrane_resultant(0);
+        ps.ny = centre.membrane_resultant(1);
+        ps.nxy = centre.membrane_resultant(2);
+        ps.qx = centre.transverse_shear(0);
+        ps.qy = centre.transverse_shear(1);
+        static constexpr std::array<std::array<double, 2>, 3> kTriaCorners{
+            {{0.0, 0.0}, {1.0, 0.0}, {0.0, 1.0}}};
+        for (size_t n = 0; n < 3; ++n) {
+          const auto corner = tria.recover_response(
+              u_span, kTriaCorners[n][0], kTriaCorners[n][1], T_avg3,
+              mat_.ref_temp);
+          PlateStressPoint pt = make_plate_stress_point(
+              elem_data.nodes[n], corner.membrane_stress, corner.bending_moment);
+          pt.nx = corner.membrane_resultant(0);
+          pt.ny = corner.membrane_resultant(1);
+          pt.nxy = corner.membrane_resultant(2);
+          pt.qx = corner.transverse_shear(0);
+          pt.qy = corner.transverse_shear(1);
+          ps.nodal.push_back(pt);
+        }
       }
       res.plate_stresses.push_back(ps);
     } else if (elem_data.type == ElementType::CHEXA8 ||

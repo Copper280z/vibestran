@@ -18,17 +18,17 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 2,512 final failure
+The suite contains 3,226 definitions. The current run has 2,477 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
 | `unsupported_input` | 1,440 | 218 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 483 | 174 | Result exists but differs from the reference or comparator expectation |
+| `numerical_mismatch` | 448 | 173 | Result exists but differs from the reference or comparator expectation |
 | `missing_result_data` | 245 | 42 | Solver completes but does not emit the requested result family |
 | `input_parse_error` | 185 | 15 | Parser rejects syntax or a card variant used by a valid deck |
 | `solver_model_error` | 159 | 18 | Parsed model is rejected by a current formulation or geometry gate |
-| **Total** | **2,512** |  |  |
+| **Total** | **2,477** |  |  |
 
 GRID PS, GRDSET, and BAROR are now applied. The decks they unblocked solve
 (the SB-BAR I12/PINFLAG/OFFSET displacements and stresses match MYSTRAN
@@ -471,3 +471,11 @@ most recent entry.
   moments and bending fibre stresses had the wrong sign (an upward-loaded
   cantilever showed tension in its top fibre at the root). Both "shell
   stress components quad4" decks and "mitc4 reaction moment easy" now pass.
+- **CTRIA3 DKT bending (2,504 -> 2,477, no new failures).** CTRIA3 bending
+  was a placeholder that never coupled the deflection w (a triangle-meshed
+  cantilever returned zero deflection) and its stress recovery ignored
+  bending. It is now a true DKT element with Nastran sign conventions, and
+  stresses include bending. Both "shell face force" decks, both "tri3
+  quad4" decks, and "shell stress components tri3" (27 records) now pass.
+  CTRIA3 transverse shear resultants are reported as zero (Kirchhoff
+  element); a converged recovery is a follow-up.

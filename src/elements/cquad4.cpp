@@ -787,10 +787,19 @@ recover_shell_response(ElementId eid, PropertyId pid,
           ? mitc4plus_membrane_B(mitc_membrane, q0)
           : standard_membrane_B(q0);
   const BendingB Bb = bending_B(q0);
+  const Mitc4PlusShearData mitc_shear =
+      (formulation == ShellFormulation::MITC4)
+          ? build_mitc4plus_shear_data(frame.xl, frame.yl)
+          : Mitc4PlusShearData{};
+  const ShearB Bs = (formulation == ShellFormulation::MITC4)
+                        ? mitc4plus_shear_B(mitc_shear, q0)
+                        : mindlin_shear_B(q0);
 
   CQuad4::CentroidResponse response;
   response.membrane_strain = Bm * u_membrane;
   response.curvature = Bb * u_plate;
+  // Same assumed shear strains and shear rigidity as the stiffness.
+  response.transverse_shear = section.T * (Bs * u_plate);
 
   const double dT = temperature - reference_temperature;
   const Eigen::Vector3d mechanical_membrane =

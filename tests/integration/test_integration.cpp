@@ -4132,3 +4132,93 @@ ENDDATA
             EXPECT_NEAR(t, 0.0, 1e-8) << "grid " << g;
     }
 }
+
+// ── CTRIA3 (DKT) plate bending ───────────────────────────────────────────────
+
+static std::string make_ss_plate_bdf(int n, bool triangles) {
+    // Simply supported square plate a = 1, t = 0.01, E = 1e7, nu = 0.3, under
+    // uniform pressure q = 1 (PLOAD2); w = 0 on all edges, in-plane fixed.
+    std::ostringstream bdf;
+    bdf << "SOL 101\nCEND\nSUBCASE 1\n  LOAD = 1\n  SPC = 1\nBEGIN BULK\n"
+        << "MAT1,1,1.0E7,,0.3\nPSHELL,1,1,0.01,1\n";
+    auto id = [n](int i, int j) { return 1 + j * (n + 1) + i; };
+    for (int j = 0; j <= n; ++j)
+        for (int i = 0; i <= n; ++i)
+            bdf << "GRID," << id(i, j) << ",," << static_cast<double>(i) / n << ","
+                << static_cast<double>(j) / n << ",0.,,126\n";
+    int e = 1;
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i) {
+            const int a = id(i, j), b = id(i + 1, j), c = id(i + 1, j + 1), d = id(i, j + 1);
+            if (triangles) {
+                bdf << "CTRIA3," << e++ << ",1," << a << "," << b << "," << c << "\n";
+                bdf << "CTRIA3," << e++ << ",1," << a << "," << c << "," << d << "\n";
+            } else {
+                bdf << "CQUAD4," << e++ << ",1," << a << "," << b << "," << c << "," << d << "\n";
+            }
+        }
+    for (int k = 0; k <= n; ++k)
+        for (int g : {id(k, 0), id(k, n), id(0, k), id(n, k)})
+            bdf << "SPC1,1,3," << g << "\n";
+    bdf << "PLOAD2,1,1.0," << 1 << ",THRU," << (e - 1) << "\nENDDATA\n";
+    return bdf.str();
+}
+
+TEST(Integration, DktSimplySupportedPlateConvergesToNavierSolution) {
+    // Navier series: w_centre = 0.00406235 q a^4 / D for nu = 0.3.  A
+    // 12 x 12 grid of triangle pairs must be within 1.5%, and the error must
+    // shrink under refinement.  (The placeholder bending previously gave no
+    // transverse stiffness at all.)
+    const double D = 1.0e7 * 1.0e-6 / (12.0 * (1.0 - 0.09));
+    const double navier = 0.00406235 / D;
+    double previous_error = 1.0;
+    for (int n : {6, 12}) {
+        const SolverResults res = run_analysis(make_ss_plate_bdf(n, true));
+        const int centre = 1 + (n / 2) * (n + 1) + n / 2;
+        const double w = get_disp(res, centre, 2);
+        const double error = std::abs(w - navier) / navier;
+        EXPECT_LT(error, previous_error) << "n = " << n;
+        previous_error = error;
+    }
+    EXPECT_LT(previous_error, 0.015);
+}
+
+TEST(Integration, DktCantileverMomentMatchesStatics) {
+    // Plate strip 10 x 1 (two triangles per cell), clamped at x = 0, tip
+    // line load P = 1 in +z: Mx = -P (L - x) / b (hogging, Nastran sign:
+    // top fibre in compression), My = 0 (nu = 0).  Elements 9 and 10 occupy
+    // 4 <= x <= 5.  Element 9's x axis (G1 -> G2) is the global x axis;
+    // element 10's runs at 45 degrees, so its element-frame moment is
+    // Mx' = Mx cos^2(45) = Mx / 2.  DKT is a Kirchhoff element: its
+    // transverse shear resultants are reported as zero.
+    std::ostringstream bdf;
+    bdf << "SOL 101\nCEND\nSUBCASE 1\n  LOAD = 1\n  SPC = 1\n  STRESS = ALL\nBEGIN BULK\n"
+        << "MAT1,1,1.0E7,,0.0\nPSHELL,1,1,0.1,1,,1\n";
+    for (int i = 0; i <= 10; ++i)
+        bdf << "GRID," << i + 1 << ",,"  << i << ".,0.,0.\nGRID," << i + 101 << ",," << i << ".,1.,0.\n";
+    int e = 1;
+    for (int i = 0; i < 10; ++i) {
+        bdf << "CTRIA3," << e++ << ",1," << i + 1 << "," << i + 2 << "," << i + 102 << "\n";
+        bdf << "CTRIA3," << e++ << ",1," << i + 1 << "," << i + 102 << "," << i + 101 << "\n";
+    }
+    bdf << "SPC1,1,123456,1,101\nFORCE,1,11,,0.5,0.,0.,1.\nFORCE,1,111,,0.5,0.,0.,1.\nENDDATA\n";
+    const SolverResults res = run_analysis(bdf.str());
+    ASSERT_EQ(res.subcases.size(), 1u);
+    int checked = 0;
+    for (const auto& ps : res.subcases[0].plate_stresses) {
+        if (ps.eid.value == 9) {
+            const double xc = 14.0 / 3.0;
+            EXPECT_NEAR(ps.mx, -(10.0 - xc), 0.03 * (10.0 - xc));
+            ++checked;
+        } else if (ps.eid.value == 10) {
+            const double xc = 13.0 / 3.0;
+            EXPECT_NEAR(ps.mx, -0.5 * (10.0 - xc), 0.03 * (10.0 - xc));
+            ++checked;
+        } else {
+            continue;
+        }
+        EXPECT_EQ(ps.qx, 0.0);
+        EXPECT_EQ(ps.qy, 0.0);
+    }
+    EXPECT_EQ(checked, 2);
+}

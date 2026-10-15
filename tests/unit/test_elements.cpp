@@ -1915,37 +1915,97 @@ TEST(CTria3, MembraneForce_UniformXStretch_Analytical) {
     EXPECT_NEAR(f(i), 0.0, tol) << "DOF " << i << " should be zero";
 }
 
-TEST(CTria3, BendingEnergy_UniformCurvatureX_Analytical) {
-  // Unit right triangle: node1=(0,0), node2=(1,0), node3=(0,1). E=1, ν=0, t=1.
-  //
-  // CTria3 uses DKT bending (Kirchhoff, no shear).  The bending B matrix maps
-  // θx_local at each node to curvature κxx via constant-strain interpolation:
-  //   κxx = (b1*θx1 + b2*θx2 + b3*θx3) / (2A)
-  // With b2=1, b1=b3=0 and 2A=1, setting θx2_local=1 gives κxx=1 exactly.
-  //
-  // For horizontal element (e3=Z), T_rot maps DOF3_local = -Ry_global, so:
-  //   θx2_local = 1  ↔  Ry_global(node2) = -1
-  //
-  // Bending energy for κxx=1, κyy=κxy=0, A=0.5:
-  //   U = (1/2) * A * D_b[0,0] * κxx²   where D_b = (t³/12) * E
-  //   U = (1/2) * 0.5 * (1/12) * 1 = 1/48   →   u^T*K*u = 1/24
-  const double E = 1.0, nu = 0.0, t = 1.0;
-  Model m = make_shell_model(E, nu, t);
-  add_grid(m, 1, 0.0, 0.0, 0.0);
-  add_grid(m, 2, 1.0, 0.0, 0.0);
-  add_grid(m, 3, 0.0, 1.0, 0.0);
-  std::array<NodeId, 3> nodes{NodeId{1}, NodeId{2}, NodeId{3}};
-  CTria3 elem(ElementId{1}, PropertyId{1}, nodes, m);
-  LocalKe Ke = elem.stiffness_matrix();
+namespace {
 
-  // Only node 2 Ry_global = -1  →  θx2_local = +1  →  κxx = 1
+/// Global DOF vector of a flat (XY-plane) plate field w(x, y) at the CTRIA3
+/// nodes: T3 = w, R1 = w_y, R2 = -w_x (Kirchhoff rotations).
+template <class W, class WX, class WY>
+Eigen::VectorXd tria_plate_field(const std::array<std::array<double, 2>, 3> &xy,
+                                 W w, WX wx, WY wy) {
   Eigen::VectorXd u = Eigen::VectorXd::Zero(18);
-  u(10) = -1.0; // node 2, Ry_global (index 6*1+4 = 10)
+  for (int n = 0; n < 3; ++n) {
+    const double x = xy[static_cast<size_t>(n)][0], y = xy[static_cast<size_t>(n)][1];
+    u(6 * n + 2) = w(x, y);
+    u(6 * n + 3) = wy(x, y);
+    u(6 * n + 4) = -wx(x, y);
+  }
+  return u;
+}
 
-  const double D = E * t * t * t / 12.0; // plate bending stiffness (ν=0)
-  const double A = 0.5;
-  const double expected = 2.0 * (0.5 * A * D); // u^T*K*u = 2*U = A*D*kappa²
-  EXPECT_NEAR(u.dot(Ke * u), expected, 1e-10 * expected);
+} // namespace
+
+TEST(CTria3, DktPassesConstantCurvaturePatchTest) {
+  // DKT reproduces any quadratic w exactly: with w = a x^2 + b y^2 + c xy
+  // (+ linear terms), the curvature is the constant Nastran kappa =
+  // -(2a, 2b, 2c) everywhere and u^T K u = A kappa^T D kappa.  A general
+  // (scalene, rotated) triangle and nu != 0 exercise every term.
+  const double E = 2.0e5, nu = 0.3, t = 0.2;
+  Model m = make_shell_model(E, nu, t);
+  const std::array<std::array<double, 2>, 3> xy{{{0.3, -0.1}, {1.7, 0.4}, {0.6, 1.3}}};
+  for (int n = 0; n < 3; ++n)
+    add_grid(m, n + 1, xy[static_cast<size_t>(n)][0], xy[static_cast<size_t>(n)][1], 0.0);
+  const CTria3 elem(ElementId{1}, PropertyId{1}, {NodeId{1}, NodeId{2}, NodeId{3}}, m);
+  const LocalKe K = elem.stiffness_matrix();
+
+  const double a = 0.7, b = -0.4, c = 0.25, d = 0.1, e = -0.3, f = 0.05;
+  const Eigen::VectorXd u = tria_plate_field(
+      xy, [&](double x, double y) { return a*x*x + b*y*y + c*x*y + d*x + e*y + f; },
+      [&](double x, double y) { return 2*a*x + c*y + d; },
+      [&](double x, double y) { return 2*b*y + c*x + e; });
+  const Eigen::Vector3d kappa(-2*a, -2*b, -2*c);
+  const double D0 = E * t * t * t / (12.0 * (1.0 - nu * nu));
+  Eigen::Matrix3d Db;
+  Db << D0, nu * D0, 0, nu * D0, D0, 0, 0, 0, D0 * (1.0 - nu) / 2.0;
+  const double area = 0.5 * std::abs((xy[1][0]-xy[0][0])*(xy[2][1]-xy[0][1]) -
+                                     (xy[2][0]-xy[0][0])*(xy[1][1]-xy[0][1]));
+  const double energy = area * kappa.dot(Db * kappa);
+  EXPECT_NEAR(u.dot(K * u), energy, 1e-10 * energy);
+
+  // Recovery reports curvature in the element frame (x along G1 -> G2):
+  // rotate the global curvature tensor [[kxx, kxy/2], [kxy/2, kyy]].
+  const double ex = xy[1][0] - xy[0][0], ey = xy[1][1] - xy[0][1];
+  const double len = std::hypot(ex, ey);
+  Eigen::Matrix2d R;
+  R << ex / len, ey / len, -ey / len, ex / len;
+  Eigen::Matrix2d Kg;
+  Kg << kappa(0), 0.5 * kappa(2), 0.5 * kappa(2), kappa(1);
+  const Eigen::Matrix2d Kl = R * Kg * R.transpose();
+  const Eigen::Vector3d kappa_local(Kl(0, 0), Kl(1, 1), 2.0 * Kl(0, 1));
+  for (const auto &p : {std::array<double, 2>{0.2, 0.3}, std::array<double, 2>{0.0, 1.0},
+                        std::array<double, 2>{0.6, 0.1}}) {
+    const auto r = elem.recover_response(
+        std::span<const double>(u.data(), 18), p[0], p[1], 0.0, 0.0);
+    EXPECT_LT((r.curvature - kappa_local).cwiseAbs().maxCoeff(), 1e-10);
+    EXPECT_LT((r.bending_moment - Db * kappa_local).cwiseAbs().maxCoeff(), 1e-8);
+  }
+}
+
+TEST(CTria3, DktHasExactlyThreeRigidPlateModes) {
+  // Rigid plate motion w = c0 + c1 x + c2 y is strain free, and the 9x9
+  // bending block has rank 6 (no spurious zero-energy modes).
+  Model m = make_shell_model(1.0e4, 0.25, 0.1);
+  const std::array<std::array<double, 2>, 3> xy{{{0.0, 0.0}, {2.0, 0.3}, {0.4, 1.1}}};
+  for (int n = 0; n < 3; ++n)
+    add_grid(m, n + 1, xy[static_cast<size_t>(n)][0], xy[static_cast<size_t>(n)][1], 0.0);
+  const CTria3 elem(ElementId{1}, PropertyId{1}, {NodeId{1}, NodeId{2}, NodeId{3}}, m);
+  const LocalKe K = elem.stiffness_matrix();
+  const Eigen::VectorXd rigid = tria_plate_field(
+      xy, [](double x, double y) { return 0.3 + 0.2 * x - 0.5 * y; },
+      [](double, double) { return 0.2; }, [](double, double) { return -0.5; });
+  EXPECT_LT((K * rigid).cwiseAbs().maxCoeff(), 1e-9 * K.cwiseAbs().maxCoeff());
+
+  Eigen::MatrixXd Kb(9, 9);
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j)
+      for (int a = 0; a < 3; ++a)
+        for (int b = 0; b < 3; ++b)
+          Kb(3 * i + a, 3 * j + b) = K(6 * i + 2 + a, 6 * j + 2 + b);
+  const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(Kb);
+  const double kmax = es.eigenvalues().maxCoeff();
+  int zero = 0;
+  for (int i = 0; i < 9; ++i)
+    zero += (std::abs(es.eigenvalues()(i)) < 1e-10 * kmax) ? 1 : 0;
+  EXPECT_EQ(zero, 3);
 }
 
 TEST(CQuad4, MembraneEnergy_UniformXStretch_Analytical) {

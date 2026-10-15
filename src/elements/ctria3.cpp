@@ -1,8 +1,10 @@
 // src/elements/ctria3.cpp
 // CTRIA3: 3-node constant-strain triangle shell element.
 // Membrane: CST (plane-stress), closed-form integration
-// Bending:  DKT (Discrete Kirchhoff Triangle) — simplified implementation
-//           using constant curvature approximation for this linear element.
+// Bending:  DKT (Discrete Kirchhoff Triangle), Batoz-Bathe-Ho (1980): normal
+//           slopes interpolated quadratically from corner and midside values,
+//           with Kirchhoff constraints imposed at the corners and edge
+//           midsides; the linear curvature field is integrated exactly.
 
 #include "elements/ctria3.hpp"
 #include <Eigen/Dense>
@@ -122,50 +124,95 @@ Eigen::MatrixXd CTria3::membrane_stiffness(const std::array<double,3>& xl,
     return t * A * Bm.transpose() * D * Bm;
 }
 
+Eigen::Matrix3d CTria3::bending_D() const {
+    const PShell& ps = pshell();
+    const Mat1& m = (ps.mid2.value != 0) ? model_.material(ps.mid2) : material();
+    const double c = m.E / (1.0 - m.nu * m.nu);
+    Eigen::Matrix3d Q;
+    Q << c,      c*m.nu, 0,
+         c*m.nu, c,      0,
+         0,      0,      c*(1.0-m.nu)/2.0;
+    const double t = ps.t;
+    return (ps.twelveI_t3 * t * t * t / 12.0) * Q;
+}
+
+Eigen::Matrix<double, 3, 9>
+CTria3::dkt_curvature_B(const std::array<double,3>& xl,
+                        const std::array<double,3>& yl,
+                        const double xi, const double eta) {
+    // Unknowns per node: [w, s_x, s_y] with s = (w_x, w_y) the slope
+    // rotations of the shell frame (local DOFs 2, 3, 4).  The slope field is
+    // quadratic:  s = sum_c N_c s_c + sum_k N_k s_k  over corners c and edge
+    // midsides k, where at the midside of edge (i -> j), with unit tangent t,
+    // unit normal n, and length l,
+    //   tangential slope = 3/(2l) (w_j - w_i) - (t.s_i + t.s_j)/4  (cubic w)
+    //   normal slope     = (n.s_i + n.s_j)/2                        (linear)
+    // i.e. s_k = 3/(2l) t (w_j - w_i) + (I/2 - 3/4 t t^T)(s_i + s_j).
+    const double L1 = 1.0 - xi - eta, L2 = xi, L3 = eta;
+
+    // Quadratic shape functions: corners 1-3, midsides 4 (2-3), 5 (3-1),
+    // 6 (1-2), and their (xi, eta) derivatives.
+    const std::array<double, 6> dN_dxi{-(4*L1 - 1), 4*L2 - 1, 0.0,
+                                       4*L3, -4*L3, 4*L1 - 4*L2};
+    const std::array<double, 6> dN_deta{-(4*L1 - 1), 0.0, 4*L3 - 1,
+                                        4*L2, 4*L1 - 4*L3, -4*L2};
+    const double x21 = xl[1] - xl[0], y21 = yl[1] - yl[0];
+    const double x31 = xl[2] - xl[0], y31 = yl[2] - yl[0];
+    const double det = x21 * y31 - x31 * y21;
+    std::array<double, 6> dNx{}, dNy{};
+    for (size_t q = 0; q < 6; ++q) {
+        dNx[q] = ( y31 * dN_dxi[q] - y21 * dN_deta[q]) / det;
+        dNy[q] = (-x31 * dN_dxi[q] + x21 * dN_deta[q]) / det;
+    }
+
+    // C_q (2x9): s_q = C_q U for each of the six interpolation points.
+    std::array<Eigen::Matrix<double, 2, 9>, 6> C;
+    for (auto& c : C) c.setZero();
+    for (int c = 0; c < 3; ++c) {
+        C[static_cast<size_t>(c)](0, 3*c + 1) = 1.0;
+        C[static_cast<size_t>(c)](1, 3*c + 2) = 1.0;
+    }
+    static constexpr std::array<std::array<int, 2>, 3> kEdges{{{1, 2}, {2, 0}, {0, 1}}};
+    for (size_t k = 0; k < 3; ++k) {
+        const int i = kEdges[k][0], j = kEdges[k][1];
+        const double dx = xl[static_cast<size_t>(j)] - xl[static_cast<size_t>(i)];
+        const double dy = yl[static_cast<size_t>(j)] - yl[static_cast<size_t>(i)];
+        const double l = std::sqrt(dx*dx + dy*dy);
+        const Eigen::Vector2d t(dx / l, dy / l);
+        const Eigen::Matrix2d P = 0.5 * Eigen::Matrix2d::Identity() - 0.75 * t * t.transpose();
+        Eigen::Matrix<double, 2, 9>& Ck = C[3 + k];
+        Ck.col(3*j) += 1.5 / l * t;
+        Ck.col(3*i) -= 1.5 / l * t;
+        Ck.block<2, 2>(0, 3*i + 1) += P;
+        Ck.block<2, 2>(0, 3*j + 1) += P;
+    }
+
+    // Nastran curvature convention: kappa = -[sx_x, sy_y, sx_y + sy_x]
+    // (= -[w_xx, w_yy, 2 w_xy]), matching CQUAD4.
+    Eigen::Matrix<double, 3, 9> B = Eigen::Matrix<double, 3, 9>::Zero();
+    for (size_t q = 0; q < 6; ++q) {
+        B.row(0) -= dNx[q] * C[q].row(0);
+        B.row(1) -= dNy[q] * C[q].row(1);
+        B.row(2) -= dNy[q] * C[q].row(0) + dNx[q] * C[q].row(1);
+    }
+    return B;
+}
+
 Eigen::MatrixXd CTria3::bending_stiffness(const std::array<double,3>& xl,
                                             const std::array<double,3>& yl) const {
-    // Simplified DKT: constant curvature triangle bending element.
-    // Uses the standard thin-plate stiffness formulation.
-    // For each node: DOFs are w (out-of-plane), θx, θy
-    // Total bending DOFs: 9 (3 nodes × 3)
-    //
-    // Curvature-displacement: κ = B_b * u_b
-    // B_b is constant (same as CST approach for bending)
-
-    double x1=xl[0], y1=yl[0];
-    double x2=xl[1], y2=yl[1];
-    double x3=xl[2], y3=yl[2];
-
-    double A2 = (x2-x1)*(y3-y1) - (x3-x1)*(y2-y1);
-    double A  = 0.5 * std::abs(A2);
-
-    // Side vectors
-    double b1 = y2-y3, b2 = y3-y1, b3 = y1-y2;
-    double d1 = x3-x2, d2 = x1-x3, d3 = x2-x1;
-
-    // Bending B matrix [3x9]: curvatures from [w1,θx1,θy1, w2,θx2,θy2, w3,θx3,θy3]
-    // Using standard DKT approximation:
-    // κxx = dθx/dx, κyy = dθy/dy, κxy = dθx/dy + dθy/dx
-    Eigen::MatrixXd Bb(3, 9);
-    Bb.setZero();
-
-    double inv2A = 1.0 / (2.0 * A);
-
-    // Node 1: cols 0,1,2 → w1,θx1,θy1
-    // Node 2: cols 3,4,5 → w2,θx2,θy2
-    // Node 3: cols 6,7,8 → w3,θx3,θy3
-    // dθx/dx contribution (κxx)
-    Bb(0,1) = b1 * inv2A;  Bb(0,4) = b2 * inv2A;  Bb(0,7) = b3 * inv2A;
-    // dθy/dy contribution (κyy)
-    Bb(1,2) = d1 * inv2A;  Bb(1,5) = d2 * inv2A;  Bb(1,8) = d3 * inv2A;
-    // dθx/dy + dθy/dx (κxy)
-    Bb(2,1) = d1 * inv2A;  Bb(2,4) = d2 * inv2A;  Bb(2,7) = d3 * inv2A;
-    Bb(2,2) = b1 * inv2A;  Bb(2,5) = b2 * inv2A;  Bb(2,8) = b3 * inv2A;
-
-    double t = thickness();
-    double Db_scale = t*t*t / 12.0;
-    Eigen::Matrix3d Db = Db_scale * plane_stress_D();
-    return A * Bb.transpose() * Db * Bb;
+    // K_b = int B^T D B dA.  B is linear, so the integrand is quadratic and
+    // the 3-point midside rule (weights A/3) is exact.
+    const double A = 0.5 * std::abs((xl[1]-xl[0])*(yl[2]-yl[0]) -
+                                    (xl[2]-xl[0])*(yl[1]-yl[0]));
+    const Eigen::Matrix3d Db = bending_D();
+    static constexpr std::array<std::array<double, 2>, 3> kPoints{
+        {{0.5, 0.0}, {0.5, 0.5}, {0.0, 0.5}}};
+    Eigen::MatrixXd K = Eigen::MatrixXd::Zero(9, 9);
+    for (const auto& p : kPoints) {
+        const Eigen::Matrix<double, 3, 9> B = dkt_curvature_B(xl, yl, p[0], p[1]);
+        K += (A / 3.0) * B.transpose() * Db * B;
+    }
+    return K;
 }
 
 LocalKe CTria3::stiffness_matrix() const {
@@ -291,6 +338,65 @@ LocalFe CTria3::thermal_load(std::span<const double> temperatures, double t_ref)
     }
     // Transform local load vector to global frame: f_global = T^T * f_local
     return frame.T.transpose() * fe;
+}
+
+CTria3::PlateResponse
+CTria3::recover_response(std::span<const double> global_displacements,
+                         const double xi, const double eta,
+                         const double temperature, const double t_ref) const {
+    if (global_displacements.size() != static_cast<size_t>(NUM_DOFS)) {
+        throw SolverError(std::format(
+            "CTRIA3 {}: expected {} displacement entries for recovery, got {}",
+            eid_.value, NUM_DOFS, global_displacements.size()));
+    }
+    const TriaFrame frame = compute_tria_frame(node_coords(), eid_);
+    Eigen::Matrix<double, 18, 1> ug;
+    for (int i = 0; i < NUM_DOFS; ++i)
+        ug(i) = global_displacements[static_cast<size_t>(i)];
+    const Eigen::Matrix<double, 18, 1> ul = frame.T * ug;
+
+    const auto& xl = frame.xl;
+    const auto& yl = frame.yl;
+    const double A2 = (xl[1]-xl[0])*(yl[2]-yl[0]) - (xl[2]-xl[0])*(yl[1]-yl[0]);
+    const double b1 = yl[1]-yl[2], b2 = yl[2]-yl[0], b3 = yl[0]-yl[1];
+    const double d1 = xl[2]-xl[1], d2 = xl[0]-xl[2], d3 = xl[1]-xl[0];
+
+    PlateResponse r;
+    // Membrane (CST): constant strain, mechanical stress after the free
+    // thermal strain.
+    Eigen::Matrix<double, 3, 6> Bm = Eigen::Matrix<double, 3, 6>::Zero();
+    Bm(0,0)=b1; Bm(0,2)=b2; Bm(0,4)=b3;
+    Bm(1,1)=d1; Bm(1,3)=d2; Bm(1,5)=d3;
+    Bm(2,0)=d1; Bm(2,1)=b1; Bm(2,2)=d2; Bm(2,3)=b2; Bm(2,4)=d3; Bm(2,5)=b3;
+    Bm /= A2;
+    Eigen::Matrix<double, 6, 1> u_mem;
+    for (int n = 0; n < 3; ++n) {
+        u_mem(2*n) = ul(6*n);
+        u_mem(2*n + 1) = ul(6*n + 1);
+    }
+    const double alpha = material().A;
+    const Eigen::Vector3d eps_th(alpha * (temperature - t_ref),
+                                 alpha * (temperature - t_ref), 0.0);
+    r.membrane_stress = plane_stress_D() * (Bm * u_mem - eps_th);
+    r.membrane_resultant = thickness() * r.membrane_stress;
+
+    // Bending (DKT).
+    Eigen::Matrix<double, 9, 1> u_b;
+    for (int n = 0; n < 3; ++n) {
+        u_b(3*n) = ul(6*n + 2);
+        u_b(3*n + 1) = ul(6*n + 3);
+        u_b(3*n + 2) = ul(6*n + 4);
+    }
+    const Eigen::Matrix3d Db = bending_D();
+    r.curvature = dkt_curvature_B(xl, yl, xi, eta) * u_b;
+    r.bending_moment = Db * r.curvature;
+
+    // DKT is a Kirchhoff element: there is no transverse shear strain, and
+    // differentiating its element-wise linear moment field gives a
+    // mesh-independent bias (it is not complete for cubic deflections), so
+    // transverse shear resultants are left at zero rather than reported
+    // inaccurately.
+    return r;
 }
 
 std::vector<EqIndex> CTria3::global_dof_indices(const DofMap& dof_map) const {

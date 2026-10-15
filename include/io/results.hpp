@@ -31,6 +31,8 @@ struct PlateStressPoint {
   double sx{0}, sy{0}, sxy{0};
   double mx{0}, my{0}, mxy{0};
   double von_mises{0};
+  double nx{0}, ny{0}, nxy{0}; // membrane force resultants per unit length
+  double qx{0}, qy{0};         // transverse shear resultants per unit length
 };
 
 struct PlateStress {
@@ -38,8 +40,10 @@ struct PlateStress {
   ElementId eid{0};
   ElementType etype{ElementType::CQUAD4};
   double sx{0}, sy{0}, sxy{0};  // membrane stresses
-  double mx{0}, my{0}, mxy{0};  // moments (plate bending)
+  double mx{0}, my{0}, mxy{0};  // moments per unit length (plate bending)
   double von_mises{0}; // derived
+  double nx{0}, ny{0}, nxy{0};  // membrane force resultants per unit length
+  double qx{0}, qy{0};          // transverse shear resultants per unit length
   std::vector<PlateStressPoint> nodal;
 };
 

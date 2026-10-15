@@ -65,6 +65,7 @@ Notable current limitations:
 - CBAR offsets in the element system (OFFT `xGO`/`xOG`/`xOO`) are not yet supported.
 - GRID and GRDSET SEID (superelements) are not supported.
 - GPFORCE is written for linear statics only (no modal inertia-force rows yet).
+- CTRIA3 uses DKT (Kirchhoff) bending, so its transverse shear resultants are reported as zero.
 - Mass is consistent by default (unlike Nastran, whose default is lumped); `PARAM,COUPMASS,-1` selects lumped mass.
 
 ## SOL 103 — Normal Modes (Modal Analysis)

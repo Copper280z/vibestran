@@ -56,6 +56,8 @@ public:
         Eigen::Vector3d membrane_stress{Eigen::Vector3d::Zero()};
         Eigen::Vector3d membrane_resultant{Eigen::Vector3d::Zero()};
         Eigen::Vector3d bending_moment{Eigen::Vector3d::Zero()};
+        /// Transverse shear resultants (Qx, Qy) per unit length.
+        Eigen::Vector2d transverse_shear{Eigen::Vector2d::Zero()};
     };
     static CentroidResponse recover_response(
         ElementId eid,
