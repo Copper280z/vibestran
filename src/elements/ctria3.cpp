@@ -187,13 +187,14 @@ CTria3::dkt_curvature_B(const std::array<double,3>& xl,
         Ck.block<2, 2>(0, 3*j + 1) += P;
     }
 
-    // Nastran curvature convention: kappa = -[sx_x, sy_y, sx_y + sy_x]
-    // (= -[w_xx, w_yy, 2 w_xy]), matching CQUAD4.
+    // kappa = [sx_x, sy_y, sx_y + sy_x] (= [w_xx, w_yy, 2 w_xy]), the same
+    // convention as CQUAD4: M = D kappa is Nastran's moment sign (positive
+    // puts the -z fibre in tension).
     Eigen::Matrix<double, 3, 9> B = Eigen::Matrix<double, 3, 9>::Zero();
     for (size_t q = 0; q < 6; ++q) {
-        B.row(0) -= dNx[q] * C[q].row(0);
-        B.row(1) -= dNy[q] * C[q].row(1);
-        B.row(2) -= dNy[q] * C[q].row(0) + dNx[q] * C[q].row(1);
+        B.row(0) += dNx[q] * C[q].row(0);
+        B.row(1) += dNy[q] * C[q].row(1);
+        B.row(2) += dNy[q] * C[q].row(0) + dNx[q] * C[q].row(1);
     }
     return B;
 }

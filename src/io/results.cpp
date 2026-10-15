@@ -143,8 +143,11 @@ std::string fmt_angle(const double v) {
 
 /// Bending stress factor for fiber distance z and thickness t:
 /// sigma(z) = sigma_membrane + factor*M with factor = 12*z/t^3 (0 if t<=0).
+/// Bending stress per unit moment at fibre distance z.  Nastran's moment
+/// sign convention: a positive moment puts the -z (Z1) fibre in tension, so
+/// sigma(z) = N/t - 12 M z / t^3 (MYSTRAN prints Mx > 0 with Z1 in tension).
 double fiber_factor(double z, double t) {
-    return (t > 0.0) ? 12.0 * z / (t * t * t) : 0.0;
+    return (t > 0.0) ? -12.0 * z / (t * t * t) : 0.0;
 }
 
 } // namespace
@@ -283,6 +286,13 @@ void F06Writer::write(const SolverResults& results, const Model& model,
         if (do_spc_force) write_spc_force_table(sc, out);
         if (msc != nullptr && msc->mpc_force_print) write_mpc_force_table(sc, out);
         if (msc != nullptr && msc->gpforce_print) write_gpforce_table(sc, out);
+        if (msc != nullptr && msc->force_print) {
+            write_bar_force_table(sc, out);
+            write_shell_force_table(sc, out, ElementType::CQUAD4,
+                                    msc->force_corner);
+            write_shell_force_table(sc, out, ElementType::CTRIA3,
+                                    msc->force_corner);
+        }
         if (do_stress_any) {
             write_bar_stress_table(sc, out);
             write_shell_stress_table(sc, out, ElementType::CQUAD4, do_corner,
@@ -460,6 +470,84 @@ void F06Writer::write_constraint_force_table(
     out << "\n";
 }
 
+// Element engineering forces, MYSTRAN layout: the validation parser reads the
+// element ID within cols 17-24 (TRIA3/BAR) or 2-24 (QUAD4 centre rows), "GRD"
+// at cols 12-14 with the grid ID at 15-22 for corner rows, and values in
+// 13-wide windows from col 26 (each value is an ES14.6 field from col 25).
+namespace {
+void put_es14(std::ostream& out, const double v) {
+    out << std::right << std::uppercase << std::setw(14) << std::setprecision(6)
+        << std::scientific << v << std::nouppercase;
+}
+} // namespace
+
+void F06Writer::write_bar_force_table(const SubCaseResults& sc, std::ostream& out) {
+    const bool any = std::any_of(sc.line_stresses.begin(), sc.line_stresses.end(),
+                                 [](const LineStress& ls) { return ls.etype == ElementType::CBAR; });
+    if (!any) return;
+    write_subcase_header(out, sc.id);
+    if (!sc.label.empty())
+        out << " " << sc.label << "\n";
+    out << "\n";
+    out << "                                                       E L E M E N T   E N G I N E E R I N G   F O R C E S\n";
+    out << "                                                             F O R   E L E M E N T   T Y P E   B A R\n";
+    out << "                 Element       Bend-Moment End A           Bend-Moment End B              - Shear -              Axial         Torque\n";
+    out << "                    ID       Plane 1       Plane 2       Plane 1       Plane 2      Plane 1       Plane 2        Force\n";
+    for (const auto& ls : sc.line_stresses) {
+        if (ls.etype != ElementType::CBAR) continue;
+        const auto& f = ls.forces;
+        out << std::right << std::setw(24) << ls.eid.value;
+        for (const double v : {f.m1a, f.m2a, f.m1b, f.m2b, f.v1, f.v2, f.axial, f.torque})
+            put_es14(out, v);
+        out << "\n";
+    }
+    out << "          ------------- ------------- ------------- ------------- ------------- ------------- ------------- -------------\n\n";
+}
+
+void F06Writer::write_shell_force_table(const SubCaseResults& sc, std::ostream& out,
+                                        const ElementType etype, const bool corners) {
+    const bool any = std::any_of(sc.plate_stresses.begin(), sc.plate_stresses.end(),
+                                 [etype](const PlateStress& ps) { return ps.etype == etype; });
+    if (!any) return;
+    const bool quad = (etype == ElementType::CQUAD4);
+    write_subcase_header(out, sc.id);
+    if (!sc.label.empty())
+        out << " " << sc.label << "\n";
+    out << "\n";
+    out << "                                                       E L E M E N T   E N G I N E E R I N G   F O R C E S\n";
+    out << "                                                           F O R   E L E M E N T   T Y P E   "
+        << (quad ? "Q U A D 4" : "T R I A 3") << "\n";
+    if (quad)
+        out << "  Element Location               N o r m a l   F o r c e s                       M o m e n t s                   T r a n s v e r s e\n"
+            << "     ID                                                                                                        S h e a r   F o r c e s\n";
+    else
+        out << "                 Element         N o r m a l   F o r c e s                       M o m e n t s                   T r a n s v e r s e\n"
+            << "                    ID                                                                                         S h e a r   F o r c e s\n";
+    out << "                              Nxx           Nyy           Nxy           Mxx           Myy           Mxy            Qx           Qy\n";
+    auto values = [&](double nx, double ny, double nxy, double mx, double my,
+                      double mxy, double qx, double qy) {
+        for (const double v : {nx, ny, nxy, mx, my, mxy, qx, qy})
+            put_es14(out, v);
+        out << "\n";
+    };
+    for (const auto& ps : sc.plate_stresses) {
+        if (ps.etype != etype) continue;
+        if (quad) {
+            out << std::right << std::setw(9) << ps.eid.value << std::string(15, ' ');
+        } else {
+            out << std::right << std::setw(24) << ps.eid.value;
+        }
+        values(ps.nx, ps.ny, ps.nxy, ps.mx, ps.my, ps.mxy, ps.qx, ps.qy);
+        if (quad && corners) {
+            for (const auto& pt : ps.nodal) {
+                out << "           GRD" << std::right << std::setw(8) << pt.node.value << "  ";
+                values(pt.nx, pt.ny, pt.nxy, pt.mx, pt.my, pt.mxy, pt.qx, pt.qy);
+            }
+        }
+    }
+    out << "          ------------- ------------- ------------- ------------- ------------- ------------- ------------- -------------\n\n";
+}
+
 void F06Writer::write_gpforce_table(const SubCaseResults& sc,
                                     std::ostream& out) {
     if (sc.gp_forces.empty()) return;
@@ -611,8 +699,17 @@ FiberStress fiber_stress_at(double sx, double sy, double sxy,
 // Writes one fiber-stress line. `prefix` carries the element/location fields
 // already positioned in their columns; the fiber and stress values are placed
 // at absolute columns within the same line.
+/// Peak transverse shear stresses of a homogeneous shell: the parabolic
+/// distribution through the thickness peaks at 1.5 Q / t (as MYSTRAN prints).
+std::array<double, 2> peak_transverse_shear(double qx, double qy, double t) {
+    if (!(t > 0.0))
+        return {0.0, 0.0};
+    return {1.5 * qx / t, 1.5 * qy / t};
+}
+
 void write_fiber_row(std::ostream& out, const ShellCols& c, F06Row row,
-                     const FiberStress& fs, double z, bool with_transverse) {
+                     const FiberStress& fs, double z, bool with_transverse,
+                     const std::array<double, 2>& transverse = {0.0, 0.0}) {
     row.put(c.fiber, 11, std::format("{:.4E}", z));
     row.put(c.xx, 12, fmt_e(fs.sx));
     row.put(c.yy, 12, fmt_e(fs.sy));
@@ -622,9 +719,9 @@ void write_fiber_row(std::ostream& out, const ShellCols& c, F06Row row,
     row.put(c.minor, 12, fmt_e(fs.minor));
     row.put(c.vm, 12, fmt_e(fs.von_mises));
     if (with_transverse) {
-        // Transverse shear is not currently recovered; report zeros.
-        row.put(c.zx, 12, fmt_e(0.0));
-        row.put(c.yz, 12, fmt_e(0.0));
+        // Maximum through-thickness transverse shear stresses (XZ, YZ).
+        row.put(c.zx, 12, fmt_e(transverse[0]));
+        row.put(c.yz, 12, fmt_e(transverse[1]));
     }
     out << row.str() << "\n";
 }
@@ -679,7 +776,8 @@ void F06Writer::write_shell_stress_table(
             write_fiber_row(out, c, cen,
                             fiber_stress_at(ps.sx, ps.sy, ps.sxy,
                                             ps.mx, ps.my, ps.mxy, z1, t),
-                            z1, /*with_transverse=*/true);
+                            z1, /*with_transverse=*/true,
+                            peak_transverse_shear(ps.qx, ps.qy, t));
             write_fiber_row(out, c, F06Row{},
                             fiber_stress_at(ps.sx, ps.sy, ps.sxy,
                                             ps.mx, ps.my, ps.mxy, z2, t),
@@ -698,7 +796,8 @@ void F06Writer::write_shell_stress_table(
                                     fiber_stress_at(pt.sx, pt.sy, pt.sxy,
                                                     pt.mx, pt.my, pt.mxy,
                                                     z1, t),
-                                    z1, true);
+                                    z1, true,
+                                    peak_transverse_shear(pt.qx, pt.qy, t));
                     write_fiber_row(out, c, F06Row{},
                                     fiber_stress_at(pt.sx, pt.sy, pt.sxy,
                                                     pt.mx, pt.my, pt.mxy,
@@ -714,7 +813,7 @@ void F06Writer::write_shell_stress_table(
             write_fiber_row(out, c, anywhere,
                             fiber_stress_at(ps.sx, ps.sy, ps.sxy,
                                             ps.mx, ps.my, ps.mxy, z1, t),
-                            z1, true);
+                            z1, true, peak_transverse_shear(ps.qx, ps.qy, t));
             F06Row in_elem;
             in_elem.put_left(14, "in elem");
             write_fiber_row(out, c, in_elem,

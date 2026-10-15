@@ -43,7 +43,7 @@ reference is a MYSTRAN run.
 
 | Feature | Check | Suggested deck |
 |---|---|---|
-| CBEAM / PBEAM (any use) | No `CBEAM` or `PBEAM` card | Cantilever with tip loads in both planes and a nonzero I12; compare against the closed-form unsymmetric bending solution |
+| CBEAM / PBEAM (any use) | No `CBEAM` or `PBEAM` card | Cantilever with tip loads in both planes and a nonzero I12; compare against the closed-form unsymmetric bending solution, with `FORCE = ALL` so the element end forces (written in the BAR force layout) are checked too |
 
 ## Mass and modal analysis
 

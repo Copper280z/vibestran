@@ -25,6 +25,7 @@
 #include <fstream>
 #include <bit>
 #include <cstdint>
+#include <array>
 #include <vector>
 
 using namespace vibestran;
@@ -556,6 +557,88 @@ TEST(F06Writer, GpforceBlockMatchesParserColumns) {
     EXPECT_TRUE(header && app && elem);
 }
 
+TEST(F06Writer, ElementForceBlocksMatchParserColumns) {
+    // Validation parser (1-based): BAR rows read the EID at cols 17-24 and
+    // MA1, MA2, MB1, MB2, S1, S2, AXIAL, TORQUE in 13-wide windows from col 26;
+    // QUAD4 centre rows hold the EID within cols 2-24, corner rows "GRD" at
+    // cols 12-14 and the grid ID at 15-22; TRIA3 rows hold the EID at 17-24;
+    // shell values NXX..QY sit in the same windows as the BAR values.
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    LineStress ls;
+    ls.eid = ElementId{12};
+    ls.etype = ElementType::CBAR;
+    ls.forces = {600.0, 1200.0, 300.0, 600.0, -300.0, 600.0, 100.0, -2.5};
+    sc.line_stresses.push_back(ls);
+    PlateStress q;
+    q.eid = ElementId{5};
+    q.etype = ElementType::CQUAD4;
+    q.nx = 1.0; q.ny = 2.0; q.nxy = 3.0; q.mx = 4.0; q.my = 5.0; q.mxy = 6.0;
+    q.qx = 7.0; q.qy = 8.0;
+    PlateStressPoint c;
+    c.node = NodeId{370};
+    c.mx = -9.5; c.qy = 0.25;
+    q.nodal = {c};
+    sc.plate_stresses.push_back(q);
+    PlateStress t3;
+    t3.eid = ElementId{21};
+    t3.etype = ElementType::CTRIA3;
+    t3.ny = 35.0; t3.mxy = -2.6e-4;
+    sc.plate_stresses.push_back(t3);
+    res.subcases.push_back(sc);
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].force_print = true;
+    m.analysis.subcases[0].force_corner = true;
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+
+    auto field = [](const std::string& line, size_t col1) {
+        return std::stod(line.substr(col1 - 1, 13));
+    };
+    std::istringstream iss(oss.str());
+    std::string line, block;
+    bool in_forces = false;
+    int seen = 0;
+    while (std::getline(iss, line)) {
+        if (line.find("E N G I N E E R I N G   F O R C E S") != std::string::npos)
+            in_forces = true;
+        else if (line.find("S T R E S S E S") != std::string::npos)
+            in_forces = false;
+        if (line.find("F O R   E L E M E N T   T Y P E") != std::string::npos)
+            block = line;
+        if (!in_forces || line.size() < 100 || line.find("E+") == std::string::npos)
+            continue;
+        SCOPED_TRACE("line: [" + line + "] block: [" + block + "]");
+        if (block.find("B A R") != std::string::npos) {
+            EXPECT_EQ(std::stoi(line.substr(16, 8)), 12);
+            EXPECT_DOUBLE_EQ(field(line, 26), 600.0);
+            EXPECT_DOUBLE_EQ(field(line, 82), -300.0);
+            EXPECT_DOUBLE_EQ(field(line, 110), 100.0);
+            EXPECT_DOUBLE_EQ(field(line, 124), -2.5);
+            ++seen;
+        } else if (block.find("Q U A D 4") != std::string::npos) {
+            if (line.substr(11, 3) == "GRD") {
+                EXPECT_EQ(std::stoi(line.substr(14, 8)), 370);
+                EXPECT_DOUBLE_EQ(field(line, 68), -9.5);
+                EXPECT_DOUBLE_EQ(field(line, 124), 0.25);
+            } else {
+                EXPECT_EQ(std::stoi(line.substr(1, 23)), 5);
+                EXPECT_DOUBLE_EQ(field(line, 26), 1.0);
+                EXPECT_DOUBLE_EQ(field(line, 96), 6.0);
+                EXPECT_DOUBLE_EQ(field(line, 124), 8.0);
+            }
+            ++seen;
+        } else if (block.find("T R I A 3") != std::string::npos) {
+            EXPECT_EQ(std::stoi(line.substr(16, 8)), 21);
+            EXPECT_DOUBLE_EQ(field(line, 40), 35.0);
+            EXPECT_DOUBLE_EQ(field(line, 96), -2.6e-4);
+            ++seen;
+        }
+    }
+    EXPECT_EQ(seen, 4);
+}
+
 TEST(F06Writer, SpcForceTableSuppressedWithoutRequest) {
     SolverResults res;
     SubCaseResults sc;
@@ -737,8 +820,10 @@ TEST(F06Writer, Quad4CenterRowMatchesParserColumns) {
 }
 
 TEST(F06Writer, Quad4FiberStressesFromBendingMoment) {
-    // With thickness t from PSHELL, fiber stresses are
-    // sigma(z) = membrane + (12*z/t^3)*moment, z1=-t/2, z2=+t/2.
+    // With thickness t from PSHELL, fiber stresses follow Nastran's moment
+    // sign convention (a positive moment puts the -z fibre in tension; MYSTRAN
+    // prints Mx > 0 for an upward-loaded cantilever whose Z1 fibre is in
+    // tension): sigma(z) = membrane - (12*z/t^3)*moment, z1=-t/2, z2=+t/2.
     Model m = make_empty_model_sc1();
     PShell ps_prop;
     ps_prop.pid = PropertyId{10};
@@ -765,8 +850,8 @@ TEST(F06Writer, Quad4FiberStressesFromBendingMoment) {
     std::ostringstream oss;
     F06Writer::write(res, m, oss);
 
-    // 12*z/t^3 at z=-0.05, t=0.1: 12*(-0.05)/0.001 = -600 → XX(Z1) = 10 - 600
-    // At z=+0.05: XX(Z2) = 10 + 600.
+    // 12*z/t^3 at z=-0.05, t=0.1: 12*(-0.05)/0.001 = -600 → XX(Z1) = 10 + 600
+    // At z=+0.05: XX(Z2) = 10 - 600.
     std::istringstream iss(oss.str());
     std::string z1_line, z2_line;
     while (std::getline(iss, z1_line)) {
@@ -776,10 +861,10 @@ TEST(F06Writer, Quad4FiberStressesFromBendingMoment) {
         }
     }
     ASSERT_FALSE(z1_line.empty());
-    EXPECT_NEAR(std::stod(z1_line.substr(34, 12)), 10.0 - 600.0,
-                std::abs(10.0 - 600.0) * 1e-5);
-    EXPECT_NEAR(std::stod(z2_line.substr(34, 12)), 10.0 + 600.0,
+    EXPECT_NEAR(std::stod(z1_line.substr(34, 12)), 10.0 + 600.0,
                 std::abs(10.0 + 600.0) * 1e-5);
+    EXPECT_NEAR(std::stod(z2_line.substr(34, 12)), 10.0 - 600.0,
+                std::abs(10.0 - 600.0) * 1e-5);
 }
 
 TEST(F06Writer, BarStressTableMatchesParserColumns) {
@@ -1553,8 +1638,10 @@ ENDDATA
 
 TEST(BdfParser, StressAndStrainAreIndependentChannels) {
     // A single deck that requests both STRESS and STRAIN must set each
-    // channel's flags independently, and STRESS(CORNER) must not enable
-    // strain corners (and vice versa).
+    // channel's print flags independently.  The output location (CENTER,
+    // CORNER, BILIN, ...) is different: only one is used per run, and a
+    // STRESS request governs it ahead of STRAIN.  STRESS gives no option
+    // here, so the run is CENTER and STRAIN(CORNER) gets no corner rows.
     const std::string bdf = R"(
 SOL 101
 CEND
@@ -1572,7 +1659,81 @@ ENDDATA
     EXPECT_TRUE(sc.stress_print);
     EXPECT_FALSE(sc.stress_corner_print);
     EXPECT_TRUE(sc.strain_print);
-    EXPECT_TRUE(sc.strain_corner_print);
+    EXPECT_FALSE(sc.strain_corner_print);
+}
+
+namespace {
+// Corner flags of each subcase as (stress, strain, force), for decks whose
+// case control is given between CEND and BEGIN BULK.
+std::vector<std::array<bool, 3>> corner_flags(const std::string& case_control) {
+    const Model m = BdfParser::parse_string(
+        "SOL 101\nCEND\n" + case_control + "BEGIN BULK\nENDDATA\n");
+    std::vector<std::array<bool, 3>> flags(m.analysis.subcases.size());
+    std::transform(m.analysis.subcases.begin(), m.analysis.subcases.end(),
+                   flags.begin(), [](const SubCase& sc) {
+                       return std::array<bool, 3>{sc.stress_corner_print,
+                                                  sc.strain_corner_print,
+                                                  sc.force_corner};
+                   });
+    return flags;
+}
+} // namespace
+
+TEST(BdfParser, LocationOptionPrecedence) {
+    // One CENTER/CORNER location is used for every STRESS, STRAIN and FORCE
+    // request in the run.  Only global entries and the first subcase can set
+    // it; within those, STRESS governs, then STRAIN, then FORCE, whatever the
+    // order of the requests.  These decks are the MYSTRAN bilin_* validation
+    // cases, which follow the MSC rule.
+    using F = std::array<bool, 3>;
+
+    // STRESS beats an earlier STRAIN, in both directions.
+    EXPECT_EQ(corner_flags("STRAIN(CORNER,FIBER) = ALL\nSTRESS(CENTER) = ALL\n"
+                           "FORCE(CORNER) = ALL\n"),
+              (std::vector<F>{{false, false, false}}));
+    EXPECT_EQ(corner_flags("STRAIN(CENTER,FIBER) = ALL\nSTRESS(CORNER) = ALL\n"
+                           "FORCE(CENTER) = ALL\n"),
+              (std::vector<F>{{true, true, true}}));
+
+    // STRAIN beats FORCE.
+    EXPECT_EQ(corner_flags("STRAIN(CENTER) = ALL\nFORCE(CORNER) = ALL\n"),
+              (std::vector<F>{{false, false, false}}));
+    EXPECT_EQ(corner_flags("STRAIN(CORNER) = ALL\nFORCE(CENTER) = ALL\n"),
+              (std::vector<F>{{false, true, true}}));
+
+    // A request set to NONE is no request: FORCE/STRAIN decide.
+    EXPECT_EQ(corner_flags("STRAIN(CORNER,FIBER) = ALL\nSTRESS(CENTER) = NONE\n"
+                           "FORCE(CORNER) = ALL\n"),
+              (std::vector<F>{{false, true, true}}));
+
+    // Later subcases cannot change the first subcase's choice.
+    EXPECT_EQ(corner_flags("SUBCASE 1\nFORCE(CENTER) = ALL\nSUBCASE 2\n"
+                           "STRESS(CORNER) = ALL\nSTRAIN(CORNER) = ALL\n"
+                           "FORCE(CORNER) = ALL\n"),
+              (std::vector<F>{{false, false, false}, {false, false, false}}));
+    EXPECT_EQ(corner_flags("SUBCASE 1\nFORCE(CORNER) = ALL\nSUBCASE 2\n"
+                           "STRESS(CENTER) = ALL\nSTRAIN(CENTER) = ALL\n"
+                           "FORCE(CENTER) = ALL\n"),
+              (std::vector<F>{{false, false, true}, {true, true, true}}));
+
+    // A global request counts as the first subcase's, and the first
+    // subcase's own request overrides it.
+    EXPECT_EQ(corner_flags("FORCE(CORNER) = ALL\nSUBCASE 1\nSUBCASE 2\n"
+                           "STRESS(CENTER) = ALL\n"),
+              (std::vector<F>{{false, false, true}, {true, false, true}}));
+    EXPECT_EQ(corner_flags("FORCE(CORNER) = ALL\nSUBCASE 1\n"
+                           "FORCE(CENTER) = ALL\n"),
+              (std::vector<F>{{false, false, false}}));
+    EXPECT_EQ(corner_flags("FORCE(CENTER) = ALL\nSUBCASE 1\n"
+                           "FORCE(CORNER) = ALL\n"),
+              (std::vector<F>{{false, false, true}}));
+
+    // A request without an option keeps the option given earlier for that
+    // request type; with none at all the run is CENTER.
+    EXPECT_EQ(corner_flags("STRESS(BILIN) = ALL\nSUBCASE 1\nSTRESS = ALL\n"),
+              (std::vector<F>{{true, false, false}}));
+    EXPECT_EQ(corner_flags("STRESS = ALL\nFORCE = ALL\n"),
+              (std::vector<F>{{false, false, false}}));
 }
 
 TEST(Model, HasAnyStrainOutputReflectsStrainFlagsOnly) {

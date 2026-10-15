@@ -18,17 +18,23 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 2,477 final failure
+The suite contains 3,226 definitions. The current run has 2,348 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
-| `unsupported_input` | 1,440 | 218 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 448 | 173 | Result exists but differs from the reference or comparator expectation |
-| `missing_result_data` | 245 | 42 | Solver completes but does not emit the requested result family |
+| `unsupported_input` | 1,438 | 217 | Requires unsupported cards, solution sequences, elements, or formulations |
+| `numerical_mismatch` | 457 | 172 | Result exists but differs from the reference or comparator expectation |
 | `input_parse_error` | 185 | 15 | Parser rejects syntax or a card variant used by a valid deck |
-| `solver_model_error` | 159 | 18 | Parsed model is rejected by a current formulation or geometry gate |
-| **Total** | **2,477** |  |  |
+| `solver_model_error` | 161 | 19 | Parsed model is rejected by a current formulation or geometry gate |
+| `missing_result_data` | 107 | 33 | Solver completes but does not emit the requested result family |
+| **Total** | **2,348** |  |  |
+
+Element engineering forces (`FORCE`/`ELFORCE`) are written for CBAR/CBEAM,
+CQUAD4 (centre and corner) and CTRIA3, and shell bending moments follow the
+Nastran sign convention (a positive moment puts the Z1 fibre in tension).
+`SHELLFORCES` is no longer a missing-result family; shell strain output
+(`SHELLSTRAINS`, 95 records) is now the largest one.
 
 GRID PS, GRDSET, and BAROR are now applied. The decks they unblocked solve
 (the SB-BAR I12/PINFLAG/OFFSET displacements and stresses match MYSTRAN
@@ -205,24 +211,28 @@ The most widespread ignored keywords across all failing decks are `ECHO`
 `PCOMP` (15), and `TEMPERATURE` (15). Abbreviated case-control commands
 (`DISP`, `STRE`, `SPCF`, ...) are now accepted and no longer appear.
 
-The main implementation work remains grid point force output (`GPFORCE`),
-element force output (`FORCE`/`ELFORCE`), CONM2, CQUAD8, PCOMP laminates,
-CROD/PROD, MPC force output, EIGR/reduction behavior, and unsupported solution
-sequences such as buckling.
+The main implementation work remains CQUAD8, PCOMP laminates, CROD/PROD,
+modal GPFORCE, EIGR/reduction behavior, and unsupported solution sequences
+such as buckling. CONM2, MPCFORCE, statics GPFORCE, and FORCE/ELFORCE are
+implemented.
 
 ### Missing Result Data
 
-There are 252 records across 40 decks:
+There are 107 records across 33 decks:
 
 | Result family | Records |
 |---|---:|
-| `SHELLFORCES` | 132 |
 | `SHELLSTRAINS` | 95 |
-| `MPCFORCES` | 12 |
-| `SHELLSTRESSES` | 4 |
 | `DISPLACEMENTS` | 4 |
-| `SPCFORCES` | 3 |
+| `ELASSTRESSES` | 3 |
+| `ELASFORCES` | 3 |
 | `MODE` | 2 |
+
+`SHELLSTRAINS` covers every remaining `bilin_*` location-option record: the
+CENTER/CORNER choice itself now matches (one location per run, taken from
+the first subcase with STRESS ahead of STRAIN ahead of FORCE), but shell
+strains are not yet written. `ELASSTRESSES`/`ELASFORCES` are CELAS stress and
+force recovery.
 
 The two `MODE` records are `V30 beam released dof x-x` and `xyz-xyz`, which
 expect the solve to fail (eigenvector `ABSENT`): releasing the same component
@@ -230,41 +240,33 @@ at both ends of a bar leaves a mechanism that MYSTRAN rejects. vibestran
 returns a zero-frequency mode instead, which is a valid modal answer; these
 records encode MYSTRAN behaviour rather than a correctness requirement.
 
-`SOLIDSTRAINS` has no missing-result records (the block is emitted for all
-supported solid types). The three remaining SPCFORCES records all belong to
-`vic/9/S30 node-surface coupling RBE3 19.bdf`. The decks whose SPCFORCES
-comparisons need value-level investigation (mostly RBE3/coupled-node and
-MITC4+ cases):
-
-- `vic/7/S30 mitc4 macneal twisted beam.bdf`
-- `vic/7/S30 mitc4 macneal twisted beam_2.bdf`
-- `vic/8/NAS S30 PLOAD2 PLOAD4 MITC4+.bdf`
-- `vic/9/S30 node-surface coupling RBE3 12.bdf`, `... 19.bdf`, `... 2.bdf`,
-  `... 5.bdf`, `... 7.bdf`, `... 8.bdf`
-- `vic/10/NAS S30 AUTOSPC reaction forces.bdf`
-
 Recommended order:
 
-1. Resolve the remaining SPCFORCES/MPCFORCES deck (`RBE3 19`) and the
-   SPCFORCES numerical mismatches on the RBE3-coupled and MITC4+ decks.
-2. Add shell engineering force recovery.
-3. Add shell strain recovery and output (solid strain is now emitted).
-4. Investigate the remaining small displacement and shell-stress omissions by
-   output request and element type.
+1. Shell strain recovery and output (`SHELLSTRAINS`, including `FIBER` and
+   `STRCUR` forms and corner rows).
+2. CELAS/CBUSH stress and force recovery.
+3. Investigate the remaining small displacement omissions by output request.
 
 ### Numerical Mismatch
 
-There are 476 records across 164 decks:
+There are 457 records across 172 decks:
 
 | Result family | Records |
 |---|---:|
-| `DISPLACEMENTS` | 173 |
-| Bulk comparison | 160 |
-| `SHELLSTRESSES` | 55 |
+| Bulk comparison | 166 |
+| `DISPLACEMENTS` | 151 |
+| `SHELLSTRESSES` | 43 |
 | `SPCFORCES` | 34 |
-| `REALEIGENVALUES` | 27 |
+| `REALEIGENVALUES` | 26 |
 | `MODE` | 15 |
 | `SOLIDSTRESSES` | 12 |
+| `SHELLFORCES` | 10 |
+
+Of the `SHELLFORCES` records, the CTRIA3 transverse shear ones expect a
+non-zero Q where the DKT element reports zero, the quad4 corner QX ones are
+roundoff (8.7e-15) against an all-zero reference with zero tolerance (see
+suite issue 2), and the rest belong to the MAT8 orthotropic thermal deck,
+which stops at a formulation gate.
 
 Element and constraint incidence overlaps when a deck contains multiple cards:
 
@@ -362,11 +364,9 @@ The goal is feature compatibility with correct, modern formulations, not
 numerical agreement with MYSTRAN; the suite's tolerances and some expected
 values encode MYSTRAN behaviour and are not a correctness oracle.
 
-1. Element force output (`FORCE`/`ELFORCE`), now the first blocker of
-   most Benchmark bulk comparisons (BARFORCES, SHELLFORCES): bar end forces
-   are already recovered (`CBarBeamElement::EndForces`); shell forces are the
-   largest missing-result family. Then modal GPFORCE (inertia-force rows;
-   34 decks request GPFORCE in SOL 103).
+1. Shell strain output (`SHELLSTRAINS`), now the largest missing-result
+   family. Then modal GPFORCE (inertia-force rows; 34 decks request GPFORCE
+   in SOL 103) and a converged CTRIA3 transverse shear recovery.
 2. CROD/PROD and CQUAD8.
 3. Triage the SPCFORCES `numerical_mismatch` decks (RBE3 node-surface
    coupling and MITC4+ reaction decks) and MPC force output.
@@ -479,3 +479,17 @@ most recent entry.
   quad4" decks, and "shell stress components tri3" (27 records) now pass.
   CTRIA3 transverse shear resultants are reported as zero (Kirchhoff
   element); a converged recovery is a follow-up.
+- **Element forces and shell moment sign (2,477 -> 2,348, no new
+  failures).** `FORCE`/`ELFORCE` engineering forces are written for
+  CBAR/CBEAM, CQUAD4 (centre and corner) and CTRIA3 in MYSTRAN's layout.
+  The CQUAD4 "bending sign" entry above misdiagnosed the problem: the
+  moments were already in Nastran's convention (kappa = [w_xx, w_yy,
+  2 w_xy] in rotation variables, positive moment = Z1 fibre in tension);
+  the fibre-stress formula in the writer had the wrong sign. The element B
+  matrices (CQUAD4 and the DKT) are back to positive curvature, the writer
+  uses sigma = N/t - 12 M z / t^3, and the stress tables' transverse shear
+  columns now carry the peak parabolic stress 1.5 Q / t. The quad
+  location option (CENTER/CORNER/BILIN) is now one per run, chosen as MSC
+  and MYSTRAN do: global entries and the first subcase only, STRESS ahead of
+  STRAIN ahead of FORCE, NONE requests ignored. Every `bilin_*` location
+  check now passes except those that need shell strain output.

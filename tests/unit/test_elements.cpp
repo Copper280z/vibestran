@@ -221,8 +221,8 @@ TEST(CQuad4, RecoveryUsesSeparateSectionMaterialsAndReportsMoments) {
 
     // Curvature patch: Ry = -x, i.e. slope w_x = x (w = x^2/2).  The fibre
     // displacement u(z) = z Ry = -z x gives eps_xx(z) = -z: tension at -z.
-    // Nastran's convention (kappa = -w_xx, Mx = integral of sigma z dz) makes
-    // that kappa_xx = -1 and Mx < 0.
+    // In Nastran's moment convention (positive Mx puts the -z fibre in
+    // tension) that is kappa_xx = w_xx = +1 and Mx > 0.
     u(10) = -1.0; // node 2 Ry
     u(16) = -1.0; // node 3 Ry
 
@@ -232,13 +232,13 @@ TEST(CQuad4, RecoveryUsesSeparateSectionMaterialsAndReportsMoments) {
         0.0);
 
     EXPECT_NEAR(response.membrane_strain(0), 1.0, 1e-12);
-    EXPECT_NEAR(response.curvature(0), -1.0, 1e-12);
+    EXPECT_NEAR(response.curvature(0), 1.0, 1e-12);
     EXPECT_NEAR(response.membrane_stress(0), 10.0, 1e-12);
     EXPECT_NEAR(response.membrane_stress(1), 0.0, 1e-12);
     EXPECT_NEAR(response.membrane_stress(2), 0.0, 1e-12);
 
-    // D_xx = E_bend * (12I/t^3) * t^3 / 12 = 120 * 2 / 12 = 20, Mx = -20.
-    EXPECT_NEAR(response.bending_moment(0), -20.0, 1e-12);
+    // D_xx = E_bend * (12I/t^3) * t^3 / 12 = 120 * 2 / 12 = 20, Mx = +20.
+    EXPECT_NEAR(response.bending_moment(0), 20.0, 1e-12);
     EXPECT_NEAR(response.bending_moment(1), 0.0, 1e-12);
     EXPECT_NEAR(response.bending_moment(2), 0.0, 1e-12);
   };
@@ -1936,8 +1936,8 @@ Eigen::VectorXd tria_plate_field(const std::array<std::array<double, 2>, 3> &xy,
 
 TEST(CTria3, DktPassesConstantCurvaturePatchTest) {
   // DKT reproduces any quadratic w exactly: with w = a x^2 + b y^2 + c xy
-  // (+ linear terms), the curvature is the constant Nastran kappa =
-  // -(2a, 2b, 2c) everywhere and u^T K u = A kappa^T D kappa.  A general
+  // (+ linear terms), the curvature is the constant kappa = (w_xx, w_yy,
+  // 2 w_xy) = (2a, 2b, 2c) everywhere and u^T K u = A kappa^T D kappa.  A general
   // (scalene, rotated) triangle and nu != 0 exercise every term.
   const double E = 2.0e5, nu = 0.3, t = 0.2;
   Model m = make_shell_model(E, nu, t);
@@ -1952,7 +1952,7 @@ TEST(CTria3, DktPassesConstantCurvaturePatchTest) {
       xy, [&](double x, double y) { return a*x*x + b*y*y + c*x*y + d*x + e*y + f; },
       [&](double x, double y) { return 2*a*x + c*y + d; },
       [&](double x, double y) { return 2*b*y + c*x + e; });
-  const Eigen::Vector3d kappa(-2*a, -2*b, -2*c);
+  const Eigen::Vector3d kappa(2*a, 2*b, 2*c);
   const double D0 = E * t * t * t / (12.0 * (1.0 - nu * nu));
   Eigen::Matrix3d Db;
   Db << D0, nu * D0, 0, nu * D0, D0, 0, 0, 0, D0 * (1.0 - nu) / 2.0;

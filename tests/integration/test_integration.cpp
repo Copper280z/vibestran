@@ -4185,8 +4185,8 @@ TEST(Integration, DktSimplySupportedPlateConvergesToNavierSolution) {
 
 TEST(Integration, DktCantileverMomentMatchesStatics) {
     // Plate strip 10 x 1 (two triangles per cell), clamped at x = 0, tip
-    // line load P = 1 in +z: Mx = -P (L - x) / b (hogging, Nastran sign:
-    // top fibre in compression), My = 0 (nu = 0).  Elements 9 and 10 occupy
+    // line load P = 1 in +z: Mx = +P (L - x) / b in Nastran's convention
+    // (positive moment = tension in the -z fibre, as here), My = 0 (nu = 0).  Elements 9 and 10 occupy
     // 4 <= x <= 5.  Element 9's x axis (G1 -> G2) is the global x axis;
     // element 10's runs at 45 degrees, so its element-frame moment is
     // Mx' = Mx cos^2(45) = Mx / 2.  DKT is a Kirchhoff element: its
@@ -4208,11 +4208,11 @@ TEST(Integration, DktCantileverMomentMatchesStatics) {
     for (const auto& ps : res.subcases[0].plate_stresses) {
         if (ps.eid.value == 9) {
             const double xc = 14.0 / 3.0;
-            EXPECT_NEAR(ps.mx, -(10.0 - xc), 0.03 * (10.0 - xc));
+            EXPECT_NEAR(ps.mx, 10.0 - xc, 0.03 * (10.0 - xc));
             ++checked;
         } else if (ps.eid.value == 10) {
             const double xc = 13.0 / 3.0;
-            EXPECT_NEAR(ps.mx, -0.5 * (10.0 - xc), 0.03 * (10.0 - xc));
+            EXPECT_NEAR(ps.mx, 0.5 * (10.0 - xc), 0.03 * (10.0 - xc));
             ++checked;
         } else {
             continue;
@@ -4221,4 +4221,52 @@ TEST(Integration, DktCantileverMomentMatchesStatics) {
         EXPECT_EQ(ps.qy, 0.0);
     }
     EXPECT_EQ(checked, 2);
+}
+
+TEST(Integration, Cquad4CantileverForcesAndShearStressMatchStatics) {
+    // Plate strip 10 x 1 of CQUAD4, clamped at x = 0, tip line load P = 1 in
+    // +z.  Nastran sign convention (as MYSTRAN prints): Mx = +P (L - x) / b
+    // (the -z fibre in tension), Qx = +P / b; the peak transverse shear
+    // stress is 1.5 Qx / t and the Z1 (bottom) fibre is in tension.
+    std::ostringstream bdf;
+    bdf << "SOL 101\nCEND\nSUBCASE 1\n  LOAD = 1\n  SPC = 1\n  STRESS = ALL\n"
+        << "  FORCE = ALL\nBEGIN BULK\nMAT1,1,1.0E7,,0.0\nPSHELL,1,1,0.1,1,,1\n";
+    for (int i = 0; i <= 10; ++i)
+        bdf << "GRID," << i + 1 << ",," << i << ".,0.,0.\nGRID," << i + 101 << ",," << i << ".,1.,0.\n";
+    for (int i = 0; i < 10; ++i)
+        bdf << "CQUAD4," << i + 1 << ",1," << i + 1 << "," << i + 2 << "," << i + 102 << "," << i + 101 << "\n";
+    bdf << "SPC1,1,123456,1,101\nFORCE,1,11,,0.5,0.,0.,1.\nFORCE,1,111,,0.5,0.,0.,1.\nENDDATA\n";
+    const SolverResults res = run_analysis(bdf.str());
+    int checked = 0;
+    for (const auto& ps : res.subcases[0].plate_stresses) {
+        if (ps.eid.value < 3 || ps.eid.value > 8)
+            continue; // away from the clamp and the loaded edge
+        const double xc = ps.eid.value - 0.5;
+        EXPECT_NEAR(ps.mx, 10.0 - xc, 0.02 * (10.0 - xc)) << ps.eid.value;
+        EXPECT_NEAR(ps.qx, 1.0, 0.02) << ps.eid.value;
+        EXPECT_NEAR(ps.nx, 0.0, 1e-9);
+        ++checked;
+    }
+    EXPECT_EQ(checked, 6);
+
+    // F06 transverse shear column and fibre signs for element 5.
+    Model model = BdfParser::parse_string(bdf.str());
+    std::ostringstream f06;
+    F06Writer::write(res, model, f06);
+    std::istringstream iss(f06.str());
+    std::string z1, z2;
+    while (std::getline(iss, z1)) {
+        if (z1.size() > 20 && z1.substr(11, 6) == "CENTER" &&
+            z1.substr(0, 9).find_first_not_of(' ') != std::string::npos &&
+            std::stoi(z1.substr(0, 9)) == 5) {
+            std::getline(iss, z2);
+            break;
+        }
+    }
+    ASSERT_FALSE(z2.empty());
+    const double sx_z1 = std::stod(z1.substr(34, 12));
+    const double sx_z2 = std::stod(z2.substr(34, 12));
+    EXPECT_GT(sx_z1, 0.0);            // bottom fibre in tension
+    EXPECT_NEAR(sx_z2, -sx_z1, 1e-6 * sx_z1);
+    EXPECT_NEAR(std::stod(z1.substr(120, 12)), 1.5 * 1.0 / 0.1, 0.03 * 15.0);
 }

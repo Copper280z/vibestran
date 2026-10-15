@@ -94,12 +94,22 @@ struct LineStressEnd {
   double smin{0};
 };
 
+/// CBAR/CBEAM engineering forces in the element frame (Nastran sign
+/// convention): plane 1/2 bending moments at ends A and B, plane 1/2 shear,
+/// axial force (tension positive), and torque.
+struct LineForces {
+  double m1a{0}, m2a{0}, m1b{0}, m2b{0};
+  double v1{0}, v2{0};
+  double axial{0}, torque{0};
+};
+
 struct LineStress {
   constexpr LineStress() = default;
   ElementId eid{0};
   ElementType etype{ElementType::CBAR};
   LineStressEnd end_a;
   LineStressEnd end_b;
+  LineForces forces;
 };
 
 /// Nodal temperature (SOL 153 heat-transfer output).
@@ -264,6 +274,11 @@ private:
   static void write_solid_strain_table(const SubCaseResults& sc,
                                        std::ostream& out, ElementType etype,
                                        bool corners);
+  static void write_bar_force_table(const SubCaseResults& sc,
+                                    std::ostream& out);
+  static void write_shell_force_table(const SubCaseResults& sc,
+                                      std::ostream& out, ElementType etype,
+                                      bool corners);
   static void write_bar_stress_table(const SubCaseResults& sc,
                                      std::ostream& out);
   static void write_quad4_gpstress_table(const SubCaseResults& sc,

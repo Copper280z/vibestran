@@ -1502,6 +1502,10 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
       ls.end_b.axial = recovery.end_b.axial;
       ls.end_b.smax = recovery.end_b.smax;
       ls.end_b.smin = recovery.end_b.smin;
+      ls.forces = {recovery.forces.m1a, recovery.forces.m2a,
+                   recovery.forces.m1b, recovery.forces.m2b,
+                   recovery.forces.v1,  recovery.forces.v2,
+                   recovery.forces.axial, recovery.forces.torque};
       res.line_stresses.push_back(ls);
     } else if (elem_data.type == ElementType::CQUAD4 ||
                elem_data.type == ElementType::CTRIA3) {

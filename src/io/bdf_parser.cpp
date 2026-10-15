@@ -53,7 +53,7 @@ canonicalize_case_control_command(const std::string &line) {
     std::string_view canonical;
     std::string_view alias;
   };
-  static constexpr std::array<Command, 14> kCommands{{
+  static constexpr std::array<Command, 16> kCommands{{
       {"DISPLACEMENT", "DISPLACEMENT"},
       {"EIGENVECTOR", "EIGENVECTOR"},
       {"VECTOR", "VECTOR"},
@@ -64,6 +64,8 @@ canonicalize_case_control_command(const std::string &line) {
       {"SPCFORCES", "SPCFORCES"},
       {"MPCFORCES", "MPCFORCES"},
       {"GPFORCE", "GPFORCE"},
+      {"FORCE", "FORCE"},
+      {"FORCE", "ELFORCE"},
       {"METHOD", "METHOD"},
       {"ANALYSIS", "ANALYSIS"},
       {"THERMAL", "THERMAL"},
@@ -259,6 +261,7 @@ Model BdfParser::parse_stream(std::istream &in) {
              sc.spc_force_print || sc.spc_force_plot ||
              sc.mpc_force_print || sc.mpc_force_plot ||
              sc.gpforce_print || sc.gpforce_plot ||
+             sc.force_print || sc.force_plot ||
              sc.eigrl_id != 0 ||
              sc.eigvec_print || sc.eigvec_plot;
     };
@@ -282,6 +285,38 @@ Model BdfParser::parse_stream(std::istream &in) {
         do_print = true;
       }
       return {do_print, do_plot};
+    };
+
+    // Quadrilateral stress/strain/force location (CENTER, CORNER, BILIN,
+    // CUBIC, SGAGE): only one is used per run (MSC QRG; MYSTRAN agrees).  Each
+    // request type keeps the last option given before the second SUBCASE
+    // (global entries plus the first subcase); later subcases cannot change
+    // it.  The run-wide choice is then taken from STRESS if the first subcase
+    // requests stresses, else STRAIN, else FORCE, else CENTER.  A request set
+    // to NONE does not count as a request.
+    std::optional<bool> stress_location_is_corner;
+    std::optional<bool> strain_location_is_corner;
+    std::optional<bool> force_location_is_corner;
+    auto note_location = [&](const std::string& keyword,
+                             std::optional<bool>& location_is_corner) {
+      if (in_sc && !ctx.model.analysis.subcases.empty())
+        return; // second or later subcase
+      const size_t lp = keyword.find('(');
+      const size_t rp = keyword.find(')');
+      if (lp == std::string::npos || rp == std::string::npos || rp < lp)
+        return;
+      const std::string mods = keyword.substr(lp + 1, rp - lp - 1);
+      std::istringstream ms(mods);
+      std::string tok;
+      while (std::getline(ms, tok, ',')) {
+        tok.erase(std::remove_if(tok.begin(), tok.end(),
+                                 [](unsigned char c) { return std::isspace(c); }),
+                  tok.end());
+        if (tok == "CORNER" || tok == "BILIN")
+          location_is_corner = true;
+        else if (tok == "CENTER" || tok == "CUBIC" || tok == "SGAGE")
+          location_is_corner = false;
+      }
     };
 
     for (int i = 0; i < begin_bulk_line; ++i) {
@@ -425,6 +460,7 @@ Model BdfParser::parse_stream(std::istream &in) {
         }
       } else if (kw.starts_with("STRAIN")) {
         SubCase& sc = current_subcase();
+        note_location(kw, strain_location_is_corner);
         // Syntax: STRAIN[(PRINT[,PLOT][,CORNER])] = ALL|NONE|<set_id>
         // No PRINT/PLOT modifier defaults to PRINT.
         // CORNER requests vertex strains in addition to the centroidal STRAIN
@@ -459,6 +495,7 @@ Model BdfParser::parse_stream(std::istream &in) {
         }
       } else if (kw.starts_with("STRESS")) {
         SubCase& sc = current_subcase();
+        note_location(kw, stress_location_is_corner);
         // Syntax: STRESS[(PRINT[,PLOT][,CORNER])] = ALL|NONE|<set_id>
         // No PRINT/PLOT modifier defaults to PRINT.
         // CORNER requests vertex stresses in addition to the centroidal STRESS
@@ -489,6 +526,36 @@ Model BdfParser::parse_stream(std::istream &in) {
                 sc.stress_corner_print = sc.stress_corner_print || do_print;
                 sc.stress_corner_plot = sc.stress_corner_plot || do_plot;
               }
+            }
+          }
+        }
+      } else if (kw.starts_with("FORCE") || kw.starts_with("ELFORCE")) {
+        SubCase& sc = current_subcase();
+        note_location(kw, force_location_is_corner);
+        // Syntax: FORCE[(PRINT,PLOT,CORNER|BILIN|CENTER,BOTH|ENGR|NODE)] =
+        // ALL|NONE|<set_id>; ELFORCE is an alias.  Engineering element
+        // forces are written; CORNER adds shell corner rows.
+        size_t eq = kw.find('=');
+        if (eq != std::string::npos) {
+          std::string val = kw.substr(eq + 1);
+          size_t ns = val.find_first_not_of(" \t");
+          if (ns != std::string::npos) val = val.substr(ns);
+          if (val.starts_with("NONE")) {
+            sc.force_print = false;
+            sc.force_plot = false;
+            sc.force_corner = false;
+          } else {
+            const auto [do_print, do_plot] =
+                parse_print_plot_modifiers(kw, /*default_print=*/true);
+            sc.force_print = sc.force_print || do_print;
+            sc.force_plot = sc.force_plot || do_plot;
+            const size_t lp = kw.find('(');
+            const size_t rp = kw.find(')');
+            if (lp != std::string::npos && rp != std::string::npos && rp > lp) {
+              const std::string mods = kw.substr(lp + 1, rp - lp - 1);
+              if (mods.find("CORNER") != std::string::npos ||
+                  mods.find("BILIN") != std::string::npos)
+                sc.force_corner = true;
             }
           }
         }
@@ -634,6 +701,26 @@ Model BdfParser::parse_stream(std::istream &in) {
       } else {
         ctx.model.analysis.subcases.push_back(global_sc);
       }
+    }
+
+    // Apply the run-wide location option (see note_location): corner output
+    // for every active STRESS/STRAIN/FORCE request when the governing option
+    // is CORNER/BILIN, centre only otherwise.
+    bool corners = false;
+    if (!ctx.model.analysis.subcases.empty()) {
+      const SubCase& first_sc = ctx.model.analysis.subcases.front();
+      if (first_sc.stress_print || first_sc.stress_plot)
+        corners = stress_location_is_corner.value_or(false);
+      else if (first_sc.strain_print)
+        corners = strain_location_is_corner.value_or(false);
+      else if (first_sc.force_print || first_sc.force_plot)
+        corners = force_location_is_corner.value_or(false);
+    }
+    for (auto& sc : ctx.model.analysis.subcases) {
+      sc.stress_corner_print = corners && sc.stress_print;
+      sc.stress_corner_plot = corners && sc.stress_plot;
+      sc.strain_corner_print = corners && sc.strain_print;
+      sc.force_corner = corners && (sc.force_print || sc.force_plot);
     }
   }
 

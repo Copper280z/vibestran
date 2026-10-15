@@ -599,6 +599,9 @@ struct SubCase {
   bool spc_force_plot{false};      // SPCFORCE(PLOT)=ALL
   bool mpc_force_print{false};     // MPCFORCE(PRINT)=ALL or MPCFORCE=ALL
   bool mpc_force_plot{false};      // MPCFORCE(PLOT)=ALL
+  bool force_print{false};         // FORCE/ELFORCE(PRINT)=ALL (engineering)
+  bool force_plot{false};          // FORCE/ELFORCE(PLOT)=ALL
+  bool force_corner{false};        // FORCE(CORNER|BILIN): shell corner rows
   bool gpforce_print{false};       // GPFORCE(PRINT)=ALL or GPFORCE=ALL
   bool gpforce_plot{false};        // GPFORCE(PLOT)=ALL
 

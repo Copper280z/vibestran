@@ -1540,6 +1540,32 @@ ENDDATA
     EXPECT_TRUE(sc2.mpc_force_print);
 }
 
+TEST(BdfParser, ElementForceRequests) {
+    const Model m = BdfParser::parse_string(R"(
+SOL 101
+CEND
+SUBCASE 1
+  ELFORCE(BOTH) = ALL
+SUBCASE 2
+  FORCE(PRINT,CORNER) = ALL
+SUBCASE 3
+  FORC = ALL
+  FORCE = NONE
+BEGIN BULK
+GRID,1,,0.,0.,0.
+ENDDATA
+)");
+    ASSERT_EQ(m.analysis.subcases.size(), 3u);
+    EXPECT_TRUE(m.analysis.subcases[0].force_print);
+    // The location option is fixed by the first subcase, whose ELFORCE(BOTH)
+    // gives none, so the run is CENTER; subcase 2's CORNER is ignored.
+    EXPECT_FALSE(m.analysis.subcases[0].force_corner);
+    EXPECT_TRUE(m.analysis.subcases[1].force_print);
+    EXPECT_FALSE(m.analysis.subcases[1].force_corner);
+    EXPECT_FALSE(m.analysis.subcases[2].force_print);
+    EXPECT_FALSE(m.analysis.subcases[2].force_corner);
+}
+
 TEST(BdfParser, MpcforceAndGpforceRequests) {
     const Model m = BdfParser::parse_string(R"(
 SOL 101

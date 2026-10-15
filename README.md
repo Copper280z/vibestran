@@ -51,6 +51,7 @@ vibestran/
 - **Constraints**: SPC, SPC1, GRID PS (permanent SPCs, in the grid's CD frame), MPC, RBE2, RBE3
 - **Defaults**: GRDSET (CP/CD/PS for blank GRID fields), BAROR (PID/orientation/OFFT for blank CBAR fields)
 - **Reaction output**: SPCFORCE(S) and MPCFORCE(S) in F06, in each grid's global (CD) system (MYSTRAN-compatible blocks)
+- **Element forces**: FORCE/ELFORCE for CBAR/CBEAM, CQUAD4 (centre and CORNER/BILIN) and CTRIA3, Nastran sign convention (MYSTRAN-compatible blocks)
 - **Grid point force balance**: GPFORCE for linear statics (applied, thermal, SPC, MPC, and per-element rows; MYSTRAN layout)
 - **Coordinate systems**: CORD1R/C/S, CORD2R/C/S
 - **Input formats**: Nastran BDF (`.bdf`) and CalculiX/Abaqus (`.inp`, experimental)
@@ -64,6 +65,7 @@ Notable current limitations:
 - Stress recovery is not yet implemented for CBUSH, CELAS1/2, and CMASS1/2.
 - CBAR offsets in the element system (OFFT `xGO`/`xOG`/`xOO`) are not yet supported.
 - GRID and GRDSET SEID (superelements) are not supported.
+- Shell strain output (STRAIN for CQUAD4/CTRIA3) is not yet written; element forces are not yet written for CBUSH, CELAS, or solids.
 - GPFORCE is written for linear statics only (no modal inertia-force rows yet).
 - CTRIA3 uses DKT (Kirchhoff) bending, so its transverse shear resultants are reported as zero.
 - Mass is consistent by default (unlike Nastran, whose default is lumped); `PARAM,COUPMASS,-1` selects lumped mass.
