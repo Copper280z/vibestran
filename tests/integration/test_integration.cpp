@@ -4245,6 +4245,14 @@ TEST(Integration, Cquad4CantileverForcesAndShearStressMatchStatics) {
         EXPECT_NEAR(ps.mx, 10.0 - xc, 0.02 * (10.0 - xc)) << ps.eid.value;
         EXPECT_NEAR(ps.qx, 1.0, 0.02) << ps.eid.value;
         EXPECT_NEAR(ps.nx, 0.0, 1e-9);
+        // Strains: kappa = M / D with D = E t^3 / 12 (nu = 0), section
+        // shear strain gamma = Q / (k G t) with k = 5/6, G = E / 2.
+        const double D = 1.0e7 * 1.0e-3 / 12.0;
+        EXPECT_NEAR(ps.strain.kx, (10.0 - xc) / D, 0.02 * (10.0 - xc) / D)
+            << ps.eid.value;
+        EXPECT_NEAR(ps.strain.gxz, 1.0 / (5.0 / 6.0 * 5.0e6 * 0.1),
+                    0.03 * 2.4e-6) << ps.eid.value;
+        EXPECT_NEAR(ps.strain.ex, 0.0, 1e-12);
         ++checked;
     }
     EXPECT_EQ(checked, 6);
@@ -4269,4 +4277,13 @@ TEST(Integration, Cquad4CantileverForcesAndShearStressMatchStatics) {
     EXPECT_GT(sx_z1, 0.0);            // bottom fibre in tension
     EXPECT_NEAR(sx_z2, -sx_z1, 1e-6 * sx_z1);
     EXPECT_NEAR(std::stod(z1.substr(120, 12)), 1.5 * 1.0 / 0.1, 0.03 * 15.0);
+
+    // The Z1 fibre strain, strain(z) = membrane - z * curvature at z = -t/2,
+    // is the Z1 stress over E (nu = 0).
+    for (const auto& ps : res.subcases[0].plate_stresses) {
+        if (ps.eid.value != 5)
+            continue;
+        EXPECT_NEAR(1.0e7 * (ps.strain.ex + 0.05 * ps.strain.kx), sx_z1,
+                    1e-4 * sx_z1);
+    }
 }

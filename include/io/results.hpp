@@ -24,6 +24,16 @@ struct NodeDisplacement {
   CoordId coord{0};          // frame of d: the grid's displacement system
 };
 
+/// Total shell strains at a point in the element frame (engineering shear).
+/// The strain at fibre distance z is membrane - z * curvature, so a positive
+/// curvature (and moment) puts the -z (Z1) fibre in tension.
+struct ShellStrain {
+  constexpr ShellStrain() = default;
+  double ex{0}, ey{0}, exy{0}; // mid-surface membrane strains
+  double kx{0}, ky{0}, kxy{0}; // curvatures (kxy is the engineering twist)
+  double gxz{0}, gyz{0};       // transverse shear strains (section average)
+};
+
 /// Element stress at centroid (for plate elements: CQUAD4, CTRIA3)
 struct PlateStressPoint {
   constexpr PlateStressPoint() = default;
@@ -33,6 +43,7 @@ struct PlateStressPoint {
   double von_mises{0};
   double nx{0}, ny{0}, nxy{0}; // membrane force resultants per unit length
   double qx{0}, qy{0};         // transverse shear resultants per unit length
+  ShellStrain strain;
 };
 
 struct PlateStress {
@@ -44,6 +55,7 @@ struct PlateStress {
   double von_mises{0}; // derived
   double nx{0}, ny{0}, nxy{0};  // membrane force resultants per unit length
   double qx{0}, qy{0};          // transverse shear resultants per unit length
+  ShellStrain strain;
   std::vector<PlateStressPoint> nodal;
 };
 
@@ -267,6 +279,10 @@ private:
   static void write_shell_stress_table(
       const SubCaseResults& sc, std::ostream& out, ElementType etype,
       bool corners,
+      const std::unordered_map<ElementId, const PShell*>& shell_props);
+  static void write_shell_strain_table(
+      const SubCaseResults& sc, std::ostream& out, ElementType etype,
+      bool corners, bool fiber, bool max_shear,
       const std::unordered_map<ElementId, const PShell*>& shell_props);
   static void write_solid_stress_table(const SubCaseResults& sc,
                                        std::ostream& out, ElementType etype,

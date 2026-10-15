@@ -128,12 +128,17 @@ double compute_drilling_stiffness(const LocalKe &Ke) {
   return 1e-12 * max_diag;
 }
 
+/// Nastran CQUAD4 element coordinate system: z is normal to both diagonals
+/// (d13 x d24, the mean plane of a warped element) and x bisects the angle
+/// between the diagonals, x ~ d13/|d13| - d24/|d24|, so it is symmetric in
+/// the element's corners rather than tied to the G1-G2 edge.  Stress,
+/// strain and force output is reported in this frame.
 ShellFrame compute_shell_frame(const std::array<Vec3, 4> &g) {
   ShellFrame fr;
-  const Vec3 v12 = g[1] - g[0];
-  const Vec3 v14 = g[3] - g[0];
-  fr.e3 = v12.cross(v14).normalized();
-  fr.e1 = v12.normalized();
+  const Vec3 d13 = (g[2] - g[0]).normalized();
+  const Vec3 d24 = (g[3] - g[1]).normalized();
+  fr.e3 = d13.cross(d24).normalized();
+  fr.e1 = (d13 - d24).normalized();
   fr.e2 = fr.e3.cross(fr.e1);
 
   for (int n = 0; n < 4; ++n) {
@@ -800,7 +805,8 @@ recover_shell_response(ElementId eid, PropertyId pid,
   response.membrane_strain = Bm * u_membrane;
   response.curvature = Bb * u_plate;
   // Same assumed shear strains and shear rigidity as the stiffness.
-  response.transverse_shear = section.T * (Bs * u_plate);
+  response.transverse_shear_strain = Bs * u_plate;
+  response.transverse_shear = section.T * response.transverse_shear_strain;
 
   const double dT = temperature - reference_temperature;
   const Eigen::Vector3d mechanical_membrane =

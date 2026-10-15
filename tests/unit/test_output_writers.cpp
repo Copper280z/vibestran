@@ -867,6 +867,116 @@ TEST(F06Writer, Quad4FiberStressesFromBendingMoment) {
                 std::abs(10.0 - 600.0) * 1e-5);
 }
 
+TEST(F06Writer, ShellStrainBlocksFollowParserLayout) {
+    // Validation parser (0-based): QUAD4 strain header line 2 holds
+    // "Distance" (FIBER) or "Curvature" (STRCUR) at 24 and "Shear-XY" at
+    // 109 for maximum shear; TRIA3 at 26 and 113.  Values sit in the same
+    // windows as the stress table: XX at 34, XY at 60, angle at 74 (6
+    // wide), equivalent strain at 107, ZX/YZ at 120/133 on the first row.
+    // FIBER rows are strain(z) = membrane - z * curvature at z = -/+ t/2;
+    // the von Mises strain is (2/3) sqrt(ex^2 + ey^2 - ex ey + 3/4 g^2) and
+    // the maximum shear strain is sqrt((ex - ey)^2 + g^2).
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].stress_print = false;
+    m.analysis.subcases[0].strain_print = true;
+    PShell prop;
+    prop.pid = PropertyId{10};
+    prop.t = 0.1;
+    m.properties[prop.pid] = prop;
+    for (const auto& [id, type] : {std::pair{7, ElementType::CQUAD4},
+                                   std::pair{8, ElementType::CTRIA3}}) {
+        ElementData elem;
+        elem.id = ElementId{id};
+        elem.type = type;
+        elem.pid = prop.pid;
+        m.elements.push_back(elem);
+    }
+    ShellStrain e;
+    e.ex = 1.0e-3; e.ey = -2.0e-4; e.exy = 6.0e-4;
+    e.kx = 0.5; e.ky = 0.0; e.kxy = 0.1;
+    e.gxz = 3.0e-4; e.gyz = -1.0e-4;
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    for (const auto& elem : m.elements) {
+        PlateStress ps;
+        ps.eid = elem.id;
+        ps.etype = elem.type;
+        ps.strain = e;
+        sc.plate_stresses.push_back(ps);
+    }
+    res.subcases.push_back(sc);
+
+    struct Block { std::string header; std::string row1, row2; };
+    auto blocks = [&](const Model& model) {
+        std::ostringstream oss;
+        F06Writer::write(res, model, oss);
+        std::istringstream iss(oss.str());
+        std::vector<Block> out;
+        std::string line;
+        bool in_strain = false;
+        while (std::getline(iss, line)) {
+            if (line.find("S T R A I N S") != std::string::npos) {
+                in_strain = true;
+                std::getline(iss, line); // element type
+                std::getline(iss, line); // labels
+                std::getline(iss, line);
+                out.push_back({line, "", ""});
+            } else if (in_strain && (line.find("CENTER") != std::string::npos ||
+                                     line.find("Anywhere") != std::string::npos)) {
+                out.back().row1 = line;
+                std::getline(iss, out.back().row2);
+            }
+        }
+        return out;
+    };
+    auto val = [](const std::string& line, size_t pos, size_t w = 12) {
+        return std::stod(line.substr(pos, w));
+    };
+    auto vm = [](double x, double y, double g) {
+        return 2.0 / 3.0 * std::sqrt(x * x + y * y - x * y + 0.75 * g * g);
+    };
+
+    // STRCUR (the default): membrane strain row, then curvature row.
+    const auto strcur = blocks(m);
+    ASSERT_EQ(strcur.size(), 2u);
+    EXPECT_EQ(strcur[0].header.substr(24, 9), "Curvature");
+    EXPECT_EQ(strcur[1].header.substr(26, 9), "Curvature");
+    const Block& q = strcur[0];
+    EXPECT_NEAR(val(q.row1, 34), 1.0e-3, 1e-8);
+    EXPECT_NEAR(val(q.row1, 60), 6.0e-4, 1e-9);
+    EXPECT_NEAR(val(q.row1, 74, 6),
+                0.5 * std::atan2(6.0e-4, 1.2e-3) * 180.0 / std::numbers::pi,
+                0.01);
+    EXPECT_NEAR(val(q.row1, 107), vm(1.0e-3, -2.0e-4, 6.0e-4), 1e-8);
+    EXPECT_NEAR(val(q.row1, 120), 3.0e-4, 1e-9);
+    EXPECT_NEAR(val(q.row1, 133), -1.0e-4, 1e-9);
+    EXPECT_NEAR(val(q.row2, 34), 0.5, 1e-6);
+    EXPECT_NEAR(val(q.row2, 60), 0.1, 1e-6);
+    EXPECT_NEAR(val(strcur[1].row2, 37), 0.5, 1e-6); // TRIA3 XX window
+
+    // FIBER with maximum shear strain.
+    m.analysis.subcases[0].strain_fiber = true;
+    m.analysis.subcases[0].strain_max_shear = true;
+    const auto fiber = blocks(m);
+    ASSERT_EQ(fiber.size(), 2u);
+    EXPECT_EQ(fiber[0].header.substr(24, 8), "Distance");
+    EXPECT_EQ(fiber[0].header.substr(109, 8), "Shear-XY");
+    EXPECT_EQ(fiber[1].header.substr(26, 8), "Distance");
+    EXPECT_EQ(fiber[1].header.substr(113, 8), "Shear-XY");
+    const double x1 = 1.0e-3 + 0.05 * 0.5, g1 = 6.0e-4 + 0.05 * 0.1;
+    const double x2 = 1.0e-3 - 0.05 * 0.5, g2 = 6.0e-4 - 0.05 * 0.1;
+    EXPECT_NEAR(val(fiber[0].row1, 34), x1, 1e-7);   // Z1 fibre in tension
+    EXPECT_NEAR(val(fiber[0].row2, 34), x2, 1e-7);
+    EXPECT_NEAR(val(fiber[0].row1, 60), g1, 1e-8);
+    EXPECT_NEAR(val(fiber[0].row1, 107),
+                std::hypot(x1 + 2.0e-4, g1), 1e-7);
+    EXPECT_NEAR(val(fiber[0].row2, 107),
+                std::hypot(x2 + 2.0e-4, g2), 1e-7);
+    EXPECT_NEAR(val(fiber[1].row1, 37), x1, 1e-7);
+    EXPECT_NEAR(val(fiber[1].row1, 111), std::hypot(x1 + 2.0e-4, g1), 1e-7);
+}
+
 TEST(F06Writer, BarStressTableMatchesParserColumns) {
     // Parser windows: eid cols 2-9, SA/SB1-4 at 11/25/39/53, axial at 67,
     // each 13 wide.
@@ -1734,6 +1844,35 @@ TEST(BdfParser, LocationOptionPrecedence) {
               (std::vector<F>{{true, false, false}}));
     EXPECT_EQ(corner_flags("STRESS = ALL\nFORCE = ALL\n"),
               (std::vector<F>{{false, false, false}}));
+}
+
+TEST(BdfParser, StrainFormAndEquivalentStrainOptions) {
+    // STRCUR (membrane strain + curvature) and von Mises are the defaults;
+    // FIBER and SHEAR/MAXS are set per request and inherited from the
+    // global case control.
+    const Model m = BdfParser::parse_string(R"(
+SOL 101
+CEND
+STRAIN(FIBER,SHEAR) = ALL
+SUBCASE 1
+SUBCASE 2
+  STRAIN(STRCUR,VONMISES) = ALL
+SUBCASE 3
+  STRAIN = ALL
+BEGIN BULK
+ENDDATA
+)");
+    ASSERT_EQ(m.analysis.subcases.size(), 3u);
+    EXPECT_TRUE(m.analysis.subcases[0].strain_fiber);
+    EXPECT_TRUE(m.analysis.subcases[0].strain_max_shear);
+    EXPECT_FALSE(m.analysis.subcases[1].strain_fiber);
+    EXPECT_FALSE(m.analysis.subcases[1].strain_max_shear);
+    EXPECT_TRUE(m.analysis.subcases[2].strain_fiber);
+
+    const Model d = BdfParser::parse_string(
+        "SOL 101\nCEND\nSTRAIN(MAXS) = ALL\nBEGIN BULK\nENDDATA\n");
+    EXPECT_FALSE(d.analysis.subcases[0].strain_fiber);
+    EXPECT_TRUE(d.analysis.subcases[0].strain_max_shear);
 }
 
 TEST(Model, HasAnyStrainOutputReflectsStrainFlagsOnly) {

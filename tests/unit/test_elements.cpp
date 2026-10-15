@@ -247,6 +247,79 @@ TEST(CQuad4, RecoveryUsesSeparateSectionMaterialsAndReportsMoments) {
   check_formulation(ShellFormulation::MITC4);
 }
 
+TEST(CQuad4, ElementFrameBisectsTheDiagonals) {
+  // Nastran's CQUAD4 x-axis bisects the angle between the diagonals,
+  // x ~ d13/|d13| - d24/|d24|, so results are reported in a frame that
+  // does not depend on the G1-G2 edge.  A uniform basic strain field on a
+  // skewed quad (the MacNeal patch-test element 1, rotated in its plane)
+  // must come out as that tensor rotated into the bisector frame, and
+  // renumbering the corners cyclically must rotate the frame by exactly 90
+  // degrees (ex <-> ey, gxy -> -gxy).
+  const std::array<std::array<double, 2>, 4> base{
+      {{0.0, 0.0}, {0.04, 0.02}, {0.08, 0.08}, {0.0, 0.12}}};
+  const double rot = 0.3; // in-plane rigid rotation of the whole patch
+  const double a = 1.0e-3, b = 0.4e-3, c = 0.7e-3, d = -0.2e-3;
+  const double ex = a, ey = d, gxy = b + c; // u = a x + b y, v = c x + d y
+
+  auto check = [&](ShellFormulation formulation, int shift) {
+    Model m;
+    add_mat1(m, 1, 1.0e6, 0.25);
+    PShell ps;
+    ps.pid = PropertyId{1};
+    ps.mid1 = MaterialId{1};
+    ps.mid2 = MaterialId{1};
+    ps.mid3 = MaterialId{1};
+    ps.t = 1.0e-3;
+    ps.shell_form = formulation;
+    m.properties[ps.pid] = ps;
+    std::array<std::array<double, 2>, 4> p{};
+    for (int n = 0; n < 4; ++n) {
+      const auto& q = base[static_cast<size_t>((n + shift) % 4)];
+      p[static_cast<size_t>(n)] = {std::cos(rot) * q[0] - std::sin(rot) * q[1],
+                                   std::sin(rot) * q[0] + std::cos(rot) * q[1]};
+      add_grid(m, n + 1, p[static_cast<size_t>(n)][0],
+               p[static_cast<size_t>(n)][1], 0.0);
+    }
+    Eigen::Matrix<double, 24, 1> u = Eigen::Matrix<double, 24, 1>::Zero();
+    for (int n = 0; n < 4; ++n) {
+      const auto& q = p[static_cast<size_t>(n)];
+      u(6 * n) = a * q[0] + b * q[1];
+      u(6 * n + 1) = c * q[0] + d * q[1];
+    }
+    const std::array<NodeId, 4> nodes{NodeId{1}, NodeId{2}, NodeId{3},
+                                      NodeId{4}};
+    const auto r = CQuad4::recover_centroid_response(
+        ElementId{1}, PropertyId{1}, nodes, m,
+        std::span<const double>(u.data(), static_cast<size_t>(u.size())), 0.0,
+        0.0);
+
+    auto unit = [](double x, double y) {
+      const double l = std::hypot(x, y);
+      return std::array<double, 2>{x / l, y / l};
+    };
+    const auto d13 = unit(p[2][0] - p[0][0], p[2][1] - p[0][1]);
+    const auto d24 = unit(p[3][0] - p[1][0], p[3][1] - p[1][1]);
+    const double phi = std::atan2(d13[1] - d24[1], d13[0] - d24[0]);
+    const double cs = std::cos(phi), sn = std::sin(phi);
+    const double ex_l = ex * cs * cs + ey * sn * sn + gxy * sn * cs;
+    const double ey_l = ex * sn * sn + ey * cs * cs - gxy * sn * cs;
+    const double gxy_l = 2.0 * (ey - ex) * sn * cs + gxy * (cs * cs - sn * sn);
+    EXPECT_NEAR(r.membrane_strain(0), ex_l, 1e-12) << shift;
+    EXPECT_NEAR(r.membrane_strain(1), ey_l, 1e-12) << shift;
+    EXPECT_NEAR(r.membrane_strain(2), gxy_l, 1e-12) << shift;
+    return r.membrane_strain;
+  };
+
+  for (const auto formulation :
+       {ShellFormulation::MINDLIN, ShellFormulation::MITC4}) {
+    const Eigen::Vector3d e0 = check(formulation, 0);
+    const Eigen::Vector3d e1 = check(formulation, 1);
+    EXPECT_NEAR(e1(0), e0(1), 1e-12);
+    EXPECT_NEAR(e1(1), e0(0), 1e-12);
+    EXPECT_NEAR(e1(2), -e0(2), 1e-12);
+  }
+}
+
 TEST(CQuad4, ShearEnergyUsesMid3AndTst) {
   auto check_formulation = [](ShellFormulation formulation) {
     Model m;

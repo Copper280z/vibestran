@@ -58,6 +58,8 @@ public:
         Eigen::Vector3d bending_moment{Eigen::Vector3d::Zero()};
         /// Transverse shear resultants (Qx, Qy) per unit length.
         Eigen::Vector2d transverse_shear{Eigen::Vector2d::Zero()};
+        /// Transverse shear strains (gamma_xz, gamma_yz), section average.
+        Eigen::Vector2d transverse_shear_strain{Eigen::Vector2d::Zero()};
     };
     static CentroidResponse recover_response(
         ElementId eid,

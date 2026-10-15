@@ -593,6 +593,10 @@ struct SubCase {
   bool stress_corner_plot{false};  // STRESS(PLOT,CORNER)=ALL
   bool strain_print{false};        // STRAIN(PRINT)=ALL  or  STRAIN=ALL
   bool strain_corner_print{false}; // STRAIN(PRINT,CORNER)=ALL
+  bool strain_fiber{false};        // STRAIN(FIBER): shell strains at Z1/Z2
+                                   // instead of membrane strain + curvature
+  bool strain_max_shear{false};    // STRAIN(SHEAR|MAXS): max shear strain
+                                   // instead of von Mises strain
   bool gpstress_print{false};      // GPSTRESS(PRINT)=ALL
   bool gpstress_plot{false};       // GPSTRESS(PLOT)=ALL
   bool spc_force_print{false};     // SPCFORCE(PRINT)=ALL or SPCFORCE=ALL

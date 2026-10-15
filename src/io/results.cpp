@@ -6,6 +6,7 @@
 #include <sstream>
 #include <cmath>
 #include <numbers>
+#include <optional>
 #include <format>
 #include <algorithm>
 #include <unordered_map>
@@ -306,6 +307,12 @@ void F06Writer::write(const SolverResults& results, const Model& model,
             write_solid_stress_table(sc, out, ElementType::CPENTA6, do_corner);
         }
         if (do_strain_any) {
+            write_shell_strain_table(sc, out, ElementType::CQUAD4,
+                                     do_strain_corner, msc->strain_fiber,
+                                     msc->strain_max_shear, shell_props);
+            write_shell_strain_table(sc, out, ElementType::CTRIA3,
+                                     do_strain_corner, msc->strain_fiber,
+                                     msc->strain_max_shear, shell_props);
             write_solid_strain_table(sc, out, ElementType::CHEXA8, do_strain_corner);
             write_solid_strain_table(sc, out, ElementType::CTETRA4, do_strain_corner);
             write_solid_strain_table(sc, out, ElementType::CTETRA10,
@@ -708,9 +715,11 @@ std::array<double, 2> peak_transverse_shear(double qx, double qy, double t) {
 }
 
 void write_fiber_row(std::ostream& out, const ShellCols& c, F06Row row,
-                     const FiberStress& fs, double z, bool with_transverse,
+                     const FiberStress& fs, std::optional<double> z,
+                     bool with_transverse,
                      const std::array<double, 2>& transverse = {0.0, 0.0}) {
-    row.put(c.fiber, 11, std::format("{:.4E}", z));
+    if (z.has_value())
+        row.put(c.fiber, 11, std::format("{:.4E}", *z));
     row.put(c.xx, 12, fmt_e(fs.sx));
     row.put(c.yy, 12, fmt_e(fs.sy));
     row.put(c.sxy, 12, fmt_e(fs.sxy));
@@ -726,7 +735,126 @@ void write_fiber_row(std::ostream& out, const ShellCols& c, F06Row row,
     out << row.str() << "\n";
 }
 
+/// In-plane strain state with principal values (engineering shear gxy). The
+/// equivalent strain is Nastran's von Mises strain (2/3) sqrt(ex^2 + ey^2 -
+/// ex ey + 3/4 gxy^2), or the maximum engineering shear strain (major -
+/// minor) when max_shear is set; either is stored in the von_mises slot.
+FiberStress strain_state(double ex, double ey, double gxy, bool max_shear) {
+    FiberStress st;
+    st.sx = ex;
+    st.sy = ey;
+    st.sxy = gxy;
+    compute_principal_2d(ex, ey, 0.5 * gxy, st.major, st.minor, st.angle);
+    st.von_mises =
+        max_shear ? st.major - st.minor
+                  : (2.0 / 3.0) * std::sqrt(ex * ex + ey * ey - ex * ey +
+                                            0.75 * gxy * gxy);
+    return st;
+}
+
+/// The two rows of one shell strain location: fibre strains at Z1 and Z2
+/// (strain(z) = membrane - z * curvature), or membrane strain and curvature.
+std::array<FiberStress, 2> shell_strain_rows(const ShellStrain& e, bool fiber,
+                                             double z1, double z2,
+                                             bool max_shear) {
+    if (!fiber)
+        return {strain_state(e.ex, e.ey, e.exy, max_shear),
+                strain_state(e.kx, e.ky, e.kxy, max_shear)};
+    auto at = [&](double z) {
+        return strain_state(e.ex - z * e.kx, e.ey - z * e.ky,
+                            e.exy - z * e.kxy, max_shear);
+    };
+    return {at(z1), at(z2)};
+}
+
 } // namespace
+
+void F06Writer::write_shell_strain_table(
+    const SubCaseResults& sc, std::ostream& out, const ElementType etype,
+    const bool corners, const bool fiber, const bool max_shear,
+    const std::unordered_map<ElementId, const PShell*>& shell_props) {
+    const bool is_quad4 = (etype == ElementType::CQUAD4);
+    if (!contains_plate_stress_type(sc, etype))
+        return;
+
+    write_subcase_header(out, sc.id);
+    if (!sc.label.empty())
+        out << " " << sc.label << "\n";
+    out << "\n";
+    out << "                                           E L E M E N T   S T R A I N S   I N   L O C A L   E L E M E N T   C O O R D I N A T E   S Y S T E M\n";
+    out << "                                 F O R   E L E M E N T   T Y P E   "
+        << (is_quad4 ? "Q U A D 4" : "T R I A 3") << "\n";
+    // Column labels; the parser reads the Distance/Curvature label and the
+    // equivalent-strain label ("Shear-XY" for maximum shear) by position.
+    const std::string_view equivalent = max_shear ? "Shear-XY " : "von Mises";
+    if (is_quad4) {
+        out << "    Elem  Location       " << (fiber ? "Fiber " : "Strain")
+            << "       Strains In Element Coord System     Principal  Strains (Zero Shear)                Transverse   Transverse\n";
+        out << "     ID                 " << (fiber ? "Distance " : "Curvature")
+            << "   Normal-X     Normal-Y     Shear-XY     Angle     Major        Minor      "
+            << equivalent << "    Shear-XZ     Shear-YZ\n";
+    } else {
+        out << "  Element    Location      " << (fiber ? "Fiber " : "Strain")
+            << "        Strains In Element Coord System      Principal  Strains (Zero Shear)                Transverse   Transverse\n";
+        out << "     ID                   " << (fiber ? "Distance " : "Curvature")
+            << "    Normal-X     Normal-Y     Shear-XY      Angle     Major        Minor      "
+            << equivalent << "    Shear-XZ     Shear-YZ\n";
+    }
+    out << "\n";
+
+    const ShellCols& c = is_quad4 ? kQuad4Cols : kTria3Cols;
+    for (const auto& ps : sc.plate_stresses) {
+        if (ps.etype != etype) continue;
+
+        double z1 = 0.0, z2 = 0.0;
+        if (const auto it = shell_props.find(ps.eid); it != shell_props.end()) {
+            const double t = it->second->t;
+            z1 = std::isnan(it->second->z1) ? -t * 0.5 : it->second->z1;
+            z2 = std::isnan(it->second->z2) ? t * 0.5 : it->second->z2;
+        }
+        const std::optional<double> d1 =
+            fiber ? std::optional<double>(z1) : std::nullopt;
+        const std::optional<double> d2 =
+            fiber ? std::optional<double>(z2) : std::nullopt;
+
+        auto write_location = [&](const F06Row& first, const F06Row& second,
+                                  const ShellStrain& e) {
+            const auto rows = shell_strain_rows(e, fiber, z1, z2, max_shear);
+            write_fiber_row(out, c, first, rows[0], d1, /*with_transverse=*/true,
+                            {e.gxz, e.gyz});
+            write_fiber_row(out, c, second, rows[1], d2, false);
+        };
+
+        if (is_quad4) {
+            F06Row cen;
+            cen.put(2, 8, std::to_string(ps.eid.value));
+            cen.put_left(12, "CENTER");
+            write_location(cen, F06Row{}, ps.strain);
+            out << "\n";
+            if (corners) {
+                const int limit = std::min<int>(
+                    plate_vertex_count(etype),
+                    static_cast<int>(ps.nodal.size()));
+                for (int i = 0; i < limit; ++i) {
+                    const auto& pt = ps.nodal[static_cast<std::size_t>(i)];
+                    F06Row grd;
+                    grd.put_left(12, "GRD");
+                    grd.put(15, 8, std::to_string(pt.node.value));
+                    write_location(grd, F06Row{}, pt.strain);
+                }
+            }
+        } else {
+            F06Row anywhere;
+            anywhere.put(2, 8, std::to_string(ps.eid.value));
+            anywhere.put_left(14, "Anywhere");
+            F06Row in_elem;
+            in_elem.put_left(14, "in elem");
+            write_location(anywhere, in_elem, ps.strain);
+        }
+    }
+    out << "                                  ------------ ------------ ------------         ------------ ------------ ------------ ------------\n";
+    out << "\n";
+}
 
 void F06Writer::write_shell_stress_table(
     const SubCaseResults& sc, std::ostream& out, const ElementType etype,

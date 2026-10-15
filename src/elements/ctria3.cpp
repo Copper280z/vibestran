@@ -378,7 +378,8 @@ CTria3::recover_response(std::span<const double> global_displacements,
     const double alpha = material().A;
     const Eigen::Vector3d eps_th(alpha * (temperature - t_ref),
                                  alpha * (temperature - t_ref), 0.0);
-    r.membrane_stress = plane_stress_D() * (Bm * u_mem - eps_th);
+    r.membrane_strain = Bm * u_mem;
+    r.membrane_stress = plane_stress_D() * (r.membrane_strain - eps_th);
     r.membrane_resultant = thickness() * r.membrane_stress;
 
     // Bending (DKT).

@@ -50,6 +50,8 @@ public:
     /// from the DKT curvature, with the same sign conventions as CQUAD4.
     /// DKT is a Kirchhoff element, so transverse_shear is always zero.
     struct PlateResponse {
+        /// Total membrane strain (engineering shear), thermal included.
+        Eigen::Vector3d membrane_strain{Eigen::Vector3d::Zero()};
         Eigen::Vector3d membrane_stress{Eigen::Vector3d::Zero()};
         Eigen::Vector3d membrane_resultant{Eigen::Vector3d::Zero()};
         Eigen::Vector3d curvature{Eigen::Vector3d::Zero()};

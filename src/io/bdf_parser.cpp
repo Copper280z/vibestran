@@ -490,6 +490,24 @@ Model BdfParser::parse_stream(std::istream &in) {
               if (want_corner) {
                 sc.strain_corner_print = sc.strain_corner_print || want;
               }
+              // Shell strain form: FIBER (strains at Z1/Z2) or STRCUR
+              // (membrane strain and curvature, the default), and SHEAR or
+              // MAXS (maximum shear strain) instead of VONMISES.
+              std::istringstream ms(mods);
+              std::string tok;
+              while (std::getline(ms, tok, ',')) {
+                tok.erase(std::remove_if(tok.begin(), tok.end(),
+                                         [](unsigned char c) { return std::isspace(c); }),
+                          tok.end());
+                if (tok == "FIBER")
+                  sc.strain_fiber = true;
+                else if (tok == "STRCUR")
+                  sc.strain_fiber = false;
+                else if (tok == "SHEAR" || tok == "MAXS")
+                  sc.strain_max_shear = true;
+                else if (tok == "VONMISES" || tok == "VONM")
+                  sc.strain_max_shear = false;
+              }
             }
           }
         }

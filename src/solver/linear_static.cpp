@@ -229,6 +229,22 @@ make_plate_stress_point(const NodeId node,
   return point;
 }
 
+[[nodiscard]] ShellStrain
+make_shell_strain(const Eigen::Vector3d &membrane_strain,
+                  const Eigen::Vector3d &curvature,
+                  const Eigen::Vector2d &transverse_shear_strain) {
+  ShellStrain strain;
+  strain.ex = membrane_strain(0);
+  strain.ey = membrane_strain(1);
+  strain.exy = membrane_strain(2);
+  strain.kx = curvature(0);
+  strain.ky = curvature(1);
+  strain.kxy = curvature(2);
+  strain.gxz = transverse_shear_strain(0);
+  strain.gyz = transverse_shear_strain(1);
+  return strain;
+}
+
 /// Mechanical stress and total strain at one evaluation point of a solid
 /// element.  Strain is total strain (B*u, including thermal expansion) to
 /// match MYSTRAN, which reports STRAIN = B*U; the free thermal strain is
@@ -1539,6 +1555,9 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         ps.nxy = response.membrane_resultant(2);
         ps.qx = response.transverse_shear(0);
         ps.qy = response.transverse_shear(1);
+        ps.strain = make_shell_strain(response.membrane_strain,
+                                      response.curvature,
+                                      response.transverse_shear_strain);
 
         static constexpr std::array<std::pair<double, double>, 4>
             kQuadCornerCoords{{{-1.0, -1.0}, {1.0, -1.0},
@@ -1561,6 +1580,8 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
           pt.nxy = point.membrane_resultant(2);
           pt.qx = point.transverse_shear(0);
           pt.qy = point.transverse_shear(1);
+          pt.strain = make_shell_strain(point.membrane_strain, point.curvature,
+                                        point.transverse_shear_strain);
           ps.nodal.push_back(pt);
         }
       } else {
@@ -1590,6 +1611,9 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         ps.nxy = centre.membrane_resultant(2);
         ps.qx = centre.transverse_shear(0);
         ps.qy = centre.transverse_shear(1);
+        // DKT is a Kirchhoff element: no transverse shear strain.
+        ps.strain = make_shell_strain(centre.membrane_strain, centre.curvature,
+                                      Eigen::Vector2d::Zero());
         static constexpr std::array<std::array<double, 2>, 3> kTriaCorners{
             {{0.0, 0.0}, {1.0, 0.0}, {0.0, 1.0}}};
         for (size_t n = 0; n < 3; ++n) {
@@ -1603,6 +1627,9 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
           pt.nxy = corner.membrane_resultant(2);
           pt.qx = corner.transverse_shear(0);
           pt.qy = corner.transverse_shear(1);
+          pt.strain = make_shell_strain(corner.membrane_strain,
+                                        corner.curvature,
+                                        Eigen::Vector2d::Zero());
           ps.nodal.push_back(pt);
         }
       }
