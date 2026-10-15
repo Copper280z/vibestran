@@ -12,6 +12,7 @@
 #include <cmath>
 #include <format>
 #include <fstream>
+#include <iterator>
 #include <numbers>
 #include <set>
 #include <sstream>
@@ -122,6 +123,40 @@ struct BdfParser::ParseContext {
   // at the end of parsing through the logger.
   std::set<std::string> unsupported_case_control_keywords;
   std::set<std::string> unsupported_bulk_keywords;
+
+  // GRDSET supplies CP, CD, and PS for GRIDs that leave those fields blank.
+  // Defaults are applied after parsing because GRDSET may follow the GRIDs.
+  struct GridBlankFields {
+    bool cp{false};
+    bool cd{false};
+    bool ps{false};
+  };
+  std::unordered_map<NodeId, GridBlankFields> grid_blank_fields;
+  struct GrdsetDefaults {
+    CoordId cp{0};
+    CoordId cd{0};
+    DofSet ps;
+    int line{0};
+  };
+  std::optional<GrdsetDefaults> grdset;
+
+  // BAROR supplies PID, orientation (vector or G0), and OFFT for CBARs that
+  // leave those fields blank; applied after parsing for the same reason.
+  struct BarBlankFields {
+    size_t element_index{0};
+    bool pid{false};
+    bool orientation{false};
+    bool offt{false};
+  };
+  std::vector<BarBlankFields> bar_blank_fields;
+  struct BarorDefaults {
+    std::optional<PropertyId> pid;
+    std::optional<Vec3> orientation;
+    std::optional<NodeId> g0;
+    std::optional<bool> orientation_in_basic;
+    int line{0};
+  };
+  std::optional<BarorDefaults> baror;
 };
 
 // ── Public entry points
@@ -593,7 +628,9 @@ Model BdfParser::parse_stream(std::istream &in) {
     if (l.empty())
       return false;
     char c0 = l[0];
-    if (c0 == '+')
+    // '+' labels a continuation; a leading ',' is a free-field continuation
+    // whose label field is blank.
+    if (c0 == '+' || c0 == ',')
       return true;
     if (c0 == '*') {
       // A bare '*' (cols 0-7 contain only '*' and spaces) is a large-field
@@ -692,6 +729,18 @@ Model BdfParser::parse_stream(std::istream &in) {
           cont_fields.pop_back();
       }
 
+      // Free-field segments may stop short of their 8 data fields; pad the
+      // card to the end of the previous segment so continuation fields land
+      // in their positional slots (parent: 9 entries incl. keyword, each
+      // continuation: 8 more).
+      if (is_free) {
+        const size_t segment_end =
+            9 + 8 * ((card.fields.size() > 9) ? (card.fields.size() - 2) / 8
+                                              : 0);
+        if (card.fields.size() < segment_end)
+          card.fields.resize(segment_end);
+      }
+
       // Skip the continuation marker (field 0) and append fields 1-8
       for (size_t k = 1; k < cont_fields.size() && k <= 8; ++k)
         card.fields.push_back(cont_fields[k]);
@@ -723,6 +772,10 @@ Model BdfParser::parse_stream(std::istream &in) {
       bool handled = true;
       if (kw == "GRID")
         process_grid(ctx, card.fields);
+      else if (kw == "GRDSET")
+        process_grdset(ctx, card.fields);
+      else if (kw == "BAROR")
+        process_baror(ctx, card.fields);
       else if (kw == "MAT1")
         process_mat1(ctx, card.fields);
       else if (kw == "MAT2")
@@ -882,6 +935,41 @@ Model BdfParser::parse_stream(std::istream &in) {
           std::get<PShell>(prop).shell_form = sf;
       }
     }
+  }
+
+  // Post-parse: GRDSET defaults for blank GRID CP/CD/PS fields (before
+  // coordinates are resolved, since CP determines the GRID position).
+  if (ctx.grdset.has_value()) {
+    for (auto &[nid, gp] : ctx.model.nodes) {
+      const auto it = ctx.grid_blank_fields.find(nid);
+      if (it == ctx.grid_blank_fields.end())
+        continue;
+      if (it->second.cp)
+        gp.cp = ctx.grdset->cp;
+      if (it->second.cd)
+        gp.cd = ctx.grdset->cd;
+      if (it->second.ps)
+        gp.ps = ctx.grdset->ps;
+    }
+  }
+
+  // Post-parse: BAROR defaults for blank CBAR fields.  A CBAR with a blank
+  // PID and no BAROR PID uses its element ID as the property ID (Nastran).
+  for (const auto &blank : ctx.bar_blank_fields) {
+    ElementData &e = ctx.model.elements[blank.element_index];
+    if (blank.pid) {
+      e.pid = (ctx.baror.has_value() && ctx.baror->pid.has_value())
+                  ? *ctx.baror->pid
+                  : PropertyId(e.id.value);
+    }
+    if (!ctx.baror.has_value())
+      continue;
+    if (blank.orientation) {
+      e.orientation = ctx.baror->orientation;
+      e.g0 = ctx.baror->g0;
+    }
+    if (blank.offt && ctx.baror->orientation_in_basic.has_value())
+      e.orientation_in_basic = *ctx.baror->orientation_in_basic;
   }
 
   // Post-parse: resolve coordinate systems and transform node positions to basic
@@ -1210,6 +1298,35 @@ void parse_orientation_or_g0(const std::vector<std::string> &f,
     e.cid = *cid;
 }
 
+/// Parse a Nastran component field ("", "0", or distinct digits 1-6, e.g.
+/// "123456") into a DofSet.  Embedded blanks ("12 4 6") are ignored, as
+/// MYSTRAN does; any other character is an error.
+DofSet parse_component_set(const std::string &field, const int line_num,
+                           const std::string_view card,
+                           const std::string_view name) {
+  DofSet set;
+  std::string digits;
+  std::copy_if(field.begin(), field.end(), std::back_inserter(digits),
+               [](const char c) { return c != ' ' && c != '\t'; });
+  if (digits.empty() || digits == "0")
+    return set;
+  for (const char c : digits) {
+    if (c < '1' || c > '6') {
+      throw ParseError(std::format(
+          "Line {}: {} {} = '{}' must contain only component digits 1-6",
+          line_num, card, name, field));
+    }
+    const auto bit = static_cast<std::uint8_t>(1u << (c - '1'));
+    if ((set.mask & bit) != 0) {
+      throw ParseError(std::format(
+          "Line {}: {} {} = '{}' repeats component {}", line_num, card, name,
+          field, c));
+    }
+    set.mask = static_cast<std::uint8_t>(set.mask | bit);
+  }
+  return set;
+}
+
 /// Parse a Nastran pin-flag field ("", "0", or up to six distinct digits
 /// 1-6) into a bitmask where bit k releases component k+1.
 std::uint8_t parse_pin_flags(const std::string &field, const int line_num,
@@ -1361,7 +1478,69 @@ void BdfParser::process_grid(ParseContext &ctx,
       Vec3(parse_double(f[3], ctx.line_num), parse_double(f[4], ctx.line_num),
            parse_double(f[5], ctx.line_num));
   g.cd = CoordId(f[6].empty() ? 0 : parse_int(f[6], ctx.line_num));
+  const std::string ps = (f.size() > 7) ? f[7] : std::string{};
+  g.ps = parse_component_set(ps, ctx.line_num, "GRID", "PS");
+  ctx.grid_blank_fields[g.id] = {.cp = f[2].empty(),
+                                 .cd = f[6].empty(),
+                                 .ps = ps.empty()};
   ctx.model.nodes[g.id] = g;
+}
+
+void BdfParser::process_grdset(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  // GRDSET, , CP, , , , CD, PS, SEID
+  if (ctx.grdset.has_value()) {
+    throw ParseError(std::format(
+        "Line {}: only one GRDSET entry is allowed (first at line {})",
+        ctx.line_num, ctx.grdset->line));
+  }
+  auto field = [&](const size_t i) {
+    return (f.size() > i) ? f[i] : std::string{};
+  };
+  ParseContext::GrdsetDefaults d;
+  d.line = ctx.line_num;
+  d.cp = CoordId(parse_int(field(2), ctx.line_num));
+  d.cd = CoordId(parse_int(field(6), ctx.line_num));
+  d.ps = parse_component_set(field(7), ctx.line_num, "GRDSET", "PS");
+  if (!field(8).empty() && parse_int(field(8), ctx.line_num) != 0) {
+    throw ParseError(std::format(
+        "Line {}: GRDSET SEID = '{}': superelements are not supported",
+        ctx.line_num, field(8)));
+  }
+  ctx.grdset = d;
+}
+
+void BdfParser::process_baror(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  // BAROR, , PID, , , X1|G0, X2, X3, OFFT
+  if (ctx.baror.has_value()) {
+    throw ParseError(std::format(
+        "Line {}: only one BAROR entry is allowed (first at line {})",
+        ctx.line_num, ctx.baror->line));
+  }
+  auto field = [&](const size_t i) {
+    return (f.size() > i) ? f[i] : std::string{};
+  };
+  ParseContext::BarorDefaults d;
+  d.line = ctx.line_num;
+  if (!field(2).empty())
+    d.pid = PropertyId(parse_int(field(2), ctx.line_num));
+  // Reuse the CBAR orientation parser on an ElementData scratch object so
+  // the X1/G0 rules are identical.
+  ElementData scratch;
+  parse_orientation_or_g0(f, scratch, 5, ctx.line_num, std::nullopt);
+  d.orientation = scratch.orientation;
+  d.g0 = scratch.g0;
+  if (!field(8).empty()) {
+    std::vector<std::string> offt_fields(9);
+    offt_fields[8] = field(8);
+    ElementData offt_scratch;
+    parse_line_element_ends(offt_fields, offt_scratch, ctx.line_num, "BAROR");
+    d.orientation_in_basic = offt_scratch.orientation_in_basic;
+  }
+  reject_nonblank_fields(f, 9, ctx.line_num, "BAROR",
+                         "has data beyond the OFFT field");
+  ctx.baror = d;
 }
 
 void BdfParser::process_mat1(ParseContext &ctx,
@@ -1875,6 +2054,12 @@ void BdfParser::process_cbar(ParseContext &ctx,
   e.nodes.push_back(NodeId(parse_int(f[4], ctx.line_num)));
   parse_orientation_or_g0(f, e, 5, ctx.line_num, std::nullopt);
   parse_line_element_ends(f, e, ctx.line_num, "CBAR");
+  auto blank = [&](const size_t i) { return f.size() <= i || f[i].empty(); };
+  ctx.bar_blank_fields.push_back(
+      {.element_index = ctx.model.elements.size(),
+       .pid = blank(2),
+       .orientation = blank(5) && blank(6) && blank(7),
+       .offt = blank(8)});
   ctx.model.elements.push_back(std::move(e));
 }
 

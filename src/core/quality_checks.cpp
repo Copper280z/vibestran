@@ -510,7 +510,7 @@ PhysicalResult check_physical(const Model& model) {
         if (sc.load_set.value != 0 && model.loads_for_set(sc.load_set).empty())
             res.subcases_no_load.push_back(sc.id);
 
-        bool has_spc = !model.spcs_for_set(sc.spc_set).empty();
+        bool has_spc = !model.structural_spcs(sc.spc_set).empty();
         bool has_rbe = !model.rbe2s.empty() || !model.rbe3s.empty();
         if (!has_spc && !has_rbe)
             res.subcases_no_constraint.push_back(sc.id);

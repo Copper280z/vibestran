@@ -5,7 +5,9 @@
 
 #include "core/types.hpp"
 #include "core/coord_sys.hpp"
+#include <algorithm>
 #include <array>
+#include <iterator>
 #include <cstdint>
 #include <memory>
 #include <limits>
@@ -22,6 +24,9 @@ struct GridPoint {
   CoordId cp{0}; // input coordinate system
   Vec3 position{0, 0, 0};
   CoordId cd{0}; // displacement coordinate system
+  /// Permanent single-point constraints (GRID field 8, PS), applied in every
+  /// structural subcase in the displacement coordinate system `cd`.
+  DofSet ps;
 };
 
 // ── Materials ────────────────────────────────────────────────────────────────
@@ -773,6 +778,29 @@ public:
       if (spc.sid == sid)
         result.push_back(&spc);
     }
+    return result;
+  }
+
+  /// Single-point constraints active in a structural subcase: the subcase's
+  /// SPC set plus one zero-valued constraint per grid with GRID PS
+  /// components.  Heat-transfer analyses use spcs_for_set() only, since PS
+  /// constrains structural components.
+  std::vector<Spc> structural_spcs(SpcSetId sid) const {
+    // Permanent constraints come first so that an explicit SPC with an
+    // enforced value on the same component (merged later by consumers)
+    // takes precedence over the zero-valued PS entry.
+    std::vector<Spc> result;
+    for (const auto &[nid, gp] : nodes) {
+      if (gp.ps.mask == 0)
+        continue;
+      Spc permanent;
+      permanent.sid = sid;
+      permanent.node = nid;
+      permanent.dofs = gp.ps;
+      result.push_back(permanent);
+    }
+    std::copy_if(spcs.begin(), spcs.end(), std::back_inserter(result),
+                 [sid](const Spc &spc) { return spc.sid == sid; });
     return result;
   }
 

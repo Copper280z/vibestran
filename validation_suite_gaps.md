@@ -15,6 +15,18 @@ reference is a MYSTRAN run.
 | Abbreviated commands other than `DISP`, `STRE`, `STRA`, `SPCF`, `LABE` (e.g. `METH`, `VECT`, `EIGE`, `GPST`, `ANAL`, `THER`, 5+ character forms such as `DISPL`) | No case-control line matching `^<abbr>\s*[(=]` | One modal and one static deck that use only abbreviated commands; results must equal the long-form deck |
 | `ELSTRESS` alias for `STRESS` | Not found | Same deck as above |
 
+## Bulk data syntax
+
+| Feature | Check | Suggested deck |
+|---|---|---|
+| Free-field continuation lines that start with `,` (blank continuation label), including short segments | No deck line starts with `,` followed by data | Any free-field deck whose PBAR/CORD2R continuations use `,` and stop before the 8th field; results must equal the fixed-field deck |
+
+## Grid defaults
+
+| Feature | Check | Suggested deck |
+|---|---|---|
+| BAROR OFFT field (`BGG` default for CBARs with blank OFFT) | 14 decks use BAROR, none set its OFFT | BAROR with `BGG` and a GA displacement system that differs from basic, so the orientation-vector frame matters |
+
 ## CBAR / PBAR
 
 | Feature | Check | Suggested deck |

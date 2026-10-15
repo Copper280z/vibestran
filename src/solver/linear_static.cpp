@@ -666,8 +666,8 @@ namespace {
 std::unordered_map<NodeId, std::array<SpcDofState, 6>>
 active_spc_state(const Model &model, const SubCase &sc) {
   std::unordered_map<NodeId, std::array<SpcDofState, 6>> spc;
-  for (const Spc *spc_c : model.spcs_for_set(sc.spc_set)) {
-    auto node_it = model.nodes.find(spc_c->node);
+  for (const Spc &spc_c : model.structural_spcs(sc.spc_set)) {
+    auto node_it = model.nodes.find(spc_c.node);
     if (node_it == model.nodes.end())
       continue;
     const GridPoint &gp = node_it->second;
@@ -675,8 +675,8 @@ active_spc_state(const Model &model, const SubCase &sc) {
     // Basic-frame enforced displacement vector at this node.
     std::array<double, 6> u_spc{};
     for (int d = 0; d < 6; ++d)
-      if (spc_c->dofs.has(d + 1))
-        u_spc[static_cast<size_t>(d)] = spc_c->value;
+      if (spc_c.dofs.has(d + 1))
+        u_spc[static_cast<size_t>(d)] = spc_c.value;
 
     if (gp.cd.value != 0) {
       auto cs_it = model.coord_systems.find(gp.cd);
@@ -698,9 +698,9 @@ active_spc_state(const Model &model, const SubCase &sc) {
       }
     }
 
-    std::array<SpcDofState, 6> &state = spc[spc_c->node];
+    std::array<SpcDofState, 6> &state = spc[spc_c.node];
     for (int d = 0; d < 6; ++d) {
-      if (spc_c->dofs.has(d + 1)) {
+      if (spc_c.dofs.has(d + 1)) {
         state[static_cast<size_t>(d)].active = true;
         state[static_cast<size_t>(d)].value = u_spc[static_cast<size_t>(d)];
       }

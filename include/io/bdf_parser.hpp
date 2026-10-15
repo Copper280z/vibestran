@@ -49,6 +49,8 @@ private:
 
     // Card processors
     static void process_grid    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_grdset  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_baror   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_mat1    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_mat2    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_mat3    (ParseContext& ctx, const std::vector<std::string>& fields);

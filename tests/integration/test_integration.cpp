@@ -3574,3 +3574,127 @@ ENDDATA
     EXPECT_GT(uy6, 0.0);
     EXPECT_NEAR(uy3, uy6, scale * 1e-9);
 }
+
+// ── GRID PS, GRDSET, BAROR ───────────────────────────────────────────────────
+
+TEST(Integration, GridPermanentConstraintsAloneFixCantileverRoot) {
+    // The root is constrained only by GRID PS (no SPC set in case control).
+    // Tip y load P on a cantilever: v = P L^3 / (3 E I1), and the PS grid
+    // reports the reactions Fy = -P and Mz = -P L.
+    constexpr double E = 1.0e7, I1 = 1.0, L = 10.0, P = 100.0;
+    const SolverResults res = run_analysis(R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPCFORCES = ALL
+BEGIN BULK
+GRID,1,,0.,0.,0.,,123456
+GRID,2,,10.,0.,0.
+MAT1,1,1.0E7,,0.3
+PBAR,1,1,2.,1.,4.,5.
+CBAR,1,1,1,2,0.,1.,0.
+FORCE,1,2,,100.,0.,1.,0.
+ENDDATA
+)");
+    EXPECT_NEAR(get_disp(res, 2, 1), P * L * L * L / (3.0 * E * I1), 1e-12);
+    for (int d = 0; d < 6; ++d)
+        EXPECT_EQ(get_disp(res, 1, d), 0.0);
+    const SpcForce* r = get_spc_force(res, 1);
+    ASSERT_NE(r, nullptr);
+    EXPECT_NEAR(r->f[1], -P, 1e-8);
+    EXPECT_NEAR(r->f[5], -P * L, 1e-6);
+}
+
+TEST(Integration, GridPermanentConstraintInRotatedFrameIsInclinedRoller) {
+    // Grid 2 has CD = 5 (x' along (1,1,0)/sqrt2) and PS = 1, so it is a
+    // roller that forbids motion along x': u_x + u_y = 0.  With axial
+    // stiffness ka = EA/L and free-rotation tip stiffness kb = 3EI1/L^3, a
+    // y load F gives u_y = F / (ka + kb).  Output is in the CD frame:
+    // x' = 0 and y' = sqrt(2) u_y.
+    constexpr double E = 1.0e7, A = 2.0, I1 = 1.0, L = 10.0, F = 100.0;
+    const SolverResults res = run_analysis(R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+BEGIN BULK
+CORD2R,5,0,0.,0.,0.,0.,0.,1.,1.,1.,0.
+GRID,1,,0.,0.,0.,,123456
+GRID,2,,10.,0.,0.,5,1
+MAT1,1,1.0E7,,0.3
+PBAR,1,1,2.,1.,4.,5.
+CBAR,1,1,1,2,0.,1.,0.
+FORCE,1,2,,100.,0.,1.,0.
+ENDDATA
+)");
+    const double ka = E * A / L;
+    const double kb = 3.0 * E * I1 / (L * L * L);
+    const double uy = F / (ka + kb);
+    EXPECT_NEAR(get_disp(res, 2, 0), 0.0, 1e-14);
+    EXPECT_NEAR(get_disp(res, 2, 1), std::sqrt(2.0) * uy, 1e-12 * uy + 1e-16);
+}
+
+TEST(Integration, GrdsetPermanentConstraintsReactOutOfPlaneLoad) {
+    // GRDSET PS = 345 makes every grid planar (T3, R1, R2 fixed).  A tip load
+    // with an out-of-plane component is then carried only in-plane: the z
+    // component goes straight into the tip's PS reaction, and the y
+    // deflection is the cantilever value P L^3 / (3 E I1).
+    constexpr double E = 1.0e7, I1 = 1.0, L = 10.0;
+    const SolverResults res = run_analysis(R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC = 1
+  SPCFORCES = ALL
+BEGIN BULK
+GRDSET,,,,,,,345
+GRID,1,,0.,0.,0.
+GRID,2,,10.,0.,0.
+MAT1,1,1.0E7,,0.3
+PBAR,1,1,2.,1.,4.,5.
+CBAR,1,1,1,2,0.,1.,0.
+SPC1,1,123456,1
+FORCE,1,2,,1.,0.,100.,50.
+ENDDATA
+)");
+    EXPECT_NEAR(get_disp(res, 2, 1), 100.0 * L * L * L / (3.0 * E * I1), 1e-12);
+    EXPECT_EQ(get_disp(res, 2, 2), 0.0);
+    EXPECT_EQ(get_disp(res, 2, 3), 0.0);
+    EXPECT_EQ(get_disp(res, 2, 4), 0.0);
+    const SpcForce* tip = get_spc_force(res, 2);
+    ASSERT_NE(tip, nullptr);
+    EXPECT_NEAR(tip->f[2], -50.0, 1e-9);
+    EXPECT_NEAR(tip->f[1], 0.0, 1e-9);
+}
+
+TEST(Integration, BarorOrientationSelectsBendingPlane) {
+    // BAROR v = (0,0,1) makes element y = basic z, so a basic y load bends
+    // plane 2 (I2) on the CBAR that leaves its orientation and PID blank.
+    // The second CBAR gives v = (0,1,0) explicitly and bends plane 1 (I1).
+    constexpr double E = 1.0e7, I1 = 1.0, I2 = 100.0, L = 10.0, P = 100.0;
+    const SolverResults res = run_analysis(R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC = 1
+BEGIN BULK
+BAROR,,7,,,0.,0.,1.
+GRID,1,,0.,0.,0.
+GRID,2,,10.,0.,0.
+GRID,3,,0.,5.,0.
+GRID,4,,10.,5.,0.
+MAT1,1,1.0E7,,0.3
+PBAR,7,1,2.,1.,100.,5.
+CBAR,1,,1,2
+CBAR,2,7,3,4,0.,1.,0.
+SPC1,1,123456,1,3
+FORCE,1,2,,100.,0.,1.,0.
+FORCE,1,4,,100.,0.,1.,0.
+ENDDATA
+)");
+    EXPECT_NEAR(get_disp(res, 2, 1), P * L * L * L / (3.0 * E * I2), 1e-14);
+    EXPECT_NEAR(get_disp(res, 4, 1), P * L * L * L / (3.0 * E * I1), 1e-12);
+}

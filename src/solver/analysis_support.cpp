@@ -221,16 +221,16 @@ DofMap build_analysis_dof_map(const Model &model, const SubCase &sc) {
   dmap.constrain_batch(inactive_constraints);
 
   std::vector<std::pair<NodeId, int>> spc_constraints;
-  for (const Spc *spc : model.spcs_for_set(sc.spc_set)) {
-    auto node_it = model.nodes.find(spc->node);
+  for (const Spc &spc : model.structural_spcs(sc.spc_set)) {
+    auto node_it = model.nodes.find(spc.node);
     const bool has_cd =
         (node_it != model.nodes.end() && node_it->second.cd.value != 0);
     for (int d = 0; d < 6; ++d) {
-      if (!spc->dofs.has(d + 1))
+      if (!spc.dofs.has(d + 1))
         continue;
-      if (has_cd || spc->value != 0.0)
+      if (has_cd || spc.value != 0.0)
         continue;
-      spc_constraints.emplace_back(spc->node, d);
+      spc_constraints.emplace_back(spc.node, d);
     }
   }
   dmap.constrain_batch(spc_constraints);
@@ -249,13 +249,13 @@ void build_analysis_mpc_system(const Model &model, const SubCase &sc,
     std::array<double, 6> values{};
   };
   std::unordered_map<NodeId, SpcValues> node_spcs;
-  for (const Spc *spc : model.spcs_for_set(sc.spc_set)) {
-    SpcValues& values = node_spcs[spc->node];
-    values.dofs.mask |= spc->dofs.mask;
+  for (const Spc &spc : model.structural_spcs(sc.spc_set)) {
+    SpcValues& values = node_spcs[spc.node];
+    values.dofs.mask |= spc.dofs.mask;
     for (int d = 0; d < 6; ++d) {
-      if (spc->dofs.has(d + 1))
+      if (spc.dofs.has(d + 1))
         values.values[static_cast<size_t>(d)] =
-            use_spc_values ? spc->value : 0.0;
+            use_spc_values ? spc.value : 0.0;
     }
   }
 

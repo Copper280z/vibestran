@@ -18,17 +18,22 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 2,531 final failure
+The suite contains 3,226 definitions. The current run has 2,532 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
-| `unsupported_input` | 1,503 | 237 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 476 | 164 | Result exists but differs from the reference or comparator expectation |
-| `missing_result_data` | 252 | 40 | Solver completes but does not emit the requested result family |
+| `unsupported_input` | 1,484 | 223 | Requires unsupported cards, solution sequences, elements, or formulations |
+| `numerical_mismatch` | 488 | 174 | Result exists but differs from the reference or comparator expectation |
+| `missing_result_data` | 260 | 44 | Solver completes but does not emit the requested result family |
 | `input_parse_error` | 185 | 15 | Parser rejects syntax or a card variant used by a valid deck |
 | `solver_model_error` | 115 | 13 | Parsed model is rejected by a current formulation or geometry gate |
-| **Total** | **2,531** |  |  |
+| **Total** | **2,532** |  |  |
+
+GRID PS, GRDSET, and BAROR are now applied. The decks they unblocked solve
+(the SB-BAR I12/PINFLAG/OFFSET displacements and stresses match MYSTRAN
+exactly) but still fail whole-F06 bulk comparisons on result blocks
+vibestran does not write, most often `GPFORCE` (grid point force balance).
 
 CBAR/PBAR are now fully parsed (recovery points, K1/K2, I12, pin flags,
 offsets, OFFT `GGG`/`BGG`), so 50 bar decks moved out of `unsupported_input`
@@ -200,18 +205,14 @@ The most widespread ignored keywords across all failing decks are `ECHO`
 `PCOMP` (15), and `TEMPERATURE` (15). Abbreviated case-control commands
 (`DISP`, `STRE`, `SPCF`, ...) are now accepted and no longer appear.
 
-Two gaps are **silent** and therefore missing from that list:
+`CONM2` is among the ignored bulk cards; for example `SB-BAR-GRAV` now has
+the right bar frame through BAROR but still differs from MYSTRAN because its
+offset tip mass is dropped.
 
-- GRID field 8 (PS, permanent single-point constraints) is parsed but ignored.
-  59 decks use it; e.g. `SB-BAR-I12` and `SB-BAR-PINFLAG` fail with "no
-  constraints" for this reason alone (both match MYSTRAN exactly once the PS
-  constraints are rewritten as SPC1).
-- `BAROR` (default CBAR orientation) is ignored, so CBARs that rely on it get
-  an arbitrary element frame (`SB-BAR-GRAV`).
-
-The main implementation work remains GRID PS/GRDSET, CQUAD8, PCOMP laminates,
-CROD/PROD, element force output (`FORCE`/`ELFORCE`), MPC force output,
-EIGR/reduction behavior, and unsupported solution sequences such as buckling.
+The main implementation work remains grid point force output (`GPFORCE`),
+element force output (`FORCE`/`ELFORCE`), CONM2, CQUAD8, PCOMP laminates,
+CROD/PROD, MPC force output, EIGR/reduction behavior, and unsupported solution
+sequences such as buckling.
 
 ### Missing Result Data
 
@@ -364,11 +365,11 @@ The goal is feature compatibility with correct, modern formulations, not
 numerical agreement with MYSTRAN; the suite's tolerances and some expected
 values encode MYSTRAN behaviour and are not a correctness oracle.
 
-1. GRID PS permanent constraints and GRDSET defaults (59 and 20 decks; PS is
-   currently ignored silently), plus BAROR default bar orientation.
-2. Element force output (`FORCE`/`ELFORCE`): bar end forces are already
-   recovered (`CBarBeamElement::EndForces`); shell forces are the largest
-   missing-result family.
+1. Grid point force balance (`GPFORCE`), the first blocker of most
+   Benchmark bulk comparisons, and element force output (`FORCE`/`ELFORCE`):
+   bar end forces are already recovered (`CBarBeamElement::EndForces`);
+   shell forces are the largest missing-result family.
+2. CONM2 (ignored today; affects mass and inertial-load decks).
 3. A lumped-mass option (`PARAM,COUPMASS`) matching the Nastran default, which
    the pin-flag hinge-equivalence modal decks depend on.
 4. CROD/PROD and CQUAD8.
@@ -426,3 +427,11 @@ most recent entry.
   pin-flag modal checks); 50 bar decks moved from `unsupported_input` /
   `input_parse_error` into `numerical_mismatch`, for the reasons listed under
   "Numerical Mismatch".
+- **GRID PS, GRDSET, BAROR (2,531 -> 2,532, record-neutral).** Permanent
+  single-point constraints, GRDSET defaults, BAROR defaults, embedded blanks
+  in component fields, and comma-led free-field continuations are now
+  supported. No record changed outcome: the unblocked decks now fail later on
+  unimplemented result blocks (GPFORCE, CELAS forces, RFORCE), so 19 records
+  moved from `unsupported_input` to `numerical_mismatch` /
+  `missing_result_data`. The +1 is the RBE3 10 SPCFORCES TZ group again
+  (`Error = 1.8e-07`), which flips at roundoff level between runs.

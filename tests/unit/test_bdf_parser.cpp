@@ -404,6 +404,123 @@ TEST(BdfParser, RejectsInvalidBarEndDataAndSections) {
     }
 }
 
+TEST(BdfParser, FreeFieldCommaContinuationsKeepFieldPositions) {
+    // A free-field line may stop before its 8th data field, and a line that
+    // starts with ',' continues the previous card with a blank label.  Each
+    // continuation's fields must land at their positional slots: here the
+    // PBAR parent ends after J, the first continuation carries only C1/C2,
+    // and the second carries K1, K2, I12.
+    const std::string bdf =
+        "BEGIN BULK\n"
+        "MAT1,1,1.+7,,.3\n"
+        "PBAR,1,1,2.,3.,4.,5.\n"
+        ",.25,-.5\n"
+        ",.8,.7,1.5\n"
+        "CORD2R,5,0,0.,0.,0.,0.,0.,1.\n"
+        ",1.,1.,0.\n"
+        "ENDDATA\n";
+    const Model m = BdfParser::parse_string(bdf);
+    const auto& pbar = std::get<PBar>(m.properties.at(PropertyId{1}));
+    EXPECT_DOUBLE_EQ(pbar.J, 5.0);
+    EXPECT_DOUBLE_EQ(pbar.recovery_points[0][0], 0.25);
+    EXPECT_DOUBLE_EQ(pbar.recovery_points[0][1], -0.5);
+    EXPECT_DOUBLE_EQ(pbar.recovery_points[1][0], 0.0);
+    EXPECT_DOUBLE_EQ(pbar.K1, 0.8);
+    EXPECT_DOUBLE_EQ(pbar.K2, 0.7);
+    EXPECT_DOUBLE_EQ(pbar.I12, 1.5);
+    ASSERT_EQ(m.coord_systems.count(CoordId{5}), 1u);
+}
+
+TEST(BdfParser, GrdsetFillsOnlyBlankGridFields) {
+    // GRDSET may follow the GRIDs.  It supplies CP, CD and PS only where the
+    // GRID field is blank; an explicit value (including CD = 0) wins.  The
+    // PS field "34 56" has an embedded blank, which MYSTRAN decks use.
+    const std::string bdf = R"(
+BEGIN BULK
+CORD2R,3,0,0.,0.,0.,0.,0.,1.,1.,0.,0.
+CORD2R,4,0,0.,0.,0.,0.,0.,1.,0.,1.,0.
+GRID,1,,1.,0.,0.
+GRID,2,0,1.,0.,0.,0,2
+GRID,3,,1.,0.,0.,4
+GRDSET,,3,,,,4,34 56
+ENDDATA
+)";
+    const Model m = BdfParser::parse_string(bdf);
+    const GridPoint& g1 = m.nodes.at(NodeId{1});
+    const GridPoint& g2 = m.nodes.at(NodeId{2});
+    const GridPoint& g3 = m.nodes.at(NodeId{3});
+    EXPECT_EQ(g1.cd.value, 4);
+    EXPECT_EQ(g1.ps.mask, 0b111100);
+    EXPECT_EQ(g2.cd.value, 0);
+    EXPECT_EQ(g2.ps.mask, 0b000010);
+    EXPECT_EQ(g3.cd.value, 4);
+    EXPECT_EQ(g3.ps.mask, 0b111100);
+    // GRDSET CP = 3 is identical to basic here, so positions are unchanged;
+    // the CP default must still be applied before coordinates resolve.
+    EXPECT_DOUBLE_EQ(g1.position.x, 1.0);
+}
+
+TEST(BdfParser, GrdsetCpDefaultTransformsGridPosition) {
+    // CP 4 maps local x to basic y.  A GRID with blank CP placed at local
+    // (1,0,0) must land at basic (0,1,0) through the GRDSET default.
+    const std::string bdf = R"(
+BEGIN BULK
+CORD2R,4,0,0.,0.,0.,0.,0.,1.,0.,1.,0.
+GRDSET,,4
+GRID,1,,1.,0.,0.
+GRID,2,0,1.,0.,0.
+ENDDATA
+)";
+    const Model m = BdfParser::parse_string(bdf);
+    EXPECT_NEAR(m.nodes.at(NodeId{1}).position.x, 0.0, 1e-14);
+    EXPECT_NEAR(m.nodes.at(NodeId{1}).position.y, 1.0, 1e-14);
+    EXPECT_NEAR(m.nodes.at(NodeId{2}).position.x, 1.0, 1e-14);
+}
+
+TEST(BdfParser, BarorFillsBlankCbarFieldsAndPidDefaultsToEid) {
+    const std::string with_baror = R"(
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,1.,0.,0.
+BAROR,,9,,,0.,0.,1.,BGG
+CBAR,1,,1,2
+CBAR,2,5,1,2,0.,1.,0.,GGG
+ENDDATA
+)";
+    const Model m = BdfParser::parse_string(with_baror);
+    ASSERT_EQ(m.elements.size(), 2u);
+    const ElementData& b1 = m.elements[0];
+    EXPECT_EQ(b1.pid.value, 9);
+    ASSERT_TRUE(b1.orientation.has_value());
+    EXPECT_DOUBLE_EQ(b1.orientation->z, 1.0);
+    EXPECT_TRUE(b1.orientation_in_basic);
+    const ElementData& b2 = m.elements[1];
+    EXPECT_EQ(b2.pid.value, 5);
+    EXPECT_DOUBLE_EQ(b2.orientation->y, 1.0);
+    EXPECT_FALSE(b2.orientation_in_basic);
+
+    const Model no_baror = BdfParser::parse_string(
+        "BEGIN BULK\nGRID,1,,0.,0.,0.\nGRID,2,,1.,0.,0.\n"
+        "CBAR,17,,1,2,0.,1.,0.\nENDDATA\n");
+    EXPECT_EQ(no_baror.elements[0].pid.value, 17);
+}
+
+TEST(BdfParser, RejectsInvalidPermanentConstraintInput) {
+    for (const std::string body : {
+             std::string("GRID,1,,0.,0.,0.,,127\n"),
+             std::string("GRID,1,,0.,0.,0.,,1123\n"),
+             std::string("GRID,1,,0.,0.,0.,,1 1\n"),
+             std::string("GRDSET,,,,,,,1\nGRDSET,,,,,,,2\n"),
+             std::string("BAROR,,1,,,0.,1.,0.\nBAROR,,1,,,0.,1.,0.\n"),
+         }) {
+        EXPECT_THROW({
+            const Model ignored =
+                BdfParser::parse_string("BEGIN BULK\n" + body + "ENDDATA\n");
+            (void)ignored;
+        }, ParseError) << body;
+    }
+}
+
 TEST(BdfParser, ParsesPbarlAndAccel1ByRange) {
     const std::string bdf = R"(
 BEGIN BULK
@@ -586,25 +703,20 @@ TEST(BdfParser, LargeFieldMat1Card) {
 }
 
 TEST(BdfParser, LargeFieldGridWithContinuation) {
-    // Two-line large-field GRID: first line holds ID, CP, X, Y;
-    // continuation line (also *-prefixed) holds Z.
-    // Per the field-splitting logic, continuation fields are appended
-    // starting at index 10, so Z appears at fields[10] rather than fields[5].
-    // This means the parser reads an empty fields[5] → Z = 0, not the
-    // continuation value. The test documents this known limitation.
+    // Two-line large-field GRID: the first line holds ID, CP, X1, X2 and the
+    // continuation holds X3, CD, PS, SEID in its four 16-column fields.
     const std::string bdf =
         "BEGIN BULK\n"
         "*GRID                  5               0             3.0             4.0+       \n"
-        "*                                                    5.0                        \n"
+        "*                    5.0               0             246                        \n"
         "ENDDATA\n";
     Model m = BdfParser::parse_string(bdf);
     ASSERT_EQ(m.nodes.size(), 1u);
     const GridPoint& n = m.nodes.at(NodeId{5});
     EXPECT_DOUBLE_EQ(n.position.x, 3.0);
     EXPECT_DOUBLE_EQ(n.position.y, 4.0);
-    // Z comes from the continuation line appended at index 10;
-    // process_grid reads index 5 which is the blank continuation marker → 0.
-    EXPECT_DOUBLE_EQ(n.position.z, 0.0);
+    EXPECT_DOUBLE_EQ(n.position.z, 5.0);
+    EXPECT_EQ(n.ps.mask, 0b101010); // components 2, 4, 6
 }
 
 // ── Small-field continuation cards ───────────────────────────────────────────
