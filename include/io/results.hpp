@@ -19,7 +19,8 @@ namespace vibestran {
 struct NodeDisplacement {
   constexpr NodeDisplacement() = default;
   NodeId node{0};
-  std::array<double, 6> d{}; // indexed 0-5
+  std::array<double, 6> d{}; // indexed 0-5, in the grid's CD frame
+  CoordId coord{0};          // frame of d: the grid's displacement system
 };
 
 /// Element stress at centroid (for plate elements: CQUAD4, CTRIA3)
@@ -114,11 +115,13 @@ struct ElementHeatFlux {
   double magnitude{0.0};
 };
 
-/// Constraint reaction force at an SPC'd DOF set (global/basic frame).
+/// Constraint reaction at an SPC'd grid, in the grid's global (displacement,
+/// CD) coordinate system, as Nastran reports SPC forces.
 struct SpcForce {
   constexpr SpcForce() = default;
   NodeId node{0};
-  std::array<double, 6> f{}; // indexed 0-5 (T1,R1...)
+  std::array<double, 6> f{}; // indexed 0-5 (T1..T3, R1..R3)
+  CoordId coord{0};          // frame of f: the grid's displacement system
 };
 
 struct SubCaseResults {

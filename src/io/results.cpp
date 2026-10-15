@@ -349,7 +349,7 @@ void F06Writer::write_displacement_table(const SubCaseResults& sc,
 
     for (const auto& nd : sc.displacements) {
         out << std::setw(15) << nd.node.value;
-        out << std::setw(9) << 0; // global coordinate system
+        out << std::setw(9) << nd.coord.value; // grid's global (CD) system
         out << std::uppercase;
         for (int i = 0; i < 6; ++i) {
             const double v = nd.d[i];
@@ -401,7 +401,7 @@ void F06Writer::write_spc_force_table(const SubCaseResults& sc,
 
     for (const auto& sf : sc.spc_forces) {
         out << std::right << std::setw(15) << sf.node.value;
-        out << std::setw(9) << 0; // global coordinate system
+        out << std::setw(9) << sf.coord.value; // grid's global (CD) system
         out << " ";
         for (int i = 0; i < 6; ++i)
             put_value(sf.f[static_cast<size_t>(i)]);

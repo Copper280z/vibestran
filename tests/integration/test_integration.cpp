@@ -3627,6 +3627,7 @@ SOL 101
 CEND
 SUBCASE 1
   LOAD = 1
+  SPCFORCES = ALL
 BEGIN BULK
 CORD2R,5,0,0.,0.,0.,0.,0.,1.,1.,1.,0.
 GRID,1,,0.,0.,0.,,123456
@@ -3642,6 +3643,15 @@ ENDDATA
     const double uy = F / (ka + kb);
     EXPECT_NEAR(get_disp(res, 2, 0), 0.0, 1e-14);
     EXPECT_NEAR(get_disp(res, 2, 1), std::sqrt(2.0) * uy, 1e-12 * uy + 1e-16);
+
+    // The roller reaction, reported in the grid's CD frame, acts purely
+    // along x' with magnitude |R| = sqrt(2) ka u_y (basic Rx = Ry = ka u_y).
+    const SpcForce* roller = get_spc_force(res, 2);
+    ASSERT_NE(roller, nullptr);
+    EXPECT_EQ(roller->coord.value, 5);
+    EXPECT_NEAR(std::abs(roller->f[0]), std::sqrt(2.0) * ka * uy, 1e-9);
+    EXPECT_NEAR(roller->f[1], 0.0, 1e-9);
+    EXPECT_NEAR(roller->f[2], 0.0, 1e-9);
 }
 
 TEST(Integration, GrdsetPermanentConstraintsReactOutOfPlaneLoad) {

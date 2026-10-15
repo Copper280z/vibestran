@@ -701,6 +701,22 @@ active_spc_state(const Model &model, const SubCase &sc) {
     }
 
     std::array<SpcDofState, 6> &state = spc[spc_c.node];
+    if (gp.cd.value != 0) {
+      // SPC components are in the grid's CD frame, not basic: accumulate the
+      // full basic residual K u - F at this grid (every basic component), and
+      // let compute_spc_forces rotate it to CD and keep the constrained
+      // components.  Basic enforced values R u_cd are exact for any basic
+      // DOF the constraint fixes directly.
+      for (int d = 0; d < 6; ++d) {
+        auto &st = state[static_cast<size_t>(d)];
+        if (!st.active)
+          st.value = u_spc[static_cast<size_t>(d)];
+        else
+          st.value += u_spc[static_cast<size_t>(d)];
+        st.active = true;
+      }
+      continue;
+    }
     for (int d = 0; d < 6; ++d) {
       if (spc_c.dofs.has(d + 1)) {
         state[static_cast<size_t>(d)].active = true;
@@ -1012,6 +1028,15 @@ LinearStaticSolver::compute_spc_forces(const Model &model, const SubCase &sc,
     sorted_nodes.push_back(nid);
   std::sort(sorted_nodes.begin(), sorted_nodes.end());
 
+  // Constrained components per grid, in the grid's CD frame.
+  std::unordered_map<NodeId, DofSet> constrained;
+  for (const Spc &c : model.structural_spcs(sc.spc_set))
+    constrained[c.node].mask |= c.dofs.mask;
+
+  // Reactions are accumulated in basic; report them in each grid's global
+  // (displacement) system, like the displacements.  For a CD grid the full
+  // basic residual is rotated and only its constrained CD components are
+  // kept (the free ones vanish by equilibrium, up to roundoff).
   std::vector<SpcForce> result;
   result.reserve(sorted_nodes.size());
   for (NodeId nid : sorted_nodes) {
@@ -1020,6 +1045,30 @@ LinearStaticSolver::compute_spc_forces(const Model &model, const SubCase &sc,
     const auto it = react.find(nid);
     if (it != react.end())
       sf.f = it->second;
+    const GridPoint &gp = model.node(nid);
+    if (gp.cd.value != 0) {
+      const auto cs_it = model.coord_systems.find(gp.cd);
+      if (cs_it == model.coord_systems.end()) {
+        throw SolverError(std::format(
+            "GRID {}: displacement coordinate system {} not found",
+            nid.value, gp.cd.value));
+      }
+      const Mat3 T3 = rotation_matrix(cs_it->second, gp.position);
+      std::array<double, 6> local{};
+      for (int block = 0; block < 2; ++block)
+        for (int i = 0; i < 3; ++i) {
+          double v = 0.0;
+          for (int j = 0; j < 3; ++j)
+            v += T3(j, i) * sf.f[static_cast<size_t>(3 * block + j)];
+          local[static_cast<size_t>(3 * block + i)] = v;
+        }
+      const DofSet mask = constrained[nid];
+      for (int d = 0; d < 6; ++d)
+        if (!mask.has(d + 1))
+          local[static_cast<size_t>(d)] = 0.0;
+      sf.f = local;
+      sf.coord = gp.cd;
+    }
     result.push_back(std::move(sf));
   }
   return result;
@@ -1073,6 +1122,7 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
             T3(0,2)*rot_basic.x + T3(1,2)*rot_basic.y + T3(2,2)*rot_basic.z,
         };
         nd.d[3] = rot_cd.x; nd.d[4] = rot_cd.y; nd.d[5] = rot_cd.z;
+        nd.coord = gp.cd;
       }
     }
     res.displacements.push_back(nd);

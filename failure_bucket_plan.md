@@ -448,3 +448,9 @@ most recent entry.
   deliberately indefinite inertia tensor, accepted with a warning) now run;
   their displacements match MYSTRAN, but their SPCFORCES were reported in
   basic instead of each grid's global system (fixed in the next entry).
+- **SPC force output frame (2,528, neutral).** SPCFORCES are now reported
+  in each grid's global (CD) system with its ID in the COORD column, as
+  Nastran and MYSTRAN do, and reactions at CD grids are the constrained CD
+  components of the full residual (they were previously the basic
+  components with the same index). SB/SS-CONM2A now pass SPCFORCES and stop
+  at GPFORCE.

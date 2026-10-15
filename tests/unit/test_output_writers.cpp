@@ -469,6 +469,43 @@ TEST(F06Writer, SpcForceRowMatchesParserColumns) {
     EXPECT_DOUBLE_EQ(std::stod(line.substr(95, 13)), 3.25e-4);
 }
 
+TEST(F06Writer, CoordColumnShowsEachGridsGlobalSystem) {
+    // Displacements and SPC forces are reported in each grid's global (CD)
+    // system; the COORD SYS column (cols 16-24) must name that system.
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    NodeDisplacement nd;
+    nd.node = NodeId{7};
+    nd.d = {1.0, 2.0, 3.0, 0.0, 0.0, 0.0};
+    nd.coord = CoordId{18};
+    sc.displacements.push_back(nd);
+    SpcForce sf;
+    sf.node = NodeId{7};
+    sf.f = {-1.0, 1.0, -1.0, 0.0, 2.0, 2.0};
+    sf.coord = CoordId{18};
+    sc.spc_forces.push_back(sf);
+    res.subcases.push_back(sc);
+
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].disp_print = true;
+    m.analysis.subcases[0].spc_force_print = true;
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+
+    int rows = 0;
+    std::istringstream iss(oss.str());
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (line.size() > 24 && line.substr(8, 7).find('7') != std::string::npos &&
+            line.substr(0, 15).find_first_not_of(" 7") == std::string::npos) {
+            EXPECT_EQ(line.substr(15, 9), "       18") << line;
+            ++rows;
+        }
+    }
+    EXPECT_EQ(rows, 2);
+}
+
 TEST(F06Writer, SpcForceTableSuppressedWithoutRequest) {
     SolverResults res;
     SubCaseResults sc;
