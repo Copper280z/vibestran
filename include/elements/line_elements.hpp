@@ -154,6 +154,38 @@ private:
   const Model &model_;
 };
 
+/// CONM2 concentrated mass with CG offset and inertia tensor.  It adds no
+/// stiffness; its 6x6 grid mass is the rigid transfer of the mass and inertia
+/// from the centre of gravity to the grid (basic frame).  A point mass is
+/// already lumped, so lumped_mass_matrix() equals mass_matrix().
+class Conm2Element : public ElementBase {
+public:
+  Conm2Element(const ElementData &data, const Model &model);
+
+  [[nodiscard]] ElementType type() const noexcept override {
+    return ElementType::CONM2;
+  }
+  [[nodiscard]] ElementId id() const noexcept override { return eid_; }
+  [[nodiscard]] int num_dofs() const noexcept override { return 6; }
+
+  [[nodiscard]] LocalKe stiffness_matrix() const override;
+  [[nodiscard]] LocalKe mass_matrix() const override;
+  [[nodiscard]] LocalKe lumped_mass_matrix() const override;
+  [[nodiscard]] LocalFe thermal_load(std::span<const double> temperatures,
+                                     double t_ref) const override;
+  [[nodiscard]] std::vector<EqIndex>
+  global_dof_indices(const DofMap &dof_map) const override;
+  [[nodiscard]] std::span<const NodeId> node_ids() const noexcept override {
+    return std::span<const NodeId>{&node_, 1};
+  }
+
+private:
+  ElementId eid_;
+  NodeId node_;
+  ElementData::ConcentratedMass data_;
+  const Model &model_;
+};
+
 class ScalarMassElement : public ElementBase {
 public:
   ScalarMassElement(ElementType type, ElementId eid, PropertyId pid,

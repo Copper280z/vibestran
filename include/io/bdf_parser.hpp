@@ -72,6 +72,7 @@ private:
     static void process_ctetra  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_cpenta  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_cbar    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_conm2   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_cbeam   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_cbush   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_celas1  (ParseContext& ctx, const std::vector<std::string>& fields);

@@ -521,6 +521,50 @@ TEST(BdfParser, RejectsInvalidPermanentConstraintInput) {
     }
 }
 
+TEST(BdfParser, ParsesConm2AndRejectsInvalidInertia) {
+    const std::string bdf =
+        "BEGIN BULK\n"
+        "GRID    7               0.      0.      0.\n"
+        "CONM2   12      7       -1      5.      .2      .3      .4              +C1\n"
+        "+C1     1.      .1      2.      .2      .3      3.\n"
+        "ENDDATA\n";
+    const Model m = BdfParser::parse_string(bdf);
+    ASSERT_EQ(m.elements.size(), 1u);
+    const ElementData& e = m.elements[0];
+    EXPECT_EQ(e.type, ElementType::CONM2);
+    ASSERT_EQ(e.nodes.size(), 1u);
+    EXPECT_EQ(e.nodes[0].value, 7);
+    ASSERT_TRUE(e.conm2.has_value());
+    EXPECT_EQ(e.conm2->cid, -1);
+    EXPECT_DOUBLE_EQ(e.conm2->mass, 5.0);
+    EXPECT_DOUBLE_EQ(e.conm2->offset.z, 0.4);
+    EXPECT_DOUBLE_EQ(e.conm2->inertia[1], 0.1); // I21
+    EXPECT_DOUBLE_EQ(e.conm2->inertia[5], 3.0); // I33
+
+    // CID below -1 is invalid.
+    EXPECT_THROW({
+        const Model ignored = BdfParser::parse_string(
+            "BEGIN BULK\nGRID,7,,0.,0.,0.\nCONM2,1,7,-2,1.\nENDDATA\n");
+        (void)ignored;
+    }, ParseError);
+
+    // A product of inertia larger than the moments makes the inertia matrix
+    // indefinite (physically impossible).  It is accepted with a warning so
+    // decks that only exercise the transformation still run, and the values
+    // are kept as given.
+    const auto log_path = std::filesystem::temp_directory_path() /
+                          "vibestran_conm2_indefinite_inertia.log";
+    init_logger(log_path);
+    const Model indefinite = BdfParser::parse_string(
+        "BEGIN BULK\nGRID,7,,0.,0.,0.\n"
+        "CONM2,1,7,0,1.,0.,0.,0.,,1.,5.,1.,0.,0.,1.\nENDDATA\n");
+    spdlog::default_logger()->flush();
+    ASSERT_TRUE(indefinite.elements[0].conm2.has_value());
+    EXPECT_DOUBLE_EQ(indefinite.elements[0].conm2->inertia[1], 5.0);
+    EXPECT_NE(read_text_file(log_path).find("not positive semi-definite"),
+              std::string::npos);
+}
+
 TEST(BdfParser, ParsesPbarlAndAccel1ByRange) {
     const std::string bdf = R"(
 BEGIN BULK

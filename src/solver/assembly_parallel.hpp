@@ -42,6 +42,8 @@ inline int element_num_dofs(ElementType type) {
   case ElementType::CMASS1:
   case ElementType::CMASS2:
     return 2;
+  case ElementType::CONM2:
+    return 6;
   case ElementType::CHBDY:
     return 0;
   }

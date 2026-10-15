@@ -933,6 +933,73 @@ CBushElement::global_dof_indices(const DofMap &dof_map) const {
   return line_global_dofs(nodes_, dof_map);
 }
 
+Conm2Element::Conm2Element(const ElementData &data, const Model &model)
+    : eid_(data.id), node_(data.nodes.empty() ? NodeId{0} : data.nodes[0]),
+      data_(data.conm2.value_or(ElementData::ConcentratedMass{})),
+      model_(model) {
+  if (data.nodes.size() != 1 || !data.conm2.has_value()) {
+    throw SolverError(std::format(
+        "CONM2 {}: expected one grid and concentrated-mass data (got {} grids)",
+        data.id.value, data.nodes.size()));
+  }
+}
+
+LocalKe Conm2Element::stiffness_matrix() const {
+  return LocalKe::Zero(6, 6);
+}
+
+LocalKe Conm2Element::mass_matrix() const {
+  const GridPoint &gp = model_.node(node_);
+  const std::string ctx = std::format("CONM2 {}", eid_.value);
+
+  // Frame of the offset and inertia, and the CG offset r from the grid, in
+  // basic.
+  Eigen::Matrix3d R = Eigen::Matrix3d::Identity();
+  Vec3 r_basic = data_.offset;
+  if (data_.cid == -1) {
+    r_basic = data_.offset - gp.position;
+  } else if (data_.cid > 0) {
+    const auto cs_it = model_.coord_systems.find(CoordId{data_.cid});
+    if (cs_it == model_.coord_systems.end()) {
+      throw SolverError(std::format("{}: coordinate system {} not found", ctx,
+                                    data_.cid));
+    }
+    const Mat3 T = rotation_matrix(cs_it->second, gp.position);
+    for (int i = 0; i < 3; ++i)
+      for (int j = 0; j < 3; ++j)
+        R(i, j) = T(i, j);
+    r_basic = apply_rotation(T, data_.offset);
+  }
+
+  const auto &I = data_.inertia; // I11, I21, I22, I31, I32, I33
+  Eigen::Matrix3d inertia_cid;
+  inertia_cid << I[0], -I[1], -I[3],
+                 -I[1], I[2], -I[4],
+                 -I[3], -I[4], I[5];
+  const Eigen::Matrix3d inertia_basic = R * inertia_cid * R.transpose();
+
+  Eigen::Matrix<double, 6, 6> D = Eigen::Matrix<double, 6, 6>::Zero();
+  D.block<3, 3>(0, 0) = data_.mass * Eigen::Matrix3d::Identity();
+  D.block<3, 3>(3, 3) = inertia_basic;
+  // CG velocity = u + theta x r = u - skew(r) theta.
+  Eigen::Matrix<double, 6, 6> T = Eigen::Matrix<double, 6, 6>::Identity();
+  T.block<3, 3>(0, 3) = -skew(r_basic);
+  return T.transpose() * D * T;
+}
+
+LocalKe Conm2Element::lumped_mass_matrix() const { return mass_matrix(); }
+
+LocalFe Conm2Element::thermal_load(std::span<const double> /*temperatures*/,
+                                   double /*t_ref*/) const {
+  return zero_force(6);
+}
+
+std::vector<EqIndex>
+Conm2Element::global_dof_indices(const DofMap &dof_map) const {
+  const auto &blk = dof_map.block(node_);
+  return {blk.eq[0], blk.eq[1], blk.eq[2], blk.eq[3], blk.eq[4], blk.eq[5]};
+}
+
 ScalarSpringElement::ScalarSpringElement(ElementType type, ElementId eid,
                                          PropertyId pid,
                                          std::vector<NodeId> nodes,

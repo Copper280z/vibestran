@@ -64,6 +64,25 @@ void mark_element_dofs(const ElementData &elem,
     if (elem.nodes.size() > 1)
       mark_component(node_masks[elem.nodes[1]], elem.components[1]);
     break;
+  case ElementType::CONM2: {
+    // Translations always carry the mass.  Rotations carry inertia only with
+    // an inertia tensor or a CG offset; activating them otherwise would
+    // create stiffness-less DOFs at grids that only solids connect.
+    if (elem.nodes.empty())
+      break;
+    ActiveMask &mask = node_masks[elem.nodes[0]];
+    mark_basic_translations(mask);
+    if (elem.conm2.has_value()) {
+      const auto &c = *elem.conm2;
+      const bool has_inertia = std::any_of(c.inertia.begin(), c.inertia.end(),
+                                           [](double v) { return v != 0.0; });
+      const bool has_offset =
+          c.cid == -1 || c.offset.x != 0.0 || c.offset.y != 0.0 || c.offset.z != 0.0;
+      if (has_inertia || has_offset)
+        mark_all(mask);
+    }
+    break;
+  }
   case ElementType::CHBDY:
     break;  // CHBDY elements are stored in model.chbdy_elements, never here
   }

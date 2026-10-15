@@ -27,6 +27,7 @@ bool element_requires_property(const ElementType type) {
         return true;
     case ElementType::CELAS2:
     case ElementType::CMASS2:
+    case ElementType::CONM2:
     case ElementType::CHBDY:
         return false;
     }

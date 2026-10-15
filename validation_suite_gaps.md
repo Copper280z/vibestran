@@ -51,4 +51,6 @@ reference is a MYSTRAN run.
 |---|---|---|
 | `PARAM,COUPMASS` (lumped mass; vibestran defaults to consistent mass) | No deck sets COUPMASS | Copy the `V30 beam released dof *` decks with `PARAM,COUPMASS,-1`: the pin-flag and MPC-hinge structures must then give identical frequency pairs (vibestran reproduces MYSTRAN's `released dof y-n` frequencies exactly this way) |
 | Modal analysis with massless DOFs (lumped mass, rotations without inertia) | No deck exercises it | Same decks; checks that no spurious modes appear and none are missed |
+| CONM2 with CID = -1 (X is the basic location of the CG) | 19 decks use CONM2, none with CID = -1 | Same offset mass given once with CID = 0 and an offset, once with CID = -1 and the absolute CG location; results must be identical |
+| Modal analysis requesting all finite modes (ND >= massed DOFs, e.g. a one-DOF spring-mass) | Not checked by any deck | Grounded CELAS2 + CONM2: lambda = k/m |
 | CTETRA10 consistent mass in modal or inertial-load analysis | 12 decks use CTETRA10, none in SOL 103 | Free-free or cantilevered tet10 block in SOL 103, compared with a refined CHEXA/CTETRA4 reference, plus a GRAV case checking total reaction = rho*V*g |

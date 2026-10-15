@@ -3833,3 +3833,82 @@ EIGRL,1,,,8
     }
     EXPECT_GT(max_split, 1e-6);
 }
+
+// ── CONM2 ─────────────────────────────────────────────────────────────────────
+
+TEST(Integration, Conm2OnGroundedSpringHasOmegaSquaredKOverM) {
+    // One free DOF: grounded CELAS2 (k = 800) on T1 with a 2.0 CONM2;
+    // lambda = k/m = 400 exactly.  Uses the dense path (all finite modes).
+    const ModalSolverResults res = run_modal(R"(
+SOL 103
+CEND
+METHOD = 1
+SPC = 1
+BEGIN BULK
+GRID,1,,0.,0.,0.
+CELAS2,1,800.,1,1
+CONM2,2,1,,2.
+SPC1,1,23456,1
+EIGRL,1,,,3
+ENDDATA
+)");
+    ASSERT_EQ(res.subcases.size(), 1u);
+    ASSERT_EQ(res.subcases[0].modes.size(), 1u);
+    EXPECT_NEAR(res.subcases[0].modes[0].eigenvalue, 400.0, 1e-9);
+}
+
+TEST(Integration, Conm2RotaryInertiaGivesTorsionPendulumFrequency) {
+    // Massless bar (rho = 0) clamped at grid 1, CONM2 with only I11 at the
+    // tip: the single finite mode is torsion with lambda = GJ / (L I11).
+    // Translations and the other rotations are massless and condensed out.
+    constexpr double E = 2.0e7, nu = 0.25, J = 0.3, L = 4.0, I11 = 1.5;
+    const double G = E / (2.0 * (1.0 + nu));
+    const ModalSolverResults res = run_modal(R"(
+SOL 103
+CEND
+METHOD = 1
+SPC = 1
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,4.,0.,0.
+MAT1,1,2.0E7,,0.25
+PBAR,1,1,1.,0.2,0.2,0.3
+CBAR,1,1,1,2,0.,1.,0.
+CONM2,2,2,,0.,,,,,1.5
+SPC1,1,123456,1
+EIGRL,1,,,2
+ENDDATA
+)");
+    ASSERT_EQ(res.subcases[0].modes.size(), 1u);
+    EXPECT_NEAR(res.subcases[0].modes[0].eigenvalue, G * J / (L * I11),
+                1e-9 * G * J / (L * I11));
+}
+
+TEST(Integration, Conm2OffsetMassUnderGravityLoadsTipWithForceAndTorque) {
+    // A massless cantilever along x carries a CONM2 of mass m whose CG is
+    // offset d along +y from the tip.  Gravity g in -z puts -m g on the tip
+    // and a torque (d e_y) x (-m g e_z) = -m g d e_x, so
+    //   w_tip = -m g L^3 / (3 E I2),  theta_x = -m g d L / (G J).
+    constexpr double E = 2.0e7, nu = 0.25, I2 = 0.2, J = 0.3, L = 4.0;
+    constexpr double mass = 3.0, g = 9.81, d = 0.5;
+    const double G = E / (2.0 * (1.0 + nu));
+    const SolverResults res = run_analysis(R"(
+SOL 101
+CEND
+SUBCASE 1
+  LOAD = 1
+  SPC = 1
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,4.,0.,0.
+MAT1,1,2.0E7,,0.25
+PBAR,1,1,1.,0.2,0.2,0.3
+CBAR,1,1,1,2,0.,1.,0.
+CONM2,2,2,,3.,0.,0.5,0.
+SPC1,1,123456,1
+GRAV,1,,9.81,0.,0.,-1.
+ENDDATA
+)");
+    EXPECT_NEAR(get_disp(res, 2, 2), -mass * g * L * L * L / (3.0 * E * I2), 1e-12);
+    EXPECT_NEAR(get_disp(res, 2, 3), -mass * g * d * L / (G * J), 1e-12);
+}

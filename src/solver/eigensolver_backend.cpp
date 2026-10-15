@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <Eigen/Dense>
 #include <Eigen/SparseCholesky>
 #include <format>
 #include <optional>
@@ -349,6 +350,90 @@ std::vector<int> massed_dof_indices(const Eigen::SparseMatrix<double>& M) {
     return massed;
 }
 
+namespace {
+
+/// Every finite eigenpair of K phi = lambda M phi by dense algebra: massless
+/// DOFs (index set 0) are condensed exactly, K_red = K_mm - K_m0 K_00^-1 K_0m,
+/// the definite problem K_red x = lambda M_mm x is solved, and the massless
+/// components are recovered as phi_0 = -K_00^-1 K_0m x.  Vectors are returned
+/// mass-normalized and sorted by ascending eigenvalue.
+std::vector<EigenPair> solve_condensed_dense(const Eigen::SparseMatrix<double>& K,
+                                             const Eigen::SparseMatrix<double>& M,
+                                             const std::vector<int>& massed) {
+    const auto n = static_cast<int>(K.rows());
+    const Eigen::MatrixXd Kd =
+        Eigen::MatrixXd(Eigen::SparseMatrix<double>(K.selfadjointView<Eigen::Lower>()));
+    const Eigen::MatrixXd Md =
+        Eigen::MatrixXd(Eigen::SparseMatrix<double>(M.selfadjointView<Eigen::Lower>()));
+    std::vector<int> massless;
+    {
+        std::vector<char> is_massed(static_cast<size_t>(n), 0);
+        for (const int i : massed)
+            is_massed[static_cast<size_t>(i)] = 1;
+        for (int i = 0; i < n; ++i)
+            if (!is_massed[static_cast<size_t>(i)])
+                massless.push_back(i);
+    }
+    const auto nm = static_cast<Eigen::Index>(massed.size());
+    const auto n0 = static_cast<Eigen::Index>(massless.size());
+    auto sub = [](const Eigen::MatrixXd& A, const std::vector<int>& rows,
+                  const std::vector<int>& cols) {
+        Eigen::MatrixXd S(static_cast<Eigen::Index>(rows.size()),
+                          static_cast<Eigen::Index>(cols.size()));
+        for (size_t i = 0; i < rows.size(); ++i)
+            for (size_t j = 0; j < cols.size(); ++j)
+                S(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j)) =
+                    A(rows[i], cols[j]);
+        return S;
+    };
+    const Eigen::MatrixXd Kmm = sub(Kd, massed, massed);
+    const Eigen::MatrixXd Mmm = sub(Md, massed, massed);
+    Eigen::MatrixXd Kred = Kmm;
+    Eigen::MatrixXd recover; // phi_0 = recover * x
+    if (n0 > 0) {
+        const Eigen::MatrixXd K00 = sub(Kd, massless, massless);
+        const Eigen::MatrixXd K0m = sub(Kd, massless, massed);
+        const Eigen::LDLT<Eigen::MatrixXd> ldlt(K00);
+        if (ldlt.info() != Eigen::Success || !ldlt.isPositive() ||
+            ldlt.vectorD().cwiseAbs().minCoeff() <=
+                1e-14 * ldlt.vectorD().cwiseAbs().maxCoeff()) {
+            throw SolverError(std::format(
+                "Eigensolver: the {} massless DOFs have a singular stiffness "
+                "block (an unrestrained mechanism without mass)", n0));
+        }
+        recover = -ldlt.solve(K0m);
+        Kred += K0m.transpose() * recover;
+    }
+    const Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> ges(
+        0.5 * (Kred + Kred.transpose()), Mmm);
+    if (ges.info() != Eigen::Success)
+        throw SolverError(std::format(
+            "Eigensolver: dense generalized eigensolve failed (n={}, massed={})",
+            n, nm));
+    spdlog::info("Eigensolver: all {} finite eigenvalues requested; solved the "
+                 "condensed problem densely", nm);
+
+    std::vector<EigenPair> results;
+    results.reserve(static_cast<size_t>(nm));
+    for (Eigen::Index k = 0; k < nm; ++k) {
+        const Eigen::VectorXd x = ges.eigenvectors().col(k); // M_mm-normalized
+        EigenPair ep;
+        ep.eigenvalue = ges.eigenvalues()(k);
+        ep.eigenvector = Eigen::VectorXd::Zero(n);
+        for (Eigen::Index i = 0; i < nm; ++i)
+            ep.eigenvector(massed[static_cast<size_t>(i)]) = x(i);
+        if (n0 > 0) {
+            const Eigen::VectorXd phi0 = recover * x;
+            for (Eigen::Index i = 0; i < n0; ++i)
+                ep.eigenvector(massless[static_cast<size_t>(i)]) = phi0(i);
+        }
+        results.push_back(std::move(ep));
+    }
+    return results;
+}
+
+} // namespace
+
 std::vector<EigenPair> SpectraEigensolverBackend::solve(
     const Eigen::SparseMatrix<double>& K,
     const Eigen::SparseMatrix<double>& M,
@@ -360,8 +445,6 @@ std::vector<EigenPair> SpectraEigensolverBackend::solve(
         throw SolverError("Eigensolver: system has no free DOFs");
     if (nd < 1)
         throw SolverError("Eigensolver: nd must be >= 1");
-    if (nd >= n)
-        nd = n - 1; // Spectra requires nd < n
 
     // The Lanczos iteration itself is mostly serial, but the shift-invert
     // factorization and triangular solves dominate runtime for large models.
@@ -385,13 +468,18 @@ std::vector<EigenPair> SpectraEigensolverBackend::solve(
 
     const std::vector<int> massed = massed_dof_indices(M);
     const int nm = static_cast<int>(massed.size());
-    if (nm < 2) {
+    if (nm < 1) {
         throw SolverError(std::format(
-            "Eigensolver: only {} of {} free DOFs carry mass; at least 2 are "
-            "required", nm, n));
+            "Eigensolver: none of the {} free DOFs carries mass", n));
     }
+    // The number of finite eigenvalues equals the massed DOFs.  Spectra needs
+    // nd < nm; when every finite eigenvalue is requested, solve the condensed
+    // problem densely instead (this only happens for small models).
+    constexpr int kMaxDenseMassed = 2000;
+    if (nd >= nm && nm <= kMaxDenseMassed)
+        return solve_condensed_dense(K, M, massed);
     if (nd >= nm)
-        nd = nm - 1; // finite eigenvalues = massed DOFs; Spectra needs nd < nm
+        nd = nm - 1;
     const bool reduced = (nm < n);
 
     // M restricted to the massed DOFs (lower triangle, like M).

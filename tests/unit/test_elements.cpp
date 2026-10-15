@@ -2612,6 +2612,89 @@ TEST(LumpedMass, CoupmassParamSelectsFormulation) {
   EXPECT_FALSE(m.use_lumped_mass());
 }
 
+namespace {
+
+ElementData conm2_data(double mass, Vec3 offset, std::array<double, 6> inertia,
+                       int cid) {
+  ElementData e;
+  e.id = ElementId{9};
+  e.type = ElementType::CONM2;
+  e.nodes = {NodeId{1}};
+  e.conm2 = ElementData::ConcentratedMass{mass, offset, inertia, cid};
+  return e;
+}
+
+/// Rigid-body kinetic "energy" u^T M u for grid translation u and rotation w.
+double rigid_energy(const LocalKe &M, const Eigen::Vector3d &u,
+                    const Eigen::Vector3d &w) {
+  Eigen::Matrix<double, 6, 1> x;
+  x << u, w;
+  return x.dot(M * x);
+}
+
+} // namespace
+
+TEST(Conm2, OffsetMassFollowsRigidBodyKinematicsAndParallelAxis) {
+  // Mass m with inertia J about its CG at offset r from the grid: the grid
+  // rotational inertia is J + m(|r|^2 I - r r^T) (parallel axis) and the
+  // CG moves with u + w x r, so u^T M u = m |u + w x r|^2 + w^T J w.
+  Model m;
+  add_grid(m, 1, 1.0, 2.0, 3.0);
+  const double mass = 4.0;
+  const Vec3 r{0.3, -0.2, 0.5};
+  // I11, I21, I22, I31, I32, I33 (products enter with a minus sign).
+  const std::array<double, 6> I{2.0, 0.1, 3.0, -0.2, 0.15, 4.0};
+  const LocalKe M = Conm2Element(conm2_data(mass, r, I, 0), m).mass_matrix();
+  Eigen::Matrix3d J;
+  J << 2.0, -0.1, 0.2, -0.1, 3.0, -0.15, 0.2, -0.15, 4.0;
+  const Eigen::Vector3d rv{r.x, r.y, r.z};
+  const Eigen::Matrix3d parallel =
+      J + mass * (rv.squaredNorm() * Eigen::Matrix3d::Identity() - rv * rv.transpose());
+  EXPECT_LT((M.block<3, 3>(3, 3) - parallel).cwiseAbs().maxCoeff(), 1e-12);
+  EXPECT_LT((M - M.transpose()).cwiseAbs().maxCoeff(), 1e-14);
+
+  const Eigen::Vector3d u{0.7, -0.4, 0.25}, w{0.3, 0.9, -0.6};
+  const Eigen::Vector3d v_cg = u + w.cross(rv);
+  EXPECT_NEAR(rigid_energy(M, u, w), mass * v_cg.squaredNorm() + w.dot(J * w),
+              1e-12);
+  // No stiffness, and the lumped form is the same matrix.
+  const Conm2Element elem(conm2_data(mass, r, I, 0), m);
+  EXPECT_EQ(elem.stiffness_matrix().cwiseAbs().maxCoeff(), 0.0);
+  EXPECT_LT((elem.lumped_mass_matrix() - M).cwiseAbs().maxCoeff(), 1e-15);
+}
+
+TEST(Conm2, CidMinusOneGivesCgLocationAndRotatedCidRotatesInertia) {
+  // CID = -1: X is the basic CG location, so the offset is X - grid.
+  Model m;
+  add_grid(m, 1, 1.0, 2.0, 3.0);
+  const LocalKe Mabs = Conm2Element(
+      conm2_data(2.0, Vec3{1.3, 1.8, 3.5}, {}, -1), m).mass_matrix();
+  const LocalKe Mrel = Conm2Element(
+      conm2_data(2.0, Vec3{0.3, -0.2, 0.5}, {}, 0), m).mass_matrix();
+  EXPECT_LT((Mabs - Mrel).cwiseAbs().maxCoeff(), 1e-12);
+
+  // CID 5 has x5 = basic y, y5 = -basic x, z5 = basic z.  An inertia I11
+  // about x5 is an inertia about basic y, and an offset along x5 is a basic
+  // y offset.
+  CoordSys cs;
+  cs.id = CoordId{5};
+  cs.type = CoordType::Rectangular;
+  cs.origin = Vec3{0, 0, 0};
+  cs.axes = {Vec3{0, 1, 0}, Vec3{-1, 0, 0}, Vec3{0, 0, 1}};
+  m.coord_systems[cs.id] = cs;
+  const LocalKe Mrot = Conm2Element(
+      conm2_data(0.0, Vec3{}, {7.0, 0, 0, 0, 0, 0}, 5), m).mass_matrix();
+  EXPECT_NEAR(Mrot(4, 4), 7.0, 1e-12); // basic R2
+  EXPECT_NEAR(Mrot(3, 3), 0.0, 1e-12);
+  const LocalKe Moff = Conm2Element(
+      conm2_data(3.0, Vec3{2.0, 0, 0}, {}, 5), m).mass_matrix();
+  // Offset along basic y by 2: rotation about basic z moves the CG in -x.
+  EXPECT_NEAR(rigid_energy(Moff, Eigen::Vector3d::Zero(),
+                           Eigen::Vector3d{0, 0, 1}), 3.0 * 4.0, 1e-12);
+  EXPECT_NEAR(rigid_energy(Moff, Eigen::Vector3d::Zero(),
+                           Eigen::Vector3d{0, 1, 0}), 0.0, 1e-12);
+}
+
 TEST(CBeam, ThermalLoadIsAxialAndSelfEquilibrated) {
   Model m;
   add_mat1(m, 1, 3.0e7, 0.25, 0.0, 1.2e-5);

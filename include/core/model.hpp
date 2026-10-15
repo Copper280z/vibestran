@@ -256,6 +256,7 @@ enum class ElementType {
   CELAS2,
   CMASS1,
   CMASS2,
+  CONM2,
   CHBDY,
 };
 
@@ -319,6 +320,20 @@ struct ElementData {
   /// CBAR OFFT first character 'B': the orientation vector is in the basic
   /// system instead of the displacement coordinate system of GA.
   bool orientation_in_basic{false};
+
+  /// CONM2 data: mass, offset X of the centre of gravity, and inertia
+  /// {I11, I21, I22, I31, I32, I33} about the CG.  With cid >= 0 the offset
+  /// is measured from the grid in system `cid` and the inertia is expressed in
+  /// `cid`; with cid = -1 the offset is the basic location of the CG and the
+  /// inertia is in basic.  Off-diagonal inertia terms enter the inertia matrix
+  /// with a minus sign (Nastran convention).
+  struct ConcentratedMass {
+    double mass{0.0};
+    Vec3 offset{};
+    std::array<double, 6> inertia{};
+    int cid{0};
+  };
+  std::optional<ConcentratedMass> conm2{std::nullopt};
 };
 
 // ── Loads

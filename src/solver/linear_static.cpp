@@ -550,6 +550,7 @@ void LinearStaticSolver::apply_inertial_loads(const Model &model,
     case ElementType::CBAR:
     case ElementType::CBEAM:
     case ElementType::CBUSH:
+    case ElementType::CONM2:
       for (size_t i = 0; i < elem_data.nodes.size(); ++i) {
         const Vec3 a = nodal_accels[elem_data.nodes[i]];
         accel(6 * static_cast<int>(i) + 0) = a.x;
@@ -638,7 +639,8 @@ void LinearStaticSolver::apply_thermal_loads(
     // Reference temperature from the element's material (MAT1 TREF field)
     MaterialId mid{0};
     if (elem_data.type != ElementType::CELAS2 &&
-        elem_data.type != ElementType::CMASS2) {
+        elem_data.type != ElementType::CMASS2 &&
+        elem_data.type != ElementType::CONM2) {
       const auto &prop = model.property(elem_data.pid);
       mid = property_material_id(prop);
     }
@@ -826,6 +828,7 @@ void subtract_spc_inertial_loads(const Model &model, const SubCase &sc,
     case ElementType::CBAR:
     case ElementType::CBEAM:
     case ElementType::CBUSH:
+    case ElementType::CONM2:
       for (size_t i = 0; i < elem_data.nodes.size(); ++i) {
         const Vec3 a = nodal_accels[elem_data.nodes[i]];
         accel(6 * static_cast<int>(i) + 0) = a.x;
@@ -914,7 +917,8 @@ void subtract_spc_thermal_loads(const Model &model, const SubCase &sc,
 
     MaterialId mid{0};
     if (elem_data.type != ElementType::CELAS2 &&
-        elem_data.type != ElementType::CMASS2) {
+        elem_data.type != ElementType::CMASS2 &&
+        elem_data.type != ElementType::CONM2) {
       const auto &prop = model.property(elem_data.pid);
       mid = property_material_id(prop);
     }

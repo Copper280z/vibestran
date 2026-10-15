@@ -135,15 +135,34 @@ TEST(SpectraEigensolverBackend, MasslessDofsAreCondensedExactly) {
   }
 }
 
-TEST(SpectraEigensolverBackend, RequestBeyondMassedDofsIsCapped) {
-  // Only the massed DOFs give finite eigenvalues; asking for more than
-  // exist returns every finite one (Spectra needs nd < nm) instead of
-  // inventing modes.
+TEST(SpectraEigensolverBackend, RequestingAllFiniteModesReturnsEveryOne) {
+  // Only the massed DOFs give finite eigenvalues.  Asking for at least that
+  // many returns every finite mode (via the exact dense condensed solve,
+  // since Spectra needs nd < n) and no invented ones.
   const auto p = vibestran::test::make_lumped_beam_problem(5);
   vibestran::SpectraEigensolverBackend backend;
   const auto pairs = backend.solve(p.K, p.M, 9, -1.0);
-  ASSERT_EQ(pairs.size(), 4u);
-  for (int i = 0; i < 4; ++i)
-    EXPECT_NEAR(pairs[static_cast<size_t>(i)].eigenvalue,
-                p.reference_eigenvalues(i), 1e-9 * p.reference_eigenvalues(i));
+  ASSERT_EQ(pairs.size(), 5u);
+  for (int i = 0; i < 5; ++i) {
+    const auto &ep = pairs[static_cast<size_t>(i)];
+    EXPECT_NEAR(ep.eigenvalue, p.reference_eigenvalues(i),
+                1e-10 * p.reference_eigenvalues(i));
+    const Eigen::VectorXd kx = p.K.selfadjointView<Eigen::Lower>() * ep.eigenvector;
+    const Eigen::VectorXd mx = p.M.selfadjointView<Eigen::Lower>() * ep.eigenvector;
+    EXPECT_LT((kx - ep.eigenvalue * mx).norm(), 1e-9 * kx.norm());
+    EXPECT_NEAR(ep.eigenvector.dot(mx), 1.0, 1e-12);
+  }
+}
+
+TEST(SpectraEigensolverBackend, SingleDofProblemIsSolved) {
+  // A one-DOF spring-mass (k = 50, m = 2) has lambda = k/m = 25; Spectra
+  // alone cannot solve n = 1.
+  Eigen::SparseMatrix<double> K(1, 1), M(1, 1);
+  K.insert(0, 0) = 50.0;
+  M.insert(0, 0) = 2.0;
+  vibestran::SpectraEigensolverBackend backend;
+  const auto pairs = backend.solve(K, M, 1, -1.0);
+  ASSERT_EQ(pairs.size(), 1u);
+  EXPECT_NEAR(pairs[0].eigenvalue, 25.0, 1e-12);
+  EXPECT_NEAR(std::abs(pairs[0].eigenvector(0)), 1.0 / std::sqrt(2.0), 1e-12);
 }

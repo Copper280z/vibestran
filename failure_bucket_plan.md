@@ -18,17 +18,17 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 2,532 final failure
+The suite contains 3,226 definitions. The current run has 2,528 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
 | `unsupported_input` | 1,484 | 223 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 488 | 174 | Result exists but differs from the reference or comparator expectation |
+| `numerical_mismatch` | 484 | 172 | Result exists but differs from the reference or comparator expectation |
 | `missing_result_data` | 260 | 44 | Solver completes but does not emit the requested result family |
 | `input_parse_error` | 185 | 15 | Parser rejects syntax or a card variant used by a valid deck |
 | `solver_model_error` | 115 | 13 | Parsed model is rejected by a current formulation or geometry gate |
-| **Total** | **2,532** |  |  |
+| **Total** | **2,528** |  |  |
 
 GRID PS, GRDSET, and BAROR are now applied. The decks they unblocked solve
 (the SB-BAR I12/PINFLAG/OFFSET displacements and stresses match MYSTRAN
@@ -205,10 +205,6 @@ The most widespread ignored keywords across all failing decks are `ECHO`
 `PCOMP` (15), and `TEMPERATURE` (15). Abbreviated case-control commands
 (`DISP`, `STRE`, `SPCF`, ...) are now accepted and no longer appear.
 
-`CONM2` is among the ignored bulk cards; for example `SB-BAR-GRAV` now has
-the right bar frame through BAROR but still differs from MYSTRAN because its
-offset tip mass is dropped.
-
 The main implementation work remains grid point force output (`GPFORCE`),
 element force output (`FORCE`/`ELFORCE`), CONM2, CQUAD8, PCOMP laminates,
 CROD/PROD, MPC force output, EIGR/reduction behavior, and unsupported solution
@@ -370,11 +366,10 @@ values encode MYSTRAN behaviour and are not a correctness oracle.
    Benchmark bulk comparisons, and element force output (`FORCE`/`ELFORCE`):
    bar end forces are already recovered (`CBarBeamElement::EndForces`);
    shell forces are the largest missing-result family.
-2. CONM2 (ignored today; affects mass and inertial-load decks).
-3. CROD/PROD and CQUAD8.
-4. Triage the SPCFORCES `numerical_mismatch` decks (RBE3 node-surface
+2. CROD/PROD and CQUAD8.
+3. Triage the SPCFORCES `numerical_mismatch` decks (RBE3 node-surface
    coupling and MITC4+ reaction decks) and MPC force output.
-5. Implement 15-node CPENTA and partial PBUSH parsing only with their required
+4. Implement 15-node CPENTA and partial PBUSH parsing only with their required
    mechanics; keep MAT2/MAT8 and severely warped CQUAD4 decks explicitly
    unsupported until the corresponding formulations are implemented.
 
@@ -447,3 +442,9 @@ most recent entry.
   consistent mass was rank-deficient (4-point degree-2 rule, 8-digit
   constants: 18 of 30 eigenvalues zero) and now uses an exact rule. No
   validation deck sets COUPMASS or runs a CTETRA10 modal analysis.
+- **CONM2 (2,532 -> 2,528, no new failures).** CONM2 concentrated mass
+  (offset, inertia tensor, CID, CID = -1) is implemented; previously it was
+  ignored. RBE3 12/13 records now pass. SB/SS-CONM2A (statics with a
+  deliberately indefinite inertia tensor, accepted with a warning) now run;
+  their displacements match MYSTRAN, but their SPCFORCES were reported in
+  basic instead of each grid's global system (fixed in the next entry).

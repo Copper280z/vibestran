@@ -43,7 +43,7 @@ vibestran/
 
 ## Supported Features
 
-- **Elements**: CQUAD4, CTRIA3, CHEXA8, CHEXA20, CTETRA4, CTETRA10, CPENTA6, CBAR, CBEAM, CBUSH, CELAS1, CELAS2, CMASS1, CMASS2
+- **Elements**: CQUAD4, CTRIA3, CHEXA8, CHEXA20, CTETRA4, CTETRA10, CPENTA6, CBAR, CBEAM, CBUSH, CELAS1, CELAS2, CMASS1, CMASS2, CONM2 (CG offset, inertia tensor, CID / CID = -1)
 - **Materials**: MAT1 (analysis), plus parser/model support for MAT2, MAT3, MAT4, MAT5, MAT6, and MAT8
 - **Properties**: PSHELL, PSOLID, PBAR (stress recovery points C-F, K1/K2 transverse shear, I12), PBARL (`ROD`, `TUBE`, `BAR`), PBEAM, PBUSH (`K` section), PELAS, PMASS
 - **CBAR end data**: pin flags (PA/PB, statically condensed), rigid end offsets (WA/WB), OFFT `GGG`/`BGG`

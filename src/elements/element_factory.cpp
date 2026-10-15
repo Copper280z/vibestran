@@ -95,6 +95,8 @@ std::unique_ptr<ElementBase> make_element(const ElementData& data, const Model& 
             return std::make_unique<ScalarMassElement>(data.type, data.id, data.pid,
                                                        data.nodes, data.components,
                                                        data.value, model);
+        case ElementType::CONM2:
+            return std::make_unique<Conm2Element>(data, model);
         default:
             throw SolverError(std::format("Unsupported element type for element {}", data.id.value));
     }

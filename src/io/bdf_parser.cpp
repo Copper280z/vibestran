@@ -6,6 +6,7 @@
 #include "io/bdf_parser.hpp"
 #include "core/coord_sys.hpp"
 #include "core/logger.hpp"
+#include <Eigen/Dense>
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -828,6 +829,8 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_celas2(ctx, card.fields);
       else if (kw == "CMASS1")
         process_cmass1(ctx, card.fields);
+      else if (kw == "CONM2")
+        process_conm2(ctx, card.fields);
       else if (kw == "CMASS2")
         process_cmass2(ctx, card.fields);
       else if (kw == "LOAD")
@@ -2060,6 +2063,53 @@ void BdfParser::process_cbar(ParseContext &ctx,
        .pid = blank(2),
        .orientation = blank(5) && blank(6) && blank(7),
        .offt = blank(8)});
+  ctx.model.elements.push_back(std::move(e));
+}
+
+void BdfParser::process_conm2(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  // CONM2, EID, G, CID, M, X1, X2, X3, (blank)
+  //        I11, I21, I22, I31, I32, I33
+  auto num = [&](const size_t i) {
+    return (f.size() > i) ? parse_double(f[i], ctx.line_num) : 0.0;
+  };
+  ElementData e;
+  e.id = ElementId(parse_int(f[1], ctx.line_num));
+  e.type = ElementType::CONM2;
+  e.nodes.push_back(NodeId(parse_int(f[2], ctx.line_num)));
+  ElementData::ConcentratedMass c;
+  c.cid = (f.size() > 3) ? parse_int(f[3], ctx.line_num) : 0;
+  if (c.cid < -1) {
+    throw ParseError(std::format(
+        "Line {}: CONM2 {} CID = {} must be -1 or a coordinate system ID",
+        ctx.line_num, e.id.value, c.cid));
+  }
+  c.mass = num(4);
+  c.offset = Vec3{num(5), num(6), num(7)};
+  for (size_t k = 0; k < 6; ++k)
+    c.inertia[k] = num(9 + k);
+  reject_nonblank_fields(f, 15, ctx.line_num, "CONM2",
+                         "has data beyond the I33 field");
+  // The inertia tensor about the CG must be positive semi-definite.
+  const auto &I = c.inertia;
+  Eigen::Matrix3d J;
+  J << I[0], -I[1], -I[3], -I[1], I[2], -I[4], -I[3], -I[4], I[5];
+  const double min_eig =
+      Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>(J, Eigen::EigenvaluesOnly)
+          .eigenvalues()
+          .minCoeff();
+  if (min_eig < -1e-12 * std::max(1.0, J.cwiseAbs().maxCoeff())) {
+    // Physically impossible, but such entries appear in decks that only
+    // exercise the transformation (e.g. statics without inertial loads), so
+    // warn rather than refuse to run.
+    log_warn(std::format(
+        "Line {}: CONM2 {} inertia matrix is not positive semi-definite "
+        "(smallest eigenvalue {:.6g}; I11={}, I21={}, I22={}, I31={}, I32={}, "
+        "I33={}); modal and inertial-load results that use it are not "
+        "physical",
+        ctx.line_num, e.id.value, min_eig, I[0], I[1], I[2], I[3], I[4], I[5]));
+  }
+  e.conm2 = c;
   ctx.model.elements.push_back(std::move(e));
 }
 
