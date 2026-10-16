@@ -106,6 +106,9 @@ RefinementReport refine_solution(const SparseMatrixBuilder::CsrData &K, std::spa
   auto finish = [&](const std::vector<double> &r) {
     rep.backward_error = backward_error(r, u);
     rep.relative_residual = normF_2 > 0.0 ? two_norm(r) / normF_2 : two_norm(r);
+    const double uF = std::inner_product(u.begin(), u.end(), F.begin(), 0.0);
+    const double ur = std::inner_product(u.begin(), u.end(), r.begin(), 0.0);
+    rep.epsilon = uF != 0.0 ? ur / uF : (ur == 0.0 ? 0.0 : 1.0);
     return rep;
   };
   std::vector<double> r = compensated_residual(K, u, F);
@@ -174,6 +177,11 @@ RefinementReport refine_solution(const SparseMatrixBuilder::CsrData &K, std::spa
     previous = dn;
   }
   return finish(r);
+}
+bool indicates_mechanism(const RefinementReport &r, bool refined) {
+  if (refined)
+    return !r.converged && !(r.estimated_error <= 1e-2);
+  return !(std::abs(r.epsilon) <= kMechanismEpsilon);
 }
 
 } // namespace vibestran

@@ -71,6 +71,7 @@ TEST(RefinementTest, DirectSolveOfAnIllConditionedSystemIsRefinedToFullAccuracy)
   // (1e-4 to 1e-2 here); refinement with compensated residuals removes it.
   const auto [K, F] = scaled_hilbert(10);
   EigenSolverBackend direct;
+  direct.set_refinement(true);
   const std::vector<double> u = direct.solve(K, F);
   const auto rep = direct.last_refinement();
   ASSERT_TRUE(rep.has_value());
@@ -78,6 +79,42 @@ TEST(RefinementTest, DirectSolveOfAnIllConditionedSystemIsRefinedToFullAccuracy)
   EXPECT_GT(rep->initial_error, 1e-7) << "the unrefined solve should be visibly inaccurate";
   EXPECT_LT(max_error_from_one(u), 1e-12);
   EXPECT_LT(rep->backward_error, 1e-15);
+}
+
+TEST(RefinementTest, DirectSolvesAreNotRefinedByDefault) {
+  // Refinement of a direct solve is opt-in (--refine, PARAM,REFINE,YES): by
+  // default the single solve is returned, with its cond(K) eps error.
+  const auto [K, F] = scaled_hilbert(10);
+  EigenSolverBackend direct;
+  const std::vector<double> u = direct.solve(K, F);
+  EXPECT_FALSE(direct.last_refinement().has_value());
+  EXPECT_GT(max_error_from_one(u), 1e-7);
+}
+
+TEST(RefinementTest, EpsilonSeparatesAMechanismFromAnIllConditionedSystem) {
+  // Mechanism: K = [[1, -1], [-1, 1]] is singular and F = (1, 0) is not in
+  // its range.  A factorization with a perturbed pivot returns roughly
+  // u = (K + delta I)^-1 F, whose residual is delta u: the backward error
+  // is round-off, but epsilon = u . (F - K u) / u . F = 1 - O(delta).
+  const auto K = csr(2, {{{0, 1.0}}, {{0, -1.0}, {1, 1.0}}}, SymmetryStorage::Lower);
+  const std::vector<double> F{1.0, 0.0};
+  const double delta = 1e-10, s = std::sqrt(0.5);
+  // F = s (v1 + v2), v1 = s (1, 1) with eigenvalue 0, v2 = s (1, -1) with 2.
+  const double a1 = s / delta, a2 = s / (2.0 + delta);
+  std::vector<double> u{s * (a1 + a2), s * (a1 - a2)};
+  const auto mech = refine_solution(K, F, u, nullptr, RefinementOptions{.max_corrections = 0});
+  EXPECT_NEAR(mech.epsilon, 1.0, 1e-6);
+  EXPECT_LT(mech.backward_error, 1e-9);
+  EXPECT_TRUE(indicates_mechanism(mech, /*refined=*/false));
+
+  // Ill-conditioned but regular: H_10 (cond 1.6e13) solved once is wrong
+  // by more than 1e-7, yet its epsilon is small, so no mechanism is flagged.
+  const auto [H, G] = scaled_hilbert(10);
+  EigenSolverBackend direct;
+  std::vector<double> v = direct.solve(H, G);
+  const auto ill = refine_solution(H, G, v, nullptr, RefinementOptions{.max_corrections = 0});
+  EXPECT_LT(std::abs(ill.epsilon), 1e-6);
+  EXPECT_FALSE(indicates_mechanism(ill, /*refined=*/false));
 }
 
 TEST(RefinementTest, CorrectionsThatDoNotContractEndRefinement) {

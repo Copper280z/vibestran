@@ -215,6 +215,7 @@ TEST_F(CudaTest, SingularMatrixThrowsSolverError) {
 
 TEST_F(CudaTest, Fp64SolveOfHilbert10IsRefinedToFullAccuracy) {
     const auto [K, F] = test::scaled_hilbert(10);
+    backend_->set_refinement(true);
     const auto u = backend_->solve(K, F);
     const auto rep = backend_->last_refinement();
     ASSERT_TRUE(rep.has_value());
@@ -224,6 +225,14 @@ TEST_F(CudaTest, Fp64SolveOfHilbert10IsRefinedToFullAccuracy) {
     EXPECT_LT(rep->backward_error, 1e-15);
 }
 
+TEST_F(CudaTest, Fp64SolveIsNotRefinedByDefault) {
+    const auto [K, F] = test::scaled_hilbert(10);
+    const auto u = backend_->solve(K, F);
+    EXPECT_FALSE(backend_->last_refinement().has_value());
+    EXPECT_GT(test::max_error_from_one(u), 1e-7);
+}
+
+// An fp32 factorization is refined whether or not refinement was requested.
 TEST(CudaFp32Test, Fp32FactorizationIsRefinedToDoubleAccuracy) {
     auto backend = CudaSolverBackend::try_create(CudaSolverPrecision::Float32);
     if (!backend.has_value())

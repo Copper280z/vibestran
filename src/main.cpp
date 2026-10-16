@@ -116,6 +116,7 @@ static void print_usage() {
       "                      [--log-file=<path>] "
       "[--checkmode=lenient]\n"
       "                      [--no-quality-checks] [--dump-system=<prefix>]\n"
+      "                      [--refine]\n"
       "                      <input.bdf|input.inp> [output.f06]\n"
       "  --backend=cpu              Eigen sparse Cholesky CPU solver "
       "(default)\n"
@@ -138,6 +139,8 @@ static void print_usage() {
       "  --checkmode=lenient        Override the deck and run quality "
       "checks in LENIENT mode\n"
       "  --no-quality-checks        Skip all pre-flight quality checks\n"
+      "  --refine                   Refine direct solves to full accuracy\n"
+      "                             (also PARAM,REFINE,YES)\n"
       "  --dump-system=<prefix>     Write each subcase's reduced K (and M,\n"
       "                             F, u) in Matrix Market format and its\n"
       "                             DOF map: <prefix>_sc<N>_K.mtx etc.\n"
@@ -151,6 +154,7 @@ int main(int argc, const char *argv[]) {
   BackendChoice backend_choice = BackendChoice::Auto;
   CudaPrecisionChoice cuda_precision = CudaPrecisionChoice::Float64;
   bool force_csv = false;
+  bool force_refine = false;
   bool force_checkmode_lenient = false;
   bool skip_quality_checks = false;
   std::filesystem::path log_file_path;
@@ -176,6 +180,8 @@ int main(int argc, const char *argv[]) {
       }
     } else if (arg == "--csv") {
       force_csv = true;
+    } else if (arg == "--refine") {
+      force_refine = true;
     } else if (arg == "--no-quality-checks") {
       skip_quality_checks = true;
     } else if (arg.starts_with("--checkmode=")) {
@@ -353,6 +359,16 @@ int main(int argc, const char *argv[]) {
     if (!backend)
       backend = std::make_unique<vibestran::EigenSolverBackend>();
 
+    // Iterative refinement of direct solves is opt-in (--refine or
+    // PARAM,REFINE,YES); a single backward-stable solve is the default, as
+    // in Nastran.  PCG and fp32 backends always refine.
+    bool refine = force_refine;
+    if (!refine) {
+      auto it = model.params.find("REFINE");
+      refine = it != model.params.end() && it->second == "YES";
+    }
+    backend->set_refinement(refine);
+
     auto op2_path = std::filesystem::path(f06_path).replace_extension(".op2");
 
     if (model.analysis.sol == vibestran::SolutionType::HeatTransferSteady) {
@@ -430,8 +446,9 @@ int main(int argc, const char *argv[]) {
         }
 
         spdlog::info("Solving structural chain with: Apple Accelerate (CPU)");
-        vibestran::LinearStaticSolver lsolver(
-            std::make_unique<vibestran::EigenSolverBackend>());
+        auto chain_backend = std::make_unique<vibestran::EigenSolverBackend>();
+        chain_backend->set_refinement(refine);
+        vibestran::LinearStaticSolver lsolver(std::move(chain_backend));
         lsolver.set_system_dump(dump_prefix);
         vibestran::SolverResults stat_results = lsolver.solve(stat_model);
 

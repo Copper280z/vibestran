@@ -73,14 +73,18 @@ report_factor_ratio_result(const FactorRatioCheckPolicy &policy,
 #endif
 
 /// Refines a direct solution with its own factorization (one triangular
-/// solve per correction) and compensated residuals.
+/// solve per correction) and compensated residuals, when refinement is
+/// enabled; otherwise returns it unchanged with no report.
 template <class Factor>
 std::vector<double> refine_direct(const SparseMatrixBuilder::CsrData &K,
                                   const std::vector<double> &F, const Eigen::VectorXd &u0,
                                   const Factor &factor,
-                                  std::optional<RefinementReport> &report) {
+                                  std::optional<RefinementReport> &report, bool refine) {
   const auto n = static_cast<Eigen::Index>(u0.size());
   std::vector<double> u(u0.data(), u0.data() + n);
+  report.reset();
+  if (!refine)
+    return u;
   const auto correction = [&](const std::vector<double> &r) {
     const Eigen::Map<const Eigen::VectorXd> rhs(r.data(), n);
     const Eigen::VectorXd d = factor.solve(rhs);
@@ -218,7 +222,7 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
         Ms(t_compute_end - t_compute_begin).count(),
         Ms(t_fallback_compute_end - t_fallback_compute_begin).count(),
         Ms(t_fallback_solve_end - t_fallback_solve_begin).count());
-    return refine_direct(K_csr, F, u, ldlt, last_refinement_);
+    return refine_direct(K_csr, F, u, ldlt, last_refinement_, refine_);
   }
   if (factor_ratio_policy != nullptr) {
     spdlog::debug(
@@ -279,7 +283,7 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
         Ms(t_compute_end - t_compute_begin).count(),
         Ms(t_fallback_compute_end - t_fallback_compute_begin).count(),
         Ms(t_fallback_solve_end - t_fallback_solve_begin).count());
-    return refine_direct(K_csr, F, u, ldlt, last_refinement_);
+    return refine_direct(K_csr, F, u, ldlt, last_refinement_, refine_);
   }
   if (factor_ratio_policy != nullptr) {
     spdlog::debug(
@@ -338,7 +342,7 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
         Ms(t_compute_end - t_compute_begin).count(),
         Ms(t_fallback_compute_end - t_fallback_compute_begin).count(),
         Ms(t_fallback_solve_end - t_fallback_solve_begin).count());
-    return refine_direct(K_csr, F, u, ldlt, last_refinement_);
+    return refine_direct(K_csr, F, u, ldlt, last_refinement_, refine_);
   }
   if (factor_ratio_policy != nullptr) {
     report_factor_ratio_result(
@@ -363,7 +367,7 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
       Ms(t_solve_end - t_solve_begin).count());
 #endif
 
-  return refine_direct(K_csr, F, u, solver, last_refinement_);
+  return refine_direct(K_csr, F, u, solver, last_refinement_, refine_);
 }
 
 

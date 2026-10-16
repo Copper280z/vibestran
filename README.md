@@ -118,7 +118,7 @@ Optional solver backends are detected automatically at configure time.
 ```
 vibestran [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg|cuda-pcg-mixed>]
          [--cuda-precision=<fp32|fp64>] [--csv]
-         [--log-file=<path>] [--dump-system=<prefix>]
+         [--log-file=<path>] [--dump-system=<prefix>] [--refine]
          <input.bdf|input.inp> [output.f06]
 ```
 
@@ -168,19 +168,28 @@ SPC'd and MPC-dependent DOFs are not in the reduced system.
 
 ### Solution accuracy
 
-Every backend refines its solution against the double-precision stiffness
-with residuals computed in compensated (double-double) arithmetic, and is
-judged by the estimated relative error of the solution, ||d|| / ||u|| for
-the last refinement correction d, rather than by the residual. Shell and
-thin-solid stiffness matrices commonly have condition numbers of 1e10 to
-1e15, so an unrefined backward-stable solve is only accurate to cond(K) * eps
-(up to 1e-1), and even the exact solution rounded to double can have
-||F - K u|| / ||F|| of 1e-3: a residual test says little about accuracy.
-Each SOL 101 subcase logs the estimated error before and after refinement,
-the relative residual and the normwise backward error, and warns when the
-solution could not be refined (a mechanism or a hopelessly ill-conditioned
-model). Assembly is deterministic, so K and the solution are reproducible
-bit for bit between runs.
+A direct solve is a single backward-stable factorization and solve, as in
+Nastran, and is assessed with a residual computed in compensated
+(double-double) arithmetic. Each SOL 101 subcase logs:
+
+- **epsilon** = u · (F − K u) / u · F, Nastran's load-sequence epsilon. It roughly
+  tracks the relative error of the solution: below 1e-10 for ordinary models,
+  ~1e-4 for a thin CHEXA8 shell with cond(K) ~ 6e14, and O(1) for a loaded
+  mechanism. |epsilon| > 1e-2 is reported as a mechanism (results not
+  meaningful), |epsilon| > 1e-6 as an ill-conditioned model.
+- the normwise **backward error**, which is round-off for any stable solve;
+- the relative residual ||F − K u|| / ||F||, which is not an accuracy measure:
+  for an ill-conditioned K it is ~ eps ||K|| ||u|| / ||F|| even for the exact
+  solution rounded to double.
+
+`--refine` (or `PARAM,REFINE,YES` in the bulk data) refines direct solves with
+their factorization and compensated residuals until the corrections reach
+round-off, which removes the cond(K) * eps error of a single solve (thin
+hemisphere: 4e-4 to 1e-14). It costs a few triangular solves, typically 5-10%
+of the solve time, and the log then reports the estimated relative error.
+The PCG backends and fp32 factorizations always refine: that is how they reach
+double accuracy at all. Assembly is deterministic, so K is identical bit for
+bit between runs.
 
 ### CPU — Cholesky (default)
 
@@ -221,8 +230,9 @@ shift-and-invert linear solver inside the IRL eigensolver for SOL 103.
 1. Sparse Cholesky (`CUDSS_MTYPE_SPD`) — optimal for SPD FEM stiffness matrices
 2. Sparse LU (`CUDSS_MTYPE_GENERAL`) fallback when the Cholesky factorization
    fails or its solution cannot be refined
-3. The factorization is kept and the solution refined on the host; a singular
-   stiffness (whose solution cannot be refined at all) is an error
+3. With `--refine`, the factorization is kept and the solution refined on the
+   host; a singular stiffness (whose LU solution does not equilibrate the
+   load) is an error
 
 **Memory management:**
 - After symbolic analysis, cuDSS memory estimates are logged (device/host stable and peak).

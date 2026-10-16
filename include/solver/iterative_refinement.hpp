@@ -70,6 +70,11 @@ struct RefinementReport {
   double backward_error{0.0};
   /// ||r||_2 / ||F||_2 of the returned solution (compensated residual).
   double relative_residual{0.0};
+  /// Nastran's load-sequence epsilon u . r / u . F of the returned solution:
+  /// the residual weighted by the solution, so it stays small for an
+  /// ill-conditioned K solved stably but not for a mechanism, whose huge
+  /// near-null-mode displacement does not equilibrate the load.
+  double epsilon{0.0};
   /// The corrections fell below RefinementOptions::tolerance.
   bool converged{false};
 };
@@ -85,5 +90,18 @@ using CorrectionSolve = std::function<std::vector<double>(const std::vector<doub
                                                std::vector<double> &u,
                                                const CorrectionSolve &solve,
                                                const RefinementOptions &options = {});
+
+/// |epsilon| above which an unrefined solution is taken to be that of a
+/// singular K.  Measured: 0.79 for a loaded mechanism, 4e-4 for a thin
+/// CHEXA8 hemisphere with cond(K) ~ 6e14, below 1e-10 for ordinary models.
+/// |epsilon| roughly tracks the forward error of a stable solve.
+inline constexpr double kMechanismEpsilon = 1e-2;
+
+/// True when `r` indicates the solution of a singular K (an unrestrained
+/// mechanism under load) rather than of an ill-conditioned one: for a
+/// refined solve, refinement that did not converge with an estimated error
+/// above 1e-2 (or NaN); for an unrefined one (an assessment with no
+/// corrections), |epsilon| above kMechanismEpsilon (or NaN).
+[[nodiscard]] bool indicates_mechanism(const RefinementReport &r, bool refined);
 
 } // namespace vibestran

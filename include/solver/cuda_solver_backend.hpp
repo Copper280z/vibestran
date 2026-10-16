@@ -7,7 +7,7 @@
 // factorization fails or its solution cannot be refined.  Factorization and
 // triangular solves run on-device via cudssExecute; the solution is then
 // refined with the retained factorization and compensated residuals computed
-// on the host (iterative_refinement.hpp).
+// on the host when refinement is enabled (iterative_refinement.hpp).
 //
 // For large problems where cuDSS's internal workspace exceeds device memory,
 // fp32 mode halves the device memory footprint by factorizing in float;
@@ -75,6 +75,9 @@ public:
         return last_refinement_;
     }
 
+    /// Refine fp64 solves (fp32 factorizations are always refined).
+    void set_refinement(bool enabled) noexcept override { refine_ = enabled; }
+
 private:
     explicit CudaSolverBackend(std::unique_ptr<CudaContext> ctx) noexcept;
 
@@ -85,6 +88,7 @@ private:
 
     std::unique_ptr<CudaContext> ctx_;
     bool last_cholesky_{true};
+    bool refine_{false};
     std::optional<RefinementReport> last_refinement_;
 };
 

@@ -136,6 +136,7 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
         last_full_gpu_ = false;
         last_iters_    = 1;
         EigenSolverBackend eigen;
+        eigen.set_refinement(refine_direct_);
         auto u = eigen.solve(K, F, factor_ratio_policy);
         last_refinement_ = eigen.last_refinement();
         last_residual_   = last_refinement_ ? last_refinement_->relative_residual : 0.0;

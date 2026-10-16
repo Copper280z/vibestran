@@ -419,18 +419,25 @@ static bool factor_cudss(cudssHandle_t handle, int n, int nnz,
 // ── solve_and_refine
 // ─────────────────────────────────────────────────────────
 
-/// u = solve(F), refined against the double-precision K.  An fp32
+/// u = solve(F), refined against the double-precision K when `refine`
+/// (otherwise only assessed: residual, backward error, epsilon).  An fp32
 /// factorization contracts the error by about cond(K) * 6e-8 per correction,
 /// so it is allowed more corrections.
 static std::vector<double> solve_and_refine(const SparseMatrixBuilder::CsrData &K,
                                             const std::vector<double> &F,
-                                            const FactorSolve &solve, bool fp32,
+                                            const FactorSolve &solve, bool fp32, bool refine,
                                             const std::string &label,
                                             RefinementReport &report) {
   std::vector<double> u = solve(F);
   RefinementOptions opts;
-  opts.max_corrections = fp32 ? 30 : 10;
-  report = refine_solution(K, F, u, solve, opts);
+  opts.max_corrections = !refine ? 0 : fp32 ? 30 : 10;
+  report = refine_solution(K, F, u, refine ? solve : FactorSolve{}, opts);
+  if (!refine) {
+    vibestran::log_debug("[cuda] " + label +
+                         std::format(" solve: epsilon {:.2e}, backward error {:.2e}",
+                                     report.epsilon, report.backward_error));
+    return u;
+  }
   vibestran::log_debug(
       "[cuda] " + label + " iterative refinement: " +
       std::to_string(report.corrections) + " correction(s), estimated error " +
@@ -440,11 +447,6 @@ static std::vector<double> solve_and_refine(const SparseMatrixBuilder::CsrData &
   return u;
 }
 
-/// A Cholesky solution whose refinement fails grossly (the factorization
-/// "succeeded" on an indefinite or singular matrix) is retried with LU.
-static bool refinement_failed(const RefinementReport &r) {
-  return !r.converged && !(r.estimated_error <= 1e-2);
-}
 
 // ── solve
 // ─────────────────────────────────────────────────────────────────────
@@ -483,6 +485,8 @@ std::vector<double>
 CudaSolverBackend::solve_typed(const SparseMatrixBuilder::CsrData &K,
                                const std::vector<double> &F) {
   constexpr bool fp32 = std::is_same_v<Scalar, float>;
+  // An fp32 factorization is only usable refined.
+  const bool refine = fp32 || refine_;
   const cudaDataType_t scalar_type = fp32 ? CUDA_R_32F : CUDA_R_64F;
   const std::string suffix = fp32 ? "/float" : "";
   const int n = K.n;
@@ -541,15 +545,18 @@ CudaSolverBackend::solve_typed(const SparseMatrixBuilder::CsrData &K,
         ctx_->cudss, n, nnz, d_values, d_row_ptr, d_col_ind, d_F, d_u,
         CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER, scalar_type, "SPD" + suffix,
         [&](const FactorSolve &solve) {
-          u = solve_and_refine(K, F, solve, fp32, "Cholesky" + suffix, report);
+          u = solve_and_refine(K, F, solve, fp32, refine, "Cholesky" + suffix, report);
         });
   }
-  // In fp32 a failed refinement means cond(K) is too large for fp32, which
-  // LU does not help; solve() retries in fp64.
-  if (chol_ok && !fp32 && refinement_failed(report)) {
+  // A Cholesky solution that indicates a singular K (the factorization
+  // "succeeded" on an indefinite or singular matrix) is retried with LU.  In
+  // fp32 a failed refinement means cond(K) is too large for fp32, which LU
+  // does not help; solve() retries in fp64.
+  if (chol_ok && !fp32 && indicates_mechanism(report, refine)) {
     vibestran::log_debug(
-        "[cuda] Cholesky" + suffix + " solution could not be refined (estimated error " +
-        std::format("{:.2e}", report.estimated_error) + ") -- retrying with LU");
+        "[cuda] Cholesky" + suffix + " solution indicates a singular matrix (" +
+        std::format("estimated error {:.2e}, epsilon {:.2e}", report.estimated_error,
+                    report.epsilon) + ") -- retrying with LU");
     chol_ok = false;
   }
   if (chol_ok) {
@@ -576,7 +583,7 @@ CudaSolverBackend::solve_typed(const SparseMatrixBuilder::CsrData &K,
         ctx_->cudss, K_lu->n, K_lu->nnz, d_values_lu, d_row_ptr_lu,
         d_col_ind_lu, d_F, d_u, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL,
         scalar_type, "LU" + suffix, [&](const FactorSolve &solve) {
-          u = solve_and_refine(K, F, solve, fp32, "LU" + suffix, report);
+          u = solve_and_refine(K, F, solve, fp32, refine, "LU" + suffix, report);
         });
     if (!lu_ok)
       throw SolverError("CUDA solver: LU" + suffix + " factorisation failed (n=" +
@@ -584,20 +591,24 @@ CudaSolverBackend::solve_typed(const SparseMatrixBuilder::CsrData &K,
                         ") -- stiffness matrix may be singular. Check boundary "
                         "conditions (SPCs)");
     // cuDSS perturbs tiny pivots instead of failing, so a singular K
-    // factorizes; its solution then cannot be refined at all.
-    if (!fp32 && refinement_failed(report))
+    // factorizes; its solution then does not equilibrate the load.
+    if (!fp32 && indicates_mechanism(report, refine))
       throw SolverError(
-          "CUDA solver: the LU" + suffix + " solution could not be refined (estimated "
-          "relative error " + std::format("{:.2e}", report.estimated_error) +
-          " after " + std::to_string(report.corrections) +
-          " correction(s), relative residual " +
-          std::format("{:.2e}", report.relative_residual) + ", n=" + std::to_string(n) +
+          "CUDA solver: the LU" + suffix + " solution does not equilibrate the load (" +
+          std::format("epsilon {:.2e}, relative residual {:.2e}", report.epsilon,
+                      report.relative_residual) +
+          (refine ? std::format(", estimated relative error {:.2e} after {} correction(s)",
+                                report.estimated_error, report.corrections)
+                  : std::string()) +
+          ", n=" + std::to_string(n) +
           ") -- stiffness matrix is singular. Check boundary conditions (SPCs)");
     last_cholesky_ = false;
   }
 
-  // The accuracy achieved is reported by the caller from last_refinement().
-  last_refinement_ = report;
+  // The accuracy achieved is reported by the caller from last_refinement()
+  // (an unrefined solve is assessed by the caller).
+  if (refine)
+    last_refinement_ = report;
   vibestran::log_info("[cuda] " + std::string(last_cholesky_ ? "Cholesky" : "LU") +
                       suffix + " solve: n=" + std::to_string(n) +
                       ", nnz=" + std::to_string(nnz) + ", device='" +

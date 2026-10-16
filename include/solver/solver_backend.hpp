@@ -44,11 +44,18 @@ public:
     /// the backend is a direct solver or the estimate is unavailable.
     [[nodiscard]] virtual double last_estimated_error() const noexcept { return -1.0; }
 
-    /// Iterative-refinement report of the most recent solve(), or nullopt for
-    /// a backend that does not refine (see iterative_refinement.hpp).
+    /// Iterative-refinement report of the most recent solve(), or nullopt
+    /// when it was not refined (a direct solve without set_refinement(true);
+    /// see iterative_refinement.hpp).
     [[nodiscard]] virtual std::optional<RefinementReport> last_refinement() const noexcept {
         return std::nullopt;
     }
+
+    /// Opt-in iterative refinement of a direct solve with its factorization
+    /// (--refine or PARAM,REFINE,YES; off by default, as in Nastran).
+    /// Backends whose accuracy depends on refinement (PCG, fp32
+    /// factorizations) always refine and ignore this.
+    virtual void set_refinement(bool enabled) noexcept { (void)enabled; }
 
     /// Returns true when this backend still requires a full symmetric CSR
     /// matrix rather than lower-triangular symmetric storage.
@@ -60,11 +67,15 @@ public:
 
 /// CPU backend using Eigen's sparse Cholesky.
 /// Solver priority: Apple Accelerate > SuiteSparse CHOLMOD > SimplicialLLT.
-/// The solution is refined with the factorization and compensated residuals
-/// until the corrections fall to round-off (iterative_refinement.hpp), so it
-/// is accurate to working precision unless cond(K) eps approaches 1.
+/// A single backward-stable solve is accurate to about cond(K) eps.  With
+/// set_refinement(true) the solution is refined with the factorization and
+/// compensated residuals until the corrections fall to round-off
+/// (iterative_refinement.hpp), so it is accurate to working precision unless
+/// cond(K) eps approaches 1.
 class EigenSolverBackend final : public SolverBackend {
 public:
+    void set_refinement(bool enabled) noexcept override { refine_ = enabled; }
+
     [[nodiscard]] std::optional<RefinementReport> last_refinement() const noexcept override {
         return last_refinement_;
     }
@@ -85,6 +96,7 @@ public:
     }
 
 private:
+    bool refine_{false};
     std::optional<RefinementReport> last_refinement_;
 };
 
