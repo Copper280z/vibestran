@@ -496,6 +496,7 @@ test('unit_tests', unit_tests,
 integration_test_sources = files(
   'tests/integration/test_integration.cpp',
   'tests/integration/test_thermal_steady.cpp',
+  'tests/integration/test_shell_benchmarks.cpp',
 )
 
 integration_tests = executable(
