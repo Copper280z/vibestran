@@ -3,6 +3,7 @@
 #include "elements/cquad4.hpp"
 #include "elements/ctria3.hpp"
 #include "elements/shell_quad4.hpp"
+#include "elements/shell_tria3.hpp"
 #include "elements/line_elements.hpp"
 #include "elements/solid_elements.hpp"
 #include <format>
@@ -19,8 +20,7 @@ std::unique_ptr<ElementBase> make_element(const ElementData& data, const Model& 
         case ElementType::CTRIA3: {
             if (data.nodes.size() != 3)
                 throw SolverError(std::format("CTRIA3 {} needs 3 nodes, got {}", data.id.value, data.nodes.size()));
-            std::array<NodeId,3> nids{data.nodes[0],data.nodes[1],data.nodes[2]};
-            return std::make_unique<CTria3>(data.id, data.pid, nids, model);
+            return std::make_unique<ShellTria3>(data, model);
         }
         case ElementType::CHEXA8: {
             if (data.nodes.size() != 8)

@@ -51,3 +51,25 @@ benchmark now measures there.
 The MYSTRAN Raasch hook deck (`raasch_hook_k6rot_1000.0`) now converges to
 the published 0.1275 m (5.02 in): 0.1175, 0.1218, 0.1258, 0.1272 m for 9,
 18, 72 and 144 elements along the hook.
+
+## CTRIA3 = MITC3+ (2026-10-16)
+
+| Benchmark | Mesh | Before (CST+DKT) | MITC3+ | Ko et al. MITC3+ on that mesh |
+|---|---|---:|---:|---:|
+| Scordelis-Lo roof | 32×32 | 1.53% | 1.28% | 1.49% |
+| Pinched cylinder | 64×64 (was 32×32) | 0.08% | 0.00% | 0.2% |
+| Pinched hemisphere | 16×16 | 7.04% | 0.92% | 0.4% |
+| Twisted beam t = 0.32, in-plane | 8×48 | 39.1% | 0.36% | 0.53% |
+| Twisted beam t = 0.32, out-of-plane | 8×48 | 13.7% | 2.05% | 2.6% |
+| Twisted beam t = 0.0032, in-plane | 8×48 | 77.7% | 0.62% | 0.68% |
+| Twisted beam t = 0.0032, out-of-plane | 8×48 | 71.9% | 0.46% | 0.49% |
+| Clamped plate, a/t = 1000 | 8×8 | 0.54% | 2.18% | |
+| Simply supported plate, a/t = 1000 | 8×8 | 0.34% | 0.85% | |
+| Cook's membrane (mid right edge) | 16×16 | 0.62%* | 3.49% | |
+| Free thermal expansion, faceted ring | 24 facets | exact | exact | |
+
+\* corner value in the baseline table.  The triangle membrane is the
+constant-strain triangle (as in MITC3+), so it is stiffer in in-plane
+bending (Cook's) than the old element on that point; plates and curved
+shells are far better.  An Allman drill membrane was tried and rejected:
+it locked thin curved shells (thin twisted beam 22%, hemisphere 13%).

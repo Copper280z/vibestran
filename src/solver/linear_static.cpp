@@ -4,6 +4,7 @@
 
 #include "solver/linear_static.hpp"
 #include "elements/shell_quad4.hpp"
+#include "elements/shell_tria3.hpp"
 #include "elements/shell_section.hpp"
 #include "core/coord_sys.hpp"
 #include "core/factor_ratio_check.hpp"
@@ -254,6 +255,20 @@ make_shell_strain(const Eigen::Vector3d &membrane_strain,
   strain.gxz = transverse_shear_strain(0);
   strain.gyz = transverse_shear_strain(1);
   return strain;
+}
+
+/// Plate output point from a shell element response (membrane stress is
+/// N / t; moments, resultants and strains as recovered).
+void fill_shell_point(PlateStressPoint &pt, const ShellPointResponse &r) {
+  pt = make_plate_stress_point(pt.node, r.membrane_resultant / r.thickness,
+                               r.bending_moment);
+  pt.nx = r.membrane_resultant(0);
+  pt.ny = r.membrane_resultant(1);
+  pt.nxy = r.membrane_resultant(2);
+  pt.qx = r.transverse_shear(0);
+  pt.qy = r.transverse_shear(1);
+  pt.strain = make_shell_strain(r.membrane_strain, r.curvature,
+                                r.transverse_shear_strain);
 }
 
 /// Mechanical stress and total strain at one evaluation point of a solid
@@ -1558,20 +1573,8 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         const auto points = quad.recover(
             std::span<const double>(ue.data(), static_cast<size_t>(ue.size())),
             temps, t_ref);
-        const auto fill = [](PlateStressPoint &pt, const ShellPointResponse &r) {
-          const double t = r.thickness;
-          pt = make_plate_stress_point(pt.node, r.membrane_resultant / t,
-                                       r.bending_moment);
-          pt.nx = r.membrane_resultant(0);
-          pt.ny = r.membrane_resultant(1);
-          pt.nxy = r.membrane_resultant(2);
-          pt.qx = r.transverse_shear(0);
-          pt.qy = r.transverse_shear(1);
-          pt.strain = make_shell_strain(r.membrane_strain, r.curvature,
-                                        r.transverse_shear_strain);
-        };
         PlateStressPoint centroid;
-        fill(centroid, points[0]);
+        fill_shell_point(centroid, points[0]);
         ps.sx = centroid.sx;
         ps.sy = centroid.sy;
         ps.sxy = centroid.sxy;
@@ -1588,24 +1591,22 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         for (size_t n = 0; n < 4; ++n) {
           PlateStressPoint pt;
           pt.node = elem_data.nodes[n];
-          fill(pt, points[n + 1]);
+          fill_shell_point(pt, points[n + 1]);
           ps.nodal.push_back(pt);
         }
       } else {
-        const auto &pshell_ = std::get<PShell>(model.property(elem_data.pid));
-        const Mat1 &mat_ = model.material(pshell_.mid1);
-        const CTria3 tria(elem_data.id, elem_data.pid,
-                          {elem_data.nodes[0], elem_data.nodes[1],
-                           elem_data.nodes[2]},
-                          model);
-        const std::span<const double> u_span(ue.data(),
-                                             static_cast<size_t>(ue.size()));
-        const double T_avg3 =
-            average_temperature(elem_data.nodes, nodal_temps_rec, mat_.ref_temp);
-        const auto centre =
-            tria.recover_response(u_span, 1.0 / 3.0, 1.0 / 3.0, T_avg3, mat_.ref_temp);
-        const PlateStressPoint centroid = make_plate_stress_point(
-            NodeId{0}, centre.membrane_stress, centre.bending_moment);
+        const ShellTria3 tria(elem_data, model);
+        const double t_ref = shell_reference_temperature(model, elem_data);
+        std::array<double, 3> temps{};
+        for (size_t n = 0; n < 3; ++n) {
+          const auto it = nodal_temps_rec.find(elem_data.nodes[n]);
+          temps[n] = (it != nodal_temps_rec.end()) ? it->second : t_ref;
+        }
+        const auto points = tria.recover(
+            std::span<const double>(ue.data(), static_cast<size_t>(ue.size())),
+            temps, t_ref);
+        PlateStressPoint centroid;
+        fill_shell_point(centroid, points[0]);
         ps.sx = centroid.sx;
         ps.sy = centroid.sy;
         ps.sxy = centroid.sxy;
@@ -1613,30 +1614,16 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         ps.my = centroid.my;
         ps.mxy = centroid.mxy;
         ps.von_mises = centroid.von_mises;
-        ps.nx = centre.membrane_resultant(0);
-        ps.ny = centre.membrane_resultant(1);
-        ps.nxy = centre.membrane_resultant(2);
-        ps.qx = centre.transverse_shear(0);
-        ps.qy = centre.transverse_shear(1);
-        // DKT is a Kirchhoff element: no transverse shear strain.
-        ps.strain = make_shell_strain(centre.membrane_strain, centre.curvature,
-                                      Eigen::Vector2d::Zero());
-        static constexpr std::array<std::array<double, 2>, 3> kTriaCorners{
-            {{0.0, 0.0}, {1.0, 0.0}, {0.0, 1.0}}};
+        ps.nx = centroid.nx;
+        ps.ny = centroid.ny;
+        ps.nxy = centroid.nxy;
+        ps.qx = centroid.qx;
+        ps.qy = centroid.qy;
+        ps.strain = centroid.strain;
         for (size_t n = 0; n < 3; ++n) {
-          const auto corner = tria.recover_response(
-              u_span, kTriaCorners[n][0], kTriaCorners[n][1], T_avg3,
-              mat_.ref_temp);
-          PlateStressPoint pt = make_plate_stress_point(
-              elem_data.nodes[n], corner.membrane_stress, corner.bending_moment);
-          pt.nx = corner.membrane_resultant(0);
-          pt.ny = corner.membrane_resultant(1);
-          pt.nxy = corner.membrane_resultant(2);
-          pt.qx = corner.transverse_shear(0);
-          pt.qy = corner.transverse_shear(1);
-          pt.strain = make_shell_strain(corner.membrane_strain,
-                                        corner.curvature,
-                                        Eigen::Vector2d::Zero());
+          PlateStressPoint pt;
+          pt.node = elem_data.nodes[n];
+          fill_shell_point(pt, points[n + 1]);
           ps.nodal.push_back(pt);
         }
       }

@@ -544,3 +544,9 @@ most recent entry.
   Raasch hook with K6ROT=10 and two drill-rotation (RZ) records encode
   MYSTRAN's element behaviour and its K6ROT drilling spring.  Full triage
   in the shell-rewrite commits; this body is rewritten after phase 4.
+- **CTRIA3 rewritten as MITC3+ (2,096 -> 1,983).** 125 records fixed
+  (MAT8/PCOMP triangle decks now run; Reissner-Mindlin transverse shear;
+  curved and thin triangles no longer lock).  12 new records are roundoff
+  against all-zero references plus the RBE3 10 flake.  MAT8/PCOMP decks
+  that now run expose `COMPOSITESTRESSES` (ply stress output, not yet
+  written; 2 decks).

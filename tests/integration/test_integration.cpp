@@ -4194,14 +4194,17 @@ TEST(Integration, DktSimplySupportedPlateConvergesToNavierSolution) {
     EXPECT_LT(previous_error, 0.015);
 }
 
-TEST(Integration, DktCantileverMomentMatchesStatics) {
+TEST(Integration, Ctria3CantileverMomentAndShearMatchStatics) {
     // Plate strip 10 x 1 (two triangles per cell), clamped at x = 0, tip
     // line load P = 1 in +z: Mx = +P (L - x) / b in Nastran's convention
     // (positive moment = tension in the -z fibre, as here), My = 0 (nu = 0).  Elements 9 and 10 occupy
     // 4 <= x <= 5.  Element 9's x axis (G1 -> G2) is the global x axis;
     // element 10's runs at 45 degrees, so its element-frame moment is
-    // Mx' = Mx cos^2(45) = Mx / 2.  DKT is a Kirchhoff element: its
-    // transverse shear resultants are reported as zero.
+    // Mx' = Mx cos^2(45) = Mx / 2.  CTRIA3 (MITC3+) has linear rotations
+    // plus a bubble, so its element moment is close to the cell's mean
+    // moment rather than the exact linear value at the centroid: 5% here.
+    // It is a Reissner-Mindlin element and reports the transverse shear
+    // |Q| = P / b (the old DKT element reported zero).
     std::ostringstream bdf;
     bdf << "SOL 101\nCEND\nSUBCASE 1\n  LOAD = 1\n  SPC = 1\n  STRESS = ALL\nBEGIN BULK\n"
         << "MAT1,1,1.0E7,,0.0\nPSHELL,1,1,0.1,1,,1\n";
@@ -4219,17 +4222,18 @@ TEST(Integration, DktCantileverMomentMatchesStatics) {
     for (const auto& ps : res.subcases[0].plate_stresses) {
         if (ps.eid.value == 9) {
             const double xc = 14.0 / 3.0;
-            EXPECT_NEAR(ps.mx, 10.0 - xc, 0.03 * (10.0 - xc));
+            EXPECT_NEAR(ps.mx, 10.0 - xc, 0.05 * (10.0 - xc));
+            EXPECT_NEAR(ps.qx, 1.0, 0.02);
+            EXPECT_NEAR(ps.qy, 0.0, 0.02);
             ++checked;
         } else if (ps.eid.value == 10) {
             const double xc = 13.0 / 3.0;
-            EXPECT_NEAR(ps.mx, 0.5 * (10.0 - xc), 0.03 * (10.0 - xc));
+            EXPECT_NEAR(ps.mx, 0.5 * (10.0 - xc), 0.05 * (10.0 - xc));
+            EXPECT_NEAR(std::hypot(ps.qx, ps.qy), 1.0, 0.02);
             ++checked;
         } else {
             continue;
         }
-        EXPECT_EQ(ps.qx, 0.0);
-        EXPECT_EQ(ps.qy, 0.0);
     }
     EXPECT_EQ(checked, 2);
 }

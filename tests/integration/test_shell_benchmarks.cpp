@@ -392,8 +392,10 @@ TEST(ShellBenchmark, PinchedCylinderQuad) {
 }
 
 TEST(ShellBenchmark, PinchedCylinderTria) {
-  const double w = pinched_cylinder(32, ShellMesh::Tria); // [Ko] MITC3+: 0.9847
-  REPORT("Pinched cylinder 32x32 CTRIA3", w, 1.8248e-5);
+  // 64 x 64: with alternating diagonals the 32 x 32 mesh is still
+  // pre-asymptotic at the point load ([Ko] MITC3+ 64 x 64: 1.002).
+  const double w = pinched_cylinder(64, ShellMesh::Tria);
+  REPORT("Pinched cylinder 64x64 CTRIA3", w, 1.8248e-5);
   EXPECT_LT(rel(w, 1.8248e-5), 0.025);
 }
 
@@ -403,7 +405,7 @@ TEST(ShellBenchmark, PinchedHemisphereQuad) {
   EXPECT_LT(rel(u, 0.093), 0.015);
 }
 
-TEST(ShellBenchmark, DISABLED_PinchedHemisphereTria) {
+TEST(ShellBenchmark, PinchedHemisphereTria) {
   const double u = pinched_hemisphere(16, ShellMesh::Tria); // [Ko] MITC3+: 1.004
   REPORT("Pinched hemisphere 16x16 CTRIA3", u, 0.093);
   EXPECT_LT(rel(u, 0.093), 0.015);
@@ -429,7 +431,7 @@ TEST(ShellBenchmark, TwistedBeamThinQuad) {
   EXPECT_LT(rel(out, 1.294e-3), 0.025);
 }
 
-TEST(ShellBenchmark, DISABLED_TwistedBeamThickTria) {
+TEST(ShellBenchmark, TwistedBeamThickTria) {
   // [Ko] MITC3+ 8x48: 0.9947 in-plane, 0.9740 out-of-plane.
   const double in = twisted_beam(48, 8, 0.32, 1.0, true, ShellMesh::Tria);
   const double out = twisted_beam(48, 8, 0.32, 1.0, false, ShellMesh::Tria);
@@ -439,7 +441,7 @@ TEST(ShellBenchmark, DISABLED_TwistedBeamThickTria) {
   EXPECT_LT(rel(out, 1.754e-3), 0.035);
 }
 
-TEST(ShellBenchmark, DISABLED_TwistedBeamThinTria) {
+TEST(ShellBenchmark, TwistedBeamThinTria) {
   // [Ko] MITC3+ 8x48: 0.9932 in-plane, 0.9951 out-of-plane.
   const double in = twisted_beam(48, 8, 0.0032, 1.0e-6, true, ShellMesh::Tria);
   const double out = twisted_beam(48, 8, 0.0032, 1.0e-6, false, ShellMesh::Tria);
