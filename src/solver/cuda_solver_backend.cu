@@ -30,12 +30,17 @@
 // Include exceptions.hpp directly (not types.hpp) to avoid pulling in <format>.
 #include "core/exceptions.hpp"
 #include "core/logger.hpp"
+#include "solver/iterative_refinement.hpp"
 
 #include <cuda_runtime.h>
 #include <cudss.h>
 
+#include <algorithm>
 #include <cmath>
+#include <format>
+#include <functional>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace vibestran {
@@ -200,27 +205,6 @@ CudaSolverPrecision CudaSolverBackend::precision() const noexcept {
   return ctx_->precision;
 }
 
-// ── Residual validation
-// ───────────────────────────────────────────────────────
-
-// Compute relative residual ||K*u - F||_2 / ||F||_2 on the CPU.
-static double relative_residual(const SparseMatrixBuilder::CsrData &K,
-                                const std::vector<double> &u,
-                                const std::vector<double> &F) {
-  const int n = K.n;
-  const std::vector<double> Ku = K.multiply(u);
-  double res_sq = 0.0;
-  double rhs_sq = 0.0;
-  for (int row = 0; row < n; ++row) {
-    double diff = Ku[static_cast<size_t>(row)] - F[static_cast<size_t>(row)];
-    res_sq += diff * diff;
-    rhs_sq += F[static_cast<size_t>(row)] * F[static_cast<size_t>(row)];
-  }
-  if (rhs_sq == 0.0)
-    return (res_sq == 0.0) ? 0.0 : 1.0;
-  return std::sqrt(res_sq / rhs_sq);
-}
-
 // ── cudss_execute_phase: thin error-checking wrapper
 // ─────────────────────────────────────────────────────
 
@@ -231,18 +215,25 @@ static cudssStatus_t cudss_execute(cudssHandle_t handle, cudssPhase_t phase,
   return cudssExecute(handle, phase, cfg, data, A, x, b);
 }
 
-// ── solve_cudss: run analysis + factorization + solve for a given matrix type
+/// Solves K x = b with a retained factorization: b and x are in double, the
+/// factorization in Scalar.
+using FactorSolve = std::function<std::vector<double>(const std::vector<double> &)>;
+
+// ── factor_cudss: run analysis + factorization for a given matrix type, then
+// hand use_factor a solve with that factorization (valid only during the
+// call; it reuses d_F and d_u as the right-hand side and solution buffers).
 // Returns false (without throwing) for recoverable factorisation failures so
 // the caller can retry with a different matrix type.
 // Throws SolverError for unrecoverable errors (bad status, alloc failure, etc.)
 template <typename Scalar>
-static bool solve_cudss(cudssHandle_t handle, const std::string &device_name,
-                        int n, int nnz, DeviceBuffer<Scalar> &d_values,
-                        DeviceBuffer<int> &d_row_ptr,
-                        DeviceBuffer<int> &d_col_ind, DeviceBuffer<Scalar> &d_F,
-                        DeviceBuffer<Scalar> &d_u, cudssMatrixType_t mtype,
-                        cudssMatrixViewType_t mview,
-                        cudaDataType_t scalar_type, const std::string &label) {
+static bool factor_cudss(cudssHandle_t handle, int n, int nnz,
+                         DeviceBuffer<Scalar> &d_values,
+                         DeviceBuffer<int> &d_row_ptr,
+                         DeviceBuffer<int> &d_col_ind, DeviceBuffer<Scalar> &d_F,
+                         DeviceBuffer<Scalar> &d_u, cudssMatrixType_t mtype,
+                         cudssMatrixViewType_t mview,
+                         cudaDataType_t scalar_type, const std::string &label,
+                         const std::function<void(const FactorSolve &)> &use_factor) {
   // Reset solution buffer.
   cudaMemset(d_u.ptr, 0, (std::size_t)n * sizeof(Scalar));
 
@@ -390,121 +381,69 @@ static bool solve_cudss(cudssHandle_t handle, const std::string &device_name,
     return false;
   }
 
-  // ── Solve ─────────────────────────────────────────────────────────────────
-  st = cudss_execute(handle, CUDSS_PHASE_SOLVE, cfg.cfg, solver_data.data,
-                     A_mat.mat, x_mat.mat, b_mat.mat);
-  if (st != CUDSS_STATUS_SUCCESS)
-    throw SolverError("CUDA solver: cuDSS solve failed (" + label +
-                      "), status=" + std::to_string(static_cast<int>(st)));
-
-  (void)device_name; // used by caller in log messages
+  // ── Solve with the factorization ──────────────────────────────────────────
+  // In fp32 the right-hand side is scaled to unit max-norm before the
+  // downcast: refinement residuals are tiny and must not lose range.
+  std::vector<Scalar> b(static_cast<std::size_t>(n)), x(static_cast<std::size_t>(n));
+  const FactorSolve solve = [&](const std::vector<double> &rhs) {
+    double scale = 1.0;
+    if constexpr (!std::is_same_v<Scalar, double>) {
+      double m = 0.0;
+      for (double v : rhs)
+        m = std::max(m, std::abs(v));
+      if (m > 0.0 && std::isfinite(m))
+        scale = m;
+    }
+    for (int i = 0; i < n; ++i)
+      b[static_cast<std::size_t>(i)] =
+          static_cast<Scalar>(rhs[static_cast<std::size_t>(i)] / scale);
+    d_F.upload(b.data(), n);
+    const cudssStatus_t s = cudss_execute(handle, CUDSS_PHASE_SOLVE, cfg.cfg,
+                                          solver_data.data, A_mat.mat,
+                                          x_mat.mat, b_mat.mat);
+    if (s != CUDSS_STATUS_SUCCESS)
+      throw SolverError("CUDA solver: cuDSS solve failed (" + label + ", n=" +
+                        std::to_string(n) + "), status=" +
+                        std::to_string(static_cast<int>(s)));
+    d_u.download(x.data(), n);
+    std::vector<double> out(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i)
+      out[static_cast<std::size_t>(i)] =
+          static_cast<double>(x[static_cast<std::size_t>(i)]) * scale;
+    return out;
+  };
+  use_factor(solve);
   return true;
 }
 
-// ── solve_single_precision
-// ────────────────────────────────────────────────────
+// ── solve_and_refine
+// ─────────────────────────────────────────────────────────
 
-struct CudaSolveResult {
-  std::vector<double> solution;
-  bool used_cholesky = true;
-};
-
-static CudaSolveResult
-solve_single_precision(cudssHandle_t handle, const std::string &device_name,
-                       const SparseMatrixBuilder::CsrData &K,
-                       const std::vector<double> &F) {
-  const SparseMatrixBuilder::CsrData *K_spd = &K;
-  SparseMatrixBuilder::CsrData lower_csr;
-  if (!K.stores_lower_triangle_only()) {
-    lower_csr = K.lower_triangle();
-    K_spd = &lower_csr;
-  }
-
-  const int n = K_spd->n;
-  const int nnz = K_spd->nnz;
-
-  std::vector<float> values_f(nnz);
-  std::vector<float> F_f(n);
-  for (int i = 0; i < nnz; ++i)
-    values_f[static_cast<size_t>(i)] =
-        static_cast<float>(K_spd->values[static_cast<size_t>(i)]);
-  for (int i = 0; i < n; ++i)
-    F_f[static_cast<size_t>(i)] = static_cast<float>(F[static_cast<size_t>(i)]);
-
-  std::size_t alloc_bytes = (std::size_t)nnz * sizeof(float)     // d_values
-                            + (std::size_t)(n + 1) * sizeof(int) // d_row_ptr
-                            + (std::size_t)nnz * sizeof(int)     // d_col_ind
-                            + (std::size_t)n * sizeof(float)     // d_F
-                            + (std::size_t)n * sizeof(float);    // d_u
-  std::size_t free_bytes = 0, total_bytes = 0;
-  cudaMemGetInfo(&free_bytes, &total_bytes);
+/// u = solve(F), refined against the double-precision K.  An fp32
+/// factorization contracts the error by about cond(K) * 6e-8 per correction,
+/// so it is allowed more corrections.
+static std::vector<double> solve_and_refine(const SparseMatrixBuilder::CsrData &K,
+                                            const std::vector<double> &F,
+                                            const FactorSolve &solve, bool fp32,
+                                            const std::string &label,
+                                            RefinementReport &report) {
+  std::vector<double> u = solve(F);
+  RefinementOptions opts;
+  opts.max_corrections = fp32 ? 30 : 10;
+  report = refine_solution(K, F, u, solve, opts);
   vibestran::log_debug(
-      "[cuda] single-precision device memory: allocating " +
-      std::to_string(alloc_bytes / (1024UL * 1024UL)) + " MiB"
-      " (free=" + std::to_string(free_bytes / (1024UL * 1024UL)) + " MiB"
-      ", total=" + std::to_string(total_bytes / (1024UL * 1024UL)) + " MiB)");
+      "[cuda] " + label + " iterative refinement: " +
+      std::to_string(report.corrections) + " correction(s), estimated error " +
+      std::format("{:.2e} -> {:.2e}, backward error {:.2e}", report.initial_error,
+                  report.estimated_error, report.backward_error) +
+      (report.converged ? "" : " (not converged)"));
+  return u;
+}
 
-  DeviceBuffer<float> d_values(nnz);
-  DeviceBuffer<int> d_row_ptr(n + 1);
-  DeviceBuffer<int> d_col_ind(nnz);
-  DeviceBuffer<float> d_F(n);
-  DeviceBuffer<float> d_u(n);
-
-  d_values.upload(values_f.data(), nnz);
-  d_row_ptr.upload(K_spd->row_ptr.data(), n + 1);
-  d_col_ind.upload(K_spd->col_ind.data(), nnz);
-  d_F.upload(F_f.data(), n);
-
-  bool ok = solve_cudss<float>(handle, device_name, n, nnz, d_values, d_row_ptr,
-                               d_col_ind, d_F, d_u, CUDSS_MTYPE_SPD,
-                               CUDSS_MVIEW_LOWER, CUDA_R_32F, "SPD/float");
-  bool used_cholesky = ok;
-  if (!ok) {
-    vibestran::log_debug("[cuda] single-precision SPD failed -- retrying with LU");
-    const SparseMatrixBuilder::CsrData *K_lu = &K;
-    SparseMatrixBuilder::CsrData expanded_csr;
-    if (K.stores_lower_triangle_only()) {
-      expanded_csr = K.expanded_symmetric();
-      K_lu = &expanded_csr;
-    }
-
-    std::vector<float> values_lu(static_cast<size_t>(K_lu->nnz));
-    for (int i = 0; i < K_lu->nnz; ++i)
-      values_lu[static_cast<size_t>(i)] =
-          static_cast<float>(K_lu->values[static_cast<size_t>(i)]);
-
-    DeviceBuffer<float> d_values_lu(K_lu->nnz);
-    DeviceBuffer<int> d_row_ptr_lu(K_lu->n + 1);
-    DeviceBuffer<int> d_col_ind_lu(K_lu->nnz);
-    d_values_lu.upload(values_lu.data(), K_lu->nnz);
-    d_row_ptr_lu.upload(K_lu->row_ptr.data(), K_lu->n + 1);
-    d_col_ind_lu.upload(K_lu->col_ind.data(), K_lu->nnz);
-
-    ok = solve_cudss<float>(handle, device_name, K_lu->n, K_lu->nnz,
-                            d_values_lu, d_row_ptr_lu, d_col_ind_lu, d_F, d_u,
-                            CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL,
-                            CUDA_R_32F, "LU/float");
-    if (!ok)
-      throw SolverError(
-          "CUDA solver: single-precision LU factorisation failed -- "
-          "stiffness matrix may be singular. Check boundary conditions (SPCs)");
-    used_cholesky = false;
-  }
-
-  std::vector<float> u_f(n);
-  d_u.download(u_f.data(), n);
-
-  std::vector<double> u(static_cast<size_t>(n));
-  for (int i = 0; i < n; ++i)
-    u[static_cast<size_t>(i)] = static_cast<double>(u_f[static_cast<size_t>(i)]);
-
-  vibestran::log_info("[cuda] single-precision solve: n=" + std::to_string(n) +
-                     ", nnz=" + std::to_string(K_spd->nnz) +
-                     ", device='" + device_name + "'");
-  CudaSolveResult result;
-  result.solution = std::move(u);
-  result.used_cholesky = used_cholesky;
-  return result;
+/// A Cholesky solution whose refinement fails grossly (the factorization
+/// "succeeded" on an indefinite or singular matrix) is retried with LU.
+static bool refinement_failed(const RefinementReport &r) {
+  return !r.converged && !(r.estimated_error <= 1e-2);
 }
 
 // ── solve
@@ -522,6 +461,31 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
     throw SolverError("CUDA solver: force vector size " +
                       std::to_string(F.size()) + " != matrix size " +
                       std::to_string(n));
+  last_refinement_.reset();
+  if (ctx_->precision == CudaSolverPrecision::Float32) {
+    std::vector<double> u = solve_typed<float>(K, F);
+    if (last_refinement_->converged)
+      return u;
+    // An fp32 factorization contracts the error by cond(K) * 6e-8 per
+    // correction; beyond cond(K) ~ 1e7 (thin shells and solids) it cannot
+    // be refined, and its solution is unusable.
+    vibestran::log_warn(
+        "[cuda] fp32 factorization could not be refined to double accuracy "
+        "(estimated relative error " +
+        std::format("{:.2e}", last_refinement_->estimated_error) +
+        ": the stiffness matrix is too ill-conditioned for fp32) -- retrying in fp64");
+  }
+  return solve_typed<double>(K, F);
+}
+
+template <typename Scalar>
+std::vector<double>
+CudaSolverBackend::solve_typed(const SparseMatrixBuilder::CsrData &K,
+                               const std::vector<double> &F) {
+  constexpr bool fp32 = std::is_same_v<Scalar, float>;
+  const cudaDataType_t scalar_type = fp32 ? CUDA_R_32F : CUDA_R_64F;
+  const std::string suffix = fp32 ? "/float" : "";
+  const int n = K.n;
 
   const SparseMatrixBuilder::CsrData *K_spd = &K;
   SparseMatrixBuilder::CsrData lower_csr;
@@ -529,106 +493,115 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
     lower_csr = K.lower_triangle();
     K_spd = &lower_csr;
   }
-
   const int nnz = K_spd->nnz;
 
-  if (ctx_->precision == CudaSolverPrecision::Float32) {
-    CudaSolveResult result =
-        solve_single_precision(ctx_->cudss, ctx_->device_name, K, F);
-    last_cholesky_ = result.used_cholesky;
-    return result.solution;
-  }
+  const auto to_scalar = [](const std::vector<double> &v) {
+    std::vector<Scalar> out(v.size());
+    for (std::size_t i = 0; i < v.size(); ++i)
+      out[i] = static_cast<Scalar>(v[i]);
+    return out;
+  };
 
   // ── Allocate and upload ───────────────────────────────────────────────────
   {
-    double alloc_mib = ((std::size_t)nnz * sizeof(double)    // d_values
-                        + (std::size_t)(n + 1) * sizeof(int) // d_row_ptr
-                        + (std::size_t)nnz * sizeof(int)     // d_col_ind
-                        + (std::size_t)n * sizeof(double)    // d_F
-                        + (std::size_t)n * sizeof(double))   // d_u
-                       / (1024.0 * 1024.0);
+    const double alloc_mib = ((std::size_t)nnz * sizeof(Scalar)    // d_values
+                              + (std::size_t)(n + 1) * sizeof(int) // d_row_ptr
+                              + (std::size_t)nnz * sizeof(int)     // d_col_ind
+                              + (std::size_t)n * sizeof(Scalar)    // d_F
+                              + (std::size_t)n * sizeof(Scalar))   // d_u
+                             / (1024.0 * 1024.0);
     std::size_t free_bytes = 0, total_bytes = 0;
     cudaMemGetInfo(&free_bytes, &total_bytes);
     vibestran::log_debug(
-        "[cuda] device memory: allocating " + std::to_string(alloc_mib) + " MiB"
+        "[cuda] device memory (" + std::string(fp32 ? "fp32" : "fp64") +
+        "): allocating " + std::to_string(alloc_mib) + " MiB"
         " (free=" + std::to_string(free_bytes / (1024UL * 1024UL)) + " MiB"
         ", total=" + std::to_string(total_bytes / (1024UL * 1024UL)) + " MiB)");
   }
 
-  DeviceBuffer<double> d_values(nnz);
   DeviceBuffer<int> d_row_ptr(n + 1);
   DeviceBuffer<int> d_col_ind(nnz);
-  DeviceBuffer<double> d_F(n);
-  DeviceBuffer<double> d_u(n);
-
-  d_values.upload(K_spd->values.data(), nnz);
+  DeviceBuffer<Scalar> d_F(n);
+  DeviceBuffer<Scalar> d_u(n);
   d_row_ptr.upload(K_spd->row_ptr.data(), n + 1);
   d_col_ind.upload(K_spd->col_ind.data(), nnz);
-  d_F.upload(F.data(), n);
+
+  std::vector<double> u;
+  RefinementReport report;
 
   // ── Path 1: Cholesky (SPD) ────────────────────────────────────────────────
-  std::vector<double> u(n, 0.0);
-
-  bool chol_ok = solve_cudss<double>(ctx_->cudss, ctx_->device_name, n, nnz,
-                                     d_values, d_row_ptr, d_col_ind, d_F, d_u,
-                                     CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER,
-                                     CUDA_R_64F, "SPD");
-  if (chol_ok) {
-    d_u.download(u.data(), n);
-    double rel_res = relative_residual(K, u, F);
-    if (!std::isfinite(rel_res) || rel_res > 1e-2) {
-      vibestran::log_debug("[cuda] Cholesky residual " + std::to_string(rel_res) +
-                          " -- retrying with LU");
-      chol_ok = false;
-    }
+  bool chol_ok = false;
+  {
+    DeviceBuffer<Scalar> d_values(nnz);
+    if constexpr (fp32)
+      d_values.upload(to_scalar(K_spd->values).data(), nnz);
+    else
+      d_values.upload(K_spd->values.data(), nnz);
+    chol_ok = factor_cudss<Scalar>(
+        ctx_->cudss, n, nnz, d_values, d_row_ptr, d_col_ind, d_F, d_u,
+        CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER, scalar_type, "SPD" + suffix,
+        [&](const FactorSolve &solve) {
+          u = solve_and_refine(K, F, solve, fp32, "Cholesky" + suffix, report);
+        });
   }
-
+  // In fp32 a failed refinement means cond(K) is too large for fp32, which
+  // LU does not help; solve() retries in fp64.
+  if (chol_ok && !fp32 && refinement_failed(report)) {
+    vibestran::log_debug(
+        "[cuda] Cholesky" + suffix + " solution could not be refined (estimated error " +
+        std::format("{:.2e}", report.estimated_error) + ") -- retrying with LU");
+    chol_ok = false;
+  }
   if (chol_ok) {
     last_cholesky_ = true;
-    vibestran::log_info("[cuda] Cholesky solve: n=" + std::to_string(n) +
-                       ", nnz=" + std::to_string(nnz) +
-                       ", device='" + ctx_->device_name + "'");
-    return u;
+  } else {
+    // ── Path 2: LU (GENERAL) fallback ──────────────────────────────────────
+    const SparseMatrixBuilder::CsrData *K_lu = &K;
+    SparseMatrixBuilder::CsrData expanded_csr;
+    if (K.stores_lower_triangle_only()) {
+      expanded_csr = K.expanded_symmetric();
+      K_lu = &expanded_csr;
+    }
+    DeviceBuffer<Scalar> d_values_lu(K_lu->nnz);
+    DeviceBuffer<int> d_row_ptr_lu(K_lu->n + 1);
+    DeviceBuffer<int> d_col_ind_lu(K_lu->nnz);
+    if constexpr (fp32)
+      d_values_lu.upload(to_scalar(K_lu->values).data(), K_lu->nnz);
+    else
+      d_values_lu.upload(K_lu->values.data(), K_lu->nnz);
+    d_row_ptr_lu.upload(K_lu->row_ptr.data(), K_lu->n + 1);
+    d_col_ind_lu.upload(K_lu->col_ind.data(), K_lu->nnz);
+
+    const bool lu_ok = factor_cudss<Scalar>(
+        ctx_->cudss, K_lu->n, K_lu->nnz, d_values_lu, d_row_ptr_lu,
+        d_col_ind_lu, d_F, d_u, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL,
+        scalar_type, "LU" + suffix, [&](const FactorSolve &solve) {
+          u = solve_and_refine(K, F, solve, fp32, "LU" + suffix, report);
+        });
+    if (!lu_ok)
+      throw SolverError("CUDA solver: LU" + suffix + " factorisation failed (n=" +
+                        std::to_string(n) +
+                        ") -- stiffness matrix may be singular. Check boundary "
+                        "conditions (SPCs)");
+    // cuDSS perturbs tiny pivots instead of failing, so a singular K
+    // factorizes; its solution then cannot be refined at all.
+    if (!fp32 && refinement_failed(report))
+      throw SolverError(
+          "CUDA solver: the LU" + suffix + " solution could not be refined (estimated "
+          "relative error " + std::format("{:.2e}", report.estimated_error) +
+          " after " + std::to_string(report.corrections) +
+          " correction(s), relative residual " +
+          std::format("{:.2e}", report.relative_residual) + ", n=" + std::to_string(n) +
+          ") -- stiffness matrix is singular. Check boundary conditions (SPCs)");
+    last_cholesky_ = false;
   }
 
-  // ── Path 2: LU (GENERAL) fallback ────────────────────────────────────────
-  const SparseMatrixBuilder::CsrData *K_lu = &K;
-  SparseMatrixBuilder::CsrData expanded_csr;
-  if (K.stores_lower_triangle_only()) {
-    expanded_csr = K.expanded_symmetric();
-    K_lu = &expanded_csr;
-  }
-
-  DeviceBuffer<double> d_values_lu(K_lu->nnz);
-  DeviceBuffer<int> d_row_ptr_lu(K_lu->n + 1);
-  DeviceBuffer<int> d_col_ind_lu(K_lu->nnz);
-  d_values_lu.upload(K_lu->values.data(), K_lu->nnz);
-  d_row_ptr_lu.upload(K_lu->row_ptr.data(), K_lu->n + 1);
-  d_col_ind_lu.upload(K_lu->col_ind.data(), K_lu->nnz);
-
-  bool lu_ok = solve_cudss<double>(ctx_->cudss, ctx_->device_name, K_lu->n,
-                                   K_lu->nnz, d_values_lu, d_row_ptr_lu,
-                                   d_col_ind_lu, d_F, d_u, CUDSS_MTYPE_GENERAL,
-                                   CUDSS_MVIEW_FULL, CUDA_R_64F, "LU");
-  if (!lu_ok)
-    throw SolverError(
-        "CUDA solver: LU factorisation failed -- stiffness matrix may be "
-        "singular. Check boundary conditions (SPCs)");
-
-  d_u.download(u.data(), n);
-
-  double rel_res_lu = relative_residual(K, u, F);
-  if (rel_res_lu > 1e-6)
-    throw SolverError(
-        "CUDA solver: LU produced large residual " +
-        std::to_string(rel_res_lu) +
-        " -- stiffness matrix is singular or very ill-conditioned. "
-        "Check boundary conditions (SPCs)");
-
-  last_cholesky_ = false;
-  vibestran::log_info("[cuda] LU solve: n=" + std::to_string(K_lu->n) +
-                     ", nnz=" + std::to_string(K_lu->nnz) +
-                     ", device='" + ctx_->device_name + "'");
+  // The accuracy achieved is reported by the caller from last_refinement().
+  last_refinement_ = report;
+  vibestran::log_info("[cuda] " + std::string(last_cholesky_ ? "Cholesky" : "LU") +
+                      suffix + " solve: n=" + std::to_string(n) +
+                      ", nnz=" + std::to_string(nnz) + ", device='" +
+                      ctx_->device_name + "'");
   return u;
 }
 

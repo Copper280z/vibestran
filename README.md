@@ -118,7 +118,7 @@ Optional solver backends are detected automatically at configure time.
 ```
 vibestran [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg|cuda-pcg-mixed>]
          [--cuda-precision=<fp32|fp64>] [--csv]
-         [--log-file=<path>]
+         [--log-file=<path>] [--dump-system=<prefix>]
          <input.bdf|input.inp> [output.f06]
 ```
 
@@ -148,7 +148,39 @@ See `include/io/inp_parser.hpp` for full details on design decisions and limitat
 | `<stem>.node.csv` | Nodal results CSV | `--csv` flag or `PARAM,CSVOUT,YES` in BDF |
 | `<stem>.elem.csv` | Element results CSV | `--csv` flag or `PARAM,CSVOUT,YES` in BDF |
 
+### Dumping the linear system
+
+`--dump-system=<prefix>` writes each subcase's reduced system in Matrix Market
+format (1-based, 17 significant digits) for inspection in SciPy, MATLAB or
+Julia:
+
+| File | Contents |
+|---|---|
+| `<prefix>_sc<N>_K.mtx` | Reduced stiffness (`coordinate real symmetric`, lower triangle) |
+| `<prefix>_sc<N>_F.mtx` | Reduced load vector (SOL 101) |
+| `<prefix>_sc<N>_u.mtx` | Reduced solution (SOL 101) |
+| `<prefix>_sc<N>_M.mtx` | Reduced mass (SOL 103) |
+| `<prefix>_sc<N>_dofs.txt` | `equation grid component` map of the reduced DOFs |
+
+SPC'd and MPC-dependent DOFs are not in the reduced system.
+
 ## Solver Backends
+
+### Solution accuracy
+
+Every backend refines its solution against the double-precision stiffness
+with residuals computed in compensated (double-double) arithmetic, and is
+judged by the estimated relative error of the solution, ||d|| / ||u|| for
+the last refinement correction d, rather than by the residual. Shell and
+thin-solid stiffness matrices commonly have condition numbers of 1e10 to
+1e15, so an unrefined backward-stable solve is only accurate to cond(K) * eps
+(up to 1e-1), and even the exact solution rounded to double can have
+||F - K u|| / ||F|| of 1e-3: a residual test says little about accuracy.
+Each SOL 101 subcase logs the estimated error before and after refinement,
+the relative residual and the normwise backward error, and warns when the
+solution could not be refined (a mechanism or a hopelessly ill-conditioned
+model). Assembly is deterministic, so K and the solution are reproducible
+bit for bit between runs.
 
 ### CPU — Cholesky (default)
 
@@ -171,6 +203,9 @@ VIBESTRAN_ACCELERATE_ORDER=metis vibestran --backend=cpu model.bdf
 Eigen Preconditioned Conjugate Gradient with Incomplete Cholesky preconditioning.
 Iterative solver with O(nnz) memory — suitable for very large systems where the
 direct Cholesky fill-in would exhaust RAM. This is slower than the direct (Cholesky) solution.
+The solve is refined until the estimated relative error is below 1e-8; a model
+too ill-conditioned for incomplete-Cholesky PCG (e.g. a thin solid shell, with
+cond(K) ~ 1e14) is rejected with an error rather than returned inaccurate.
 
 ```bash
 vibestran --backend=cpu-pcg model.bdf
@@ -184,7 +219,10 @@ shift-and-invert linear solver inside the IRL eigensolver for SOL 103.
 
 **Solver strategy:**
 1. Sparse Cholesky (`CUDSS_MTYPE_SPD`) — optimal for SPD FEM stiffness matrices
-2. Sparse LU (`CUDSS_MTYPE_GENERAL`) fallback for non-SPD or ill-conditioned matrices
+2. Sparse LU (`CUDSS_MTYPE_GENERAL`) fallback when the Cholesky factorization
+   fails or its solution cannot be refined
+3. The factorization is kept and the solution refined on the host; a singular
+   stiffness (whose solution cannot be refined at all) is an error
 
 **Memory management:**
 - After symbolic analysis, cuDSS memory estimates are logged (device/host stable and peak).
@@ -197,8 +235,10 @@ shift-and-invert linear solver inside the IRL eigensolver for SOL 103.
 vibestran --backend=cuda model.bdf
 ```
 
-The cuDSS direct backend also supports a float32 solve path for reduced VRAM
-usage:
+The cuDSS direct backend also supports a float32 factorization for reduced
+VRAM usage. Refinement with double-precision residuals recovers double accuracy
+when cond(K) is below about 1e7; for a more ill-conditioned model (most shell
+and thin-solid models) the solve is repeated in fp64 with a warning:
 
 ```bash
 vibestran --backend=cuda --cuda-precision=fp32 model.bdf
@@ -216,10 +256,16 @@ sudo apt install libcudss0-cuda-12 libcudss0-dev-cuda-12
 
 ### CUDA — PCG
 
-GPU Preconditioned Conjugate Gradient with IC0 → ILU0 → Jacobi fallback preconditioning,
+GPU Preconditioned Conjugate Gradient with IC0 → ILU0 → Jacobi fallback preconditioning
+(IC0 is retried on K + α diag(K) with a growing shift α when it meets a
+non-positive pivot, as shell stiffness matrices often cause),
 using cuSPARSE SpSV for triangular solves and cuBLAS for vector operations.
 O(nnz) device memory — no factorization fill-in — making it suitable for systems too large
 for cuDSS even with hybrid host/device memory mode. This is slower than the cuDSS direct solve for most cases.
+Like the CPU PCG it is refined to an estimated relative error of 1e-8 and fails
+with an error, not an inaccurate answer, when it cannot get there.
+`--backend=cuda-pcg-mixed` runs the PCG in fp32 inside the same refinement, which
+only converges for cond(K) below about 1e7.
 
 ```bash
 vibestran --backend=cuda-pcg model.bdf
@@ -230,6 +276,9 @@ Requires CUDA toolkit ≥ 11 with cuBLAS and cuSPARSE (both included in the stan
 ### Vulkan - Experimental
 
 PCG iterative solver using Vulkan compute shaders. Requires Vulkan SDK, `glslc`, and `xxd`. Unfortunately performance is terrible right now, it's orders of magnitude slower than the base Eigen Cholesky CPU solver.
+The fp32 Jacobi PCG is refined with double-precision residuals to an estimated
+relative error of 1e-8, retried in fp64 if that fails (when the GPU supports
+it). Systems below 50,000 DOFs use the CPU direct solver.
 
 ```bash
 vibestran --backend=vulkan model.bdf

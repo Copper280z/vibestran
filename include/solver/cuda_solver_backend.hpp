@@ -3,13 +3,17 @@
 // CUDA sparse solver backend using NVIDIA cuDSS (direct sparse solver library).
 //
 // Algorithm: Sparse Cholesky (CUDSS_MTYPE_SPD) for SPD FEM stiffness matrices,
-// with automatic fallback to sparse LU (CUDSS_MTYPE_GENERAL) if the matrix is
-// not positive definite or the Cholesky residual is too large.
-// Both phases run fully on-device via cudssExecute.
+// with automatic fallback to sparse LU (CUDSS_MTYPE_GENERAL) if the Cholesky
+// factorization fails or its solution cannot be refined.  Factorization and
+// triangular solves run on-device via cudssExecute; the solution is then
+// refined with the retained factorization and compensated residuals computed
+// on the host (iterative_refinement.hpp).
 //
 // For large problems where cuDSS's internal workspace exceeds device memory,
-// fp32 mode halves the device memory footprint by downcasting inputs to float
-// before the solve and upcasting the result back to double.
+// fp32 mode halves the device memory footprint by factorizing in float;
+// refinement with double-precision residuals then recovers double accuracy
+// when cond(K) is below about 1e7.  When it cannot, the solve is repeated in
+// fp64 (with a warning).
 //
 // Use try_create() to construct — returns nullopt when no CUDA device is
 // present so the caller can fall back without exception handling.
@@ -65,11 +69,23 @@ public:
     /// GPU device name reported by CUDA runtime.
     [[nodiscard]] std::string_view device_name() const noexcept;
 
+    /// Refinement of the last solve with its factorization and compensated
+    /// residuals (iterative_refinement.hpp).
+    [[nodiscard]] std::optional<RefinementReport> last_refinement() const noexcept override {
+        return last_refinement_;
+    }
+
 private:
     explicit CudaSolverBackend(std::unique_ptr<CudaContext> ctx) noexcept;
 
+    /// solve() with the factorization in Scalar (double or float).
+    template <typename Scalar>
+    [[nodiscard]] std::vector<double> solve_typed(const SparseMatrixBuilder::CsrData& K,
+                                                  const std::vector<double>& F);
+
     std::unique_ptr<CudaContext> ctx_;
     bool last_cholesky_{true};
+    std::optional<RefinementReport> last_refinement_;
 };
 
 } // namespace vibestran

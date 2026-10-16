@@ -18,17 +18,17 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 1,878 final failure
+The suite contains 3,226 definitions. The current run has 1,881 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
 | `unsupported_input` | 1,111 | 190 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 540 | 201 | Result exists but differs from the reference or comparator expectation |
+| `numerical_mismatch` | 543 | 201 | Result exists but differs from the reference or comparator expectation |
 | `input_parse_error` | 185 | 15 | Parser rejects syntax or a card variant used by a valid deck |
 | `missing_result_data` | 36 | 11 | Solver completes but does not emit the requested result family |
 | `solver_model_error` | 6 | 2 | Parsed model is rejected by a geometry gate or has no free DOFs |
-| **Total** | **1,878** |  |  |
+| **Total** | **1,881** |  |  |
 
 CQUAD4 is the MITC4+/D continuum shell and CTRIA3 the MITC3+ shell (see
 `SHELL_REWRITE_PLAN.md` and `SHELL_BENCHMARKS.md`): six DOFs per grid,
@@ -563,3 +563,10 @@ most recent entry.
   and others), one new: `RBE3 4` SPCFORCES TY is 1.1e-7 of roundoff
   against an exact zero with a 1e-7 absolute tolerance on 1e8 loads. A
   GRAV card with MB = 0 is no longer rejected.
+- **Solver accuracy (1,878 -> 1,881).** Direct solves are refined with
+  compensated (double-double) residuals, the CPU and CUDA PCG backends stop
+  on the estimated forward error instead of an unattainable relative
+  residual, and assembly is deterministic, so K is bitwise reproducible.
+  The three new records are roundoff of exact-zero references: two `shell
+  force per length components quad4` records at 1e-14, and `RBE3 4`
+  SPCFORCES TY at 1.3e-7 against a 1e-7 tolerance on 1e8 loads.

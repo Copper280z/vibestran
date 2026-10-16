@@ -37,7 +37,11 @@ double CudaPCGSolverBackend::last_relative_residual() const noexcept {
 }
 
 double CudaPCGSolverBackend::last_estimated_error() const noexcept {
-    return ctx_->last_rel_res;
+    return ctx_->last_refinement ? ctx_->last_refinement->estimated_error : ctx_->last_rel_res;
+}
+
+std::optional<RefinementReport> CudaPCGSolverBackend::last_refinement() const noexcept {
+    return ctx_->last_refinement;
 }
 
 std::string_view CudaPCGSolverBackend::device_name() const noexcept {

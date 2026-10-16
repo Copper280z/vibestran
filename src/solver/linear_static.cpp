@@ -15,6 +15,7 @@
 #include "elements/rbe_constraints.hpp"
 #include "elements/solid_elements.hpp"
 #include "elements/solid_hexa8.hpp"
+#include "io/system_dump.hpp"
 #include "assembly_parallel.hpp"
 #include "solver/analysis_support.hpp"
 #include <Eigen/Dense>
@@ -376,6 +377,14 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
       backend_->solve(*solve_csr, F, &factor_ratio_policy);
   const auto t6 = Clock::now();
   spdlog::debug("[subcase {}] linear solve: {:.3f} ms", sc.id, Ms(t6 - t5b).count());
+  if (!dump_prefix_.empty()) {
+    write_matrix_market(system_dump_path(dump_prefix_, sc.id, "K.mtx"), csr);
+    write_matrix_market(system_dump_path(dump_prefix_, sc.id, "F.mtx"), F);
+    write_matrix_market(system_dump_path(dump_prefix_, sc.id, "u.mtx"), u_reduced);
+    write_dof_map(system_dump_path(dump_prefix_, sc.id, "dofs.txt"), model, mpc_handler);
+    spdlog::info("[subcase {}] wrote K, F, u and the DOF map to {}_sc{}_*", sc.id, dump_prefix_,
+                 sc.id);
+  }
 
   // Log iterative solver convergence info when available (PCG backends).
   {
@@ -385,33 +394,50 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
                     sc.id, iters, backend_->last_estimated_error());
   }
 
-  // Compute the true relative residual r = K*u - F in the reduced system.
-  // For direct solvers this should be near machine epsilon; for PCG backends
-  // it reflects the iterative convergence quality.
+  // Solution accuracy.  The backends refine their solution with
+  // compensated residuals (iterative_refinement.hpp) and report the
+  // estimated relative error; corrections that do not contract mean the
+  // equations have no accurate solution: a singular stiffness (an
+  // unrestrained mechanism under load) or one too ill-conditioned for double
+  // precision.  The relative residual ||F - K u|| / ||F|| is logged but is
+  // not an accuracy measure: for an ill-conditioned K it is ~ eps ||K|| ||u||
+  // / ||F|| even for the exact solution rounded to double.
   {
-    const std::vector<double> Ku = csr.multiply(u_reduced);
-    double r_norm_sq = 0.0;
-    double f_norm_sq = 0.0;
-    for (int row = 0; row < n; ++row) {
-      const double ri = Ku[static_cast<size_t>(row)] - F[static_cast<size_t>(row)];
-      r_norm_sq += ri * ri;
-      f_norm_sq += F[static_cast<size_t>(row)] * F[static_cast<size_t>(row)];
-    }
-    const double rel_res = (f_norm_sq > 1e-300)
-        ? std::sqrt(r_norm_sq / f_norm_sq)
-        : std::sqrt(r_norm_sq);
-    spdlog::info("[subcase {}] relative residual ||K*u - F|| / ||F|| = {:.3e}",
-                 sc.id, rel_res);
-    // A large residual means the load is not in the range of K: the model
-    // has a mechanism (unrestrained DOFs) that the applied load excites, and
-    // the reported displacements do not equilibrate the loads.
-    constexpr double kResidualWarningThreshold = 1e-6;
-    if (rel_res > kResidualWarningThreshold) {
-      spdlog::warn(
-          "[subcase {}] solution does not satisfy K*u = F (relative residual "
-          "{:.3e} > {:.0e}); the model likely has an unrestrained mechanism "
-          "loaded by the applied forces, and results are not meaningful",
-          sc.id, rel_res, kResidualWarningThreshold);
+    std::optional<RefinementReport> rep = backend_->last_refinement();
+    if (!rep) {
+      // A backend without refinement: assess its solution without changing it.
+      std::vector<double> u_probe = u_reduced;
+      RefinementOptions probe;
+      probe.max_corrections = 0;
+      rep = refine_solution(csr, F, u_probe, nullptr, probe);
+      spdlog::info("[subcase {}] relative residual ||F - K*u|| / ||F|| = {:.3e}, backward "
+                   "error {:.3e}",
+                   sc.id, rep->relative_residual, rep->backward_error);
+      constexpr double kBackwardErrorWarning = 1e-10;
+      if (rep->backward_error > kBackwardErrorWarning)
+        spdlog::warn("[subcase {}] the solution does not satisfy K*u = F (backward error "
+                     "{:.3e}); the model likely has an unrestrained mechanism loaded by the "
+                     "applied forces, and results are not meaningful",
+                     sc.id, rep->backward_error);
+    } else {
+      spdlog::info("[subcase {}] solution accuracy: estimated relative error {:.2e} after {} "
+                   "refinement correction(s) (unrefined {:.2e}); relative residual {:.3e}, "
+                   "backward error {:.3e}",
+                   sc.id, rep->estimated_error, rep->corrections, rep->initial_error,
+                   rep->relative_residual, rep->backward_error);
+      constexpr double kMechanismError = 1e-2;
+      constexpr double kAccuracyWarning = 1e-6;
+      if (!rep->converged && !(rep->estimated_error <= kMechanismError)) {
+        spdlog::warn("[subcase {}] the solution could not be refined (estimated relative "
+                     "error {:.2e}): the stiffness matrix is singular or too ill-conditioned "
+                     "for double precision; the model likely has an unrestrained mechanism "
+                     "loaded by the applied forces, and results are not meaningful",
+                     sc.id, rep->estimated_error);
+      } else if (!rep->converged && rep->estimated_error > kAccuracyWarning) {
+        spdlog::warn("[subcase {}] the stiffness matrix is very ill-conditioned: the solution "
+                     "is only accurate to about {:.0e} (relative)",
+                     sc.id, rep->estimated_error);
+      }
     }
   }
 

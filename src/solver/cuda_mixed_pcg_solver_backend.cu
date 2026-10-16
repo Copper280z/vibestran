@@ -43,7 +43,11 @@ int CudaMixedPCGSolverBackend::last_iteration_count() const noexcept {
 }
 
 double CudaMixedPCGSolverBackend::last_estimated_error() const noexcept {
-    return ctx_->last_rel_res;
+    return ctx_->last_refinement ? ctx_->last_refinement->estimated_error : ctx_->last_rel_res;
+}
+
+std::optional<RefinementReport> CudaMixedPCGSolverBackend::last_refinement() const noexcept {
+    return ctx_->last_refinement;
 }
 
 std::string_view CudaMixedPCGSolverBackend::device_name() const noexcept {

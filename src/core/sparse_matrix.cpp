@@ -96,7 +96,9 @@ SparseMatrixBuilder::CsrData SparseMatrixBuilder::build_csr() {
   auto sort_row = [&](int row) {
     auto beg = staged.begin() + bucket_ptr[static_cast<size_t>(row)];
     auto end = staged.begin() + bucket_ptr[static_cast<size_t>(row + 1)];
-    std::sort(beg, end, [](const Triplet &a, const Triplet &b) {
+    // Stable: duplicates are summed in insertion (element) order, so the
+    // result does not depend on the sort implementation.
+    std::stable_sort(beg, end, [](const Triplet &a, const Triplet &b) {
       return a.col < b.col;
     });
   };

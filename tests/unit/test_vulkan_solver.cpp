@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 #include "solver/vulkan_solver_backend.hpp"
+#include "hilbert_system.hpp"
 #include "solver/vulkan_context.hpp"
 #include "solver/solver_backend.hpp"
 #include "core/sparse_matrix.hpp"
@@ -65,11 +66,15 @@ TEST_F(VulkanTest, DiagonalSystemConvergesInOneIteration) {
     auto u = backend_->solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u.size()), 2);
-    EXPECT_NEAR(u[0], 1.0, 1e-8);
-    EXPECT_NEAR(u[1], 1.0, 1e-8);
-    EXPECT_EQ(backend_->last_iteration_count(), 1)
-        << "Jacobi preconditioning is exact for diagonal matrices: "
-           "PCG must converge in 1 iteration";
+    // The fp32 PCG is refined with double-precision residuals.
+    EXPECT_NEAR(u[0], 1.0, 1e-12);
+    EXPECT_NEAR(u[1], 1.0, 1e-12);
+    const auto rep = backend_->last_refinement();
+    ASSERT_TRUE(rep.has_value());
+    EXPECT_TRUE(rep->converged);
+    EXPECT_EQ(backend_->last_iteration_count(), rep->corrections + 1)
+        << "Jacobi preconditioning is exact for diagonal matrices: each PCG "
+           "solve (the first and every refinement correction) takes 1 iteration";
 }
 
 // ── Test 2: 5×5 tridiagonal SPD — agrees with Eigen ─────────────────────────
@@ -150,12 +155,15 @@ TEST_F(VulkanTest, ConvergenceRateForWellConditionedSystem) {
     auto csr = dense_to_csr(Kd);
     auto u   = backend_->solve(csr, F);
 
-    // Solution should be all ones
+    // Solution should be all ones (refined to double accuracy)
     for (int i = 0; i < n; ++i)
-        EXPECT_NEAR(u[i], 1.0, 1e-7) << "Component " << i;
+        EXPECT_NEAR(u[i], 1.0, 1e-12) << "Component " << i;
 
-    // With Jacobi preconditioning (exact for diagonal), should converge in 1 iter
-    EXPECT_EQ(backend_->last_iteration_count(), 1)
+    // With Jacobi preconditioning (exact for diagonal), each PCG solve
+    // converges in 1 iteration
+    const auto rep = backend_->last_refinement();
+    ASSERT_TRUE(rep.has_value());
+    EXPECT_EQ(backend_->last_iteration_count(), rep->corrections + 1)
         << "Jacobi-preconditioned PCG on a diagonal system must converge in 1 iteration";
 
     // Residual norm must be below the default float32-achievable tolerance
@@ -183,12 +191,15 @@ TEST_F(VulkanTest, LargeDiagonalSystemIsCorrect) {
     ASSERT_EQ(static_cast<int>(u.size()), n);
     // Check a representative sample of components
     for (int i = 0; i < n; i += 1000)
-        EXPECT_NEAR(u[i], 1.0, 1e-5)
+        EXPECT_NEAR(u[i], 1.0, 1e-12)
             << "Large diagonal: component " << i << " out of tolerance";
 
     // Jacobi is exact for diagonal matrices so PCG should converge very quickly.
-    // For large n, float32 dot-product accumulation may require a second iteration.
-    EXPECT_LE(backend_->last_iteration_count(), 2)
+    // For large n, float32 dot-product accumulation may require a second
+    // iteration per PCG solve (the first and each refinement correction).
+    const auto rep = backend_->last_refinement();
+    ASSERT_TRUE(rep.has_value());
+    EXPECT_LE(backend_->last_iteration_count(), 2 * (rep->corrections + 1))
         << "PCG on a Jacobi-diagonal-preconditioned diagonal system should converge in ≤2 iterations";
 }
 
@@ -459,6 +470,21 @@ TEST_F(VulkanTest, VulkanContextHandlesAreValid) {
     // compute_queue_family() must be a valid queue family index (< UINT32_MAX)
     EXPECT_LT(ctx->compute_queue_family(), UINT32_MAX)
         << "compute_queue_family() must return a valid queue family index";
+}
+
+// ── fp32 PCG is refined to double accuracy ───────────────────────────────────
+// H_4 (cond 1.5e4) in float32: each inner Jacobi PCG solve stops at a loose
+// residual, and refinement with compensated double-precision residuals takes
+// the solution to the 1e-8 target error without falling back to float64.
+
+TEST_F(VulkanTest, Float32PcgIsRefinedToDoubleAccuracy) {
+    const auto [K, F] = test::scaled_hilbert(4, SymmetryStorage::Full);
+    const auto u = backend_->solve(K, F);
+    const auto rep = backend_->last_refinement();
+    ASSERT_TRUE(rep.has_value());
+    EXPECT_TRUE(rep->converged);
+    EXPECT_GT(rep->corrections, 0);
+    EXPECT_LT(test::max_error_from_one(u), 1e-9);
 }
 
 // ── Test 14: Ill-conditioned tridiagonal converges (stagnation regression) ────

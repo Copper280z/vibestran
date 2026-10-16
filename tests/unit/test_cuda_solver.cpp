@@ -10,6 +10,7 @@
 #include "solver/solver_backend.hpp"
 #include "core/sparse_matrix.hpp"
 #include "core/types.hpp"
+#include "hilbert_system.hpp"
 #include <cmath>
 #include <vector>
 
@@ -204,6 +205,36 @@ TEST_F(CudaTest, SingularMatrixThrowsSolverError) {
     EXPECT_THROW({
         (void)backend_->solve(csr, F);
     }, SolverError) << "Truly singular matrix (det=0) must throw SolverError";
+}
+
+// ── Ill-conditioned systems are refined to full accuracy ─────────────────────
+// A backward-stable factorization leaves a forward error of about cond(K) eps;
+// refinement with the retained factorization and compensated residuals
+// removes it.  In fp32 the factorization error is cond(K) * 6e-8, so an
+// unrefined fp32 solve of H_5 (cond 4.8e5) is only accurate to ~1e-2.
+
+TEST_F(CudaTest, Fp64SolveOfHilbert10IsRefinedToFullAccuracy) {
+    const auto [K, F] = test::scaled_hilbert(10);
+    const auto u = backend_->solve(K, F);
+    const auto rep = backend_->last_refinement();
+    ASSERT_TRUE(rep.has_value());
+    EXPECT_TRUE(rep->converged);
+    EXPECT_GT(rep->initial_error, 1e-7) << "the unrefined solve should be visibly inaccurate";
+    EXPECT_LT(test::max_error_from_one(u), 1e-12);
+    EXPECT_LT(rep->backward_error, 1e-15);
+}
+
+TEST(CudaFp32Test, Fp32FactorizationIsRefinedToDoubleAccuracy) {
+    auto backend = CudaSolverBackend::try_create(CudaSolverPrecision::Float32);
+    if (!backend.has_value())
+        GTEST_SKIP() << "CUDA not available on this system";
+    const auto [K, F] = test::scaled_hilbert(5);
+    const auto u = backend->solve(K, F);
+    const auto rep = backend->last_refinement();
+    ASSERT_TRUE(rep.has_value());
+    EXPECT_TRUE(rep->converged);
+    EXPECT_GT(rep->initial_error, 1e-4) << "an fp32 factorization alone is inaccurate";
+    EXPECT_LT(test::max_error_from_one(u), 1e-11);
 }
 
 // ── Test 6: name() and device_name() are non-empty ───────────────────────────

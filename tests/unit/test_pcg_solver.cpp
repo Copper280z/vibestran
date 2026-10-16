@@ -16,6 +16,8 @@
 #include <gtest/gtest.h>
 #include "solver/solver_backend.hpp"
 #include "core/sparse_matrix.hpp"
+#include "core/exceptions.hpp"
+#include "hilbert_system.hpp"
 #include <cmath>
 #include <vector>
 
@@ -422,6 +424,61 @@ TEST_F(CudaMixedPCGTest, TridiagonalAgreesWithEigenAfterRefinement) {
             << " disagrees with Eigen";
 
     EXPECT_LT(backend_->last_estimated_error(), 1e-4);
+}
+
+
+// ── Ill-conditioned systems: the error, not the residual, is controlled ──────
+// cond(H_8) ~ 1.5e10: a relative-residual stopping test is not a statement
+// about accuracy here.  The refined CUDA PCG solution is accurate to its
+// target relative error (1e-8) and reports the refinement estimate.
+
+TEST_F(CudaPCGTest, IllConditionedSystemIsAccurateToTheTargetError) {
+    const auto [K, F] = test::scaled_hilbert(8);
+    const auto u = backend_->solve(K, F);
+    const auto rep = backend_->last_refinement();
+    ASSERT_TRUE(rep.has_value());
+    EXPECT_TRUE(rep->converged);
+    EXPECT_LE(backend_->last_estimated_error(), 1e-8);
+    EXPECT_LT(test::max_error_from_one(u), 1e-7);
+}
+
+// Kershaw's matrix (J. Comput. Phys. 26, 1978) is SPD (eigenvalues 0.17 and
+// 5.83, each twice) but IC(0) meets a negative pivot (-5) in its last row.
+// The preconditioner is retried on K + shift diag(K) (here shift 0.256
+// succeeds) instead of falling back to the nonsymmetric ILU0, as shell and
+// thin-solid stiffness matrices need.
+TEST_F(CudaPCGTest, IncompleteCholeskyBreakdownIsHandledWithADiagonalShift) {
+    SparseMatrixBuilder b(4);
+    const double A[4][4] = {{3, -2, 0, 2}, {-2, 3, -2, 0}, {0, -2, 3, -2}, {2, 0, -2, 3}};
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            if (A[i][j] != 0.0) b.add(i, j, A[i][j]);
+    const auto K = b.build_csr();
+    // F = K (1, 2, 3, 4)
+    const std::vector<double> F{7.0, -2.0, -3.0, 8.0};
+    const auto u = backend_->solve(K, F);
+    for (int i = 0; i < 4; ++i)
+        EXPECT_NEAR(u[static_cast<std::size_t>(i)], i + 1.0, 1e-10);
+    EXPECT_TRUE(backend_->last_refinement()->converged);
+}
+
+// fp32 inner PCG on H_5 (cond 4.8e5): each correction contracts the error by
+// about cond * 6e-8, so refinement still reaches the 1e-6 default target.
+TEST_F(CudaMixedPCGTest, Fp32InnerSolvesAreRefinedToTheTargetError) {
+    const auto [K, F] = test::scaled_hilbert(5);
+    const auto u = backend_->solve(K, F);
+    const auto rep = backend_->last_refinement();
+    ASSERT_TRUE(rep.has_value());
+    EXPECT_TRUE(rep->converged);
+    EXPECT_GT(rep->corrections, 0);
+    EXPECT_LT(test::max_error_from_one(u), 1e-5);
+}
+
+// A matrix too ill-conditioned for fp32 corrections (H_9, cond 4.9e11) must
+// be reported as a failure, not returned as a converged solution.
+TEST_F(CudaMixedPCGTest, HopelesslyIllConditionedSystemIsRejected) {
+    const auto [K, F] = test::scaled_hilbert(9);
+    EXPECT_THROW((void)backend_->solve(K, F), SolverError);
 }
 
 #endif // HAVE_CUDA

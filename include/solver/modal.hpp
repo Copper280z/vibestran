@@ -26,8 +26,13 @@ public:
     /// Solve all modal subcases in the model's analysis case.
     [[nodiscard]] ModalSolverResults solve(const Model& model);
 
+    /// Write each subcase's reduced K, M and DOF map in Matrix Market format
+    /// with this path prefix (io/system_dump.hpp); empty disables.
+    void set_system_dump(std::string prefix) { dump_prefix_ = std::move(prefix); }
+
 private:
     std::unique_ptr<EigensolverBackend> backend_;
+    std::string dump_prefix_;
 
     ModalSubCaseResults solve_subcase(const Model& model, const SubCase& sc);
 

@@ -41,8 +41,13 @@ public:
     /// Solve all subcases in the model's analysis case.
     [[nodiscard]] SolverResults solve(const Model& model);
 
+    /// Write each subcase's reduced K, F, u and DOF map in Matrix Market
+    /// format with this path prefix (io/system_dump.hpp); empty disables.
+    void set_system_dump(std::string prefix) { dump_prefix_ = std::move(prefix); }
+
 private:
     std::unique_ptr<SolverBackend> backend_;
+    std::string dump_prefix_;
 
     SubCaseResults solve_subcase(const Model& model, const SubCase& sc);
 

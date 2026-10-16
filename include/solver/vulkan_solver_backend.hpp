@@ -4,6 +4,11 @@
 //
 // Two execution paths are selected automatically at solve() time:
 //
+// Each PCG solve stops at a loose relative residual (inner_tolerance) and is
+// refined with compensated double-precision residuals on the host until the
+// estimated relative error is below `tolerance`; fp32 failing that retries in
+// fp64 when the device supports it.
+//
 //  Full-GPU path  — entire K matrix + working vectors fit in VRAM.
 //                   SpMV, dot products, vector ops all run as GPU dispatches.
 //                   Minimal CPU↔GPU sync (only two scalar readbacks per iter).
@@ -27,10 +32,17 @@ namespace vibestran {
 
 struct VulkanSolverConfig {
   int max_iterations = 10000;
-  double tolerance =
-      5e-5; // relative residual: ||r|| / ||b||
-            // float32 GPU ops limit achievable precision to ~1e-7;
-            // 1e-6 is safely above that floor and adequate for FEM use.
+  /// Target relative error of the solution.  The GPU PCG solves are refined
+  /// with double-precision compensated residuals on the host
+  /// (iterative_refinement.hpp), so an fp32 inner solve still reaches it;
+  /// the refinement's correction size is the error estimate.
+  double tolerance = 1e-8;
+  /// Relative residual ||r|| / ||b|| at which each inner PCG solve stops
+  /// (the first solve and each correction).
+  double inner_tolerance = 5e-5;
+  /// false: an inner PCG solve that stagnates or reaches max_iterations
+  /// returns its iterate (refinement then judges it) instead of throwing.
+  bool throw_on_no_convergence = true;
   double vram_headroom = 0.15; // fraction of VRAM reserved for driver
   bool force_tiled =
       false; // bypass VRAM check and always use tiled path (for testing)
@@ -75,10 +87,13 @@ public:
   [[nodiscard]] bool last_solve_was_full_gpu() const noexcept;
   /// Number of PCG iterations in the most recent solve.
   [[nodiscard]] int last_iteration_count() const noexcept override;
-  /// Relative residual norm at convergence (or at max_iterations).
+  /// Relative residual ||F - K u|| / ||F|| of the returned solution.
   [[nodiscard]] double last_residual_norm() const noexcept;
-  /// Alias for last_residual_norm() to satisfy SolverBackend interface.
+  /// Estimated relative error of the returned solution (refinement estimate).
   [[nodiscard]] double last_estimated_error() const noexcept override;
+  [[nodiscard]] std::optional<RefinementReport> last_refinement() const noexcept override {
+    return last_refinement_;
+  }
 
   // Opaque pipeline state — forward-declared here, defined in
   // vulkan_pipelines.hpp. Declared before private: so build_pipelines() (a free
@@ -98,6 +113,7 @@ private:
   bool last_full_gpu_{false};
   int last_iters_{0};
   double last_residual_{0.0};
+  std::optional<RefinementReport> last_refinement_;
 
   std::unique_ptr<Pipelines> pipelines_;
 };

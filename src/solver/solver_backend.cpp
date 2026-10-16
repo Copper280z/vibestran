@@ -72,6 +72,28 @@ report_factor_ratio_result(const FactorRatioCheckPolicy &policy,
 }
 #endif
 
+/// Refines a direct solution with its own factorization (one triangular
+/// solve per correction) and compensated residuals.
+template <class Factor>
+std::vector<double> refine_direct(const SparseMatrixBuilder::CsrData &K,
+                                  const std::vector<double> &F, const Eigen::VectorXd &u0,
+                                  const Factor &factor,
+                                  std::optional<RefinementReport> &report) {
+  const auto n = static_cast<Eigen::Index>(u0.size());
+  std::vector<double> u(u0.data(), u0.data() + n);
+  const auto correction = [&](const std::vector<double> &r) {
+    const Eigen::Map<const Eigen::VectorXd> rhs(r.data(), n);
+    const Eigen::VectorXd d = factor.solve(rhs);
+    return std::vector<double>(d.data(), d.data() + n);
+  };
+  report = refine_solution(K, F, u, correction);
+  spdlog::debug("[cpu-direct] iterative refinement: {} correction(s), estimated relative "
+                "error {:.2e} -> {:.2e}, backward error {:.2e}{}",
+                report->corrections, report->initial_error, report->estimated_error,
+                report->backward_error, report->converged ? "" : " (not converged)");
+  return u;
+}
+
 } // namespace
 
 #if defined(HAVE_ACCELERATE)
@@ -187,7 +209,7 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
     if (ldlt.info() != Eigen::Success)
       throw SolverError("Back-substitution failed (Accelerate LDLT fallback)");
     spdlog::debug(
-        "[cpu-direct] backend={}, order={}, storage={}, n={}, nnz(input)={}, nnz(factor)={}, "
+        "[cpu-direct] backend={}, order={}, storage={}, n={}, nnz(input)={}, nnz(lower)={}, "
         "convert CSR->Eigen: {:.3f} ms, build lower: {:.3f} ms, failed LLT attempt: {:.3f} ms, "
         "fallback factorization: {:.3f} ms, fallback solve: {:.3f} ms",
         backend_label, order_cfg.label, lower_only ? "lower" : "full", n, input_nnz, K.nonZeros(),
@@ -196,7 +218,7 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
         Ms(t_compute_end - t_compute_begin).count(),
         Ms(t_fallback_compute_end - t_fallback_compute_begin).count(),
         Ms(t_fallback_solve_end - t_fallback_solve_begin).count());
-    return std::vector<double>(u.data(), u.data() + n);
+    return refine_direct(K_csr, F, u, ldlt, last_refinement_);
   }
   if (factor_ratio_policy != nullptr) {
     spdlog::debug(
@@ -210,7 +232,7 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
   if (solver.info() != Eigen::Success)
     throw SolverError("Back-substitution failed (Accelerate)");
   spdlog::debug(
-      "[cpu-direct] backend={}, order={}, storage={}, n={}, nnz(input)={}, nnz(factor)={}, "
+      "[cpu-direct] backend={}, order={}, storage={}, n={}, nnz(input)={}, nnz(lower)={}, "
       "convert CSR->Eigen: {:.3f} ms, build lower: {:.3f} ms, factorization: {:.3f} ms, solve: {:.3f} ms",
       backend_label, order_cfg.label, lower_only ? "lower" : "full", n, input_nnz, K.nonZeros(),
       Ms(t_convert_end - t_convert_begin).count(),
@@ -248,7 +270,7 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
     if (ldlt.info() != Eigen::Success)
       throw SolverError("Back-substitution failed (LDLT fallback)");
     spdlog::debug(
-        "[cpu-direct] backend={}, storage={}, n={}, nnz(input)={}, nnz(factor)={}, "
+        "[cpu-direct] backend={}, storage={}, n={}, nnz(input)={}, nnz(lower)={}, "
         "convert CSR->Eigen: {:.3f} ms, build lower: {:.3f} ms, failed CHOLMOD attempt: {:.3f} ms, "
         "fallback factorization: {:.3f} ms, fallback solve: {:.3f} ms",
         backend_label, lower_only ? "lower" : "full", n, input_nnz, K.nonZeros(),
@@ -257,7 +279,7 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
         Ms(t_compute_end - t_compute_begin).count(),
         Ms(t_fallback_compute_end - t_fallback_compute_begin).count(),
         Ms(t_fallback_solve_end - t_fallback_solve_begin).count());
-    return std::vector<double>(u.data(), u.data() + n);
+    return refine_direct(K_csr, F, u, ldlt, last_refinement_);
   }
   if (factor_ratio_policy != nullptr) {
     spdlog::debug(
@@ -271,7 +293,7 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
   if (solver.info() != Eigen::Success)
     throw SolverError("Back-substitution failed (CHOLMOD)");
   spdlog::debug(
-      "[cpu-direct] backend={}, storage={}, n={}, nnz(input)={}, nnz(factor)={}, "
+      "[cpu-direct] backend={}, storage={}, n={}, nnz(input)={}, nnz(lower)={}, "
       "convert CSR->Eigen: {:.3f} ms, build lower: {:.3f} ms, factorization: {:.3f} ms, solve: {:.3f} ms",
       backend_label, lower_only ? "lower" : "full", n, input_nnz, K.nonZeros(),
       Ms(t_convert_end - t_convert_begin).count(),
@@ -307,7 +329,7 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
     if (ldlt.info() != Eigen::Success)
       throw SolverError("Back-substitution failed");
     spdlog::debug(
-        "[cpu-direct] backend={}, storage={}, n={}, nnz(input)={}, nnz(factor)={}, "
+        "[cpu-direct] backend={}, storage={}, n={}, nnz(input)={}, nnz(lower)={}, "
         "convert CSR->Eigen: {:.3f} ms, build lower: {:.3f} ms, failed LLT attempt: {:.3f} ms, "
         "fallback factorization: {:.3f} ms, fallback solve: {:.3f} ms",
         backend_label, lower_only ? "lower" : "full", n, input_nnz, K.nonZeros(),
@@ -316,7 +338,7 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
         Ms(t_compute_end - t_compute_begin).count(),
         Ms(t_fallback_compute_end - t_fallback_compute_begin).count(),
         Ms(t_fallback_solve_end - t_fallback_solve_begin).count());
-    return std::vector<double>(u.data(), u.data() + n);
+    return refine_direct(K_csr, F, u, ldlt, last_refinement_);
   }
   if (factor_ratio_policy != nullptr) {
     report_factor_ratio_result(
@@ -332,7 +354,7 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
   if (solver.info() != Eigen::Success)
     throw SolverError("Back-substitution failed");
   spdlog::debug(
-      "[cpu-direct] backend={}, storage={}, n={}, nnz(input)={}, nnz(factor)={}, "
+      "[cpu-direct] backend={}, storage={}, n={}, nnz(input)={}, nnz(lower)={}, "
       "convert CSR->Eigen: {:.3f} ms, build lower: {:.3f} ms, factorization: {:.3f} ms, solve: {:.3f} ms",
       backend_label, lower_only ? "lower" : "full", n, input_nnz, K.nonZeros(),
       Ms(t_convert_end - t_convert_begin).count(),
@@ -341,7 +363,7 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
       Ms(t_solve_end - t_solve_begin).count());
 #endif
 
-  return std::vector<double>(u.data(), u.data() + n);
+  return refine_direct(K_csr, F, u, solver, last_refinement_);
 }
 
 
@@ -374,20 +396,21 @@ EigenPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K_csr,
   K.makeCompressed();
   const auto t_convert_end = Clock::now();
 
-  Eigen::Map<const Eigen::VectorXd> F_eigen(F.data(), n);
-
   using Precond = Eigen::IncompleteCholesky<double, Eigen::Lower>;
 
-  auto configure = [&](auto &cg) {
+  // Restarted PCG with iterative refinement: the first solve to the
+  // requested tolerance, then corrections from compensated residuals, solved
+  // to a loose inner tolerance (they only need to be accurate relative to
+  // themselves).  Converged means the corrections fell below the tolerance,
+  // i.e. the estimated relative error of u is below it; the relative
+  // residual ||F - K u|| / ||F|| is not used, because for an ill-conditioned
+  // K it cannot reach a tight tolerance in double precision even for the
+  // exact solution.
+  constexpr double kCorrectionTolerance = 1e-3;
+  constexpr int kMaxCorrections = 20;
+  auto run = [&](auto &cg, const char *storage) {
     if (max_iters_ > 0)
       cg.setMaxIterations(max_iters_);
-    cg.setTolerance(tolerance_);
-  };
-
-  if (lower_only) {
-    Eigen::ConjugateGradient<ESM, Eigen::Lower, Precond> cg;
-    configure(cg);
-
     const auto t_compute_begin = Clock::now();
     cg.compute(K);
     const auto t_compute_end = Clock::now();
@@ -396,69 +419,52 @@ EigenPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K_csr,
           "PCG preconditioner (IncompleteCholesky) setup failed — "
           "matrix may not be positive definite. Check boundary conditions.");
 
+    int total_iters = 0;
+    const auto inner = [&](const std::vector<double> &rhs, double tol) {
+      cg.setTolerance(tol);
+      const Eigen::Map<const Eigen::VectorXd> b(rhs.data(), n);
+      const Eigen::VectorXd x = cg.solve(b);
+      total_iters += static_cast<int>(cg.iterations());
+      return std::vector<double>(x.data(), x.data() + n);
+    };
     const auto t_solve_begin = Clock::now();
-    Eigen::VectorXd u = cg.solve(F_eigen);
+    std::vector<double> u = inner(F, tolerance_);
+    RefinementOptions opts;
+    opts.tolerance = tolerance_;
+    opts.max_corrections = kMaxCorrections;
+    const RefinementReport rep = refine_solution(
+        K_csr, F, u, [&](const std::vector<double> &r) { return inner(r, kCorrectionTolerance); },
+        opts);
     const auto t_solve_end = Clock::now();
 
-    last_iters_ = static_cast<int>(cg.iterations());
-    last_error_ = cg.error();
-
+    last_iters_ = total_iters;
+    last_error_ = rep.estimated_error;
+    last_refinement_ = rep;
     spdlog::debug(
-        "[cpu-pcg] storage=lower, n={}, nnz={}, Eigen threads={}, convert CSR->Eigen: {:.3f} ms, "
-        "preconditioner: {:.3f} ms, iterative solve: {:.3f} ms, iterations: {}, estimated error: {:.3e}",
-        n, K.nonZeros(), Eigen::nbThreads(),
+        "[cpu-pcg] storage={}, n={}, nnz={}, Eigen threads={}, convert CSR->Eigen: {:.3f} ms, "
+        "preconditioner: {:.3f} ms, iterative solve: {:.3f} ms, iterations: {}, corrections: {}, "
+        "estimated relative error {:.2e} -> {:.2e}, backward error {:.2e}",
+        storage, n, K.nonZeros(), Eigen::nbThreads(),
         Ms(t_convert_end - t_convert_begin).count(),
         Ms(t_compute_end - t_compute_begin).count(),
-        Ms(t_solve_end - t_solve_begin).count(),
-        last_iters_, last_error_);
+        Ms(t_solve_end - t_solve_begin).count(), total_iters, rep.corrections,
+        rep.initial_error, rep.estimated_error, rep.backward_error);
+    if (!rep.converged)
+      throw SolverError(std::format(
+          "PCG did not converge: after {} iterations and {} refinement correction(s) the "
+          "estimated relative error of the solution is {:.3e} (tolerance {:.3e}). The "
+          "stiffness matrix is too ill-conditioned for incomplete-Cholesky PCG, or singular "
+          "(check boundary conditions); use the direct solver (--backend=cpu).",
+          total_iters, rep.corrections, rep.estimated_error, tolerance_));
+    return u;
+  };
 
-    if (cg.info() == Eigen::NoConvergence)
-      throw SolverError(
-          std::format("PCG did not converge after {} iterations "
-                      "(estimated error {:.3e} > tolerance {:.3e}). "
-                      "Consider increasing max iterations or checking "
-                      "boundary conditions.",
-                      last_iters_, last_error_, tolerance_));
-
-    return std::vector<double>(u.data(), u.data() + n);
+  if (lower_only) {
+    Eigen::ConjugateGradient<ESM, Eigen::Lower, Precond> cg;
+    return run(cg, "lower");
   }
-
   Eigen::ConjugateGradient<ESM, Eigen::Lower | Eigen::Upper, Precond> cg;
-  configure(cg);
-
-  const auto t_compute_begin = Clock::now();
-  cg.compute(K);
-  const auto t_compute_end = Clock::now();
-  if (cg.info() != Eigen::Success)
-    throw SolverError(
-        "PCG preconditioner (IncompleteCholesky) setup failed — "
-        "matrix may not be positive definite. Check boundary conditions.");
-
-  const auto t_solve_begin = Clock::now();
-  Eigen::VectorXd u = cg.solve(F_eigen);
-  const auto t_solve_end = Clock::now();
-
-  last_iters_ = static_cast<int>(cg.iterations());
-  last_error_ = cg.error();
-
-  spdlog::debug(
-      "[cpu-pcg] storage=full, n={}, nnz={}, Eigen threads={}, convert CSR->Eigen: {:.3f} ms, "
-      "preconditioner: {:.3f} ms, iterative solve: {:.3f} ms, iterations: {}, estimated error: {:.3e}",
-      n, K.nonZeros(), Eigen::nbThreads(),
-      Ms(t_convert_end - t_convert_begin).count(),
-      Ms(t_compute_end - t_compute_begin).count(),
-      Ms(t_solve_end - t_solve_begin).count(),
-      last_iters_, last_error_);
-
-  if (cg.info() == Eigen::NoConvergence)
-    throw SolverError(
-        std::format("PCG did not converge after {} iterations "
-                    "(estimated error {:.3e} > tolerance {:.3e}). "
-                    "Consider increasing max iterations or checking "
-                    "boundary conditions.",
-                    last_iters_, last_error_, tolerance_));
-
-  return std::vector<double>(u.data(), u.data() + n);
+  return run(cg, "full");
 }
 
 } // namespace vibestran

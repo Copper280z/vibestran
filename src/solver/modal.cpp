@@ -6,6 +6,7 @@
 #include "core/factor_ratio_check.hpp"
 #include "core/logger.hpp"
 #include "core/mpc_handler.hpp"
+#include "io/system_dump.hpp"
 #include "elements/element_factory.hpp"
 #include "elements/rbe_constraints.hpp"
 #include "assembly_parallel.hpp"
@@ -99,6 +100,13 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
 
     auto K_csr = K_builder.build_csr();
     auto M_csr = M_builder.build_csr();
+    if (!dump_prefix_.empty()) {
+        write_matrix_market(system_dump_path(dump_prefix_, sc.id, "K.mtx"), K_csr);
+        write_matrix_market(system_dump_path(dump_prefix_, sc.id, "M.mtx"), M_csr);
+        write_dof_map(system_dump_path(dump_prefix_, sc.id, "dofs.txt"), model, mpc_handler);
+        spdlog::info("[modal sc {}] wrote K, M and the DOF map to {}_sc{}_*", sc.id,
+                     dump_prefix_, sc.id);
+    }
 
     Eigen::SparseMatrix<double> K_eigen = to_eigen(K_csr);
     Eigen::SparseMatrix<double> M_eigen = to_eigen(M_csr);

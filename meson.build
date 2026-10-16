@@ -391,6 +391,7 @@ solver_sources = files(
   'src/io/bdf_parser.cpp',
   'src/io/inp_parser.cpp',
   'src/io/results.cpp',
+  'src/io/system_dump.cpp',
   'src/io/op2_writer.cpp',
   'src/io/csv_writer.cpp',
   # Solver
@@ -434,11 +435,31 @@ if have_accelerate
   solver_lib_deps += accelerate_dep
 endif
 
+# Compensated residuals (error-free transformations) need IEEE arithmetic
+# without reassociation or FMA contraction, so this file is built without
+# the release build's fast-math.  RefinementTest.CompensatedResidualIsExact
+# checks it.
+precise_args = []
+if cxx.get_id() == 'gcc' or cxx.get_id() == 'clang'
+  precise_args = ['-fno-fast-math', '-ffp-contract=off']
+elif cxx.get_id() == 'msvc'
+  precise_args = ['/fp:precise']
+endif
+precise_lib = static_library(
+  'vibestran_precise',
+  files('src/solver/iterative_refinement.cpp'),
+  include_directories : [inc],
+  dependencies        : [eigen_dep, spdlog_dep],
+  cpp_args            : precise_args,
+  install             : false,
+)
+
 solver_lib = static_library(
   'vibestran',
   [solver_sources, spirv_hdrs],
   include_directories : [inc, src_inc],
   dependencies        : solver_lib_deps,
+  link_whole          : precise_lib,
   cpp_args            : vulkan_compile_args + cuda_compile_args + cholmod_args + tbb_args + accelerate_args,
   install             : false,
 )
@@ -478,6 +499,8 @@ unit_test_sources = files(
   'tests/unit/test_shell_quad4.cpp',
   'tests/unit/test_shell_tria3.cpp',
   'tests/unit/test_solid_hexa8.cpp',
+  'tests/unit/test_iterative_refinement.cpp',
+  'tests/unit/test_system_dump.cpp',
   'tests/unit/test_types.cpp',
   'tests/unit/test_sparse_matrix.cpp',
   'tests/unit/test_pcg_solver.cpp',

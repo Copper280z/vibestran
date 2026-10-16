@@ -115,7 +115,7 @@ static void print_usage() {
       "                      [--cuda-precision=<fp32|fp64>] [--csv]\n"
       "                      [--log-file=<path>] "
       "[--checkmode=lenient]\n"
-      "                      [--no-quality-checks]\n"
+      "                      [--no-quality-checks] [--dump-system=<prefix>]\n"
       "                      <input.bdf|input.inp> [output.f06]\n"
       "  --backend=cpu              Eigen sparse Cholesky CPU solver "
       "(default)\n"
@@ -138,6 +138,9 @@ static void print_usage() {
       "  --checkmode=lenient        Override the deck and run quality "
       "checks in LENIENT mode\n"
       "  --no-quality-checks        Skip all pre-flight quality checks\n"
+      "  --dump-system=<prefix>     Write each subcase's reduced K (and M,\n"
+      "                             F, u) in Matrix Market format and its\n"
+      "                             DOF map: <prefix>_sc<N>_K.mtx etc.\n"
       "  OMP_NUM_THREADS=N          Limit CPU solver threads, e.g.:\n"
       "                             OMP_NUM_THREADS=8 vibestran "
       "input.bdf\n");
@@ -151,6 +154,7 @@ int main(int argc, const char *argv[]) {
   bool force_checkmode_lenient = false;
   bool skip_quality_checks = false;
   std::filesystem::path log_file_path;
+  std::string dump_prefix;
   int positional = 0;
   std::filesystem::path bdf_path;
   std::filesystem::path f06_path;
@@ -184,6 +188,9 @@ int main(int argc, const char *argv[]) {
         print_usage();
         return 1;
       }
+    } else if (arg.starts_with("--dump-system=")) {
+      dump_prefix =
+          std::string(arg.substr(std::string_view("--dump-system=").size()));
     } else if (arg.starts_with("--log-file=")) {
       log_file_path =
           std::string(arg.substr(std::string_view("--log-file=").size()));
@@ -425,6 +432,7 @@ int main(int argc, const char *argv[]) {
         spdlog::info("Solving structural chain with: Apple Accelerate (CPU)");
         vibestran::LinearStaticSolver lsolver(
             std::make_unique<vibestran::EigenSolverBackend>());
+        lsolver.set_system_dump(dump_prefix);
         vibestran::SolverResults stat_results = lsolver.solve(stat_model);
 
         auto t2 = std::chrono::steady_clock::now();
@@ -481,6 +489,7 @@ int main(int argc, const char *argv[]) {
 
       spdlog::info("Solving with: {}", eig_backend->name());
       vibestran::ModalSolver modal_solver(std::move(eig_backend));
+      modal_solver.set_system_dump(dump_prefix);
       vibestran::ModalSolverResults modal_results = modal_solver.solve(model);
 
       auto t1 = std::chrono::steady_clock::now();
@@ -497,6 +506,7 @@ int main(int argc, const char *argv[]) {
       // ── SOL 101 Linear Static ────────────────────────────────────────────
       spdlog::info("Solving with: {}", backend->name());
       vibestran::LinearStaticSolver solver(std::move(backend));
+      solver.set_system_dump(dump_prefix);
       vibestran::SolverResults results = solver.solve(model);
 
       auto t1 = std::chrono::steady_clock::now();

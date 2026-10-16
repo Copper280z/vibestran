@@ -32,6 +32,7 @@
 
 #include "core/exceptions.hpp"
 #include "core/logger.hpp"
+#include "solver/iterative_refinement.hpp"
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -45,7 +46,9 @@
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
+#include <format>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -85,37 +88,6 @@ static bool cuda_pcg_profile_enabled() {
         return env != nullptr && env[0] != '\0' && env[0] != '0';
     }();
     return enabled;
-}
-
-static double compute_true_relative_residual(
-    const vibestran::SparseMatrixBuilder::CsrData& K,
-    std::span<const double> x,
-    std::span<const double> b,
-    std::vector<double>* residual_out = nullptr)
-{
-    const std::vector<double> Ax = K.multiply(x);
-    double r_norm_sq = 0.0;
-    double b_norm_sq = 0.0;
-
-    if (residual_out)
-        residual_out->resize(b.size());
-
-    for (std::size_t i = 0; i < b.size(); ++i) {
-        const double ri = b[i] - Ax[i];
-        r_norm_sq += ri * ri;
-        b_norm_sq += b[i] * b[i];
-        if (residual_out)
-            (*residual_out)[i] = ri;
-    }
-
-    return (b_norm_sq > 1e-300)
-        ? std::sqrt(r_norm_sq / b_norm_sq)
-        : std::sqrt(r_norm_sq);
-}
-
-static void add_in_place(std::vector<double>& y, std::span<const double> x) {
-    for (std::size_t i = 0; i < y.size(); ++i)
-        y[i] += x[i];
 }
 
 class CublasPointerModeGuard {
@@ -663,6 +635,39 @@ __global__ static void subtract_diag_product_kernel(
     if (i < n) y[i] -= diag[i] * x[i];
 }
 
+/// vals[p] *= 1 + shift for the diagonal entries (IC0 of K + shift diag(K)).
+template<typename T>
+__global__ static void scale_diagonal_kernel(
+    const int* __restrict__ row_ptr,
+    const int* __restrict__ col_ind,
+    T* __restrict__ vals,
+    T factor,
+    int n)
+{
+    int i = static_cast<int>(blockIdx.x) * blockDim.x +
+            static_cast<int>(threadIdx.x);
+    if (i >= n) return;
+    for (int p = row_ptr[i]; p < row_ptr[i + 1]; ++p)
+        if (col_ind[p] == i) vals[p] *= factor;
+}
+
+/// *bad = 1 when a diagonal entry of the factor is not positive and finite
+/// (csric02 reports only exact zero pivots; a negative one gives NaN).
+template<typename T>
+__global__ static void check_factor_diagonal_kernel(
+    const int* __restrict__ row_ptr,
+    const int* __restrict__ col_ind,
+    const T* __restrict__ vals,
+    int* __restrict__ bad,
+    int n)
+{
+    int i = static_cast<int>(blockIdx.x) * blockDim.x +
+            static_cast<int>(threadIdx.x);
+    if (i >= n) return;
+    for (int p = row_ptr[i]; p < row_ptr[i + 1]; ++p)
+        if (col_ind[p] == i && !(vals[p] > T(0) && isfinite(vals[p]))) *bad = 1;
+}
+
 struct IterationHostState {
     double rel = 1.0;
     double pAp = 0.0;
@@ -1037,7 +1042,8 @@ struct PreparedPcgSystem {
 };
 
 // ── IC0 factorization and SpSV setup ─────────────────────────────────────────
-// Returns false on zero pivots so the caller can retry with ILU0.
+// Factorizes K + shift diag(K).  Returns false on a zero or non-positive
+// pivot so the caller can retry with a larger shift (or ILU0).
 template<typename T>
 static bool setup_ic0(
     cusparseHandle_t cusparse,
@@ -1045,7 +1051,8 @@ static bool setup_ic0(
     const int* d_row_ptr, const int* d_col_ind, const T* d_values,
     T* d_r, T* d_z,
     TriangPrecond<T>& tp,
-    PrecondSetupProfile* profile = nullptr)
+    PrecondSetupProfile* profile = nullptr,
+    double shift = 0.0)
 {
     using Tr = ScalarTraits<T>;
     constexpr double kMiB = 1024.0 * 1024.0;
@@ -1066,6 +1073,9 @@ static bool setup_ic0(
         cudaMemcpy(tp.d_M_vals.ptr, d_values,
                    static_cast<std::size_t>(nnz) * sizeof(T),
                    cudaMemcpyDeviceToDevice);
+        if (shift > 0.0)
+            scale_diagonal_kernel<T><<<(n + kBlock - 1) / kBlock, kBlock>>>(
+                d_row_ptr, d_col_ind, tp.d_M_vals.ptr, static_cast<T>(1.0 + shift), n);
         if (profile_enabled)
             profile->value_copy.add(host_elapsed_ms(t0, HostClock::now()));
     }
@@ -1162,10 +1172,24 @@ static bool setup_ic0(
     cusparseDestroyMatDescr(descr);
 
     if (numerical_zero >= 0 || cs != CUSPARSE_STATUS_SUCCESS) {
-        vibestran::log_warn("[cuda-pcg] IC0: numerical zero at row " +
-                           std::to_string(numerical_zero) + " -- retrying with ILU0");
+        vibestran::log_debug("[cuda-pcg] IC0 (shift " + std::to_string(shift) +
+                             "): numerical zero at row " + std::to_string(numerical_zero));
         finalize_profile();
         return false;
+    }
+    {
+        PCGDeviceBuffer<int> d_bad(1);
+        d_bad.zero(1);
+        check_factor_diagonal_kernel<T><<<(n + kBlock - 1) / kBlock, kBlock>>>(
+            d_row_ptr, d_col_ind, tp.d_M_vals.ptr, d_bad.ptr, n);
+        int bad = 0;
+        d_bad.download(&bad, 1);
+        if (bad != 0) {
+            vibestran::log_debug("[cuda-pcg] IC0 (shift " + std::to_string(shift) +
+                                 "): non-positive pivot");
+            finalize_profile();
+            return false;
+        }
     }
 
     // ── SpSV setup ────────────────────────────────────────────────────────────
@@ -1564,12 +1588,30 @@ static PreparedPcgSystem<T> prepare_pcg_system(
         ic0_profile.enabled = profile.enabled;
         ic0_profile.name = "IC0";
         ic0_profile.scalar_name = Tr::name();
-        if (setup_ic0<T>(cusparse, n, nnz,
-                         prepared.d_row_ptr.ptr, prepared.d_col_ind.ptr, prepared.d_values.ptr,
-                         prepared.d_r.ptr, prepared.d_z.ptr, *try_tp, &ic0_profile)) {
+        // IC0 of a shell or thin-solid stiffness often meets a non-positive
+        // pivot; like Eigen's IncompleteCholesky, retry with a growing
+        // diagonal shift (Manteuffel), which keeps the preconditioner SPD.
+        // ILU0 is a last resort: it is not symmetric, which CG assumes.
+        bool ic0_ok = false;
+        for (double shift : {0.0, 1e-3, 4e-3, 1.6e-2, 6.4e-2, 0.256, 1.024}) {
+            try_tp = std::make_unique<TriangPrecond<T>>();
+            if (setup_ic0<T>(cusparse, n, nnz,
+                             prepared.d_row_ptr.ptr, prepared.d_col_ind.ptr,
+                             prepared.d_values.ptr, prepared.d_r.ptr, prepared.d_z.ptr,
+                             *try_tp, &ic0_profile, shift)) {
+                if (shift > 0.0)
+                    vibestran::log_debug("[cuda-pcg] IC0 with diagonal shift " +
+                                         std::to_string(shift));
+                ic0_ok = true;
+                break;
+            }
+        }
+        if (ic0_ok) {
             prepared.precond_kind = PrecondKind::IC0;
             prepared.tp = std::move(try_tp);
         } else {
+            vibestran::log_warn("[cuda-pcg] IC0 failed even with a diagonal shift of "
+                                "1.024 -- retrying with ILU0");
             auto try_ilu = std::make_unique<TriangPrecond<T>>();
             bool ilu_ok = false;
             if (lower_only) {
@@ -1696,7 +1738,8 @@ static std::vector<double> run_pcg_prepared(
     int& out_iters,
     double& out_rel_res,
     PreparedPcgSystem<T>& prepared,
-    std::string_view solve_label = "solve")
+    std::string_view solve_label = "solve",
+    bool throw_on_no_convergence = true)
 {
     using Tr = ScalarTraits<T>;
     using DotT = typename PreparedPcgSystem<T>::DotT;
@@ -1961,20 +2004,26 @@ static std::vector<double> run_pcg_prepared(
     out_iters = iter;
     out_rel_res = rel;
 
-    if (iter >= max_iters)
+    // Breakdown and the iteration limit both leave iter == max_iters.
+    if (iter >= max_iters && !throw_on_no_convergence)
+        vibestran::log_debug(
+            std::string("[cuda-pcg] ") + std::string(solve_label) +
+            ": stopped without converging after " + std::to_string(out_iters) +
+            " iterations (relative residual " + std::to_string(out_rel_res) + ")");
+    else if (iter >= max_iters)
         throw SolverError(
             "CUDA PCG: did not converge after " + std::to_string(max_iters) +
             " iterations (relative residual " +
             std::to_string(out_rel_res) + " > tolerance " +
             std::to_string(tolerance) +
             "). Consider increasing max iterations or using a direct solver.");
-
-    vibestran::log_info(
-        std::string("[cuda-pcg] ") + prepared.precond_name() +
-        " (" + Tr::name() + ") converged in " + std::to_string(out_iters) +
-        " iterations, rel_res=" + std::to_string(out_rel_res) +
-        ", n=" + std::to_string(n) + ", nnz=" + std::to_string(nnz) +
-        ", device='" + device_name + "'");
+    else
+        vibestran::log_debug(
+            std::string("[cuda-pcg] ") + prepared.precond_name() +
+            " (" + Tr::name() + ") converged in " + std::to_string(out_iters) +
+            " iterations, rel_res=" + std::to_string(out_rel_res) +
+            ", n=" + std::to_string(n) + ", nnz=" + std::to_string(nnz) +
+            ", device='" + device_name + "'");
 
     std::vector<double> u(static_cast<std::size_t>(n));
     if constexpr (std::is_same_v<T, double>) {
@@ -2035,6 +2084,7 @@ struct CudaPCGContext {
 
     int    last_iters   = 0;
     double last_rel_res = 0.0;
+    std::optional<vibestran::RefinementReport> last_refinement;
 };
 
 static std::unique_ptr<CudaPCGContext>
@@ -2113,6 +2163,31 @@ static void validate_pcg_inputs(
                           std::to_string(n));
 }
 
+// Restarted PCG with iterative refinement (iterative_refinement.hpp), as the
+// CPU PCG backend: the first solve to the requested tolerance, corrections
+// from compensated residuals to a loose inner tolerance; converged when the
+// estimated relative error of the solution is below the tolerance.
+static constexpr double kCudaPcgCorrectionTolerance = 1e-3;
+static constexpr int kCudaPcgMaxCorrections = 20;
+
+static void require_refined(const CudaPCGContext& ctx, const char* label) {
+    const vibestran::RefinementReport& rep = *ctx.last_refinement;
+    vibestran::log_debug(std::format(
+        "[{}] {} refinement correction(s), estimated relative error {:.2e} -> {:.2e}, "
+        "backward error {:.2e}, inner iterations {}",
+        label, rep.corrections, rep.initial_error, rep.estimated_error,
+        rep.backward_error, ctx.last_iters));
+    if (!rep.converged)
+        throw SolverError(std::format(
+            "{}: did not converge: after {} iterations and {} refinement correction(s) the "
+            "estimated relative error of the solution is {:.2e} (tolerance {:.1e}). The "
+            "stiffness matrix is too ill-conditioned for this preconditioner{}, or singular "
+            "(check boundary conditions); use a direct solver (--backend=cpu or "
+            "--backend=cuda).",
+            label, ctx.last_iters, rep.corrections, rep.estimated_error, ctx.tolerance,
+            std::string_view(label) == "cuda-pcg-mixed" ? " in fp32" : ""));
+}
+
 static std::vector<double> solve_cuda_pcg_stable(
     CudaPCGContext& ctx,
     const SparseMatrixBuilder::CsrData& K,
@@ -2123,12 +2198,32 @@ static std::vector<double> solve_cuda_pcg_stable(
     const int nnz = K.nnz;
     const bool lower_only = K.stores_lower_triangle_only();
     const std::vector<double> diag_d = build_jacobi_diagonal(K);
-    return solve_pcg<double>(
-        ctx.cublas, ctx.cusparse, ctx.device_name,
-        n, nnz, K.values, K.row_ptr, K.col_ind, F, diag_d,
-        lower_only,
-        ctx.tolerance, ctx.max_iters,
-        ctx.last_iters, ctx.last_rel_res);
+    auto prepared = prepare_pcg_system<double>(
+        ctx.cusparse, n, nnz, K.values, K.row_ptr, K.col_ind, diag_d, lower_only);
+    int total_iters = 0;
+    int step = 0;
+    auto inner = [&](const std::vector<double>& rhs, double tol) {
+        int iters = 0;
+        double rel = 0.0;
+        auto x = run_pcg_prepared<double>(
+            ctx.cublas, ctx.cusparse, ctx.device_name,
+            std::span<const double>(rhs), tol, ctx.max_iters, iters, rel, prepared,
+            "solve_" + std::to_string(step++), /*throw_on_no_convergence=*/false);
+        total_iters += iters;
+        ctx.last_rel_res = rel;
+        return x;
+    };
+    std::vector<double> u = inner(F, ctx.tolerance);
+    vibestran::RefinementOptions opts;
+    opts.tolerance = ctx.tolerance;
+    opts.max_corrections = kCudaPcgMaxCorrections;
+    ctx.last_refinement = vibestran::refine_solution(
+        K, F, u,
+        [&](const std::vector<double>& r) { return inner(r, kCudaPcgCorrectionTolerance); },
+        opts);
+    ctx.last_iters = total_iters;
+    require_refined(ctx, "cuda-pcg");
+    return u;
 }
 
 static std::vector<double> solve_cuda_pcg_mixed(
@@ -2163,7 +2258,6 @@ static std::vector<double> solve_cuda_pcg_mixed(
     if (profile.enabled)
         profile.downcast_inputs.add(host_elapsed_ms(downcast_start, HostClock::now()));
 
-    constexpr int kMaxRefinementCorrections = 2;
     double inner_tolerance = ctx.tolerance * 100.0;
     if (inner_tolerance < 1e-4)
         inner_tolerance = 1e-4;
@@ -2176,88 +2270,51 @@ static std::vector<double> solve_cuda_pcg_mixed(
     if (profile.enabled)
         profile.prepare_system.add(host_elapsed_ms(prepare_start, HostClock::now()));
 
-    std::vector<double> solution(static_cast<std::size_t>(n), 0.0);
-    std::vector<double> correction_rhs = F;
     std::vector<float> rhs_f(static_cast<std::size_t>(n));
-    std::vector<double> residual;
-
     int total_inner_iters = 0;
-    double true_rel_res = 0.0;
-    bool have_prev_true_rel_res = false;
-    double prev_true_rel_res = 0.0;
-
-    for (int refinement_step = 0;
-         refinement_step <= kMaxRefinementCorrections;
-         ++refinement_step) {
+    int step = 0;
+    // fp32 inner PCG; the corrections are refined in double with compensated
+    // residuals, so the result is accurate to the tolerance when cond(K)
+    // fp32-eps is well below 1, and an error otherwise.
+    auto inner = [&](const std::vector<double>& rhs, double tol) {
         const HostTimePoint rhs_cast_start = HostClock::now();
-        for (int i = 0; i < n; ++i) {
+        for (int i = 0; i < n; ++i)
             rhs_f[static_cast<std::size_t>(i)] =
-                static_cast<float>(correction_rhs[static_cast<std::size_t>(i)]);
-        }
+                static_cast<float>(rhs[static_cast<std::size_t>(i)]);
         if (profile.enabled)
             profile.rhs_cast.add(host_elapsed_ms(rhs_cast_start, HostClock::now()));
-
         int inner_iters = 0;
         double inner_rel_res = 0.0;
         const HostTimePoint inner_start = HostClock::now();
-        const std::string solve_label =
-            "refinement_step_" + std::to_string(refinement_step);
         auto delta = run_pcg_prepared<float>(
             ctx.cublas, ctx.cusparse, ctx.device_name,
-            rhs_f,
-            inner_tolerance, ctx.max_iters,
-            inner_iters, inner_rel_res, prepared, solve_label);
+            std::span<const float>(rhs_f), tol, ctx.max_iters,
+            inner_iters, inner_rel_res, prepared,
+            "refinement_step_" + std::to_string(step++),
+            /*throw_on_no_convergence=*/false);
         if (profile.enabled)
             profile.inner_solve_wall.add(host_elapsed_ms(inner_start, HostClock::now()));
         total_inner_iters += inner_iters;
-
-        const HostTimePoint add_start = HostClock::now();
-        add_in_place(solution, delta);
-        if (profile.enabled)
-            profile.accumulate_solution.add(host_elapsed_ms(add_start, HostClock::now()));
-
-        const HostTimePoint true_res_start = HostClock::now();
-        true_rel_res = compute_true_relative_residual(K, solution, F, &residual);
-        if (profile.enabled)
-            profile.true_residual.add(host_elapsed_ms(true_res_start, HostClock::now()));
-        vibestran::log_debug(
-            "[cuda-pcg-mixed] refinement step " + std::to_string(refinement_step) +
-            ": inner_iters=" + std::to_string(inner_iters) +
-            ", inner_rel_res=" + std::to_string(inner_rel_res) +
-            ", true_rel_res=" + std::to_string(true_rel_res));
-
-        if (true_rel_res <= ctx.tolerance)
-            break;
-        if (refinement_step == kMaxRefinementCorrections)
-            break;
-        if (have_prev_true_rel_res &&
-            true_rel_res >= prev_true_rel_res * 0.9) {
-            vibestran::log_warn(
-                "[cuda-pcg-mixed] iterative refinement stalled at true residual " +
-                std::to_string(true_rel_res) +
-                " after " + std::to_string(refinement_step + 1) +
-                " solve(s)");
-            break;
-        }
-
-        prev_true_rel_res = true_rel_res;
-        have_prev_true_rel_res = true;
-        correction_rhs = residual;
-    }
-
+        return delta;
+    };
+    std::vector<double> solution = inner(F, inner_tolerance);
+    vibestran::RefinementOptions opts;
+    opts.tolerance = ctx.tolerance;
+    opts.max_corrections = kCudaPcgMaxCorrections;
+    const HostTimePoint refine_start = HostClock::now();
+    ctx.last_refinement = vibestran::refine_solution(
+        K, F, solution,
+        [&](const std::vector<double>& r) { return inner(r, inner_tolerance); }, opts);
+    if (profile.enabled)
+        profile.true_residual.add(host_elapsed_ms(refine_start, HostClock::now()));
     ctx.last_iters = total_inner_iters;
-    ctx.last_rel_res = true_rel_res;
-    if (true_rel_res > ctx.tolerance) {
-        vibestran::log_warn(
-            "[cuda-pcg-mixed] true residual remained at " +
-            std::to_string(true_rel_res) +
-            " after iterative refinement (target " +
-            std::to_string(ctx.tolerance) + ")");
-    }
+    ctx.last_rel_res = ctx.last_refinement->relative_residual;
+    const double true_rel_res = ctx.last_rel_res;
     if (profile.enabled) {
         profile.total.add(host_elapsed_ms(total_start, HostClock::now()));
         profile.log_summary(n, nnz, total_inner_iters, true_rel_res);
     }
+    require_refined(ctx, "cuda-pcg-mixed");
     return solution;
 }
 

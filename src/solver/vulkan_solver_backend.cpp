@@ -7,7 +7,10 @@
 #include "vulkan_pcg_internal.hpp"
 #include "vulkan_pipelines.hpp"
 #include "core/exceptions.hpp"
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <numeric>
 #include <spdlog/spdlog.h>
 
 namespace vibestran {
@@ -40,7 +43,9 @@ std::string_view VulkanSolverBackend::name() const noexcept {
 bool   VulkanSolverBackend::last_solve_was_full_gpu() const noexcept { return last_full_gpu_; }
 int    VulkanSolverBackend::last_iteration_count()    const noexcept { return last_iters_; }
 double VulkanSolverBackend::last_residual_norm()      const noexcept { return last_residual_; }
-double VulkanSolverBackend::last_estimated_error()    const noexcept { return last_residual_; }
+double VulkanSolverBackend::last_estimated_error()    const noexcept {
+    return last_refinement_ ? last_refinement_->estimated_error : last_residual_;
+}
 
 // ── VRAM checks ───────────────────────────────────────────────────────────────
 
@@ -124,14 +129,17 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
 
     // Small problems: GPU kernel launch and PCIe readback overhead per iteration
     // dominates actual compute time. Fall back to the CPU direct solver.
+    last_refinement_.reset();
     if (n < cfg_.min_dofs_for_gpu) {
         spdlog::debug("[vulkan] {} DOFs → CPU fallback (below min_dofs_for_gpu={})",
                       n, cfg_.min_dofs_for_gpu);
         last_full_gpu_ = false;
         last_iters_    = 1;
-        last_residual_ = 0.0;
         EigenSolverBackend eigen;
-        return eigen.solve(K, F, factor_ratio_policy);
+        auto u = eigen.solve(K, F, factor_ratio_policy);
+        last_refinement_ = eigen.last_refinement();
+        last_residual_   = last_refinement_ ? last_refinement_->relative_residual : 0.0;
+        return u;
     }
 
     // use_double requires shaderFloat64 device feature
@@ -149,57 +157,93 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
     const size_t available  = static_cast<size_t>(
         static_cast<double>(vram_total) * (1.0 - cfg_.vram_headroom));
 
-    const char* precision = cfg_.use_double ? "float64" : "float32";
-
+    enum class Path { Float32, Float64, Tiled };
+    Path path;
     if (!cfg_.force_tiled && fits_in_vram(K)) {
-        const size_t needed = cfg_.use_double ? vram_needed_f64(K) : vram_needed_f32(K);
-        spdlog::debug("[vulkan] {} DOFs → full-GPU {} ({} / {} VRAM)",
-                      n, precision, mib_str(needed), mib_str(vram_total));
-
-        last_full_gpu_ = true;
-        auto t_solve = std::chrono::steady_clock::now();
-        std::vector<double> result;
-        if (cfg_.use_double) {
-            result = solve_full_gpu_double(ctx_, *pl, K, F, cfg_, last_iters_, last_residual_);
-        } else {
-            // Attempt float32.  If it diverges/stagnates and the device supports
-            // float64 (and the matrix fits in VRAM at float64 size), transparently
-            // retry with the double-precision path rather than propagating an error.
-            try {
-                result = solve_full_gpu(ctx_, *pl, K, F, cfg_, last_iters_, last_residual_);
-            } catch (const SolverError& e) {
-                if (ctx_.device_info().supports_float64 &&
-                    vram_needed_f64(K) <= available) {
-                    spdlog::warn("[vulkan] float32 failed ({}), retrying with float64", e.what());
-                    result = solve_full_gpu_double(ctx_, *pl, K, F, cfg_, last_iters_, last_residual_);
-                } else {
-                    throw;
-                }
-            }
-        }
-
-        spdlog::info("[vulkan] converged: {} iterations, residual = {:.2e}, solve = {:.3f} ms",
-                     last_iters_, last_residual_, ms_since(t_solve));
-        return result;
+        path = cfg_.use_double ? Path::Float64 : Path::Float32;
+        spdlog::debug("[vulkan] {} DOFs → full-GPU {} ({} / {} VRAM)", n,
+                      cfg_.use_double ? "float64" : "float32",
+                      mib_str(cfg_.use_double ? vram_needed_f64(K) : vram_needed_f32(K)),
+                      mib_str(vram_total));
     } else {
         if (cfg_.use_double)
             throw SolverError(std::format(
                 "Vulkan solver: use_double=true but K ({}) exceeds available VRAM ({}) "
                 "for a full-GPU float64 solve. Use --cpu.",
                 mib_str(vram_needed_f64(K)), mib_str(available)));
-
+        path = Path::Tiled;
         spdlog::debug("[vulkan] {} DOFs → tiled float32 (matrix {} exceeds VRAM budget {})",
                       n, mib_str(vram_needed_f32(K)), mib_str(available));
-
-        last_full_gpu_ = false;
-        auto t_solve = std::chrono::steady_clock::now();
-        auto result = solve_tiled(ctx_, *pl, K, F, cfg_,
-                                   static_cast<uint64_t>(available),
-                                   last_iters_, last_residual_);
-        spdlog::info("[vulkan] converged: {} iterations, residual = {:.2e}, solve = {:.3f} ms",
-                     last_iters_, last_residual_, ms_since(t_solve));
-        return result;
     }
+    last_full_gpu_ = path != Path::Tiled;
+
+    // Each inner PCG solve stops at inner_tolerance (or its precision floor)
+    // and returns its iterate; refinement with compensated double-precision
+    // residuals takes the solution to `tolerance`.  The right-hand side is
+    // scaled to unit max-norm so fp32 keeps the range of tiny residuals.
+    VulkanSolverConfig inner = cfg_;
+    inner.tolerance = cfg_.inner_tolerance;
+    inner.throw_on_no_convergence = false;
+    int total_iters = 0;
+    const auto refine_on = [&](Path p, RefinementReport& rep) {
+        const auto pcg = [&](const std::vector<double>& rhs) {
+            double scale = std::accumulate(rhs.begin(), rhs.end(), 0.0,
+                [](double m, double v) { return std::max(m, std::abs(v)); });
+            if (scale == 0.0 || !std::isfinite(scale))
+                scale = 1.0;
+            std::vector<double> b(rhs.size());
+            std::transform(rhs.begin(), rhs.end(), b.begin(),
+                           [scale](double v) { return v / scale; });
+            int iters = 0;
+            double res = 0.0;
+            std::vector<double> x =
+                p == Path::Float64 ? solve_full_gpu_double(ctx_, *pl, K, b, inner, iters, res)
+              : p == Path::Float32 ? solve_full_gpu(ctx_, *pl, K, b, inner, iters, res)
+                                   : solve_tiled(ctx_, *pl, K, b, inner,
+                                                 static_cast<uint64_t>(available), iters, res);
+            total_iters += iters;
+            std::transform(x.begin(), x.end(), x.begin(),
+                           [scale](double v) { return v * scale; });
+            return x;
+        };
+        std::vector<double> u = pcg(F);
+        RefinementOptions opts;
+        opts.tolerance = cfg_.tolerance;
+        opts.max_corrections = 20;
+        rep = refine_solution(K, F, u, pcg, opts);
+        spdlog::debug("[vulkan] iterative refinement: {} correction(s), estimated relative "
+                      "error {:.2e} -> {:.2e}, backward error {:.2e}{}",
+                      rep.corrections, rep.initial_error, rep.estimated_error,
+                      rep.backward_error, rep.converged ? "" : " (not converged)");
+        return u;
+    };
+
+    auto t_solve = std::chrono::steady_clock::now();
+    RefinementReport rep;
+    std::vector<double> u = refine_on(path, rep);
+    // float32 too imprecise for this K (cond(K) beyond about 1e7 with Jacobi
+    // PCG): retry in float64 when the device supports it and K fits.
+    if (!rep.converged && path == Path::Float32 && ctx_.device_info().supports_float64 &&
+        vram_needed_f64(K) <= available) {
+        spdlog::warn("[vulkan] float32 PCG could not reach the target accuracy (estimated "
+                     "relative error {:.2e}), retrying with float64", rep.estimated_error);
+        u = refine_on(Path::Float64, rep);
+    }
+    last_iters_      = total_iters;
+    last_residual_   = rep.relative_residual;
+    last_refinement_ = rep;
+    if (!rep.converged)
+        throw SolverError(std::format(
+            "Vulkan PCG could not reach the target relative error {:.1e} (estimated {:.2e} "
+            "after {} refinement correction(s), {} PCG iterations; n = {}): the stiffness "
+            "matrix is too ill-conditioned for Jacobi PCG{}, or singular (check SPCs). "
+            "Use --backend=cpu for a direct solve.",
+            cfg_.tolerance, rep.estimated_error, rep.corrections, total_iters, n,
+            path == Path::Float64 ? "" : " in float32"));
+    spdlog::info("[vulkan] converged: {} PCG iterations, {} refinement correction(s), "
+                 "estimated relative error {:.2e}, solve = {:.3f} ms",
+                 last_iters_, rep.corrections, rep.estimated_error, ms_since(t_solve));
+    return u;
 }
 
 } // namespace vibestran

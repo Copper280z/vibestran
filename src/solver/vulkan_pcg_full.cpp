@@ -247,6 +247,10 @@ solve_full_gpu(VulkanContext& ctx, Pipelines& pl,
         gpu_spmv(ctx, pl, row_ptr_buf, col_ind_buf, val_buf, p_buf, Ap_buf, n);
 
         double pAp = gpu_dot(ctx, pl, p_buf, Ap_buf, partial_buf, n);
+        // At the precision floor fp32 rounding can make p^T A p <= 0; refinement
+        // judges the iterate (a K that is not SPD shows as failed corrections).
+        if (pAp <= 0.0 && iter > 0 && !cfg.throw_on_no_convergence)
+            break;
         if (pAp <= 0.0)
             throw SolverError(std::format(
                 "Vulkan PCG breakdown: p^T*A*p = {:.3e} <= 0 at iteration {} "
@@ -280,6 +284,8 @@ solve_full_gpu(VulkanContext& ctx, Pipelines& pl,
             double window_progress = cum_anorm_progress - checkpoint_progress;
             if (cum_anorm_progress > 0.0 &&
                 window_progress < cfg.stagnation_threshold * cum_anorm_progress) {
+                if (!cfg.throw_on_no_convergence)
+                    break; // precision floor: refinement continues from here
                 throw SolverError(std::format(
                     "Vulkan PCG stagnated: A-norm progress over last {} iterations was {:.1e}% "
                     "of total (precision floor reached). "
@@ -298,7 +304,7 @@ solve_full_gpu(VulkanContext& ctx, Pipelines& pl,
         rz_old = rz_new;
     }
 
-    if (out_residual >= cfg.tolerance)
+    if (cfg.throw_on_no_convergence && out_residual >= cfg.tolerance)
         throw SolverError(std::format(
             "Vulkan PCG did not converge after {} iterations; "
             "relative residual = {:.3e} (tolerance = {:.3e}). "
@@ -449,6 +455,10 @@ solve_full_gpu_double(VulkanContext& ctx, Pipelines& pl,
         gpu_spmv_d(ctx, pl, row_ptr_buf, col_ind_buf, val_buf, p_buf, Ap_buf, n);
 
         double pAp = gpu_dot_d(ctx, pl, p_buf, Ap_buf, partial_buf, n);
+        // At the precision floor fp32 rounding can make p^T A p <= 0; refinement
+        // judges the iterate (a K that is not SPD shows as failed corrections).
+        if (pAp <= 0.0 && iter > 0 && !cfg.throw_on_no_convergence)
+            break;
         if (pAp <= 0.0)
             throw SolverError(std::format(
                 "Vulkan PCG (float64) breakdown: p^T*A*p = {:.3e} <= 0 at iteration {} "
@@ -478,6 +488,8 @@ solve_full_gpu_double(VulkanContext& ctx, Pipelines& pl,
             double window_progress = cum_anorm_progress - checkpoint_progress;
             if (cum_anorm_progress > 0.0 &&
                 window_progress < cfg.stagnation_threshold * cum_anorm_progress) {
+                if (!cfg.throw_on_no_convergence)
+                    break; // precision floor: refinement continues from here
                 throw SolverError(std::format(
                     "Vulkan PCG (float64) stagnated: A-norm progress over last {} iterations "
                     "was {:.1e}% of total (precision floor reached). "
@@ -496,7 +508,7 @@ solve_full_gpu_double(VulkanContext& ctx, Pipelines& pl,
         rz_old = rz_new;
     }
 
-    if (out_residual >= cfg.tolerance)
+    if (cfg.throw_on_no_convergence && out_residual >= cfg.tolerance)
         throw SolverError(std::format(
             "Vulkan PCG (float64) did not converge after {} iterations; "
             "relative residual = {:.3e} (tolerance = {:.3e}). "
