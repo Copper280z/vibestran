@@ -1551,7 +1551,7 @@ TEST(Integration, HexaEasVsSriBendingNearlyIncompressible) {
             "GRID,7,,1.0,1.0,1.0\n"
             "GRID,8,,0.0,1.0,1.0\n"
             "MAT1,1,1.0E6,,0.4999\n"
-            "PSOLID,1,1,0,SMEAR,NO," + isop_field + "\n"
+            "PSOLID,1,1,0,,," + isop_field + "\n"
             "CHEXA,1,1,1,2,3,4,5,6,+\n"
             "+,7,8\n"
             // Fully clamp bottom face (z=0): all 6 DOFs of nodes 1,2,3,4

@@ -4,6 +4,7 @@
 #include "elements/shell_tria3.hpp"
 #include "elements/line_elements.hpp"
 #include "elements/solid_elements.hpp"
+#include "elements/solid_hexa8.hpp"
 #include <format>
 
 namespace vibestran {
@@ -25,13 +26,14 @@ std::unique_ptr<ElementBase> make_element(const ElementData& data, const Model& 
                 throw SolverError(std::format("CHEXA8 {} needs 8 nodes, got {}", data.id.value, data.nodes.size()));
             std::array<NodeId,8> nids{data.nodes[0],data.nodes[1],data.nodes[2],data.nodes[3],
                                        data.nodes[4],data.nodes[5],data.nodes[6],data.nodes[7]};
-            // Dispatch based on solid formulation (default: EAS)
+            // ISOP blank/REDUCED/EAS: Q1/E21 enhanced strain; FULL: standard
+            // displacement element; SRI: selectively reduced integration.
             const auto& prop = model.property(data.pid);
             if (std::holds_alternative<PSolid>(prop)) {
                 if (std::get<PSolid>(prop).isop == SolidFormulation::SRI)
                     return std::make_unique<CHexa8>(data.id, data.pid, nids, model);
             }
-            return std::make_unique<CHexa8Eas>(data.id, data.pid, nids, model);
+            return std::make_unique<SolidHexa8>(data.id, data.pid, nids, model);
         }
         case ElementType::CTETRA4: {
             if (data.nodes.size() != 4)
@@ -44,7 +46,8 @@ std::unique_ptr<ElementBase> make_element(const ElementData& data, const Model& 
                 throw SolverError(std::format("CPENTA6 {} needs 6 nodes, got {}", data.id.value, data.nodes.size()));
             std::array<NodeId,6> nids{data.nodes[0],data.nodes[1],data.nodes[2],
                                        data.nodes[3],data.nodes[4],data.nodes[5]};
-            // Dispatch based on solid formulation (default: EAS)
+            // Dispatch based on solid formulation (default: EAS; there is no
+            // separate full-integration CPENTA6, so FULL keeps the default).
             const auto& prop = model.property(data.pid);
             if (std::holds_alternative<PSolid>(prop)) {
                 if (std::get<PSolid>(prop).isop == SolidFormulation::SRI)

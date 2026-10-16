@@ -18,17 +18,17 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 1,929 final failure
+The suite contains 3,226 definitions. The current run has 1,878 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
 | `unsupported_input` | 1,111 | 190 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 591 | 209 | Result exists but differs from the reference or comparator expectation |
+| `numerical_mismatch` | 540 | 201 | Result exists but differs from the reference or comparator expectation |
 | `input_parse_error` | 185 | 15 | Parser rejects syntax or a card variant used by a valid deck |
 | `missing_result_data` | 36 | 11 | Solver completes but does not emit the requested result family |
 | `solver_model_error` | 6 | 2 | Parsed model is rejected by a geometry gate or has no free DOFs |
-| **Total** | **1,929** |  |  |
+| **Total** | **1,878** |  |  |
 
 CQUAD4 is the MITC4+/D continuum shell and CTRIA3 the MITC3+ shell (see
 `SHELL_REWRITE_PLAN.md` and `SHELL_BENCHMARKS.md`): six DOFs per grid,
@@ -38,6 +38,13 @@ MID1-MID4 and PCOMP sections on MAT1/MAT2/MAT8, THETA/MCID, ZOFFS, grid
 thicknesses, and consistent thermal strain. `PARAM,QUAD4TYP`, `SHELLFORM`
 and `K6ROT` are accepted and ignored. Warp is a warning, not a gate. The
 MAT2/MAT8 and warp `solver_model_error` decks of earlier runs now solve.
+
+CHEXA8 is the Q1/E21 enhanced assumed strain element (MYSTRAN's CHEXA8,
+reproduced to print precision on MYSTRAN's 106 isotropic CHEXA8 comparison
+quantities, `tests/integration/test_hexa8_reference.cpp`). PSOLID ISOP =
+FULL or 1 selects the standard full-integration element, which the RBE3
+node-surface coupling decks use. Solids always report centre and corner
+stresses and strains, as in Nastran.
 
 Element engineering forces (`FORCE`/`ELFORCE`) and shell strains
 (`STRAIN`, STRCUR or FIBER form, von Mises or maximum shear) are written for
@@ -240,19 +247,19 @@ records encode MYSTRAN behaviour rather than a correctness requirement.
 
 ### Numerical Mismatch
 
-There are 591 records across 209 decks:
+There are 540 records across 201 decks:
 
 | Result family | Records |
 |---|---:|
-| `DISPLACEMENTS` | 211 |
-| Bulk comparison | 203 |
+| Bulk comparison | 195 |
+| `DISPLACEMENTS` | 182 |
 | `SHELLSTRESSES` | 48 |
-| `SPCFORCES` | 34 |
-| `REALEIGENVALUES` | 26 |
+| `SPCFORCES` | 24 |
 | `SHELLFORCES` | 24 |
-| `SHELLSTRAINS` | 18 |
+| `REALEIGENVALUES` | 24 |
+| `SHELLSTRAINS` | 17 |
 | `MODE` | 15 |
-| `SOLIDSTRESSES` | 12 |
+| `SOLIDSTRESSES` | 11 |
 
 The count rose against the pre-rewrite runs because the MAT2/MAT8, PCOMP
 and warped-shell decks now solve instead of stopping at a formulation gate.
@@ -543,3 +550,16 @@ most recent entry.
   thick (t/L = 0.6) twisted-plate error against a solid model from 114% to
   35%. Warp is a warning. No new failures apart from
   the RBE3 10 flake. Body rewritten for the new elements.
+- **Orthotropic shell thermal correction (1,929 -> 1,928).** Free thermal
+  expansion of curved MAT8/MAT2/PCOMP shells uses the anisotropic free
+  strain; the diamond thermal cylinder's hoop expansion was 120% too large
+  and now matches exact free expansion. The deck's remaining records
+  encode MYSTRAN 18 values that violate it.
+- **Q1/E21 CHEXA8 (1,928 -> 1,878).** The 9-mode incompatible-mode CHEXA8,
+  which locked on thin curved geometry and broke symmetry, is replaced by
+  the Q1/E21 enhanced assumed strain element; PSOLID ISOP FULL/1 now
+  selects a standard full-integration element and IN THREE 3x3x3. 51
+  records fixed (the RBE3 node-surface coupling decks, which set ISOP = 1,
+  and others), one new: `RBE3 4` SPCFORCES TY is 1.1e-7 of roundoff
+  against an exact zero with a 1e-7 absolute tolerance on 1e8 loads. A
+  GRAV card with MB = 0 is no longer rejected.

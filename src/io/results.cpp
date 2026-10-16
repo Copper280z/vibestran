@@ -309,11 +309,12 @@ void F06Writer::write(const SolverResults& results, const Model& model,
                                      shell_props);
             write_shell_stress_table(sc, out, ElementType::CTRIA3, do_corner,
                                      shell_props);
-            write_solid_stress_table(sc, out, ElementType::CHEXA8, do_corner);
-            write_solid_stress_table(sc, out, ElementType::CTETRA4, do_corner);
-            write_solid_stress_table(sc, out, ElementType::CTETRA10,
-                                     do_corner);
-            write_solid_stress_table(sc, out, ElementType::CPENTA6, do_corner);
+            // Solids always report the centre and the grid points, as in
+            // Nastran (CORNER/BILIN only select shell output points).
+            write_solid_stress_table(sc, out, ElementType::CHEXA8, true);
+            write_solid_stress_table(sc, out, ElementType::CTETRA4, true);
+            write_solid_stress_table(sc, out, ElementType::CTETRA10, true);
+            write_solid_stress_table(sc, out, ElementType::CPENTA6, true);
         }
         if (do_strain_any) {
             write_shell_strain_table(sc, out, ElementType::CQUAD4,
@@ -322,11 +323,10 @@ void F06Writer::write(const SolverResults& results, const Model& model,
             write_shell_strain_table(sc, out, ElementType::CTRIA3,
                                      do_strain_corner, msc->strain_fiber,
                                      msc->strain_max_shear, shell_props);
-            write_solid_strain_table(sc, out, ElementType::CHEXA8, do_strain_corner);
-            write_solid_strain_table(sc, out, ElementType::CTETRA4, do_strain_corner);
-            write_solid_strain_table(sc, out, ElementType::CTETRA10,
-                                     do_strain_corner);
-            write_solid_strain_table(sc, out, ElementType::CPENTA6, do_strain_corner);
+            write_solid_strain_table(sc, out, ElementType::CHEXA8, true);
+            write_solid_strain_table(sc, out, ElementType::CTETRA4, true);
+            write_solid_strain_table(sc, out, ElementType::CTETRA10, true);
+            write_solid_strain_table(sc, out, ElementType::CPENTA6, true);
         }
         if (do_gpstress) {
             write_quad4_gpstress_table(sc, out);

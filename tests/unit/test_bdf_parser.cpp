@@ -1111,7 +1111,7 @@ TEST(BdfParser, PsolidIsopEas) {
     // PSOLID field f[6] == "EAS" → SolidFormulation::EAS
     const std::string bdf = R"(
 BEGIN BULK
-PSOLID,1,1,0,SMEAR,NO,EAS
+PSOLID,1,1,0,,,EAS
 ENDDATA
 )";
     Model m = BdfParser::parse_string(bdf);
@@ -1124,7 +1124,7 @@ TEST(BdfParser, PsolidIsopSri) {
     // PSOLID field f[6] == "SRI" → SolidFormulation::SRI
     const std::string bdf = R"(
 BEGIN BULK
-PSOLID,1,1,0,SMEAR,NO,SRI
+PSOLID,1,1,0,,,SRI
 ENDDATA
 )";
     Model m = BdfParser::parse_string(bdf);
@@ -1144,6 +1144,27 @@ ENDDATA
     ASSERT_EQ(m.properties.size(), 1u);
     const PSolid& ps = std::get<PSolid>(m.properties.at(PropertyId{1}));
     EXPECT_EQ(ps.isop, SolidFormulation::EAS);
+}
+
+TEST(BdfParser, PsolidIsopAndIntegrationOptions) {
+    // ISOP: blank, REDUCED and 0 select the enhanced-strain element, FULL
+    // and 1 the standard displacement element.  IN: THREE (or 3) selects 3x3x3, TWO,
+    // BUBBLE, 0 and blank 2x2x2.  Other values are input errors.
+    const auto parse = [](const std::string &psolid) {
+        const Model m = BdfParser::parse_string("BEGIN BULK\n" + psolid + "\nENDDATA\n");
+        return std::get<PSolid>(m.properties.at(PropertyId{1}));
+    };
+    EXPECT_EQ(parse("PSOLID,1,1,0,,,REDUCED").isop, SolidFormulation::EAS);
+    EXPECT_EQ(parse("PSOLID,1,1,0,,,FULL").isop, SolidFormulation::Full);
+    EXPECT_EQ(parse("PSOLID,1,1,0,2,,1").isop, SolidFormulation::Full);  // MSC integer form
+    EXPECT_EQ(parse("PSOLID,1,1,0,2,,0").isop, SolidFormulation::EAS);
+    EXPECT_EQ(parse("PSOLID,1,1,0,THREE").integration_order, 3);
+    EXPECT_EQ(parse("PSOLID,1,1,0,3,,FULL").integration_order, 3);
+    for (const char *in : {"TWO", "BUBBLE", "0", "2"})
+        EXPECT_EQ(parse(std::string("PSOLID,1,1,0,") + in).integration_order, 2) << in;
+    EXPECT_EQ(parse("PSOLID,1,1").integration_order, 2);
+    EXPECT_THROW((void)parse("PSOLID,1,1,0,SMEAR"), ParseError);
+    EXPECT_THROW((void)parse("PSOLID,1,1,0,,,BOGUS"), ParseError);
 }
 
 TEST(BdfParser, Ctetra10Nodes) {

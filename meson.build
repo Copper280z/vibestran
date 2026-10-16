@@ -382,6 +382,7 @@ solver_sources = files(
   'src/elements/shell_tria3.cpp',
   'src/elements/line_elements.cpp',
   'src/elements/solid_elements.cpp',
+  'src/elements/solid_hexa8.cpp',
   'src/elements/element_factory.cpp',
   'src/elements/rbe_constraints.cpp',
   'src/elements/thermal_elements.cpp',
@@ -476,6 +477,7 @@ unit_test_sources = files(
   'tests/unit/test_shell_section.cpp',
   'tests/unit/test_shell_quad4.cpp',
   'tests/unit/test_shell_tria3.cpp',
+  'tests/unit/test_solid_hexa8.cpp',
   'tests/unit/test_types.cpp',
   'tests/unit/test_sparse_matrix.cpp',
   'tests/unit/test_pcg_solver.cpp',
@@ -502,6 +504,7 @@ integration_test_sources = files(
   'tests/integration/test_integration.cpp',
   'tests/integration/test_thermal_steady.cpp',
   'tests/integration/test_shell_benchmarks.cpp',
+  'tests/integration/test_hexa8_reference.cpp',
 )
 
 integration_tests = executable(

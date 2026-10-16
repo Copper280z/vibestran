@@ -198,7 +198,10 @@ private:
 
 // ── Properties ───────────────────────────────────────────────────────────────
 
-enum class SolidFormulation { SRI, EAS };
+/// PSOLID ISOP: EAS (blank, REDUCED or EAS) is the default enhanced-strain
+/// element (Q1/E21 for CHEXA8), FULL the standard displacement element with
+/// full integration, SRI vibestran's selectively reduced integration.
+enum class SolidFormulation { SRI, EAS, Full };
 
 struct PShell {
   PropertyId pid{0};
@@ -254,6 +257,9 @@ struct PSolid {
   MaterialId mid{0};
   int cordm{0}; // material coordinate system
   SolidFormulation isop{SolidFormulation::EAS};
+  /// PSOLID IN: Gauss points per direction (2 for blank, BUBBLE, 0 or TWO;
+  /// 3 for THREE).
+  int integration_order{2};
 };
 
 struct PBar {

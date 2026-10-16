@@ -1994,14 +1994,34 @@ void BdfParser::process_psolid(ParseContext &ctx,
   p.pid = PropertyId(parse_int(f[1], ctx.line_num));
   p.mid = MaterialId(parse_int(f[2], ctx.line_num));
   p.cordm = f[3].empty() ? 0 : parse_int(f[3], ctx.line_num);
-  // f[6] is ISOP: "EAS" (default) or "SRI" selects integration formulation
+  // f[4] is IN: blank, BUBBLE, 0, 2 or TWO (2x2x2), 3 or THREE (3x3x3).
+  if (f.size() > 4 && !f[4].empty()) {
+    std::string in = f[4];
+    std::transform(in.begin(), in.end(), in.begin(), ::toupper);
+    if (in == "THREE" || in == "3")
+      p.integration_order = 3;
+    else if (in == "TWO" || in == "2" || in == "BUBBLE" || in == "0")
+      p.integration_order = 2;
+    else
+      throw ParseError(std::format("Line {}: PSOLID {} IN = '{}' is not supported (use "
+                                   "blank, BUBBLE, TWO or THREE)",
+                                   ctx.line_num, p.pid.value, f[4]));
+  }
+  // f[6] is ISOP: blank, REDUCED or 0 (enhanced strain, default), FULL or 1
+  // (standard displacement element), EAS, or SRI (selectively reduced).
   if (f.size() > 6 && !f[6].empty()) {
     std::string isop = f[6];
     std::transform(isop.begin(), isop.end(), isop.begin(), ::toupper);
     if (isop == "SRI")
       p.isop = SolidFormulation::SRI;
-    else if (isop == "EAS")
+    else if (isop == "EAS" || isop == "REDUCED" || isop == "0")
       p.isop = SolidFormulation::EAS;
+    else if (isop == "FULL" || isop == "1")
+      p.isop = SolidFormulation::Full;
+    else
+      throw ParseError(std::format("Line {}: PSOLID {} ISOP = '{}' is not supported (use "
+                                   "blank, REDUCED, 0, FULL, 1, EAS or SRI)",
+                                   ctx.line_num, p.pid.value, f[6]));
   }
   ctx.model.properties[p.pid] = p;
 }
@@ -2599,9 +2619,11 @@ void BdfParser::process_grav(ParseContext &ctx,
   l.direction = Vec3((f.size() > 4) ? parse_double(f[4], ctx.line_num) : 0.0,
                      (f.size() > 5) ? parse_double(f[5], ctx.line_num) : 0.0,
                      (f.size() > 6) ? parse_double(f[6], ctx.line_num) : 0.0);
-  reject_nonblank_fields(
-      f, 7, ctx.line_num, "GRAV",
-      "rotational acceleration components are not yet supported");
+  // Field 7 is MB, the superelement Bulk Data section of CID (default 0).
+  if (f.size() > 7 && !f[7].empty() && parse_int(f[7], ctx.line_num) != 0)
+    throw ParseError(std::format("Line {}: GRAV MB = '{}': superelements are not supported",
+                                 ctx.line_num, f[7]));
+  reject_nonblank_fields(f, 8, ctx.line_num, "GRAV", "has data beyond the MB field");
   ctx.model.loads.emplace_back(l);
 }
 

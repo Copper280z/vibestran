@@ -45,6 +45,7 @@ vibestran/
 
 - **Elements**: CQUAD4, CTRIA3, CHEXA8, CTETRA4, CTETRA10, CPENTA6, CBAR, CBEAM, CBUSH, CELAS1, CELAS2, CMASS1, CMASS2, CONM2 (CG offset, inertia tensor, CID / CID = -1)
 - **Shells**: CQUAD4 is the MITC4+/D continuum shell (Ko, Bathe & Zhang 2025) and CTRIA3 the MITC3+ shell (Lee, Lee & Bathe 2014), both with six DOFs per grid, shared grid directors (averaged within the `PARAM,SNORM` fold angle, default 20 degrees, or given by SNORM cards), warped and curved geometry, transverse shear, ZOFFS, grid thicknesses (T1-T4, TFLAG), THETA/MCID material axes, and thermal loads consistent with the element kinematics (free expansion of curved shells is stress-free). See `SHELL_BENCHMARKS.md`.
+- **Solids**: CHEXA8 is the Q1/E21 enhanced assumed strain hexahedron (Simo & Rifai 1990, Andelfinger & Ramm 1993; the same element as MYSTRAN's CHEXA8, which it reproduces to print precision on MYSTRAN's CHEXA comparison decks): patch test on distorted meshes, no spurious modes, no preferred direction, relieved bending and volumetric locking, condensed thermal load and recovery. PSOLID ISOP = FULL (or 1) selects the standard full-integration element, IN = THREE 3x3x3 integration.
 - **Materials**: MAT1 (all elements), MAT2 and MAT8 (shells), plus parser/model support for MAT3, MAT4, MAT5, and MAT6
 - **Properties**: PSHELL (MID1-MID4, 12I/T^3, TS/T, NSM, Z1/Z2), PCOMP (classical lamination theory; LAM blank, SYM, MEM, BEND, SMEAR, SMCORE), PSOLID, PBAR (stress recovery points C-F, K1/K2 transverse shear, I12), PBARL (`ROD`, `TUBE`, `BAR`), PBEAM, PBUSH (`K` section), PELAS, PMASS
 - **CBAR end data**: pin flags (PA/PB, statically condensed), rigid end offsets (WA/WB), OFFT `GGG`/`BGG`
@@ -72,7 +73,7 @@ Notable current limitations:
 - Shell drill rotations carry only a small stabilisation (like Nastran's K6ROT); `PARAM,K6ROT`, `QUAD4TYP`, and `SHELLFORM` are accepted and ignored.
 - PCOMP ply stresses and strains (COMPOSITESTRESSES), CQUAD8, and CTRIA6 are not implemented; PCOMP is not used in heat transfer.
 - Shell sections are resultant (ABD) sections with the first-order through-thickness metric (z/R) terms; second-order thickness terms are dropped, so very thick shells (t/L around 0.5) can be well off a 3D solution (see `SHELL_BENCHMARKS.md`).
-- CHEXA20 is not implemented.
+- CHEXA20 is not implemented, and solids accept only MAT1 (no MAT9 anisotropy).
 - Mass is consistent by default (unlike Nastran, whose default is lumped); `PARAM,COUPMASS,-1` selects lumped mass.
 
 ## SOL 103 — Normal Modes (Modal Analysis)

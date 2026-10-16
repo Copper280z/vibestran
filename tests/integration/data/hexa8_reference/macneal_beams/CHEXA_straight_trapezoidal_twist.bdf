@@ -1,0 +1,102 @@
+SOL 101
+CEND
+DISPLACEMENT = ALL
+LOAD = 1
+SPC = 1
+SPCFORCES = ALL
+STRAIN = ALL
+STRESS = ALL
+TITLE = MacNeal-Harder straight cantilever beam - CHEXA - trapezoidal sh
+BEGIN BULK
+$PARAMS
+PARAM*              POST              -1
+*
+PARAM*           STR_CID              -2
+*
+$NODES
+GRID*                  1                              0.             -.1
+*                   -.05                                                
+GRID*                  2                              0.              .1
+*                   -.05                                                
+GRID*                  3                              0.             -.1
+*                    .05                                                
+GRID*                  4                              0.              .1
+*                    .05                                                
+GRID*                  5                             1.1             -.1
+*                   -.05                                                
+GRID*                  6                              .9              .1
+*                   -.05                                                
+GRID*                  7                             1.1             -.1
+*                    .05                                                
+GRID*                  8                              .9              .1
+*                    .05                                                
+GRID*                  9                             1.9             -.1
+*                   -.05                                                
+GRID*                 10                             2.1              .1
+*                   -.05                                                
+GRID*                 11                             1.9             -.1
+*                    .05                                                
+GRID*                 12                             2.1              .1
+*                    .05                                                
+GRID*                 13                             3.1             -.1
+*                   -.05                                                
+GRID*                 14                             2.9              .1
+*                   -.05                                                
+GRID*                 15                             3.1             -.1
+*                    .05                                                
+GRID*                 16                             2.9              .1
+*                    .05                                                
+GRID*                 17                             3.9             -.1
+*                   -.05                                                
+GRID*                 18                             4.1              .1
+*                   -.05                                                
+GRID*                 19                             3.9             -.1
+*                    .05                                                
+GRID*                 20                             4.1              .1
+*                    .05                                                
+GRID*                 21                             5.1             -.1
+*                   -.05                                                
+GRID*                 22                             4.9              .1
+*                   -.05                                                
+GRID*                 23                             5.1             -.1
+*                    .05                                                
+GRID*                 24                             4.9              .1
+*                    .05                                                
+GRID*                 25                              6.             -.1
+*                   -.05                                                
+GRID*                 26                              6.              .1
+*                   -.05                                                
+GRID*                 27                              6.             -.1
+*                    .05                                                
+GRID*                 28                              6.              .1
+*                    .05                                                
+$ELEMENTS
+CHEXA          1       1       1       5       6       2       3       7
+               8       4
+CHEXA          2       1       5       9      10       6       7      11
+              12       8
+CHEXA          3       1       9      13      14      10      11      15
+              16      12
+CHEXA          4       1      13      17      18      14      15      19
+              20      16
+CHEXA          5       1      17      21      22      18      19      23
+              24      20
+CHEXA          6       1      21      25      26      22      23      27
+              28      24
+$PROPERTIES
+PSOLID         1       1       0
+$MATERIALS
+MAT1*                  1       10000000.                              .3
+*
+$LOADS
+FORCE*                 1              25                           2.236
+*                     0.           .4472          -.8944
+FORCE*                 1              26                           2.236
+*                     0.           .4472           .8944
+FORCE*                 1              27                           2.236
+*                     0.          -.4472          -.8944
+FORCE*                 1              28                           2.236
+*                     0.          -.4472           .8944
+$SPCs
+SPC1           1     123       1       2       3       4
+ENDDATA

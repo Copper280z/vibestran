@@ -1,0 +1,75 @@
+SOL 101
+CEND
+DISPLACEMENT = ALL
+ECHO = NONE
+SPC = 1
+STRESS = ALL
+TEMPERATURE(LOAD) = 7
+TITLE = 
+BEGIN BULK
+$PARAMS
+PARAM*              POST              -1
+*
+PARAM*           STR_CID              -2
+*
+$NODES
+GRID*                  1                              0.              0.
+*                     0.                                                
+GRID*                  2                              1.              0.
+*                     0.                                                
+GRID*                  3                              1.              1.
+*                     0.                                                
+GRID*                  4                              0.              1.
+*                     0.                                                
+GRID*                  5                              0.              0.
+*                     1.                                                
+GRID*                  6                              1.              0.
+*                     1.                                                
+GRID*                  7                              1.              1.
+*                     1.                                                
+GRID*                  8                              0.              1.
+*                     1.                                                
+GRID*                  9                            .249            .342
+*                   .192                                                
+GRID*                 10                            .826            .288
+*                   .288                                                
+GRID*                 11                             .85            .649
+*                   .263                                                
+GRID*                 12                            .273             .75
+*                    .23                                                
+GRID*                 13                             .32            .186
+*                   .643                                                
+GRID*                 14                            .677            .305
+*                   .683                                                
+GRID*                 15                            .788            .693
+*                   .644                                                
+GRID*                 16                            .165            .745
+*                   .702                                                
+$ELEMENTS
+CHEXA          1       1       1       2       3       4       9      10
+              11      12
+CHEXA          2       1      13      14      15      16       5       6
+               7       8
+CHEXA          3       1       1       2      10       9       5       6
+              14      13
+CHEXA          4       1      12      11       3       4      16      15
+               7       8
+CHEXA          5       1       1       9      12       4       5      13
+              16       8
+CHEXA          6       1      10       2       3      11      14       6
+               7      15
+CHEXA          7       1       9      10      11      12      13      14
+              15      16
+$PROPERTIES
+PSOLID         1       1       0
+$MATERIALS
+MAT1*                  1        1000000.                             .25
+*                                 .00001
+$LOADS
+TEMPD*                 7            100.
+*
+$SPCs
+SPC            1       1     123      0.
+SPC            1       2      23      0.
+SPC            1       4       3      0.
+ENDDATA

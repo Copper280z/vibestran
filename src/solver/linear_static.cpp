@@ -14,6 +14,7 @@
 #include "elements/line_elements.hpp"
 #include "elements/rbe_constraints.hpp"
 #include "elements/solid_elements.hpp"
+#include "elements/solid_hexa8.hpp"
 #include "assembly_parallel.hpp"
 #include "solver/analysis_support.hpp"
 #include <Eigen/Dense>
@@ -1994,6 +1995,30 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
           if (want_strain)
             strain.nodal.push_back(make_solid_strain_point(
                 elem_data.nodes[static_cast<size_t>(n)], point.eps));
+        }
+      } else if (psol_.isop != SolidFormulation::SRI) {
+        // Q1/E21 (or ISOP = FULL) CHEXA8: the element's own condensed
+        // strain operator, with extrapolation at degenerate corners.
+        std::array<double, 8> temps{};
+        for (size_t n = 0; n < 8; ++n) {
+          const auto it = nodal_temps_rec.find(elem_data.nodes[n]);
+          temps[n] = (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
+        }
+        const SolidHexa8 hexa(elem_data.id, elem_data.pid,
+                              {elem_data.nodes[0], elem_data.nodes[1], elem_data.nodes[2],
+                               elem_data.nodes[3], elem_data.nodes[4], elem_data.nodes[5],
+                               elem_data.nodes[6], elem_data.nodes[7]},
+                              model);
+        const auto points = hexa.recover(
+            std::span<const double>(ue.data(), static_cast<size_t>(ue.size())), temps,
+            mat_.ref_temp);
+        center.eps = points[0].strain;
+        center.sigma = points[0].stress;
+        for (size_t n = 0; n < 8; ++n) {
+          ss.nodal.push_back(make_solid_stress_point(elem_data.nodes[n], points[n + 1].stress));
+          if (want_strain)
+            strain.nodal.push_back(
+                make_solid_strain_point(elem_data.nodes[n], points[n + 1].strain));
         }
       } else {
         center = eval_chexa8(0.0, 0.0, 0.0);
