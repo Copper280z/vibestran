@@ -54,3 +54,12 @@ reference is a MYSTRAN run.
 | CONM2 with CID = -1 (X is the basic location of the CG) | 19 decks use CONM2, none with CID = -1 | Same offset mass given once with CID = 0 and an offset, once with CID = -1 and the absolute CG location; results must be identical |
 | Modal analysis requesting all finite modes (ND >= massed DOFs, e.g. a one-DOF spring-mass) | Not checked by any deck | Grounded CELAS2 + CONM2: lambda = k/m |
 | CTETRA10 consistent mass in modal or inertial-load analysis | 12 decks use CTETRA10, none in SOL 103 | Free-free or cantilevered tet10 block in SOL 103, compared with a refined CHEXA/CTETRA4 reference, plus a GRAV case checking total reaction = rho*V*g |
+
+## Shells (CQUAD4 / CTRIA3)
+
+| Feature | Check | Suggested deck |
+|---|---|---|
+| PCOMP `LAM` = `MEM`, `BEND`, `SMEAR`, `SMCORE` | 67 PCOMP cards: LAM blank (48) or `SYM` (19) | One laminate with each option under membrane and bending loads; MEM must have no bending stiffness from the plies (and BEND none in membrane), SMEAR no B coupling, SMCORE the honeycomb-core equivalent of the listed face plies |
+| SNORM with CID != 0 | Every SNORM card (about 21,700) has CID 0 | A cylindrical patch whose SNORMs are given as (1, 0, 0) in a CORD2C about the cylinder axis; results must equal the basic-system deck |
+| `PARAM,SNORM` > 0 (shared-director fold angle) | Only `PARAM,SNORM,0.0` (2 decks) | A folded plate (box section or T-junction) with folds of 10 and 30 degrees, run with SNORM = 20 and 5: the 30-degree fold must keep separate directors in both, the 10-degree one only with 5 |
+| Free thermal expansion of a doubly curved shell | Only faceted cylinders (`thermal strain free rectangle/diamond cylinder`) | Faceted hemisphere under uniform dT with statically determinate supports: zero stress and radial growth alpha dT R (vibestran benchmark `ShellBenchmark.ThermalFacetedRing*` does the ring) |

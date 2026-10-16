@@ -10,8 +10,6 @@
 #include "core/factor_ratio_check.hpp"
 #include "core/logger.hpp"
 #include "core/mpc_handler.hpp"
-#include "elements/cquad4.hpp"
-#include "elements/ctria3.hpp"
 #include "elements/element_factory.hpp"
 #include "elements/line_elements.hpp"
 #include "elements/rbe_constraints.hpp"

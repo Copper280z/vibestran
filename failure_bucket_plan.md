@@ -18,40 +18,36 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 2,225 final failure
+The suite contains 3,226 definitions. The current run has 1,929 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
-| `unsupported_input` | 1,305 | 208 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 429 | 165 | Result exists but differs from the reference or comparator expectation |
-| `solver_model_error` | 294 | 28 | Parsed model is rejected by a current formulation or geometry gate |
+| `unsupported_input` | 1,111 | 190 | Requires unsupported cards, solution sequences, elements, or formulations |
+| `numerical_mismatch` | 591 | 209 | Result exists but differs from the reference or comparator expectation |
 | `input_parse_error` | 185 | 15 | Parser rejects syntax or a card variant used by a valid deck |
-| `missing_result_data` | 12 | 9 | Solver completes but does not emit the requested result family |
-| **Total** | **2,225** |  |  |
+| `missing_result_data` | 36 | 11 | Solver completes but does not emit the requested result family |
+| `solver_model_error` | 6 | 2 | Parsed model is rejected by a geometry gate or has no free DOFs |
+| **Total** | **1,929** |  |  |
+
+CQUAD4 is the MITC4+/D continuum shell and CTRIA3 the MITC3+ shell (see
+`SHELL_REWRITE_PLAN.md` and `SHELL_BENCHMARKS.md`): six DOFs per grid,
+shared grid directors (averaged, or SNORM), warped and curved geometry,
+transverse shear, the first-order through-thickness metric, PSHELL
+MID1-MID4 and PCOMP sections on MAT1/MAT2/MAT8, THETA/MCID, ZOFFS, grid
+thicknesses, and consistent thermal strain. `PARAM,QUAD4TYP`, `SHELLFORM`
+and `K6ROT` are accepted and ignored. Warp is a warning, not a gate. The
+MAT2/MAT8 and warp `solver_model_error` decks of earlier runs now solve.
 
 Element engineering forces (`FORCE`/`ELFORCE`) and shell strains
 (`STRAIN`, STRCUR or FIBER form, von Mises or maximum shear) are written for
-CQUAD4 (centre and corner) and CTRIA3, element forces also for CBAR/CBEAM.
-Shell bending moments follow the Nastran sign convention (a positive moment
-puts the Z1 fibre in tension), and the CQUAD4 element frame is Nastran's
-(z normal to both diagonals, x bisecting them), so shell results on skewed
-quads are reported in the same components as Nastran and MYSTRAN.
+CQUAD4 (centre and BILIN corners) and CTRIA3, element forces also for
+CBAR/CBEAM. Shell results use Nastran's element frames and sign convention.
 
-GRID PS, GRDSET, and BAROR are now applied. The decks they unblocked solve
-(the SB-BAR I12/PINFLAG/OFFSET displacements and stresses match MYSTRAN
-exactly) but still fail whole-F06 bulk comparisons on result blocks
-vibestran does not write, most often `GPFORCE` (grid point force balance).
-
-CBAR/PBAR are now fully parsed (recovery points, K1/K2, I12, pin flags,
-offsets, OFFT `GGG`/`BGG`), so 50 bar decks moved out of `unsupported_input`
-and `input_parse_error`. Most of them now land in `numerical_mismatch` for
-reasons outside the bar element (see "Numerical Mismatch" below).
-
-Solid strain is fully emitted and every SOLIDSTRAINS check passes. The two
-remaining `transform` corner-ZZ mismatches are `SOLIDSTRESSES/GID/.../ZZ`
-records on `vic/8/NAS S30 solid stress strain transform.bdf` at 0.0001% of
-the reference (tolerances unchanged).
+GRID PS, GRDSET, and BAROR are applied. CBAR/PBAR are fully parsed. Solid
+strain is fully emitted; the two `transform` corner-ZZ mismatches are
+`SOLIDSTRESSES/GID/.../ZZ` records on `vic/8/NAS S30 solid stress strain
+transform.bdf` at 0.0001% of the reference.
 
 Another 15 records still fail in the way declared by their `KNOWNFAIL`
 expectations. They are recorded under `KNOWNFAIL EXPECTED SUMMARY` in
@@ -198,41 +194,43 @@ records, not a solver exit.
 
 ### Unsupported Input
 
-There are 1,503 records across 237 decks. By unique deck, the current logs show:
+There are 1,111 records across 190 decks. By unique deck, the current logs
+show:
 
 | Cause | Decks |
 |---|---:|
-| Ignored unsupported BDF or case-control card | 156 |
+| Ignored unsupported BDF or case-control card | 110 |
 | Unsupported solution type | 61 |
-| Explicitly unsupported field or formulation | 20 |
+| Explicitly unsupported field or element | 19 |
 
-The most widespread ignored keywords across all failing decks are `ECHO`
-(55), `TITLE` (55), `ID` (54), `DEBUG` (54), `MPCFORCE`/`MPCFORCES` (52/48),
-`CQUAD8` (43), `FORCE` (42), `OLOAD` (42), `GPFORCE` (38), `ELFORCE` (36),
-`CROD`/`PROD` (32), `MEFFMASS` (24), `EIGR` (22), `SUBT` (22), `GRDSET` (20),
-and `PCOMP` (15). Case-control `TEMPERATURE = n` is now accepted
-(as TEMPERATURE(BOTH)). Abbreviated case-control commands
-(`DISP`, `STRE`, `SPCF`, ...) are now accepted and no longer appear.
+The explicit cases are CBUSH offset/location fields (8 decks) and CHEXA20
+or other elements without an implementation (11 decks). The most
+widespread ignored keywords across these decks are `ECHO`/`TITLE` (47),
+`DEBUG`/`ID` (46), `CQUAD8` (41), `OLOAD` (34), `CROD`/`PROD` (32),
+`MEFFMASS` (24), `EIGR` (22), `SUBT` (22), `SUBTITLE` (12), and `MPFACTOR`
+(10).
 
-The main implementation work remains CQUAD8, PCOMP laminates, CROD/PROD,
-modal GPFORCE, EIGR/reduction behavior, and unsupported solution sequences
-such as buckling. CONM2, MPCFORCE, statics GPFORCE, and FORCE/ELFORCE are
-implemented.
+The main implementation work remains CQUAD8 (and CTRIA6), CROD/PROD,
+CHEXA20, modal GPFORCE, EIGR/reduction behavior, and unsupported solution
+sequences such as buckling.
 
 ### Missing Result Data
 
-There are 12 records across 9 decks:
+There are 36 records across 11 decks:
 
 | Result family | Records |
 |---|---:|
+| `COMPOSITESTRESSES` | 24 |
 | `DISPLACEMENTS` | 4 |
 | `ELASSTRESSES` | 3 |
 | `ELASFORCES` | 3 |
 | `MODE` | 2 |
 
-`ELASSTRESSES`/`ELASFORCES` are CELAS stress and force recovery. The four
-`DISPLACEMENTS` records are the `BANDED`/`SPARSE BAILOUT` decks and `RBE3
-crash`.
+`COMPOSITESTRESSES` are PCOMP ply stresses (`S30 shell laminate orthotropic
+thermal stress` and `_2`), which are not implemented; these decks solved
+for the first time once PCOMP was supported. `ELASSTRESSES`/`ELASFORCES`
+are CELAS stress and force recovery. The four `DISPLACEMENTS` records are
+the `BANDED`/`SPARSE BAILOUT` decks and `RBE3 crash`.
 
 The two `MODE` records are `V30 beam released dof x-x` and `xyz-xyz`, which
 expect the solve to fail (eigenvector `ABSENT`): releasing the same component
@@ -242,102 +240,90 @@ records encode MYSTRAN behaviour rather than a correctness requirement.
 
 ### Numerical Mismatch
 
-There are 441 records across 167 decks:
+There are 591 records across 209 decks:
 
 | Result family | Records |
 |---|---:|
-| Bulk comparison | 161 |
-| `DISPLACEMENTS` | 152 |
-| `SPCFORCES` | 35 |
-| `SHELLSTRESSES` | 26 |
+| `DISPLACEMENTS` | 211 |
+| Bulk comparison | 203 |
+| `SHELLSTRESSES` | 48 |
+| `SPCFORCES` | 34 |
 | `REALEIGENVALUES` | 26 |
+| `SHELLFORCES` | 24 |
+| `SHELLSTRAINS` | 18 |
 | `MODE` | 15 |
 | `SOLIDSTRESSES` | 12 |
-| `SHELLFORCES` | 10 |
-| `SHELLSTRAINS` | 4 |
 
-Warped CQUAD4 geometry is the main shell defect left. vibestran's CQUAD4 is
-a flat element projected onto the mean plane without a warping correction:
-the MacNeal twisted beam (`S30 mitc4 macneal twisted beam*`) is 51-61% too
-stiff, and on the `mitc4+ diamond cylinder` decks (every element warped
-10 degrees) grid 106 TY is 8.5% off (3% tolerance). Those two TY records
-passed before the frame moved to the mean plane, but only because the
-G1-corner plane happened to suit that mesh; the old frame depended on
-which corner was G1. A rigid-offset (MacNeal) warping correction was tried
-and made the twisted beam far too flexible, so warped shells need a proper
-formulation rather than a patch.
+The count rose against the pre-rewrite runs because the MAT2/MAT8, PCOMP
+and warped-shell decks now solve instead of stopping at a formulation gate.
+The shell records fall into these groups:
 
-The `SHELLSTRAINS` records are `S30 mitc3 strain` (transverse shear strain
-of CTRIA3, which is a Kirchhoff DKT element and reports zero) and `S30
-mitc4 thermal strain free rectangle cylinder`. That deck is free thermal
-expansion of a faceted cylinder (uniform dT = 100, statically determinate
-supports); now that its thermal load is applied, the radial TZ is 36% off
-and a symmetry-plane TX is non-zero (0.18), so shell thermal loading on
-curved facet meshes needs investigation. Its two TX records passed before
-only because no load was applied.
+- **MYSTRAN element responses at tight tolerance.** Single-element and
+  coarse-mesh decks (`quad4 mitc4 flat`, `quad4 mitc4+ twisted`, `shell
+  stress components *`, `shell force per length components *`, `mitc4
+  strain`, `MITC4+ corner stress order`, the `thermal stress linear
+  temperature*` decks) compare against MYSTRAN's own element to 2e-5% or
+  similar. A different, converging formulation cannot match these; the
+  references are not exact solutions. Corner values are BILIN
+  extrapolations from the 2x2 points.
+- **Drilling rotations.** `K6ROT`, `K6ROT MITC4+`, `Raasch hook K6ROT=10`,
+  `AUTOSPC reaction forces`, `Shell pinned support multiple nodes`,
+  `node-surface coupling shell rotation Z` and several `RZ` bulk records
+  encode MYSTRAN's K6ROT drilling spring. vibestran's shells carry only a
+  small drill stabilisation (like Nastran) and ignore `PARAM,K6ROT`.
+- **Roundoff against all-zero references** (suite issue 2): e.g. `shell
+  element force`, `shell gravity`, `tri3 quad4`, `shell laminate coupling`,
+  `tiny principal stress and strain angle bug` (errors 1e-23 to 5e-9).
+- **Very thick twisted plate.** `NAS S30 twisted plate mit4+` (t/L = 0.6,
+  in-plane tension, corner TZ) converges to -2.36e-4; an EAS CHEXA8 model
+  of the same body converges to about -1.75e-4 and MYSTRAN to -1.89e-4.
+  The shell error falls as t^2 (3.7% at t/L = 0.2, 0.17% at 0.06); see
+  `SHELL_BENCHMARKS.md`.
+- **Reference conventions.** `gravity SNORM` SPCFORCES TY is a support
+  split of -5759.93/-5760.07 (sum exact) against 0.001%. The hemisphere
+  and diamond-cylinder records are within a few percent of decks whose
+  references are MYSTRAN's coarse-mesh values.
 
-Of the `SHELLFORCES` records, the CTRIA3 transverse shear ones expect a
-non-zero Q where the DKT element reports zero, the quad4 corner QX ones are
-roundoff (8.7e-15) against an all-zero reference with zero tolerance (see
-suite issue 2), and the rest belong to the MAT8 orthotropic thermal deck,
-which stops at a formulation gate.
+`S30 mitc4 thermal strain free rectangle/diamond cylinder` remain: the
+benchmark faceted ring is stress-free to roundoff, but these decks'
+statically determinate supports on a faceted cylinder leave TX/TZ records
+of 0.04-0.18 against zero references; not yet triaged in detail.
 
-Element and constraint incidence overlaps when a deck contains multiple cards:
+Element and constraint incidence overlaps when a deck contains multiple
+cards: CQUAD4 86 decks, CBAR 81, CTRIA3 31, CHEXA 25, RBE3 19, RBE2 16,
+CBUSH 14, PCOMP 12, CONM2 12, CROD 8, CQUAD8 5, CTETRA 5, CPENTA 4.
 
-| Card | Decks |
-|---|---:|
-| `CBAR` | 73 |
-| `CQUAD4` | 51 |
-| `CHEXA` | 25 |
-| `RBE3` | 19 |
-| `CTRIA3` | 18 |
-| `RBE2` | 15 |
-| `CBUSH` | 14 |
-| `CONM2` | 10 |
-| `CROD` | 8 |
-| `CTETRA` | 5 |
-| `CPENTA` | 4 |
-| `CQUAD8` | 3 |
-
-The CBAR count rose because the bar benchmark decks now parse and solve.
-Their remaining mismatches are mostly not in the bar element itself:
+The bar benchmark decks' remaining mismatches are mostly not in the bar
+element itself:
 
 - Benchmark bulk comparisons (`bar_*`, `SB-*`, `*-ALL-ELEM-*`) compare the
-  whole F06, including blocks vibestran does not write (bar element forces,
-  OLOAD, GPFORCE) or writes in a different layout (the bar stress table has no
-  SA-Max/SA-Min/M.S. columns). `bar_01` and `bar_05` displacements match
-  MYSTRAN to all printed digits.
+  whole F06, including blocks vibestran does not write (OLOAD, GPFORCE) or
+  writes in a different layout (the bar stress table has no
+  SA-Max/SA-Min/M.S. columns).
 - `V30 beam released dof *` modal decks compare a CBAR pin flag against an
   equivalent MPC hinge. The identity is exact only when rotations are
   massless (Nastran's default lumped mass). vibestran deliberately defaults
   to consistent mass, so the two models differ at the discretization level
   (0.02-0.2% in frequency, up to ~1% for an axial release). With
   `PARAM,COUPMASS,-1` added, vibestran reproduces MYSTRAN's `released dof
-  y-n` frequencies exactly and every pair matches; the decks do not set it.
+  y-n` frequencies exactly; the decks do not set it.
 
-Current investigation priorities are constraint coordinate systems, remaining
-RBE2/RBE3 cases, shell material axes and recovery, solid recovery, and modal
-mode matching. Unsupported cards present in a bulk-comparison deck must be
-separated from genuine numerical defects before changing solver mathematics or
-tolerances.
+Unsupported cards present in a bulk-comparison deck must be separated from
+genuine numerical defects before changing solver mathematics or tolerances.
 
 ### Solver Model Errors
 
-There are 294 records across 28 decks:
+There are 6 records across 2 decks:
 
 | Current cause | Decks | Disposition |
 |---|---:|---|
-| MAT2/MAT8 used by a formulation that currently requires MAT1 | 17 | Requires orthotropic/anisotropic constitutive, orientation, thermal, and recovery support |
-| CQUAD4 warp exceeds the 30 degree validity threshold | 10 | Requires a true warped-shell formulation rather than bypassing the gate |
-| Empty stiffness matrix (no free DOFs) | 1 | Deck-specific; not yet triaged |
+| CQUAD4 interior angle 170.2 deg > `MAXANGLE` 170 (strict quality gate) | 1 | `S30 mitc4 reaction moment complex shape`; was blocked by the warp gate before. Nastran rejects only concave elements; consider making the interior-angle check a warning like warp |
+| Empty stiffness matrix (no free DOFs) | 1 | `celas1_stress_force`; deck-specific, not yet triaged |
 
-Nine of the MAT8 decks reached this gate once case-control `TEMPERATURE = n`
-was accepted (they were `unsupported_input` before).
-
-Unused entities, coincident nodes, aspect ratio, and taper are warnings. Fatal
-negative/inverted geometry checks remain enabled. Coincident nodes are not
-merged because separate coupled substructures can intentionally share a
-position.
+Unused entities, coincident nodes, aspect ratio, taper and warp are
+warnings. Fatal negative/inverted geometry checks remain enabled.
+Coincident nodes are not merged because separate coupled substructures can
+intentionally share a position.
 
 ### Input Parse Errors
 
@@ -382,19 +368,16 @@ The goal is feature compatibility with correct, modern formulations, not
 numerical agreement with MYSTRAN; the suite's tolerances and some expected
 values encode MYSTRAN behaviour and are not a correctness oracle.
 
-1. Warped CQUAD4 formulation (twisted beam 51-61% too stiff; diamond
-   cylinder), free thermal expansion of faceted shells (rectangle
-   cylinder), MAT8/MAT2 shell materials (17 decks), modal
-   GPFORCE (inertia-force rows; 34 decks request GPFORCE in SOL 103), and a
-   CTRIA3 transverse shear recovery (MITC3-style).
-   Solid stress/strain output is in basic; PSOLID CORDM (MYSTRAN's
-   STR_CID = -2 material system for solids) is parsed but not yet applied.
-2. CROD/PROD and CQUAD8.
-3. Triage the SPCFORCES `numerical_mismatch` decks (RBE3 node-surface
-   coupling and MITC4+ reaction decks) and MPC force output.
-4. Implement 15-node CPENTA and partial PBUSH parsing only with their required
-   mechanics; keep MAT2/MAT8 and severely warped CQUAD4 decks explicitly
-   unsupported until the corresponding formulations are implemented.
+1. PCOMP ply stress/strain output (`COMPOSITESTRESSES`, 24 records) and
+   CQUAD8/CTRIA6 (MITC9/MITC6-type elements; CQUAD8 in 41 decks).
+2. CROD/PROD, CHEXA20, modal GPFORCE (inertia-force rows; 34 decks request
+   GPFORCE in SOL 103). Solid stress/strain output is in basic; PSOLID CORDM
+   is parsed but not yet applied.
+3. Triage the faceted-cylinder free-thermal decks and the SPCFORCES
+   `numerical_mismatch` decks (RBE3 node-surface coupling, MITC4+ reaction
+   decks); decide on the strict interior-angle gate.
+4. Implement 15-node CPENTA and partial PBUSH parsing only with their
+   required mechanics.
 
 Features vibestran supports that no deck exercises are tracked in
 `validation_suite_gaps.md`.
@@ -543,10 +526,20 @@ most recent entry.
   corner stress order" (single elements under a corner point load) and the
   Raasch hook with K6ROT=10 and two drill-rotation (RZ) records encode
   MYSTRAN's element behaviour and its K6ROT drilling spring.  Full triage
-  in the shell-rewrite commits; this body is rewritten after phase 4.
+  in the shell-rewrite commits.
 - **CTRIA3 rewritten as MITC3+ (2,096 -> 1,983).** 125 records fixed
   (MAT8/PCOMP triangle decks now run; Reissner-Mindlin transverse shear;
   curved and thin triangles no longer lock).  12 new records are roundoff
   against all-zero references plus the RBE3 10 flake.  MAT8/PCOMP decks
   that now run expose `COMPOSITESTRESSES` (ply stress output, not yet
   written; 2 decks).
+- **Shell rewrite completed (1,983 -> 1,929).** The old CQUAD4/CTRIA3 and
+  the QUAD4TYP/SHELLFORM switch are gone (decks that selected the old
+  element now use the new ones: 48 records fixed, spatial isotropy,
+  twisted beam, hemisphere SNORM decks). SNORM cards are applied as grid
+  directors, with the thickness kept normal to the element. Both elements
+  now carry the first-order through-thickness metric and volume factor,
+  which fixed `SNORM membrane bending coupling` (7 records) and cut the
+  thick (t/L = 0.6) twisted-plate error against a solid model from 114% to
+  35%. Warp is a warning. No new failures apart from
+  the RBE3 10 flake. Body rewritten for the new elements.

@@ -376,8 +376,6 @@ solver_sources = files(
   'src/core/mpc_handler.cpp',
   # Elements
   'src/elements/element_base.cpp',
-  'src/elements/cquad4.cpp',
-  'src/elements/ctria3.cpp',
   'src/elements/shell_section.cpp',
   'src/elements/shell_quad4.cpp',
   'src/elements/shell_directors.cpp',

@@ -10,6 +10,10 @@ namespace vibestran {
 
 namespace {
 
+/// Smallest accepted cosine between a SNORM and the element normal (about
+/// 89.4 degrees, the limit MYSTRAN applies).
+constexpr double kMinSnormCosine = 0.01;
+
 bool is_shell(ElementType t) {
   return t == ElementType::CQUAD4 || t == ElementType::CTRIA3;
 }
@@ -32,6 +36,38 @@ std::shared_ptr<const Model::ShellAdjacency> adjacency(const Model &model) {
     }
     return adj;
   });
+}
+
+/// SNORM normal in basic, unit length, sign-aligned with the element's own
+/// corner normal.
+Eigen::Vector3d snorm_director(const Model &model, const ElementData &elem,
+                               const Snorm &sn, const Eigen::Vector3d &own) {
+  Eigen::Vector3d n(sn.n.x, sn.n.y, sn.n.z);
+  if (sn.cid.value != 0) {
+    const auto cs = model.coord_systems.find(sn.cid);
+    if (cs == model.coord_systems.end())
+      throw SolverError(std::format("SNORM for grid {}: coordinate system {} is not "
+                                    "defined",
+                                    sn.grid.value, sn.cid.value));
+    const Mat3 R = rotation_matrix(cs->second, model.node(sn.grid).position);
+    const Vec3 b = apply_rotation(R, sn.n);
+    n = {b.x, b.y, b.z};
+  }
+  n.normalize();
+  double c = n.dot(own);
+  if (c < 0.0) { // the element is numbered the other way round
+    n = -n;
+    c = -c;
+  }
+  // The director carries the thickness t / (n . V); a normal nearly in the
+  // element's plane is not a usable director.
+  if (c < kMinSnormCosine)
+    throw SolverError(std::format(
+        "Shell element {}: SNORM at grid {} is {:.2f} deg from the element normal "
+        "(at most {:.2f} deg is allowed)",
+        elem.id.value, sn.grid.value, std::acos(c) * 180.0 / std::numbers::pi,
+        std::acos(kMinSnormCosine) * 180.0 / std::numbers::pi));
+  return n;
 }
 
 } // namespace
@@ -82,8 +118,11 @@ Eigen::Vector3d shell_corner_normal(const Model &model, const ElementData &elem,
 
 Eigen::Vector3d shell_grid_director(const Model &model, const ElementData &elem,
                                     int corner, const Eigen::Vector3d &own) {
+  const NodeId grid = elem.nodes[static_cast<std::size_t>(corner)];
+  if (const auto sn = model.snorms.find(grid); sn != model.snorms.end())
+    return snorm_director(model, elem, sn->second, own);
   const auto adj = adjacency(model);
-  const auto it = adj->find(elem.nodes[static_cast<std::size_t>(corner)]);
+  const auto it = adj->find(grid);
   if (it == adj->end())
     return own;
   const double cos_fold = std::cos(shell_fold_angle(model));

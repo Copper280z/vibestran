@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 #include "io/bdf_parser.hpp"
+#include "elements/element_factory.hpp"
 #include "core/logger.hpp"
 #include "core/model.hpp"
 #include <filesystem>
@@ -1173,37 +1174,28 @@ TEST(BdfParser, Ctetra4NodesStillCtetra4) {
     ASSERT_EQ(m.elements[0].nodes.size(), 4u);
 }
 
-TEST(BdfParser, ParamShellformMindlin) {
-    // PARAM,SHELLFORM,MINDLIN → all PShell::shell_form == ShellFormulation::MINDLIN
-    const std::string bdf = R"(
+TEST(BdfParser, ShellFormulationParamsAreKeptButDoNotChangeTheShell) {
+    // PARAM,SHELLFORM (vibestran's former switch) and MYSTRAN's QUAD4TYP are
+    // accepted and recorded, but every CQUAD4 is MITC4+/D: two decks that
+    // differ only in these PARAMs give the same element stiffness.
+    const std::string base = R"(
 BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,1.,0.,0.
+GRID,3,,1.2,1.,0.1
+GRID,4,,0.,1.,0.
+CQUAD4,1,1,1,2,3,4
 MAT1,1,2.0E7,,0.3
-PSHELL,1,1,0.1
-PSHELL,2,1,0.2
-PARAM,SHELLFORM,MINDLIN
-ENDDATA
+PSHELL,1,1,0.1,1,,1
 )";
-    Model m = BdfParser::parse_string(bdf);
-    ASSERT_EQ(m.properties.size(), 2u);
-    const PShell& ps1 = std::get<PShell>(m.properties.at(PropertyId{1}));
-    const PShell& ps2 = std::get<PShell>(m.properties.at(PropertyId{2}));
-    EXPECT_EQ(ps1.shell_form, ShellFormulation::MINDLIN);
-    EXPECT_EQ(ps2.shell_form, ShellFormulation::MINDLIN);
-    EXPECT_EQ(m.params.at("SHELLFORM"), "MINDLIN");
-}
-
-TEST(BdfParser, DefaultShellformMitc4) {
-    // Without any PARAM → PShell::shell_form defaults to ShellFormulation::MITC4
-    const std::string bdf = R"(
-BEGIN BULK
-MAT1,1,2.0E7,,0.3
-PSHELL,1,1,0.1
-ENDDATA
-)";
-    Model m = BdfParser::parse_string(bdf);
-    ASSERT_EQ(m.properties.size(), 1u);
-    const PShell& ps = std::get<PShell>(m.properties.at(PropertyId{1}));
-    EXPECT_EQ(ps.shell_form, ShellFormulation::MITC4);
+    const Model plain = BdfParser::parse_string(base + "ENDDATA\n");
+    const Model tagged = BdfParser::parse_string(
+        base + "PARAM,SHELLFORM,MINDLIN\nPARAM,QUAD4TYP,MITC4\nENDDATA\n");
+    EXPECT_EQ(tagged.params.at("SHELLFORM"), "MINDLIN");
+    EXPECT_EQ(tagged.params.at("QUAD4TYP"), "MITC4");
+    const auto k1 = make_element(plain.elements[0], plain)->stiffness_matrix();
+    const auto k2 = make_element(tagged.elements[0], tagged)->stiffness_matrix();
+    EXPECT_EQ((k1 - k2).cwiseAbs().maxCoeff(), 0.0);
 }
 
 TEST(BdfParser, PshellContinuationAndShellOrientationFields) {
@@ -1640,4 +1632,24 @@ ENDDATA
     ASSERT_EQ(m.tempd.size(), 2u);
     EXPECT_NEAR(m.tempd.at(1), 20.0, 1e-12);
     EXPECT_NEAR(m.tempd.at(2), 60.0, 1e-12);
+}
+
+TEST(BdfParser, SnormKeepsGridCoordinateSystemAndNormal) {
+    const Model m = BdfParser::parse_string(R"(
+BEGIN BULK
+CORD2R,3,0,0.,0.,0.,0.,0.,1.,1.,0.,0.
+GRID,7,,1.,0.,0.
+SNORM,7,3,0.5,-1.,2.
+ENDDATA
+)");
+    ASSERT_EQ(m.snorms.size(), 1u);
+    const Snorm &sn = m.snorms.at(NodeId{7});
+    EXPECT_EQ(sn.grid.value, 7);
+    EXPECT_EQ(sn.cid.value, 3);
+    EXPECT_DOUBLE_EQ(sn.n.x, 0.5);
+    EXPECT_DOUBLE_EQ(sn.n.y, -1.0);
+    EXPECT_DOUBLE_EQ(sn.n.z, 2.0);
+    EXPECT_THROW((void)BdfParser::parse_string(
+                     "BEGIN BULK\nGRID,7,,1.,0.,0.\nSNORM,7,4,0.,0.,1.\nENDDATA\n"),
+                 ParseError);
 }

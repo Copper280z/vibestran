@@ -932,6 +932,8 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_grdset(ctx, card.fields);
       else if (kw == "BAROR")
         process_baror(ctx, card.fields);
+      else if (kw == "SNORM")
+        process_snorm(ctx, card.fields);
       else if (kw == "MAT1")
         process_mat1(ctx, card.fields);
       else if (kw == "MAT2")
@@ -1082,19 +1084,25 @@ Model BdfParser::parse_stream(std::istream &in) {
       sc.t_ref = ctx.tempd_map.at(lookup_sid);
   }
 
-  // Post-parse: apply PARAM,SHELLFORM to all PShell properties
-  {
-    auto it = ctx.model.params.find("SHELLFORM");
-    if (it != ctx.model.params.end()) {
-      std::string val = it->second;
-      std::transform(val.begin(), val.end(), val.begin(), ::toupper);
-      ShellFormulation sf = (val == "MINDLIN") ? ShellFormulation::MINDLIN
-                                                : ShellFormulation::MITC4;
-      for (auto &[pid, prop] : ctx.model.properties) {
-        if (std::holds_alternative<PShell>(prop))
-          std::get<PShell>(prop).shell_form = sf;
-      }
-    }
+
+  // Shell formulation selectors from other codes are accepted and ignored:
+  // CQUAD4 is always MITC4+/D and CTRIA3 MITC3+.  K6ROT (Nastran's drilling
+  // spring) is likewise ignored: drill rotations are stabilised by the
+  // elements themselves.
+  for (const char *name : {"SHELLFORM", "QUAD4TYP", "K6ROT"})
+    if (ctx.model.params.contains(name))
+      log_info(std::format("PARAM,{} is ignored: CQUAD4 uses MITC4+/D and CTRIA3 "
+                           "MITC3+ with their own drill stabilisation",
+                           name));
+
+  // SNORM grids and coordinate systems must exist.
+  for (const auto &[gid, sn] : ctx.model.snorms) {
+    if (!ctx.model.nodes.contains(gid))
+      throw ParseError(std::format("SNORM references undefined grid {}", gid.value));
+    if (sn.cid.value != 0 && !ctx.model.coord_systems.contains(sn.cid))
+      throw ParseError(std::format("SNORM for grid {} references undefined coordinate "
+                                   "system {}",
+                                   gid.value, sn.cid.value));
   }
 
   // Post-parse: GRDSET defaults for blank GRID CP/CD/PS fields (before
@@ -1701,6 +1709,27 @@ void BdfParser::process_baror(ParseContext &ctx,
   reject_nonblank_fields(f, 9, ctx.line_num, "BAROR",
                          "has data beyond the OFFT field");
   ctx.baror = d;
+}
+
+void BdfParser::process_snorm(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  // SNORM, GID, CID, N1, N2, N3
+  auto field = [&](const size_t i) {
+    return (f.size() > i) ? f[i] : std::string{};
+  };
+  Snorm sn;
+  sn.grid = NodeId(parse_int(field(1), ctx.line_num));
+  sn.cid = CoordId(field(2).empty() ? 0 : parse_int(field(2), ctx.line_num));
+  sn.n = Vec3{field(3).empty() ? 0.0 : parse_double(field(3), ctx.line_num),
+              field(4).empty() ? 0.0 : parse_double(field(4), ctx.line_num),
+              field(5).empty() ? 0.0 : parse_double(field(5), ctx.line_num)};
+  if (!(sn.n.x * sn.n.x + sn.n.y * sn.n.y + sn.n.z * sn.n.z > 0.0))
+    throw ParseError(std::format("Line {}: SNORM for grid {} has a zero normal vector",
+                                 ctx.line_num, sn.grid.value));
+  reject_nonblank_fields(f, 6, ctx.line_num, "SNORM", "has data beyond N3");
+  if (!ctx.model.snorms.emplace(sn.grid, sn).second)
+    throw ParseError(std::format("Line {}: duplicate SNORM for grid {}", ctx.line_num,
+                                 sn.grid.value));
 }
 
 void BdfParser::process_mat1(ParseContext &ctx,

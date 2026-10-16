@@ -49,7 +49,8 @@ const std::array<QuadPt, 7> &quadrature() {
 struct Geometry {
   std::array<V3, 3> x;
   std::array<V3, 3> V;
-  std::array<double, 3> a{};
+  std::array<double, 3> a{};  // director lengths (t, or t / (V . n) at a SNORM)
+  std::array<double, 3> t{};  // shell thicknesses (normal to the element)
   V3 W4;          // a4 V4 = (a1 V1 + a2 V2 + a3 V3) / 3
   V3 b1, b2;      // bubble rotation axes, orthogonal to W4
   V3 n, e1;       // element normal and output x axis
@@ -84,8 +85,14 @@ Geometry build_geometry(const ElementData &data, const Model &model) {
     if (!(t > 0.0))
       throw SolverError(std::format("{} {}: non-positive thickness at grid {}", kName,
                                     data.id.value, data.nodes[static_cast<size_t>(i)].value));
-    g.a[static_cast<size_t>(i)] = t;
-    g.W4 += t * g.V[static_cast<size_t>(i)] / 3.0;
+    // At a SNORM the thickness stays normal to the element (see
+    // shell_quad4.cpp); averaged directors keep length t.
+    g.t[static_cast<size_t>(i)] = t;
+    g.a[static_cast<size_t>(i)] =
+        model.snorms.contains(data.nodes[static_cast<size_t>(i)])
+            ? t / g.V[static_cast<size_t>(i)].dot(g.n)
+            : t;
+    g.W4 += g.a[static_cast<size_t>(i)] * g.V[static_cast<size_t>(i)] / 3.0;
   }
   const V3 w4 = g.W4.normalized();
   g.b1 = (g.e1 - g.e1.dot(w4) * w4).normalized();
@@ -161,6 +168,7 @@ struct PointB {
   B2 Bg{B2::Zero()};
   LocalFrame frame;
   double thickness{0.0};
+  double m{0.0}; // volume factor dV = (1 + m z) dA dz (m = 2H)
 };
 
 PointB point_b(const Geometry &g, double r, double s) {
@@ -169,7 +177,7 @@ PointB point_b(const Geometry &g, double r, double s) {
   const BubbleFns b = bubble(r, s);
   double thick = 0.0;
   for (int k = 0; k < 3; ++k)
-    thick += h[static_cast<size_t>(k)] * g.a[static_cast<size_t>(k)];
+    thick += h[static_cast<size_t>(k)] * g.t[static_cast<size_t>(k)];
   p.thickness = thick;
   const V3 xb = xb_at(g, h), xb_r = xb_at(g, kHr), xb_s = xb_at(g, kHs);
 
@@ -203,10 +211,24 @@ PointB point_b(const Geometry &g, double r, double s) {
   p.Be.row(0) = cartesian(p.frame, 0, 0, mrr, mss, mrs, ert, est);
   p.Be.row(1) = cartesian(p.frame, 1, 1, mrr, mss, mrs, ert, est);
   p.Be.row(2) = 2.0 * cartesian(p.frame, 0, 1, mrr, mss, mrs, ert, est);
+  // d(eps)/dz = (2 / t) d(eps)/dt (see shell_quad4.cpp); Nastran kappa is
+  // its negative.
   const double k = -2.0 / thick;
-  p.Bk.row(0) = k * cartesian(p.frame, 0, 0, brr, bss, brs, Z, Z);
-  p.Bk.row(1) = k * cartesian(p.frame, 1, 1, brr, bss, brs, Z, Z);
-  p.Bk.row(2) = 2.0 * k * cartesian(p.frame, 0, 1, brr, bss, brs, Z, Z);
+  // d(eps_ab)/dt: the first-order covariant strain plus the mid-surface
+  // strain carried through the metric's change across the thickness (the
+  // z / R terms of a curved shell; zero on a flat element with normal
+  // directors), as in shell_quad4.cpp.
+  const MetricRate rate = metric_rate(p.frame, g.gr, g.gs, xb, xb_r, xb_s);
+  p.m = 2.0 / thick * rate.trace;
+  const auto cart_t = [&](int a, int b) -> Row {
+    const Eigen::Matrix3d &C = p.frame.C;
+    return cartesian_pair(C, C, a, b, brr, bss, brs, Z, Z) +
+           cartesian_pair(rate.C1, C, a, b, mrr, mss, mrs, ert, est) +
+           cartesian_pair(C, rate.C1, a, b, mrr, mss, mrs, ert, est);
+  };
+  p.Bk.row(0) = k * cart_t(0, 0);
+  p.Bk.row(1) = k * cart_t(1, 1);
+  p.Bk.row(2) = 2.0 * k * cart_t(0, 1);
   p.Bg.row(0) = 2.0 * cartesian(p.frame, 0, 2, mrr, mss, mrs, ert, est);
   p.Bg.row(1) = 2.0 * cartesian(p.frame, 1, 2, mrr, mss, mrs, ert, est);
   return p;
@@ -214,7 +236,8 @@ PointB point_b(const Geometry &g, double r, double s) {
 
 ShellSection section_at(const Geometry &g, const PointB &p) {
   return point_section(g.section, g.scale_thickness, p.thickness, g.material_dir,
-                       p.frame);
+                       p.frame)
+      .with_volume_factor(p.m);
 }
 
 /// Thermal resultants per degree, with the curved-geometry correction of the
@@ -345,7 +368,11 @@ LocalKe ShellTria3::mass_matrix() const {
     Eigen::Matrix<double, 3, 18> Nb = Eigen::Matrix<double, 3, 18>::Zero();
     for (int k = 0; k < 3; ++k) {
       Nm.block<3, 3>(0, 6 * k) = h[static_cast<size_t>(k)] * Eigen::Matrix3d::Identity();
-      Nb.block<3, 3>(0, 6 * k + 3) = -h[static_cast<size_t>(k)] * skew(g.V[static_cast<size_t>(k)]);
+      // Per unit normal distance z: a point at height z lies z a/t along V.
+      Nb.block<3, 3>(0, 6 * k + 3) = -h[static_cast<size_t>(k)] *
+                                     g.a[static_cast<size_t>(k)] /
+                                     g.t[static_cast<size_t>(k)] *
+                                     skew(g.V[static_cast<size_t>(k)]);
     }
     M += q.w * p.frame.dA *
          (sec.mass_per_area * Nm.transpose() * Nm +

@@ -71,7 +71,8 @@ struct DrillEdge {
 struct Geometry {
   std::array<V3, 4> x;   // reference-surface grid positions (offset applied)
   std::array<V3, 4> V;   // directors
-  std::array<double, 4> a{};
+  std::array<double, 4> a{};  // director lengths (t, or t / (V . n) at a SNORM)
+  std::array<double, 4> t{};  // shell thicknesses (normal to the surface)
   V3 xr, xs, xd, n;      // characteristic vectors, n = V^D
   V3 mr, ms;             // dual basis of plane P
   V3 e1, e2;             // Nastran element frame (e3 = n)
@@ -145,9 +146,11 @@ Geometry build_geometry(const ElementData &data, const Model &model) {
 
   // Directors: shared grid directors (shell_directors.hpp), seeded with the
   // unit normal of this element's surface at each corner.
+  std::array<double, 4> cos_v{};
   for (int i = 0; i < 4; ++i) {
     const V3 own = unit(g.gr_at(kEta[i]).cross(g.gs_at(kXi[i])), eid, "corner normal");
     g.V[static_cast<size_t>(i)] = shell_grid_director(model, data, i, own);
+    cos_v[static_cast<size_t>(i)] = g.V[static_cast<size_t>(i)].dot(own);
   }
   // Section and thickness.
   g.section = build_shell_section(model, data.pid, eid, "CQUAD4");
@@ -164,7 +167,15 @@ Geometry build_geometry(const ElementData &data, const Model &model) {
     if (!(t > 0.0))
       throw SolverError(std::format("CQUAD4 {}: non-positive thickness at grid {}",
                                     eid.value, data.nodes[static_cast<size_t>(i)].value));
-    g.a[static_cast<size_t>(i)] = t;
+    // A SNORM tilts the director away from the element surface, which is
+    // the shell: the thickness stays normal to it, so the director is
+    // t / (V . n) long.  An averaged director approximates the true surface
+    // normal, along which the thickness is measured, and keeps length t.
+    g.t[static_cast<size_t>(i)] = t;
+    g.a[static_cast<size_t>(i)] =
+        model.snorms.contains(data.nodes[static_cast<size_t>(i)])
+            ? t / cos_v[static_cast<size_t>(i)]
+            : t;
   }
 
   // Material x direction: THETA from the G1-G2 side, or the MCID x axis,
@@ -253,6 +264,7 @@ struct PointB {
   B2 Bg{B2::Zero()}; // transverse shear strain [gxz, gyz]
   double dA{0.0};
   double thickness{0.0};
+  double m{0.0}; // volume factor dV = (1 + m z) dA dz (m = 2H)
   V3 e1, e2, e3;
 };
 
@@ -376,7 +388,7 @@ PointB point_b(const Geometry &g, double r, double s) {
   for (int k = 0; k < 4; ++k) {
     hr[static_cast<size_t>(k)] = hfun_r(k, s);
     hs[static_cast<size_t>(k)] = hfun_s(k, r);
-    thick += hfun(k, r, s) * g.a[static_cast<size_t>(k)];
+    thick += hfun(k, r, s) * g.t[static_cast<size_t>(k)];
   }
   p.thickness = thick;
 
@@ -412,24 +424,55 @@ PointB point_b(const Geometry &g, double r, double s) {
     C(i, 1) = Gi.row(i).dot(p.e2);
     C(i, 2) = Gi.row(i).dot(p.e3);
   }
+  // Through the thickness the base vectors are g_r + t x_b,r and
+  // g_s + t x_b,s, so the contravariant basis changes at first order:
+  // dG^-1/dt = -G^-1 (dG/dt) G^-1.  C1 = dC/dt.
+  Eigen::Matrix3d dG = Eigen::Matrix3d::Zero();
+  dG.col(0) = f.xb_r;
+  dG.col(1) = f.xb_s;
+  const Eigen::Matrix3d dGi = -Gi * dG * Gi;
+  // det G(t) = det G(0) (1 + t tr(G^-1 dG/dt)), z = t thick / 2.
+  p.m = 2.0 / thick * (Gi * dG).trace();
+  Eigen::Matrix3d C1;
+  for (int i = 0; i < 3; ++i) {
+    C1(i, 0) = dGi.row(i).dot(p.e1);
+    C1(i, 1) = dGi.row(i).dot(p.e2);
+    C1(i, 2) = dGi.row(i).dot(p.e3);
+  }
+  // sum_ij P(i, a) Q(j, b) E_ij for the symmetric covariant tensor E with
+  // components (rr, ss, rs, rt, st) and E_tt = 0.
+  auto pair = [](const Eigen::Matrix3d &P, const Eigen::Matrix3d &Q, int a, int b,
+                 const Row &rr, const Row &ss, const Row &rs, const Row &rt,
+                 const Row &st) -> Row {
+    return P(0, a) * Q(0, b) * rr + P(1, a) * Q(1, b) * ss +
+           (P(0, a) * Q(1, b) + P(1, a) * Q(0, b)) * rs +
+           (P(0, a) * Q(2, b) + P(2, a) * Q(0, b)) * rt +
+           (P(1, a) * Q(2, b) + P(2, a) * Q(1, b)) * st;
+  };
   // Cartesian component eps_ab from covariant rows (rr, ss, rs, rt, st).
   auto cart = [&](int a, int b, const Row &rr, const Row &ss, const Row &rs,
                   const Row &rt, const Row &st) -> Row {
-    return C(0, a) * C(0, b) * rr + C(1, a) * C(1, b) * ss +
-           (C(0, a) * C(1, b) + C(1, a) * C(0, b)) * rs +
-           (C(0, a) * C(2, b) + C(2, a) * C(0, b)) * rt +
-           (C(1, a) * C(2, b) + C(2, a) * C(1, b)) * st;
+    return pair(C, C, a, b, rr, ss, rs, rt, st);
+  };
+  // d(eps_ab)/dt: the first-order covariant strain plus the mid-surface
+  // strain carried through the changing metric (the z / R terms of a
+  // curved or twisted shell; zero on a flat element).
+  auto cart_t = [&](int a, int b, const Row &rr, const Row &ss, const Row &rs) -> Row {
+    return pair(C, C, a, b, rr, ss, rs, Row::Zero(), Row::Zero()) +
+           pair(C1, C, a, b, em[0], em[1], em[2], ert, est) +
+           pair(C, C1, a, b, em[0], em[1], em[2], ert, est);
   };
   const Row Z = Row::Zero();
   p.Be.row(0) = cart(0, 0, em[0], em[1], em[2], ert, est);
   p.Be.row(1) = cart(1, 1, em[0], em[1], em[2], ert, est);
   p.Be.row(2) = 2.0 * cart(0, 1, em[0], em[1], em[2], ert, est);
-  // Physical strain gradient d(eps)/dz = (2 / a) d(eps)/dt; Nastran kappa
-  // is its negative.
+  // Physical strain gradient d(eps)/dz = (2 / t) d(eps)/dt, t the normal
+  // thickness (x_b . e3 = t/2, also at a SNORM where a = t / (V . n));
+  // Nastran kappa is its negative.
   const double k = -2.0 / thick;
-  p.Bk.row(0) = k * cart(0, 0, b_rr, b_ss, b_rs, Z, Z);
-  p.Bk.row(1) = k * cart(1, 1, b_rr, b_ss, b_rs, Z, Z);
-  p.Bk.row(2) = 2.0 * k * cart(0, 1, b_rr, b_ss, b_rs, Z, Z);
+  p.Bk.row(0) = k * cart_t(0, 0, b_rr, b_ss, b_rs);
+  p.Bk.row(1) = k * cart_t(1, 1, b_rr, b_ss, b_rs);
+  p.Bk.row(2) = 2.0 * k * cart_t(0, 1, b_rr, b_ss, b_rs);
   p.Bg.row(0) = 2.0 * cart(0, 2, em[0], em[1], em[2], ert, est);
   p.Bg.row(1) = 2.0 * cart(1, 2, em[0], em[1], em[2], ert, est);
 
@@ -480,7 +523,7 @@ ShellSection point_section(const Geometry &g, const PointB &p) {
                         : g.section;
   V3 m = g.material_dir - g.material_dir.dot(p.e3) * p.e3;
   const double phi = std::atan2(m.dot(p.e2), m.dot(p.e1));
-  return base.rotated(phi);
+  return base.rotated(phi).with_volume_factor(p.m);
 }
 
 /// Rigid offset from the grids to the reference surface: u_ref = W u_grid.
@@ -581,8 +624,11 @@ LocalKe ShellQuad4::mass_matrix() const {
       for (int k = 0; k < 4; ++k) {
         const double h = hfun(k, r, s);
         Nm.block<3, 3>(0, 6 * k) = h * Eigen::Matrix3d::Identity();
-        // theta x V = -skew(V) theta
-        Nb.block<3, 3>(0, 6 * k + 3) = -h * skew(g.V[static_cast<size_t>(k)]);
+        // theta x V = -skew(V) theta, per unit normal distance z (a point
+        // at height z lies z a/t along the director).
+        Nb.block<3, 3>(0, 6 * k + 3) =
+            -h * g.a[static_cast<size_t>(k)] / g.t[static_cast<size_t>(k)] *
+            skew(g.V[static_cast<size_t>(k)]);
       }
       M += p.dA * (sec.mass_per_area * Nm.transpose() * Nm +
                    sec.mass_first_moment * (Nm.transpose() * Nb + Nb.transpose() * Nm) +

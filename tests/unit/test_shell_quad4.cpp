@@ -511,3 +511,205 @@ TEST(ShellDirectors, SmoothJunctionsShareTheAverageNormalAndFoldsDoNot) {
   m.params["SNORM"] = "5.0";
   EXPECT_NEAR((shell_grid_director(m, m.elements[0], 1, n1) - n1).norm(), 0.0, 1e-12);
 }
+
+TEST(ShellQuad4, RecoveryUsesEachSectionMaterialForItsRole) {
+  // Membrane MID1 (E = 10), bending MID2 (E = 120, 12I/T^3 = 2), shear MID3
+  // (E = 30), nu = 0, t = 1, unit square.  u_x = x gives eps_xx = 1 and
+  // N_xx / t = 10.  theta_y = -x (so w_x = x, w = x^2 / 2) gives the Nastran
+  // curvature kappa_xx = +1 and M_xx = 120 * 2 / 12 = +20 (positive moment:
+  // the -z fibre in tension).
+  Model m = quad_model({{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}}, 1.0, 10.0, 0.0);
+  for (auto [id, E] : {std::pair{2, 120.0}, std::pair{3, 30.0}}) {
+    Mat1 mat;
+    mat.id = MaterialId{id};
+    mat.E = E;
+    mat.G = E / 2.0;
+    m.materials[mat.id] = mat;
+  }
+  auto &ps = std::get<PShell>(m.properties.at(PropertyId{1}));
+  ps.mid2 = MaterialId{2};
+  ps.mid3 = MaterialId{3};
+  ps.twelveI_t3 = 2.0;
+  Eigen::VectorXd u = Eigen::VectorXd::Zero(24);
+  for (int i = 0; i < 4; ++i) {
+    const double x = m.node(NodeId{i + 1}).position.x;
+    u(6 * i) = x;         // u_x = x
+    u(6 * i + 2) = 0.5 * x * x; // w = x^2 / 2
+    u(6 * i + 4) = -x;    // theta_y = -w_x
+  }
+  const auto r = ShellQuad4(quad_data(), m).recover(std::span<const double>(u.data(), 24), {}, 0.0);
+  EXPECT_NEAR(r[0].membrane_strain(0), 1.0, 1e-12);
+  EXPECT_NEAR(r[0].membrane_resultant(0), 10.0, 1e-10);
+  EXPECT_NEAR(r[0].membrane_resultant(1), 0.0, 1e-10);
+  EXPECT_NEAR(r[0].curvature(0), 1.0, 1e-12);
+  EXPECT_NEAR(r[0].bending_moment(0), 20.0, 1e-10);
+  EXPECT_NEAR(r[0].bending_moment(1), 0.0, 1e-10);
+  EXPECT_NEAR(r[0].transverse_shear(0), 0.0, 1e-10);
+}
+
+TEST(ShellQuad4, OutputFrameBisectsTheDiagonals) {
+  // A uniform basic strain on a rotated, skewed quad is reported as the
+  // tensor rotated into Nastran's frame (x ~ d13/|d13| - d24/|d24|), and a
+  // cyclic renumbering of the corners rotates the result by 90 degrees.
+  const std::array<std::array<double, 2>, 4> base{
+      {{0.0, 0.0}, {0.04, 0.02}, {0.08, 0.08}, {0.0, 0.12}}};
+  const double rot = 0.3, a = 1.0e-3, b = 0.4e-3, c = 0.7e-3, d = -0.2e-3;
+  const double ex = a, ey = d, gxy = b + c;
+  auto strain = [&](int shift) {
+    std::array<std::array<double, 3>, 4> p{};
+    for (int n = 0; n < 4; ++n) {
+      const auto &q = base[static_cast<size_t>((n + shift) % 4)];
+      p[static_cast<size_t>(n)] = {std::cos(rot) * q[0] - std::sin(rot) * q[1],
+                                   std::sin(rot) * q[0] + std::cos(rot) * q[1], 0.0};
+    }
+    const Model m = quad_model(p, 1e-3, 1.0e6, 0.25);
+    Eigen::VectorXd u = Eigen::VectorXd::Zero(24);
+    for (int n = 0; n < 4; ++n) {
+      u(6 * n) = a * p[static_cast<size_t>(n)][0] + b * p[static_cast<size_t>(n)][1];
+      u(6 * n + 1) = c * p[static_cast<size_t>(n)][0] + d * p[static_cast<size_t>(n)][1];
+    }
+    const auto r = ShellQuad4(quad_data(), m).recover(std::span<const double>(u.data(), 24), {}, 0.0);
+    auto unit2 = [](double x, double y) {
+      const double l = std::hypot(x, y);
+      return std::array<double, 2>{x / l, y / l};
+    };
+    const auto d13 = unit2(p[2][0] - p[0][0], p[2][1] - p[0][1]);
+    const auto d24 = unit2(p[3][0] - p[1][0], p[3][1] - p[1][1]);
+    const double phi = std::atan2(d13[1] - d24[1], d13[0] - d24[0]);
+    const double cs = std::cos(phi), sn = std::sin(phi);
+    EXPECT_NEAR(r[0].membrane_strain(0), ex * cs * cs + ey * sn * sn + gxy * sn * cs, 1e-12);
+    EXPECT_NEAR(r[0].membrane_strain(1), ex * sn * sn + ey * cs * cs - gxy * sn * cs, 1e-12);
+    EXPECT_NEAR(r[0].membrane_strain(2), 2 * (ey - ex) * sn * cs + gxy * (cs * cs - sn * sn), 1e-12);
+    return r[0].membrane_strain;
+  };
+  const Eigen::Vector3d e0 = strain(0), e1 = strain(1);
+  EXPECT_NEAR(e1(0), e0(1), 1e-12);
+  EXPECT_NEAR(e1(1), e0(0), 1e-12);
+  EXPECT_NEAR(e1(2), -e0(2), 1e-12);
+}
+
+TEST(ShellQuad4, PureTwistEnergyIsExact) {
+  // w = x y (theta_x = w_y = x, theta_y = -w_x = -y): constant twist
+  // kappa_xy = 2 w_xy = 2 and no transverse shear, so the strain energy is
+  // 1/2 D (1 - nu)/2 kappa_xy^2 A with D = E t^3 / (12 (1 - nu^2)).
+  const double E = 1.0e7, nu = 0.3, t = 0.1;
+  const Model m = quad_model({{{0, 0, 0}, {2, 0, 0}, {2, 1.5, 0}, {0, 1.5, 0}}}, t, E, nu);
+  Eigen::VectorXd u = Eigen::VectorXd::Zero(24);
+  for (int i = 0; i < 4; ++i) {
+    const Vec3 &p = m.node(NodeId{i + 1}).position;
+    u(6 * i + 2) = p.x * p.y;
+    u(6 * i + 3) = p.x;
+    u(6 * i + 4) = -p.y;
+  }
+  const Eigen::MatrixXd K = ShellQuad4(quad_data(), m).stiffness_matrix();
+  const double D = E * t * t * t / (12.0 * (1.0 - nu * nu));
+  const double exact = 0.5 * D * (1.0 - nu) / 2.0 * 4.0 * 3.0;
+  EXPECT_NEAR(0.5 * u.dot(K * u), exact, 1e-9 * exact);
+}
+
+TEST(ShellDirectors, SnormReplacesTheDirectorInItsOwnCoordinateSystem) {
+  // SNORM components are in their CID: in a cylindrical system about basic
+  // z, (n_r, n_theta, n_z) = (1, 0, 1) at grid 2 = (1, 0, 0) is basic
+  // (1, 0, 1) / sqrt 2.  The director is sign-aligned with the element
+  // normal (+z here), whatever sign the card gives.  A SNORM within about
+  // 0.6 degrees of the element plane is not a usable director.
+  const auto model = [](const std::string &snorm) {
+    return BdfParser::parse_string("BEGIN BULK\n"
+                                   "CORD2C,5,0,0.,0.,0.,0.,0.,1.,1.,0.,0.\n"
+                                   "GRID,1,,0.,0.,0.\nGRID,2,,1.,0.,0.\n"
+                                   "GRID,3,,1.,1.,0.\nGRID,4,,0.,1.,0.\n"
+                                   "MAT1,1,1.0E7,,0.3\nPSHELL,1,1,0.1\n"
+                                   "CQUAD4,1,1,1,2,3,4\n" +
+                                   snorm + "ENDDATA\n");
+  };
+  const Eigen::Vector3d z(0.0, 0.0, 1.0);
+  const Eigen::Vector3d expected = Eigen::Vector3d(1.0, 0.0, 1.0).normalized();
+  for (const char *card : {"SNORM,2,5,1.,0.,1.\n", "SNORM,2,5,-2.,0.,-2.\n"}) {
+    const Model m = model(card);
+    EXPECT_NEAR((shell_grid_director(m, m.elements[0], 1, z) - expected).norm(), 0.0,
+                1e-12)
+        << card;
+    // Grids without a SNORM keep the averaged (here the element) normal.
+    EXPECT_NEAR((shell_grid_director(m, m.elements[0], 0, z) - z).norm(), 0.0, 1e-12);
+  }
+  const Model flat = model("SNORM,2,0,1.,0.,0.001\n");
+  EXPECT_THROW((void)shell_grid_director(flat, flat.elements[0], 1, z), SolverError);
+  EXPECT_THROW((void)model("SNORM,2,0,0.,0.,1.\nSNORM,2,0,0.,0.,1.\n"), ParseError);
+  EXPECT_THROW((void)model("SNORM,9,0,0.,0.,1.\n"), ParseError);
+  EXPECT_THROW((void)model("SNORM,2,0,0.,0.,0.\n"), ParseError);
+}
+
+TEST(ShellQuad4, TiltedSnormDirectorsKeepRigidBodyMotionAndThinPlateBending) {
+  // SNORM directors tilted 45 degrees, along and across the span.  Rigid
+  // motion stays exact (a material point x_m + s V moves rigidly), and
+  // because the director carries the thickness t / (V . n), the shell
+  // keeps its thickness normal to the surface: the cantilever's tip
+  // deflection is that of the untilted strip (with a director of length t
+  // the 45-degree strip would be cos^-3 = 2.8 times as flexible).  The
+  // fibres tilted across the width stiffen this strip (t / W = 0.1) by 1%,
+  // a thick-section effect that falls as (t / W)^2 (0.01% at t / W = 0.01).
+  {
+    Model m = quad_model(kShapes[0]);
+    for (int g = 1; g <= 4; ++g)
+      m.snorms[NodeId{g}] = Snorm{NodeId{g}, CoordId{0}, Vec3{0.3 * g - 0.6, 1.0, 1.0}};
+    const ShellQuad4 e(quad_data(), m);
+    const Eigen::MatrixXd K = e.stiffness_matrix();
+    EXPECT_EQ(zero_modes(K), 6);
+    for (int k = 0; k < 6; ++k) {
+      Eigen::Vector3d c = Eigen::Vector3d::Zero(), w = Eigen::Vector3d::Zero();
+      (k < 3 ? c(k) : w(k - 3)) = 1.0;
+      EXPECT_LT((K * rigid(m, c, w)).cwiseAbs().maxCoeff(), 1e-9 * K.cwiseAbs().maxCoeff())
+          << "mode " << k;
+    }
+  }
+  const std::string tip = "FORCE,1,21,,0.25,0.,0.,1.\nFORCE,1,42,,0.5,0.,0.,1.\n"
+                          "FORCE,1,63,,0.25,0.,0.,1.\n";
+  const double w0 = strip_disp(run_strip(tip), 42, 2);
+  for (const char *n : {"0.,1.,1.", "1.,0.,1."}) {
+    std::string snorms;
+    for (int g = 1; g <= 63; ++g)
+      snorms += std::format("SNORM,{},0,{}\n", g, n);
+    EXPECT_NEAR(strip_disp(run_strip(tip + snorms), 42, 2) / w0, 1.0, 1.5e-2) << n;
+  }
+}
+
+TEST(ShellQuad4, RadialExpansionOfACylinderBendsTheWallWithoutMoment) {
+  // A ring of 72 facets (R = 10, t = 1) expanded uniformly by w with no
+  // rotation.  The wall's hoop strain at height z is w / (R + z), so the
+  // Nastran curvature is kappa = +w / R^2, and because the volume element
+  // grows as (1 + z / R) the hoop moment vanishes: M = -D kappa_0 + D kappa
+  // with kappa_0 = (1 / R) (w / R).  Both come from the first-order change of
+  // the metric through the thickness; mapping the strain with the
+  // mid-surface basis alone gives kappa = -w / R^2 and M = -D w / R^2.
+  constexpr int kN = 72;
+  constexpr double R = 10.0, L = 1.0, t = 1.0, E = 1.0e7, nu = 0.3, w = 1.0e-3;
+  Model m = quad_model(kShapes[0], t, E, nu);
+  m.nodes.clear();
+  const auto id = [](int i, int j) { return NodeId{1 + (i % kN) + kN * j}; };
+  for (int j = 0; j < 2; ++j)
+    for (int i = 0; i < kN; ++i) {
+      const double a = 2.0 * std::numbers::pi * i / kN;
+      GridPoint gp;
+      gp.id = id(i, j);
+      gp.position = Vec3{R * std::cos(a), R * std::sin(a), L * j};
+      m.nodes[gp.id] = gp;
+    }
+  for (int i = 0; i < kN; ++i) {
+    ElementData e = quad_data();
+    e.id = ElementId{i + 1};
+    e.nodes = {id(i, 0), id(i + 1, 0), id(i + 1, 1), id(i, 1)};
+    m.elements.push_back(e);
+  }
+  const ShellQuad4 el(m.elements[0], m);
+  std::vector<double> u(24, 0.0);
+  for (int k = 0; k < 4; ++k) {
+    const Vec3 &p = m.node(m.elements[0].nodes[static_cast<size_t>(k)]).position;
+    u[static_cast<size_t>(6 * k)] = w * p.x / R;
+    u[static_cast<size_t>(6 * k + 1)] = w * p.y / R;
+  }
+  const ShellPointResponse c = el.recover(u, {}, 0.0)[0];
+  const double D = E * t * t * t / (12.0 * (1.0 - nu * nu));
+  EXPECT_NEAR(c.membrane_strain(0), w / R, 1e-3 * w / R);
+  EXPECT_NEAR(c.curvature(0), w / (R * R), 1e-2 * w / (R * R));
+  EXPECT_NEAR(c.bending_moment(0), 0.0, 1e-2 * D * w / (R * R));
+}

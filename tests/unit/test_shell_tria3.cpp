@@ -13,6 +13,7 @@
 #include <cmath>
 #include <format>
 #include <functional>
+#include <numbers>
 #include <sstream>
 
 using namespace vibestran;
@@ -200,4 +201,119 @@ TEST(ShellTria3, TransverseShearIsRecovered) {
     ++checked;
   }
   EXPECT_EQ(checked, 20);
+}
+
+TEST(ShellTria3, PureTwistEnergyAndMassAreExact) {
+  // Constant twist w = x y is a constant-curvature state, reproduced
+  // exactly; the translational mass is rho t A per direction.
+  const double E = 1.0e7, nu = 0.3, t = 0.1, rho = 2.0;
+  const Model m = tria_model({{{0, 0, 0}, {2, 0, 0}, {0.5, 1.5, 0}}}, t);
+  Eigen::VectorXd u = Eigen::VectorXd::Zero(18);
+  for (int i = 0; i < 3; ++i) {
+    const Vec3 &p = m.node(NodeId{i + 1}).position;
+    u(6 * i + 2) = p.x * p.y;
+    u(6 * i + 3) = p.x;
+    u(6 * i + 4) = -p.y;
+  }
+  const ShellTria3 e(tria_data(), m);
+  const double D = E * t * t * t / (12.0 * (1.0 - nu * nu));
+  const double area = 0.5 * 2.0 * 1.5;
+  const double exact = 0.5 * D * (1.0 - nu) / 2.0 * 4.0 * area;
+  EXPECT_NEAR(0.5 * u.dot(e.stiffness_matrix() * u), exact, 1e-9 * exact);
+  const Eigen::MatrixXd M = e.mass_matrix();
+  for (int dir = 0; dir < 3; ++dir) {
+    double total = 0.0;
+    for (int a = 0; a < 3; ++a)
+      for (int b = 0; b < 3; ++b)
+        total += M(6 * a + dir, 6 * b + dir);
+    EXPECT_NEAR(total, rho * t * area, 1e-12);
+  }
+}
+
+TEST(ShellTria3, CollinearGridsAreRejected) {
+  const Model m = tria_model({{{0, 0, 0}, {1, 0, 0}, {2, 0, 0}}});
+  EXPECT_THROW((void)ShellTria3(tria_data(), m).stiffness_matrix(), SolverError);
+}
+
+TEST(ShellTria3, TiltedSnormDirectorsKeepThinPlateBending) {
+  // As for the CQUAD4: 45-degree SNORM directors carry the thickness
+  // t / (V . n), so a thin cantilever (L/t = 100, 20 x 4 cells split into
+  // triangles) deflects as the untilted one.
+  const auto tip_w = [](const char *snorm) {
+    std::ostringstream os;
+    os << "SOL 101\nCEND\nSPC = 1\nLOAD = 1\nDISPLACEMENT = ALL\nBEGIN BULK\n"
+          "MAT1,1,1.0E7,,0.3\nPSHELL,1,1,0.01\n";
+    const auto id = [](int i, int j) { return 1 + i + 21 * j; };
+    for (int j = 0; j <= 4; ++j)
+      for (int i = 0; i <= 20; ++i) {
+        os << std::format("GRID,{},,{},{},0.\n", id(i, j), 0.05 * i, 0.05 * j);
+        if (snorm != nullptr)
+          os << std::format("SNORM,{},0,{}\n", id(i, j), snorm);
+      }
+    int e = 1;
+    for (int j = 0; j < 4; ++j)
+      for (int i = 0; i < 20; ++i) {
+        os << std::format("CTRIA3,{},1,{},{},{}\n", e++, id(i, j), id(i + 1, j),
+                          id(i + 1, j + 1));
+        os << std::format("CTRIA3,{},1,{},{},{}\n", e++, id(i, j), id(i + 1, j + 1),
+                          id(i, j + 1));
+      }
+    for (int j = 0; j <= 4; ++j) {
+      os << std::format("SPC1,1,123456,{}\n", id(0, j));
+      os << std::format("FORCE,1,{},,2.0E-4,0.,0.,1.\n", id(20, j));
+    }
+    os << "ENDDATA\n";
+    Model model = BdfParser::parse_string(os.str());
+    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    const SolverResults res = solver.solve(model);
+    for (const auto &nd : res.subcases.at(0).displacements)
+      if (nd.node.value == id(20, 2)) // cppcheck-suppress useStlAlgorithm
+        return nd.d[2];
+    return std::nan("");
+  };
+  const double w0 = tip_w(nullptr);
+  for (const char *n : {"0.,1.,1.", "1.,0.,1."})
+    EXPECT_NEAR(tip_w(n) / w0, 1.0, 5e-3) << n;
+}
+
+TEST(ShellTria3, RadialExpansionOfACylinderBendsTheWallWithoutMoment) {
+  // As for the CQUAD4 (test_shell_quad4.cpp): a ring of 72 facets, each
+  // split into two triangles, expanded by w.  kappa_hoop = +w / R^2 and the
+  // hoop moment vanishes once the through-thickness metric and volume
+  // factor are included.
+  constexpr int kN = 72;
+  constexpr double R = 10.0, L = 1.0, t = 1.0, nu = 0.3, w = 1.0e-3;
+  Model m = tria_model(kShapes[0], t);
+  m.nodes.clear();
+  const auto id = [](int i, int j) { return 1 + (i % kN) + kN * j; };
+  for (int j = 0; j < 2; ++j)
+    for (int i = 0; i < kN; ++i) {
+      const double a = 2.0 * std::numbers::pi * i / kN;
+      GridPoint gp;
+      gp.id = NodeId{id(i, j)};
+      gp.position = Vec3{R * std::cos(a), R * std::sin(a), L * j};
+      m.nodes[gp.id] = gp;
+    }
+  int eid = 1;
+  for (int i = 0; i < kN; ++i) {
+    for (const std::array<int, 3> n : {std::array<int, 3>{id(i, 0), id(i + 1, 0), id(i + 1, 1)},
+                                       std::array<int, 3>{id(i, 0), id(i + 1, 1), id(i, 1)}}) {
+      ElementData e = tria_data(n);
+      e.id = ElementId{eid++};
+      m.elements.push_back(e);
+    }
+  }
+  const ShellTria3 el(m.elements[0], m);
+  std::vector<double> u(18, 0.0);
+  for (int k = 0; k < 3; ++k) {
+    const Vec3 &p = m.node(m.elements[0].nodes[static_cast<size_t>(k)]).position;
+    u[static_cast<size_t>(6 * k)] = w * p.x / R;
+    u[static_cast<size_t>(6 * k + 1)] = w * p.y / R;
+  }
+  const ShellPointResponse c = el.recover(u, {}, 0.0)[0];
+  const Mat1 &mat = m.material(MaterialId{1});
+  const double D = mat.E * t * t * t / (12.0 * (1.0 - nu * nu));
+  EXPECT_NEAR(c.membrane_strain(0), w / R, 1e-3 * w / R);
+  EXPECT_NEAR(c.curvature(0), w / (R * R), 1e-2 * w / (R * R));
+  EXPECT_NEAR(c.bending_moment(0), 0.0, 1e-2 * D * w / (R * R));
 }

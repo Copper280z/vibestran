@@ -35,6 +35,14 @@ struct ShellStrain {
 };
 
 /// Element stress at centroid (for plate elements: CQUAD4, CTRIA3)
+/// Thickness and output fibre distances (Z1, Z2) of a shell element, from
+/// its PSHELL or, for PCOMP, the laminate's mid-plane faces.
+struct ShellFibres {
+  double t{0.0};
+  double z1{0.0};
+  double z2{0.0};
+};
+
 struct PlateStressPoint {
   constexpr PlateStressPoint() = default;
   NodeId node{0};
@@ -279,11 +287,11 @@ private:
   static void write_shell_stress_table(
       const SubCaseResults& sc, std::ostream& out, ElementType etype,
       bool corners,
-      const std::unordered_map<ElementId, const PShell*>& shell_props);
+      const std::unordered_map<ElementId, ShellFibres>& shell_props);
   static void write_shell_strain_table(
       const SubCaseResults& sc, std::ostream& out, ElementType etype,
       bool corners, bool fiber, bool max_shear,
-      const std::unordered_map<ElementId, const PShell*>& shell_props);
+      const std::unordered_map<ElementId, ShellFibres>& shell_props);
   static void write_solid_stress_table(const SubCaseResults& sc,
                                        std::ostream& out, ElementType etype,
                                        bool corners);

@@ -357,11 +357,8 @@ static double get_subcase_disp(const SubCaseResults& sc, int node_id,
     throw std::runtime_error("Node not found in subcase results");
 }
 
-static const char* shellform_param(ShellFormulation formulation) {
-    return (formulation == ShellFormulation::MITC4) ? "MITC4" : "MINDLIN";
-}
 
-static std::string make_cquad4_cantilever_bdf(ShellFormulation formulation,
+static std::string make_cquad4_cantilever_bdf(
                                               int nx, int ny) {
     constexpr double L = 10.0;
     constexpr double H = 1.0;
@@ -379,7 +376,6 @@ static std::string make_cquad4_cantilever_bdf(ShellFormulation formulation,
         << "  LOAD = 1\n"
         << "  SPC  = 1\n"
         << "BEGIN BULK\n"
-        << "PARAM,SHELLFORM," << shellform_param(formulation) << "\n"
         << "MAT1,1," << E << ",," << nu << "\n"
         << "PSHELL,1,1," << T << "\n";
 
@@ -417,7 +413,7 @@ static std::string make_cquad4_cantilever_bdf(ShellFormulation formulation,
 }
 
 static std::string make_closed_tube_cantilever_bdf(
-    ShellFormulation formulation, int nx, int perimeter_divisions_per_face) {
+    int nx, int perimeter_divisions_per_face) {
     constexpr double L = 1.0;
     constexpr double W = 0.02;
     constexpr double T = 0.0005;
@@ -444,7 +440,6 @@ static std::string make_closed_tube_cantilever_bdf(
         << "  LOAD = 1\n"
         << "  SPC  = 1\n"
         << "BEGIN BULK\n"
-        << "PARAM,SHELLFORM," << shellform_param(formulation) << "\n"
         << "MAT1,1," << E << ",," << nu << "\n"
         << "PSHELL,1,1," << T << "\n";
 
@@ -557,7 +552,7 @@ static std::string make_cylindrical_shell_pressure_sector_bdf(int ntheta,
 }
 
 static void expect_cquad4_cantilever_matches_beam_theory(
-    ShellFormulation formulation, int nx, int ny, double rel_tol) {
+    int nx, int ny, double rel_tol) {
     constexpr double L = 10.0;
     constexpr double H = 1.0;
     constexpr double T = 0.1;
@@ -567,7 +562,7 @@ static void expect_cquad4_cantilever_matches_beam_theory(
     auto node_id = [nx](int ix, int iy) { return iy * (nx + 1) + ix + 1; };
 
     SolverResults res =
-        run_analysis(make_cquad4_cantilever_bdf(formulation, nx, ny));
+        run_analysis(make_cquad4_cantilever_bdf(nx, ny));
 
     const double expected = total_force * std::pow(L, 3) /
                             (3.0 * E * (T * std::pow(H, 3) / 12.0));
@@ -576,11 +571,9 @@ static void expect_cquad4_cantilever_matches_beam_theory(
 
     EXPECT_GT(tip_bottom, 0.0) << "Tip should displace in +y";
     EXPECT_NEAR(tip_bottom, expected, rel_tol * expected)
-        << "formulation=" << shellform_param(formulation)
         << " tip y-disp=" << tip_bottom
         << " beam theory=" << expected;
     EXPECT_NEAR(tip_top, expected, rel_tol * expected)
-        << "formulation=" << shellform_param(formulation)
         << " tip y-disp=" << tip_top
         << " beam theory=" << expected;
     EXPECT_NEAR(tip_bottom, tip_top, 1e-6 * expected)
@@ -588,7 +581,7 @@ static void expect_cquad4_cantilever_matches_beam_theory(
 }
 
 static void expect_closed_tube_matches_beam_theory(
-    ShellFormulation formulation, int nx, int perimeter_divisions_per_face,
+    int nx, int perimeter_divisions_per_face,
     double rel_tol) {
     constexpr double L = 1.0;
     constexpr double W = 0.02;
@@ -600,7 +593,7 @@ static void expect_closed_tube_matches_beam_theory(
     auto node_id = [nper](int ix, int ic) { return ix * nper + ic + 1; };
 
     SolverResults res = run_analysis(
-        make_closed_tube_cantilever_bdf(formulation, nx,
+        make_closed_tube_cantilever_bdf(nx,
                                         perimeter_divisions_per_face));
 
     double tip_sum = 0.0;
@@ -622,7 +615,6 @@ static void expect_closed_tube_matches_beam_theory(
     EXPECT_GT(tip_min, 0.15)
         << "Closed tube should show substantial +Z tip motion";
     EXPECT_NEAR(tip_avg, expected, rel_tol * expected)
-        << "formulation=" << shellform_param(formulation)
         << " tip avg=" << tip_avg
         << " beam theory=" << expected;
 }
@@ -1064,25 +1056,15 @@ ENDDATA
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test 2: Cantilever beam — CQUAD4 mesh, both shell formulations
+// Test 2: Cantilever beam — CQUAD4 mesh
 //
 // Model: 10 × 1 m strip, t = 0.1 m, clamped on the left and loaded in +y.
 // This is an in-plane beam-bending problem, so the analytical reference is the
 // Euler-Bernoulli strip solution using I = t*h^3/12.
-//
-// The coarse 4×1 mesh that originally lived here was good enough for Mindlin
-// but not for MITC4+, which converges more slowly on this membrane-dominated
-// bending case. Both formulations match beam theory once the mesh is refined.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-TEST(Integration, CantileverBeamBendingMitc4) {
-    expect_cquad4_cantilever_matches_beam_theory(
-        ShellFormulation::MITC4, 24, 6, 0.08);
-}
-
-TEST(Integration, CantileverBeamBendingMindlin) {
-    expect_cquad4_cantilever_matches_beam_theory(
-        ShellFormulation::MINDLIN, 24, 6, 0.08);
+TEST(Integration, CantileverBeamBendingCquad4) {
+    expect_cquad4_cantilever_matches_beam_theory(24, 6, 0.08);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2267,8 +2249,12 @@ TEST(Integration, CylindricalShellPressureSectorAxisymmetric) {
         const double ref_ur_pressure = get_subcase_disp(pressure, nid(0, iz), 0);
         const double ref_ur_combined = get_subcase_disp(combined, nid(0, iz), 0);
 
-        EXPECT_NEAR(ref_ur_pressure, expected_ur_pressure, 5e-4);
-        EXPECT_NEAR(ref_ur_combined, expected_ur_combined, 5e-4);
+        // 0.6%: the 5-degree facets carry the through-thickness metric
+        // (z / R) terms, which converge at second order in the facet angle:
+        // u_r at mid-length is 0.31% low with 6 sectors, 0.07% with 12 and
+        // 0.004% with 24; the free ends of this mesh are 0.54% low.
+        EXPECT_NEAR(ref_ur_pressure, expected_ur_pressure, 6e-4);
+        EXPECT_NEAR(ref_ur_combined, expected_ur_combined, 6e-4);
         // 0.3%: see the edge-director note below.
         EXPECT_NEAR(get_subcase_disp(pressure, nid(NTHETA / 2, iz), 2),
                     expected_eps_z_pressure * z,
@@ -2786,7 +2772,7 @@ ENDDATA
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test: Closed square tube cantilever — both shell formulations
+// Test: Closed square tube cantilever — CQUAD4
 //
 // Geometry: 1 m long, 20 mm × 20 mm shell midsurface square tube, t = 0.5 mm.
 // The beam-theory comparison must use the shell midsurface idealization:
@@ -2794,19 +2780,13 @@ ENDDATA
 // rather than an outer-minus-inner solid box inertia, because the shell nodes
 // lie on wall midsurfaces rather than the physical outer skin.
 //
-// The original 8×2 mesh was only good enough as a qualitative drilling
-// regularization regression. A denser mesh is required to make both MITC4+
-// and Mindlin quantitatively match beam theory.
+// The walls meet at 90-degree folds, so each wall keeps its own grid
+// directors (shell_directors.hpp) and the drill rotations at the corners are
+// carried by the adjacent walls' bending.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-TEST(Integration, ClosedTubeCantileverBendingMitc4) {
-    expect_closed_tube_matches_beam_theory(
-        ShellFormulation::MITC4, 56, 6, 0.08);
-}
-
-TEST(Integration, ClosedTubeCantileverBendingMindlin) {
-    expect_closed_tube_matches_beam_theory(
-        ShellFormulation::MINDLIN, 56, 6, 0.08);
+TEST(Integration, ClosedTubeCantileverBendingCquad4) {
+    expect_closed_tube_matches_beam_theory(56, 6, 0.08);
 }
 
 TEST(Integration, CBarAxialExtension) {

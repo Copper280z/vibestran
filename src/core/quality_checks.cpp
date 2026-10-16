@@ -901,9 +901,11 @@ void run_quality_checks(Model& model, const QualityThresholds& t) {
             issue(std::format("Element {} ({}): max interior angle {:.1f} deg > threshold {:.1f} deg",
                               q.id.value, tname, q.max_interior_angle, t.max_interior_angle), strict);
 
+        // Warp is a warning only: the CQUAD4 is a continuum shell that
+        // represents warped geometry (its directors follow the surface).
         if (q.warp_angle >= 0.0 && q.warp_angle > t.max_warp_angle)
             issue(std::format("Element {} ({}): warp angle {:.1f} deg > threshold {:.1f} deg",
-                              q.id.value, tname, q.warp_angle, t.max_warp_angle), strict);
+                              q.id.value, tname, q.warp_angle, t.max_warp_angle), false);
 
         if (q.taper_ratio >= 0.0 && q.taper_ratio > t.max_taper_ratio)
             issue(std::format("Element {} ({}): taper ratio {:.3f} > threshold {:.3f}",

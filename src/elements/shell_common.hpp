@@ -74,16 +74,53 @@ inline LocalFrame local_frame(const V3 &gr, const V3 &gs, const V3 &gt,
   return f;
 }
 
+/// sum_ij P(i, a) Q(j, b) E_ij for the symmetric covariant tensor E with
+/// rows (rr, ss, rs, rt, st) and E_tt = 0.
+template <class RowT>
+RowT cartesian_pair(const Eigen::Matrix3d &P, const Eigen::Matrix3d &Q, int a, int b,
+                    const RowT &rr, const RowT &ss, const RowT &rs, const RowT &rt,
+                    const RowT &st) {
+  return P(0, a) * Q(0, b) * rr + P(1, a) * Q(1, b) * ss +
+         (P(0, a) * Q(1, b) + P(1, a) * Q(0, b)) * rs +
+         (P(0, a) * Q(2, b) + P(2, a) * Q(0, b)) * rt +
+         (P(1, a) * Q(2, b) + P(2, a) * Q(1, b)) * st;
+}
+
 /// Cartesian component eps_ab from the covariant rows (rr, ss, rs, rt, st)
 /// (tensor components; multiply by 2 for engineering shear).
 template <class RowT>
 RowT cartesian(const LocalFrame &f, int a, int b, const RowT &rr, const RowT &ss,
                const RowT &rs, const RowT &rt, const RowT &st) {
-  const auto &C = f.C;
-  return C(0, a) * C(0, b) * rr + C(1, a) * C(1, b) * ss +
-         (C(0, a) * C(1, b) + C(1, a) * C(0, b)) * rs +
-         (C(0, a) * C(2, b) + C(2, a) * C(0, b)) * rt +
-         (C(1, a) * C(2, b) + C(2, a) * C(1, b)) * st;
+  return cartesian_pair(f.C, f.C, a, b, rr, ss, rs, rt, st);
+}
+
+/// First-order change of the metric through the thickness.  The base
+/// vectors at thickness coordinate t are g_r + t x_b,r, g_s + t x_b,s and
+/// x_b, so dC/dt = (-G^-1 dG/dt G^-1) projected on the frame, and
+/// det G(t) = det G(0) (1 + t tr(G^-1 dG/dt)).
+struct MetricRate {
+  Eigen::Matrix3d C1;  ///< dC/dt
+  double trace{0.0};   ///< tr(G^-1 dG/dt)
+};
+
+inline MetricRate metric_rate(const LocalFrame &f, const V3 &gr, const V3 &gs,
+                              const V3 &gt, const V3 &gt_r, const V3 &gt_s) {
+  Eigen::Matrix3d G, dG = Eigen::Matrix3d::Zero();
+  G.col(0) = gr;
+  G.col(1) = gs;
+  G.col(2) = gt;
+  dG.col(0) = gt_r;
+  dG.col(1) = gt_s;
+  const Eigen::Matrix3d Gi = G.inverse();
+  const Eigen::Matrix3d dGi = -Gi * dG * Gi;
+  MetricRate m;
+  for (int i = 0; i < 3; ++i) {
+    m.C1(i, 0) = dGi.row(i).dot(f.e1);
+    m.C1(i, 1) = dGi.row(i).dot(f.e2);
+    m.C1(i, 2) = dGi.row(i).dot(f.e3);
+  }
+  m.trace = (Gi * dG).trace();
+  return m;
 }
 
 /// The section at a point: scaled for the local thickness (PSHELL grid

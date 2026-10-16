@@ -199,7 +199,6 @@ private:
 // ── Properties ───────────────────────────────────────────────────────────────
 
 enum class SolidFormulation { SRI, EAS };
-enum class ShellFormulation { MINDLIN, MITC4 };
 
 struct PShell {
   PropertyId pid{0};
@@ -213,7 +212,6 @@ struct PShell {
   double z1{std::numeric_limits<double>::quiet_NaN()}; // stress recovery fiber distance 1
   double z2{std::numeric_limits<double>::quiet_NaN()}; // stress recovery fiber distance 2
   MaterialId mid4{0};     // membrane-bending coupling
-  ShellFormulation shell_form{ShellFormulation::MITC4};
 };
 
 /// One ply of a PCOMP laminate, listed from the bottom (Z0) upwards.
@@ -632,6 +630,17 @@ struct Rbe3 {
   std::vector<Rbe3WeightGroup> weight_groups;
 };
 
+// ── SNORM card (user shell grid normal) ─────────────────────────────────────
+
+/// SNORM: the shell normal at a grid, components in coordinate system `cid`.
+/// It replaces the averaged director of every CQUAD4/CTRIA3 at the grid
+/// (shell_directors.hpp).
+struct Snorm {
+  NodeId grid{0};
+  CoordId cid{0};
+  Vec3 n;
+};
+
 // ── EIGRL card (modal analysis) ──────────────────────────────────────────────
 
 struct EigRL {
@@ -776,6 +785,9 @@ public:
 
   // Analysis
   AnalysisCase analysis;
+
+  // SNORM cards (user shell grid normals), keyed by grid
+  std::unordered_map<NodeId, Snorm> snorms;
 
   // PARAM entries (name → value as string)
   std::unordered_map<std::string, std::string> params;

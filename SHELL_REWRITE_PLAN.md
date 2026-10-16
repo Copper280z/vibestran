@@ -1,6 +1,11 @@
 # Proposal: Rebuilding vibestran's Shell Elements
 
-Status: **proposal, awaiting approval** (2026-10-16). Nothing is implemented yet.
+Status: **implemented** (2026-10-16), phases 0-4. Departures from this
+proposal: the CTRIA3 drill is a corner penalty, not an Allman membrane
+(the Allman form locked thin curved shells); SNORM bulk cards are applied
+as grid directors; both elements carry the first-order through-thickness
+metric and volume factor (resultant sections otherwise). Results are in
+`SHELL_BENCHMARKS.md`.
 
 ## 1. Why a rewrite
 

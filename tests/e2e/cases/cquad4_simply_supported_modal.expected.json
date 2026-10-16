@@ -3,13 +3,27 @@
   "checks": [
     {
       "comment": "Mode 1: first bending. Analytical (SS beam): f1 = (pi/L)^2/(2*pi)*sqrt(EI/rhoA) ~= 22.9 Hz. FE: 23.2 Hz.",
-      "type": "eigenfrequency", "subcase": 1, "mode": 1,
-      "expected": 22.9, "rel_tol": 0.05
+      "type": "eigenfrequency",
+      "subcase": 1,
+      "mode": 1,
+      "expected": 22.9,
+      "rel_tol": 0.05
     },
     {
-      "comment": "Mode 2: next shell mode on this 10-element mesh is about 96.2 Hz.",
-      "type": "eigenfrequency", "subcase": 1, "mode": 2,
-      "expected": 96.2, "rel_tol": 0.05
+      "comment": "Mode 2: in-plane bending. Both left grids fix T1, so the in-plane beam is clamped-pinned: f = (3.9266/pi)^2 * 22.9 ~= 35.8 Hz analytically; one element across the width gives 38.3 Hz. (The earlier CQUAD4 membrane locked in in-plane bending and pushed this mode above 130 Hz.)",
+      "type": "eigenfrequency",
+      "subcase": 1,
+      "mode": 2,
+      "expected": 38.3,
+      "rel_tol": 0.05
+    },
+    {
+      "comment": "Mode 3: second out-of-plane bending, ~4 x f1 = 91.6 Hz for an SS beam (plate stiffness and mesh raise it).",
+      "type": "eigenfrequency",
+      "subcase": 1,
+      "mode": 3,
+      "expected": 96.3,
+      "rel_tol": 0.05
     }
   ]
 }

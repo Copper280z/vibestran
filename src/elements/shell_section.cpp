@@ -109,6 +109,20 @@ ShellSection ShellSection::rotated(double phi) const {
   return out;
 }
 
+ShellSection ShellSection::with_volume_factor(double m) const {
+  ShellSection out = *this;
+  if (m == 0.0)
+    return out;
+  const Eigen::Vector3d free_strain = A.determinant() != 0.0
+                                          ? Eigen::Vector3d(A.fullPivLu().solve(thermal_N))
+                                          : Eigen::Vector3d::Zero();
+  out.A = A - m * B;
+  out.B = B - m * D;
+  out.thermal_N = thermal_N - m * thermal_M;
+  out.thermal_M = thermal_M - m * (D * free_strain);
+  return out;
+}
+
 ShellSection ShellSection::scaled_thickness(double r) const {
   ShellSection out = *this;
   out.A *= r;

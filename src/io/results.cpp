@@ -260,13 +260,22 @@ void F06Writer::write(const SolverResults& results, const Model& model,
                       std::ostream& out) {
     write_header(out);
 
-    // Map element ID to shell property for fiber-distance stress recovery.
-    std::unordered_map<ElementId, const PShell*> shell_props;
+    // Shell thickness and output fibres for fibre stresses and strains.
+    // PCOMP has no Z1/Z2; its fibres are the laminate's faces about the
+    // mid-plane (ply stresses are not written).
+    std::unordered_map<ElementId, ShellFibres> shell_props;
     for (const auto& elem : model.elements) {
         const auto it = model.properties.find(elem.pid);
         if (it == model.properties.end()) continue;
-        if (const auto* ps = std::get_if<PShell>(&it->second))
-            shell_props.emplace(elem.id, ps);
+        if (const auto* ps = std::get_if<PShell>(&it->second)) {
+            shell_props.emplace(elem.id,
+                                ShellFibres{ps->t,
+                                            std::isnan(ps->z1) ? -0.5 * ps->t : ps->z1,
+                                            std::isnan(ps->z2) ? 0.5 * ps->t : ps->z2});
+        } else if (const auto* pc = std::get_if<PComp>(&it->second)) {
+            const double t = pc->total_thickness();
+            shell_props.emplace(elem.id, ShellFibres{t, -0.5 * t, 0.5 * t});
+        }
     }
 
     for (const auto& sc : results.subcases) {
@@ -772,7 +781,7 @@ std::array<FiberStress, 2> shell_strain_rows(const ShellStrain& e, bool fiber,
 void F06Writer::write_shell_strain_table(
     const SubCaseResults& sc, std::ostream& out, const ElementType etype,
     const bool corners, const bool fiber, const bool max_shear,
-    const std::unordered_map<ElementId, const PShell*>& shell_props) {
+    const std::unordered_map<ElementId, ShellFibres>& shell_props) {
     const bool is_quad4 = (etype == ElementType::CQUAD4);
     if (!contains_plate_stress_type(sc, etype))
         return;
@@ -808,9 +817,8 @@ void F06Writer::write_shell_strain_table(
 
         double z1 = 0.0, z2 = 0.0;
         if (const auto it = shell_props.find(ps.eid); it != shell_props.end()) {
-            const double t = it->second->t;
-            z1 = std::isnan(it->second->z1) ? -t * 0.5 : it->second->z1;
-            z2 = std::isnan(it->second->z2) ? t * 0.5 : it->second->z2;
+            z1 = it->second.z1;
+            z2 = it->second.z2;
         }
         const std::optional<double> d1 =
             fiber ? std::optional<double>(z1) : std::nullopt;
@@ -859,7 +867,7 @@ void F06Writer::write_shell_strain_table(
 void F06Writer::write_shell_stress_table(
     const SubCaseResults& sc, std::ostream& out, const ElementType etype,
     const bool corners,
-    const std::unordered_map<ElementId, const PShell*>& shell_props) {
+    const std::unordered_map<ElementId, ShellFibres>& shell_props) {
     const bool is_quad4 = (etype == ElementType::CQUAD4);
     if (!contains_plate_stress_type(sc, etype) &&
         !(corners && contains_plate_nodal_stress_type(sc, etype)))
@@ -891,9 +899,9 @@ void F06Writer::write_shell_stress_table(
         double t = 0.0;
         double z1 = 0.0, z2 = 0.0;
         if (const auto it = shell_props.find(ps.eid); it != shell_props.end()) {
-            t = it->second->t;
-            z1 = std::isnan(it->second->z1) ? -t * 0.5 : it->second->z1;
-            z2 = std::isnan(it->second->z2) ? t * 0.5 : it->second->z2;
+            t = it->second.t;
+            z1 = it->second.z1;
+            z2 = it->second.z2;
         }
 
         if (is_quad4) {

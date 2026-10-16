@@ -1,7 +1,5 @@
 // src/elements/element_factory.cpp
 #include "elements/element_factory.hpp"
-#include "elements/cquad4.hpp"
-#include "elements/ctria3.hpp"
 #include "elements/shell_quad4.hpp"
 #include "elements/shell_tria3.hpp"
 #include "elements/line_elements.hpp"

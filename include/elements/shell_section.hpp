@@ -62,6 +62,15 @@ struct ShellSection {
   /// thickness ratio t_local / t_nominal (PSHELL grid thicknesses): A, T,
   /// N_T and mass scale with r, B and M_T with r^2, D with r^3.
   [[nodiscard]] ShellSection scaled_thickness(double r) const;
+
+  /// Section of a curved shell whose volume element varies through the
+  /// thickness as dV = (1 + m z) dA dz (m = 2H, H the mean curvature of the
+  /// director field, z along the normal): with Nastran's signs
+  /// (N = A e + B kappa, strain e - z kappa), A' = A - m B, B' = B - m D,
+  /// N_T' = N_T - m M_T and M_T' = M_T - m D e_T (e_T the free thermal
+  /// strain).  The m F term of D' (F = int Q z^3 dz) is second order and
+  /// dropped.
+  [[nodiscard]] ShellSection with_volume_factor(double m) const;
 };
 
 /// Builds the section of shell property `pid` for element `eid` (named in

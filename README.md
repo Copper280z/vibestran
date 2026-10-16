@@ -43,9 +43,10 @@ vibestran/
 
 ## Supported Features
 
-- **Elements**: CQUAD4, CTRIA3, CHEXA8, CHEXA20, CTETRA4, CTETRA10, CPENTA6, CBAR, CBEAM, CBUSH, CELAS1, CELAS2, CMASS1, CMASS2, CONM2 (CG offset, inertia tensor, CID / CID = -1)
-- **Materials**: MAT1 (analysis), plus parser/model support for MAT2, MAT3, MAT4, MAT5, MAT6, and MAT8
-- **Properties**: PSHELL, PSOLID, PBAR (stress recovery points C-F, K1/K2 transverse shear, I12), PBARL (`ROD`, `TUBE`, `BAR`), PBEAM, PBUSH (`K` section), PELAS, PMASS
+- **Elements**: CQUAD4, CTRIA3, CHEXA8, CTETRA4, CTETRA10, CPENTA6, CBAR, CBEAM, CBUSH, CELAS1, CELAS2, CMASS1, CMASS2, CONM2 (CG offset, inertia tensor, CID / CID = -1)
+- **Shells**: CQUAD4 is the MITC4+/D continuum shell (Ko, Bathe & Zhang 2025) and CTRIA3 the MITC3+ shell (Lee, Lee & Bathe 2014), both with six DOFs per grid, shared grid directors (averaged within the `PARAM,SNORM` fold angle, default 20 degrees, or given by SNORM cards), warped and curved geometry, transverse shear, ZOFFS, grid thicknesses (T1-T4, TFLAG), THETA/MCID material axes, and thermal loads consistent with the element kinematics (free expansion of curved shells is stress-free). See `SHELL_BENCHMARKS.md`.
+- **Materials**: MAT1 (all elements), MAT2 and MAT8 (shells), plus parser/model support for MAT3, MAT4, MAT5, and MAT6
+- **Properties**: PSHELL (MID1-MID4, 12I/T^3, TS/T, NSM, Z1/Z2), PCOMP (classical lamination theory; LAM blank, SYM, MEM, BEND, SMEAR, SMCORE), PSOLID, PBAR (stress recovery points C-F, K1/K2 transverse shear, I12), PBARL (`ROD`, `TUBE`, `BAR`), PBEAM, PBUSH (`K` section), PELAS, PMASS
 - **CBAR end data**: pin flags (PA/PB, statically condensed), rigid end offsets (WA/WB), OFFT `GGG`/`BGG`
 - **Loads**: FORCE, MOMENT, TEMP/TEMPD, PLOAD, PLOAD1 (CBAR/CBEAM), PLOAD2, PLOAD4, GRAV, ACCEL1
 - **Constraints**: SPC, SPC1, GRID PS (permanent SPCs, in the grid's CD frame), MPC, RBE2, RBE3
@@ -67,9 +68,11 @@ Notable current limitations:
 - CBAR offsets in the element system (OFFT `xGO`/`xOG`/`xOO`) are not yet supported.
 - GRID and GRDSET SEID (superelements) are not supported.
 - Element forces are not yet written for CBUSH, CELAS, or solids; solid stress/strain output ignores PSOLID CORDM (always basic).
-- CQUAD4 is a flat element on the mean plane with no warping correction, so strongly warped meshes (e.g. the MacNeal twisted beam) are too stiff.
 - GPFORCE is written for linear statics only (no modal inertia-force rows yet).
-- CTRIA3 uses DKT (Kirchhoff) bending, so its transverse shear resultants are reported as zero.
+- Shell drill rotations carry only a small stabilisation (like Nastran's K6ROT); `PARAM,K6ROT`, `QUAD4TYP`, and `SHELLFORM` are accepted and ignored.
+- PCOMP ply stresses and strains (COMPOSITESTRESSES), CQUAD8, and CTRIA6 are not implemented; PCOMP is not used in heat transfer.
+- Shell sections are resultant (ABD) sections with the first-order through-thickness metric (z/R) terms; second-order thickness terms are dropped, so very thick shells (t/L around 0.5) can be well off a 3D solution (see `SHELL_BENCHMARKS.md`).
+- CHEXA20 is not implemented.
 - Mass is consistent by default (unlike Nastran, whose default is lumped); `PARAM,COUPMASS,-1` selects lumped mass.
 
 ## SOL 103 — Normal Modes (Modal Analysis)

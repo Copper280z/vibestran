@@ -938,3 +938,21 @@ TEST(ModeDispatchLenient, InvertedElementAlwaysThrowsEvenInLenient) {
     t.mode = CheckMode::Lenient;
     EXPECT_THROW(run_quality_checks(m, t), SolverError);
 }
+
+TEST(ElementQualityGeometry, WarpedCquad4IsAWarningEvenInStrictMode) {
+    // The CQUAD4 is a continuum shell that represents warped geometry, so a
+    // warp beyond the threshold is reported but never stops the analysis.
+    Model m;
+    add_node(m, 1, 0.0, 0.0, 0.0);
+    add_node(m, 2, 1.0, 0.0, 0.0);
+    add_node(m, 3, 1.0, 1.0, 0.8);  // strongly warped
+    add_node(m, 4, 0.0, 1.0, 0.0);
+    add_mat(m, 1); add_pshell(m, 1, 1);
+    add_cquad4(m, 1, 1, 1, 2, 3, 4);
+    QualityThresholds t;
+    t.mode = CheckMode::Strict;
+    const auto q = compute_element_quality(m.elements[0], m);
+    ASSERT_TRUE(q.has_value());
+    ASSERT_GT(q->warp_angle, t.max_warp_angle);
+    EXPECT_NO_THROW(run_quality_checks(m, t));
+}
