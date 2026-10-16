@@ -94,6 +94,41 @@ RowT cartesian(const LocalFrame &f, int a, int b, const RowT &rr, const RowT &ss
   return cartesian_pair(f.C, f.C, a, b, rr, ss, rs, rt, st);
 }
 
+/// Curvature tensor b_ab = e_a . dV/dx_b of the director field in the local
+/// frame (symmetrised), from the director-field derivatives with respect to
+/// the element coordinates (x_b,r and x_b,s = (a/2) V,r and (a/2) V,s) and
+/// the contravariant map C (C(i, b) = g^i . e_b).
+inline Eigen::Matrix2d director_curvature(const LocalFrame &f, const V3 &gt_r,
+                                          const V3 &gt_s, double half_thickness) {
+  Eigen::Matrix2d b;
+  for (int a = 0; a < 2; ++a)
+    for (int c = 0; c < 2; ++c) {
+      const V3 e = a == 0 ? f.e1 : f.e2;
+      b(a, c) = e.dot(gt_r * f.C(0, c) + gt_s * f.C(1, c)) / half_thickness;
+    }
+  return 0.5 * (b + b.transpose());
+}
+
+/// Displacement gradient of the free thermal expansion of a curved shell at
+/// a point: the in-plane free strain eps = (e_xx, e_yy, g_xy) of the section
+/// in the frame {e1, e2}, and along the normal the strain of the curved
+/// directions, tr(b eps) / tr(b) (a cylinder grows radially with its hoop
+/// strain, a sphere with the mean); where the surface has no mean curvature
+/// the normal term is the mean strain.  u = E (x - x0) is then the
+/// stress-free motion the shell kinematics must reproduce; for isotropic
+/// expansion E = alpha I.
+inline Eigen::Matrix3d free_expansion_gradient(const V3 &eps, const Eigen::Matrix2d &b,
+                                               const V3 &e1, const V3 &e2, const V3 &e3) {
+  Eigen::Matrix2d et;
+  et << eps(0), 0.5 * eps(2), 0.5 * eps(2), eps(1);
+  const double tr = b.trace();
+  const double mean = 0.5 * (eps(0) + eps(1));
+  const double e33 = std::abs(tr) > 1e-9 * (b.norm() + 1e-300) ? (b * et).trace() / tr : mean;
+  return eps(0) * e1 * e1.transpose() + eps(1) * e2 * e2.transpose() +
+         0.5 * eps(2) * (e1 * e2.transpose() + e2 * e1.transpose()) +
+         e33 * e3 * e3.transpose();
+}
+
 /// First-order change of the metric through the thickness.  The base
 /// vectors at thickness coordinate t are g_r + t x_b,r, g_s + t x_b,s and
 /// x_b, so dC/dt = (-G^-1 dG/dt G^-1) projected on the frame, and

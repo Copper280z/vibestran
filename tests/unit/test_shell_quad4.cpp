@@ -713,3 +713,72 @@ TEST(ShellQuad4, RadialExpansionOfACylinderBendsTheWallWithoutMoment) {
   EXPECT_NEAR(c.curvature(0), w / (R * R), 1e-2 * w / (R * R));
   EXPECT_NEAR(c.bending_moment(0), 0.0, 1e-2 * D * w / (R * R));
 }
+
+namespace {
+
+/// Orthotropic (MAT8) free thermal expansion of a full cylinder, R = 3,
+/// L = 2, t = 0.1, 36 x 4 facets, material axis 1 axial (THETA = 90 from the
+/// hoop-wise G1-G2 side), alpha1 = 7e-4, alpha2 = 2e-4, dT = 100, with
+/// statically determinate supports.  Returns the largest error of the
+/// radial and axial displacements against the exact free expansion
+/// (u_r = alpha2 dT R, u_y = alpha1 dT y), relative to the exact values.
+double orthotropic_cylinder_expansion_error(bool trias) {
+  constexpr int kN = 36, kM = 4;
+  constexpr double R = 3.0, L = 2.0, a1 = 7.0e-4, a2 = 2.0e-4, dT = 100.0;
+  std::ostringstream os;
+  os << "SOL 101\nCEND\nSPC = 1\nTEMPERATURE = 4\nDISPLACEMENT = ALL\nBEGIN BULK\n"
+        "MAT8,1,2.0E11,1.5E11,0.3,7.69E10,1.0E11,1.0E11,\n,7.0E-4,2.0E-4,0.0\n"
+        "PSHELL,1,1,0.1,1,,1\nTEMPD,4,0.0\n";
+  const auto id = [](int i, int j) { return 1 + (i % kN) + kN * j; };
+  for (int j = 0; j <= kM; ++j)
+    for (int i = 0; i < kN; ++i) {
+      const double a = 2.0 * std::numbers::pi * i / kN;
+      os << std::format("GRID,{},,{:.12f},{:.12f},{:.12f}\n", id(i, j), R * std::cos(a),
+                        L * j / kM, R * std::sin(a));
+      os << std::format("TEMP,4,{},{}\n", id(i, j), dT);
+    }
+  int e = 1;
+  for (int j = 0; j < kM; ++j)
+    for (int i = 0; i < kN; ++i) {
+      // G1 -> G2 runs hoop-wise; the normal (G1G2 x G1G4) points inwards.
+      const int g1 = id(i, j), g2 = id(i + 1, j), g3 = id(i + 1, j + 1), g4 = id(i, j + 1);
+      if (trias) {
+        os << std::format("CTRIA3,{},1,{},{},{},-90.0\n", e++, g1, g2, g3);
+        // G1 -> G2 hoop-wise (backwards) with the same normal.
+        os << std::format("CTRIA3,{},1,{},{},{},-90.0\n", e++, g3, g4, g1);
+      } else {
+        os << std::format("CQUAD4,{},1,{},{},{},{},-90.0\n", e++, g1, g2, g3, g4);
+      }
+    }
+  for (int i = 0; i < kN; ++i)
+    os << std::format("SPC1,1,2,{}\n", id(i, 0));
+  os << std::format("SPC1,1,3,{},{}\nSPC1,1,1,{}\nENDDATA\n", id(0, 0), id(kN / 2, 0),
+                    id(kN / 4, 0));
+  Model model = BdfParser::parse_string(os.str());
+  LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+  const SolverResults res = solver.solve(model);
+  double worst = 0.0;
+  for (const auto &nd : res.subcases.at(0).displacements) {
+    const Vec3 &p = model.node(nd.node).position;
+    const double ur = (nd.d[0] * p.x + nd.d[2] * p.z) / R;
+    worst = std::max(worst, std::abs(ur / (a2 * dT * R) - 1.0));
+    if (p.y > 0.0)
+      worst = std::max(worst, std::abs(nd.d[1] / (a1 * dT * p.y) - 1.0));
+  }
+  return worst;
+}
+
+} // namespace
+
+TEST(ShellQuad4, OrthotropicFreeExpansionOfACylinderIsExact) {
+  // The curved-shell thermal correction must use the section's anisotropic
+  // free strain.  With the mean alpha this mesh was 0.97% off (CTRIA3
+  // 0.62%), and the MYSTRAN 'thermal strain free diamond cylinder' deck,
+  // whose material axes are at 45 degrees to the element axes, expanded
+  // 120% too much in the hoop direction.  Now exact to roundoff.
+  EXPECT_LT(orthotropic_cylinder_expansion_error(false), 1e-9);
+}
+
+TEST(ShellTria3, OrthotropicFreeExpansionOfACylinderIsExact) {
+  EXPECT_LT(orthotropic_cylinder_expansion_error(true), 1e-9);
+}

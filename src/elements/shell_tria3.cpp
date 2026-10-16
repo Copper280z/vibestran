@@ -169,6 +169,7 @@ struct PointB {
   LocalFrame frame;
   double thickness{0.0};
   double m{0.0}; // volume factor dV = (1 + m z) dA dz (m = 2H)
+  Eigen::Matrix2d curv{Eigen::Matrix2d::Zero()}; // director curvature b_ab
 };
 
 PointB point_b(const Geometry &g, double r, double s) {
@@ -220,6 +221,7 @@ PointB point_b(const Geometry &g, double r, double s) {
   // directors), as in shell_quad4.cpp.
   const MetricRate rate = metric_rate(p.frame, g.gr, g.gs, xb, xb_r, xb_s);
   p.m = 2.0 / thick * rate.trace;
+  p.curv = director_curvature(p.frame, xb_r, xb_s, 0.5 * thick);
   const auto cart_t = [&](int a, int b) -> Row {
     const Eigen::Matrix3d &C = p.frame.C;
     return cartesian_pair(C, C, a, b, brr, bss, brs, Z, Z) +
@@ -252,13 +254,15 @@ ThermalResultants thermal_resultants(const Geometry &g, const ShellSection &sec,
   if (sec.A.determinant() == 0.0)
     return t;
   const V3 free_strain = sec.A.fullPivLu().solve(sec.thermal_N);
-  const double alpha = 0.5 * (free_strain(0) + free_strain(1));
-  if (alpha == 0.0)
+  if (free_strain.isZero(0.0))
     return t;
+  // The free expansion u = E (x - x0), anisotropic for MAT2/MAT8/PCOMP.
+  const Eigen::Matrix3d E =
+      free_expansion_gradient(free_strain, p.curv, p.frame.e1, p.frame.e2, p.frame.e3);
   Eigen::Matrix<double, NE, 1> uT = Eigen::Matrix<double, NE, 1>::Zero();
   for (int k = 0; k < 3; ++k)
-    uT.segment<3>(6 * k) = alpha * (g.x[static_cast<size_t>(k)] - g.x[0]);
-  const V3 re = p.Be * uT - V3(alpha, alpha, 0.0);
+    uT.segment<3>(6 * k) = E * (g.x[static_cast<size_t>(k)] - g.x[0]);
+  const V3 re = p.Be * uT - free_strain;
   const V3 rk = p.Bk * uT;
   t.N += sec.A * re + sec.B * rk;
   t.M += sec.B * re + sec.D * rk;

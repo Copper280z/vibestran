@@ -4,6 +4,7 @@
 
 #include "elements/shell_quad4.hpp"
 #include "elements/shell_directors.hpp"
+#include "shell_common.hpp"
 #include <cmath>
 #include <format>
 #include <numbers>
@@ -265,6 +266,7 @@ struct PointB {
   double dA{0.0};
   double thickness{0.0};
   double m{0.0}; // volume factor dV = (1 + m z) dA dz (m = 2H)
+  Eigen::Matrix2d curv{Eigen::Matrix2d::Zero()}; // director curvature b_ab
   V3 e1, e2, e3;
 };
 
@@ -473,6 +475,14 @@ PointB point_b(const Geometry &g, double r, double s) {
   p.Bk.row(0) = k * cart_t(0, 0, b_rr, b_ss, b_rs);
   p.Bk.row(1) = k * cart_t(1, 1, b_rr, b_ss, b_rs);
   p.Bk.row(2) = 2.0 * k * cart_t(0, 1, b_rr, b_ss, b_rs);
+  {
+    shell_detail::LocalFrame lf;
+    lf.e1 = p.e1;
+    lf.e2 = p.e2;
+    lf.e3 = p.e3;
+    lf.C = C;
+    p.curv = shell_detail::director_curvature(lf, f.xb_r, f.xb_s, 0.5 * thick);
+  }
   p.Bg.row(0) = 2.0 * cart(0, 2, em[0], em[1], em[2], ert, est);
   p.Bg.row(1) = 2.0 * cart(1, 2, em[0], em[1], em[2], ert, est);
 
@@ -488,8 +498,11 @@ PointB point_b(const Geometry &g, double r, double s) {
 /// geometric curvature and director-tilt strains.  Those are added as
 /// thermal generalised strains (the element's own strain operator applied
 /// to that field, minus the flat part), so free expansion is stress free.
-/// alpha is the mean in-plane free thermal strain per degree; the
-/// correction is exactly zero on flat elements with normal directors.
+/// The field is the section's in-plane free strain, with the normal
+/// component following the curved directions (free_expansion_gradient in
+/// shell_common.hpp), so orthotropic expansion of a curved shell is stress
+/// free too; the correction is exactly zero on flat elements with normal
+/// directors.
 struct ThermalResultants {
   V3 N, M;
   Eigen::Vector2d Q;
@@ -500,13 +513,15 @@ ThermalResultants thermal_resultants(const Geometry &g, const ShellSection &sec,
   if (sec.A.determinant() == 0.0)
     return t;
   const V3 free_strain = sec.A.fullPivLu().solve(sec.thermal_N);
-  const double alpha = 0.5 * (free_strain(0) + free_strain(1));
-  if (alpha == 0.0)
+  if (free_strain.isZero(0.0))
     return t;
+  // The free expansion u = E (x - x0), anisotropic for MAT2/MAT8/PCOMP.
+  const Eigen::Matrix3d E =
+      shell_detail::free_expansion_gradient(free_strain, p.curv, p.e1, p.e2, p.e3);
   Eigen::Matrix<double, 24, 1> uT = Eigen::Matrix<double, 24, 1>::Zero();
   for (int k = 0; k < 4; ++k)
-    uT.segment<3>(6 * k) = alpha * (g.x[static_cast<size_t>(k)] - g.x[0]);
-  const V3 re = p.Be * uT - V3(alpha, alpha, 0.0);
+    uT.segment<3>(6 * k) = E * (g.x[static_cast<size_t>(k)] - g.x[0]);
+  const V3 re = p.Be * uT - free_strain;
   const V3 rk = p.Bk * uT;
   const Eigen::Vector2d rg = p.Bg * uT;
   t.N += sec.A * re + sec.B * rk;
