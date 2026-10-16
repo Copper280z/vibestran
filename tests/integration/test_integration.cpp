@@ -2269,23 +2269,34 @@ TEST(Integration, CylindricalShellPressureSectorAxisymmetric) {
 
         EXPECT_NEAR(ref_ur_pressure, expected_ur_pressure, 5e-4);
         EXPECT_NEAR(ref_ur_combined, expected_ur_combined, 5e-4);
+        // 0.3%: see the edge-director note below.
         EXPECT_NEAR(get_subcase_disp(pressure, nid(NTHETA / 2, iz), 2),
-                    expected_eps_z_pressure * z, 1e-4);
+                    expected_eps_z_pressure * z,
+                    1e-6 + 3e-3 * std::abs(expected_eps_z_pressure * z));
         EXPECT_NEAR(get_subcase_disp(combined, nid(NTHETA / 2, iz), 2),
-                    expected_eps_z_combined * z, 1e-4);
+                    expected_eps_z_combined * z,
+                    1e-6 + 3e-3 * std::abs(expected_eps_z_combined * z));
 
+        // Shell grids share an averaged director, but the grids on the two
+        // symmetry edges belong to one element each, so their director is
+        // that facet's normal rather than radial (5 degrees off on these
+        // 10-degree facets).  Uniform response around the arc therefore
+        // holds to about 0.2% (every grid stays within 0.2% of P R^2/(E T)),
+        // not to roundoff as it did for the old flat-facet elements.
         for (int it = 0; it <= NTHETA; ++it) {
             EXPECT_NEAR(get_subcase_disp(pressure, nid(it, iz), 0),
-                        ref_ur_pressure, 1e-9)
+                        ref_ur_pressure, 3e-3 * ref_ur_pressure)
                 << "pressure-only radial displacement should be uniform at z row "
                 << iz;
             EXPECT_NEAR(get_subcase_disp(combined, nid(it, iz), 0),
-                        ref_ur_combined, 1e-9)
+                        ref_ur_combined, 3e-3 * ref_ur_combined)
                 << "combined radial displacement should be uniform at z row "
                 << iz;
-            EXPECT_NEAR(get_subcase_disp(pressure, nid(it, iz), 1), 0.0, 1e-9)
+            EXPECT_NEAR(get_subcase_disp(pressure, nid(it, iz), 1), 0.0,
+                        3e-4 * ref_ur_pressure)
                 << "pressure-only tangential displacement should vanish";
-            EXPECT_NEAR(get_subcase_disp(combined, nid(it, iz), 1), 0.0, 1e-9)
+            EXPECT_NEAR(get_subcase_disp(combined, nid(it, iz), 1), 0.0,
+                        3e-4 * ref_ur_combined)
                 << "combined tangential displacement should vanish";
         }
     }

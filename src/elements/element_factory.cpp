@@ -2,6 +2,7 @@
 #include "elements/element_factory.hpp"
 #include "elements/cquad4.hpp"
 #include "elements/ctria3.hpp"
+#include "elements/shell_quad4.hpp"
 #include "elements/line_elements.hpp"
 #include "elements/solid_elements.hpp"
 #include <format>
@@ -13,14 +14,7 @@ std::unique_ptr<ElementBase> make_element(const ElementData& data, const Model& 
         case ElementType::CQUAD4: {
             if (data.nodes.size() != 4)
                 throw SolverError(std::format("CQUAD4 {} needs 4 nodes, got {}", data.id.value, data.nodes.size()));
-            std::array<NodeId,4> nids{data.nodes[0],data.nodes[1],data.nodes[2],data.nodes[3]};
-            // Dispatch based on shell formulation
-            const auto& prop = model.property(data.pid);
-            if (std::holds_alternative<PShell>(prop)) {
-                if (std::get<PShell>(prop).shell_form == ShellFormulation::MITC4)
-                    return std::make_unique<CQuad4Mitc4>(data.id, data.pid, nids, model);
-            }
-            return std::make_unique<CQuad4>(data.id, data.pid, nids, model);
+            return std::make_unique<ShellQuad4>(data, model);
         }
         case ElementType::CTRIA3: {
             if (data.nodes.size() != 3)

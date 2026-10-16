@@ -3,6 +3,8 @@
 // K * u = F_ext + F_thermal
 
 #include "solver/linear_static.hpp"
+#include "elements/shell_quad4.hpp"
+#include "elements/shell_section.hpp"
 #include "core/coord_sys.hpp"
 #include "core/factor_ratio_check.hpp"
 #include "core/logger.hpp"
@@ -55,9 +57,18 @@ std::vector<std::pair<NodeId, int>> local_dof_identity(const ElementData &elem) 
 
 namespace {
 
+/// Reference temperature of a shell element's section (PSHELL MID1's TREF,
+/// any of MAT1/MAT2/MAT8, or PCOMP TREF).
+[[nodiscard]] double shell_reference_temperature(const Model &model,
+                                                 const ElementData &elem) {
+  return build_shell_section(model, elem.pid, elem.id,
+                             elem.type == ElementType::CTRIA3 ? "CTRIA3" : "CQUAD4")
+      .ref_temp;
+}
+
 [[nodiscard]] MaterialId property_material_id(const Property &prop) {
-  if (const auto *pshell = std::get_if<PShell>(&prop))
-    return pshell->mid1;
+  if (std::holds_alternative<PShell>(prop) || std::holds_alternative<PComp>(prop))
+    return MaterialId{0}; // shells: see shell_reference_temperature
   if (const auto *psolid = std::get_if<PSolid>(&prop))
     return psolid->mid;
   if (const auto *pbar = std::get_if<PBar>(&prop))
@@ -676,7 +687,11 @@ void LinearStaticSolver::apply_thermal_loads(
       const auto &prop = model.property(elem_data.pid);
       mid = property_material_id(prop);
     }
-    double elem_t_ref = (mid.value != 0) ? model.material(mid).ref_temp : 0.0;
+    const bool is_shell = elem_data.type == ElementType::CQUAD4 ||
+                          elem_data.type == ElementType::CTRIA3;
+    double elem_t_ref =
+        is_shell ? shell_reference_temperature(model, elem_data)
+                 : ((mid.value != 0) ? model.material(mid).ref_temp : 0.0);
 
     std::vector<double> temps(static_cast<size_t>(nn));
     for (int i = 0; i < nn; ++i) {
@@ -972,8 +987,11 @@ LocalFe element_thermal_vector(const ElementBase &elem,
     const auto &prop = model.property(elem_data.pid);
     mid = property_material_id(prop);
   }
+  const bool is_shell = elem_data.type == ElementType::CQUAD4 ||
+                        elem_data.type == ElementType::CTRIA3;
   const double elem_t_ref =
-      (mid.value != 0) ? model.material(mid).ref_temp : 0.0;
+      is_shell ? shell_reference_temperature(model, elem_data)
+               : ((mid.value != 0) ? model.material(mid).ref_temp : 0.0);
 
   std::vector<double> temps(static_cast<size_t>(nn));
   for (int i = 0; i < nn; ++i) {
@@ -1530,19 +1548,30 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
       ps.etype = elem_data.type;
 
       if (elem_data.type == ElementType::CQUAD4) {
-        const auto &pshell_ = std::get<PShell>(model.property(elem_data.pid));
-        const Mat1 &mat_ = model.material(pshell_.mid1);
-        std::array<NodeId, 4> nodes{
-            elem_data.nodes[0], elem_data.nodes[1], elem_data.nodes[2],
-            elem_data.nodes[3]};
-        const double T_avg4 =
-            average_temperature(elem_data.nodes, nodal_temps_rec, mat_.ref_temp);
-        const auto response = CQuad4::recover_centroid_response(
-            elem_data.id, elem_data.pid, nodes, model,
+        const ShellQuad4 quad(elem_data, model);
+        const double t_ref = shell_reference_temperature(model, elem_data);
+        std::array<double, 4> temps{};
+        for (size_t n = 0; n < 4; ++n) {
+          const auto it = nodal_temps_rec.find(elem_data.nodes[n]);
+          temps[n] = (it != nodal_temps_rec.end()) ? it->second : t_ref;
+        }
+        const auto points = quad.recover(
             std::span<const double>(ue.data(), static_cast<size_t>(ue.size())),
-            T_avg4, mat_.ref_temp);
-        const PlateStressPoint centroid = make_plate_stress_point(
-            NodeId{0}, response.membrane_stress, response.bending_moment);
+            temps, t_ref);
+        const auto fill = [](PlateStressPoint &pt, const ShellPointResponse &r) {
+          const double t = r.thickness;
+          pt = make_plate_stress_point(pt.node, r.membrane_resultant / t,
+                                       r.bending_moment);
+          pt.nx = r.membrane_resultant(0);
+          pt.ny = r.membrane_resultant(1);
+          pt.nxy = r.membrane_resultant(2);
+          pt.qx = r.transverse_shear(0);
+          pt.qy = r.transverse_shear(1);
+          pt.strain = make_shell_strain(r.membrane_strain, r.curvature,
+                                        r.transverse_shear_strain);
+        };
+        PlateStressPoint centroid;
+        fill(centroid, points[0]);
         ps.sx = centroid.sx;
         ps.sy = centroid.sy;
         ps.sxy = centroid.sxy;
@@ -1550,38 +1579,16 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         ps.my = centroid.my;
         ps.mxy = centroid.mxy;
         ps.von_mises = centroid.von_mises;
-        ps.nx = response.membrane_resultant(0);
-        ps.ny = response.membrane_resultant(1);
-        ps.nxy = response.membrane_resultant(2);
-        ps.qx = response.transverse_shear(0);
-        ps.qy = response.transverse_shear(1);
-        ps.strain = make_shell_strain(response.membrane_strain,
-                                      response.curvature,
-                                      response.transverse_shear_strain);
-
-        static constexpr std::array<std::pair<double, double>, 4>
-            kQuadCornerCoords{{{-1.0, -1.0}, {1.0, -1.0},
-                               {1.0, 1.0}, {-1.0, 1.0}}};
-        for (int n = 0; n < 4; ++n) {
-          const NodeId nid = elem_data.nodes[static_cast<size_t>(n)];
-          const auto temp_it = nodal_temps_rec.find(nid);
-          const double point_temp =
-              (temp_it != nodal_temps_rec.end()) ? temp_it->second : mat_.ref_temp;
-          const auto point = CQuad4::recover_response(
-              elem_data.id, elem_data.pid, nodes, model,
-              std::span<const double>(ue.data(), static_cast<size_t>(ue.size())),
-              kQuadCornerCoords[static_cast<size_t>(n)].first,
-              kQuadCornerCoords[static_cast<size_t>(n)].second, point_temp,
-              mat_.ref_temp);
-          PlateStressPoint pt = make_plate_stress_point(
-              nid, point.membrane_stress, point.bending_moment);
-          pt.nx = point.membrane_resultant(0);
-          pt.ny = point.membrane_resultant(1);
-          pt.nxy = point.membrane_resultant(2);
-          pt.qx = point.transverse_shear(0);
-          pt.qy = point.transverse_shear(1);
-          pt.strain = make_shell_strain(point.membrane_strain, point.curvature,
-                                        point.transverse_shear_strain);
+        ps.nx = centroid.nx;
+        ps.ny = centroid.ny;
+        ps.nxy = centroid.nxy;
+        ps.qx = centroid.qx;
+        ps.qy = centroid.qy;
+        ps.strain = centroid.strain;
+        for (size_t n = 0; n < 4; ++n) {
+          PlateStressPoint pt;
+          pt.node = elem_data.nodes[n];
+          fill(pt, points[n + 1]);
           ps.nodal.push_back(pt);
         }
       } else {

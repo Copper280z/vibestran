@@ -532,3 +532,15 @@ most recent entry.
   `unsupported_input` to `solver_model_error`). Two rectangle-cylinder TX
   records that passed with no load applied now fail (see Numerical
   Mismatch).
+- **CQUAD4 rewritten as MITC4+/D (2,225 -> 2,096).** Continuum-mechanics
+  shell (Ko, Bathe & Zhang 2025) with shared grid directors, the shell
+  section layer (PSHELL/PCOMP, MAT1/2/8, THETA/MCID), ZOFFS, grid
+  thicknesses, Gauss-point (BILIN) corner recovery and a consistent
+  thermal strain.  160 records fixed (twisted beam, Raasch hook K6ROT=1000,
+  MAT8/PCOMP shell decks, distorted membrane decks).  31 new: corner values
+  of the "components"/"strain" decks differ at 1e-6 relative (Gauss-point
+  extrapolation and roundoff against zero-tolerance references); "MITC4+
+  corner stress order" (single elements under a corner point load) and the
+  Raasch hook with K6ROT=10 and two drill-rotation (RZ) records encode
+  MYSTRAN's element behaviour and its K6ROT drilling spring.  Full triage
+  in the shell-rewrite commits; this body is rewritten after phase 4.

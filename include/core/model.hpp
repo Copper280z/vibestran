@@ -11,12 +11,14 @@
 #include <iterator>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <limits>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <variant>
+#include <vector>
 
 namespace vibestran {
 
@@ -153,6 +155,45 @@ struct Mat8 {
   double s{0};
   double ge{0};
   double f12{0};
+};
+
+/// Lazily built, thread-safe cache attached to a Model.  Copies and moves
+/// start empty, so a cache never outlives the data it was built from; `key`
+/// lets the owner detect a rebuilt model (e.g. a changed element count).
+template <class T> class LazyModelCache {
+public:
+  LazyModelCache() = default;
+  LazyModelCache(const LazyModelCache &) {}
+  LazyModelCache(LazyModelCache &&) noexcept {}
+  LazyModelCache &operator=(const LazyModelCache &) {
+    reset();
+    return *this;
+  }
+  LazyModelCache &operator=(LazyModelCache &&) noexcept {
+    reset();
+    return *this;
+  }
+  ~LazyModelCache() = default;
+
+  template <class Build>
+  [[nodiscard]] std::shared_ptr<const T> get(std::size_t key, Build &&build) const {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    if (!value_ || key_ != key) {
+      value_ = std::make_shared<const T>(build());
+      key_ = key;
+    }
+    return value_;
+  }
+
+private:
+  void reset() {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    value_.reset();
+    key_ = 0;
+  }
+  mutable std::mutex mutex_;
+  mutable std::shared_ptr<const T> value_;
+  mutable std::size_t key_{0};
 };
 
 // ── Properties ───────────────────────────────────────────────────────────────
@@ -741,6 +782,13 @@ public:
 
   // EIGRL cards (keyed by SID)
   std::unordered_map<int, EigRL> eigrls;
+
+  /// Shell grid adjacency: for each grid, the (element index, corner) pairs
+  /// of the CQUAD4/CTRIA3 elements that use it.  Built on first use by the
+  /// shell elements to form shared grid directors; see shell_directors.hpp.
+  using ShellAdjacency =
+      std::unordered_map<NodeId, std::vector<std::pair<std::size_t, int>>>;
+  mutable LazyModelCache<ShellAdjacency> shell_adjacency_cache;
 
   // ── Accessors ────────────────────────────────────────────────────────────
 
