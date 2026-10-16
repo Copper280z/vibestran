@@ -6,12 +6,15 @@
 #include "core/types.hpp"
 #include "core/coord_sys.hpp"
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <iterator>
 #include <cstdint>
 #include <memory>
+#include <numeric>
 #include <limits>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <variant>
 
@@ -172,6 +175,41 @@ struct PShell {
   ShellFormulation shell_form{ShellFormulation::MITC4};
 };
 
+/// One ply of a PCOMP laminate, listed from the bottom (Z0) upwards.
+struct PCompPly {
+  MaterialId mid{0};
+  double t{0.0};     // ply thickness
+  double theta{0.0}; // fibre angle (degrees) from the element material axis
+  bool sout{false};  // ply stress/strain output requested
+};
+
+/// PCOMP laminate options (LAM field).
+enum class LaminateOption { Default, Sym, Mem, Bend, Smear, SmCore };
+
+/// PCOMP composite shell property.  `plies` holds the full stack: a SYM
+/// laminate's listed half is mirrored by the parser.
+struct PComp {
+  PropertyId pid{0};
+  /// Distance from the reference surface to the bottom of the laminate
+  /// (NaN = default, -total_thickness / 2).
+  double z0{std::numeric_limits<double>::quiet_NaN()};
+  double nsm{0.0};
+  double sb{0.0};          // allowable interlaminar shear (failure; unused)
+  std::string ft;          // failure theory (unused)
+  double tref{0.0};        // reference temperature
+  double ge{0.0};          // structural damping (unused)
+  LaminateOption lam{LaminateOption::Default};
+  std::vector<PCompPly> plies;
+
+  [[nodiscard]] double total_thickness() const {
+    return std::accumulate(plies.begin(), plies.end(), 0.0,
+                           [](double t, const PCompPly &p) { return t + p.t; });
+  }
+  [[nodiscard]] double bottom_z() const {
+    return std::isnan(z0) ? -0.5 * total_thickness() : z0;
+  }
+};
+
 struct PSolid {
   PropertyId pid{0};
   MaterialId mid{0};
@@ -237,7 +275,7 @@ struct PMass {
 };
 
 using Property = std::variant<PShell, PSolid, PBar, PBarL, PBeam, PBush,
-                              PElas, PMass>;
+                              PElas, PMass, PComp>;
 
 // ── Elements ─────────────────────────────────────────────────────────────────
 
@@ -306,6 +344,12 @@ struct ElementData {
   std::optional<double> theta{std::nullopt};
   std::optional<CoordId> mcid{std::nullopt};
   double zoffs{0.0};
+  /// CQUAD4/CTRIA3 grid-point membrane thicknesses T1..Tn (continuation
+  /// fields); empty when not given.  With TFLAG = 1 they are factors on the
+  /// property thickness, otherwise actual thicknesses; a blank Ti means the
+  /// property thickness.
+  std::vector<std::optional<double>> corner_thickness;
+  int tflag{0};
   std::optional<Vec3> orientation{std::nullopt};
   std::optional<NodeId> g0{std::nullopt};
   std::optional<CoordId> cid{std::nullopt};

@@ -948,6 +948,8 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_mat8(ctx, card.fields);
       else if (kw == "PSHELL")
         process_pshell(ctx, card.fields);
+      else if (kw == "PCOMP")
+        process_pcomp(ctx, card.fields);
       else if (kw == "PSOLID")
         process_psolid(ctx, card.fields);
       else if (kw == "PBAR")
@@ -1886,6 +1888,76 @@ void BdfParser::process_pshell(ParseContext &ctx,
   ctx.model.properties[p.pid] = p;
 }
 
+void BdfParser::process_pcomp(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  // PCOMP, PID, Z0, NSM, SB, FT, TREF, GE, LAM,
+  //        MID1, T1, THETA1, SOUT1, MID2, T2, THETA2, SOUT2, ...
+  // A blank MIDi or Ti repeats the previous ply's value.
+  const auto field = [&](size_t i) -> std::string {
+    return i < f.size() ? f[i] : std::string{};
+  };
+  PComp p;
+  p.pid = PropertyId(parse_int(f[1], ctx.line_num));
+  if (!field(2).empty())
+    p.z0 = parse_double(field(2), ctx.line_num);
+  p.nsm = field(3).empty() ? 0.0 : parse_double(field(3), ctx.line_num);
+  p.sb = field(4).empty() ? 0.0 : parse_double(field(4), ctx.line_num);
+  p.ft = field(5);
+  p.tref = field(6).empty() ? 0.0 : parse_double(field(6), ctx.line_num);
+  p.ge = field(7).empty() ? 0.0 : parse_double(field(7), ctx.line_num);
+  std::string lam = field(8);
+  std::transform(lam.begin(), lam.end(), lam.begin(), ::toupper);
+  if (lam.empty())
+    p.lam = LaminateOption::Default;
+  else if (lam == "SYM")
+    p.lam = LaminateOption::Sym;
+  else if (lam == "MEM")
+    p.lam = LaminateOption::Mem;
+  else if (lam == "BEND")
+    p.lam = LaminateOption::Bend;
+  else if (lam == "SMEAR")
+    p.lam = LaminateOption::Smear;
+  else if (lam == "SMCORE")
+    p.lam = LaminateOption::SmCore;
+  else
+    throw ParseError(std::format("PCOMP {}: unsupported LAM option '{}' (line {})",
+                                 p.pid.value, lam, ctx.line_num));
+
+  MaterialId mid{0};
+  double t = 0.0;
+  for (size_t i = 9; i < f.size(); i += 4) {
+    const std::string fm = field(i), ft = field(i + 1), fth = field(i + 2),
+                      fs = field(i + 3);
+    if (fm.empty() && ft.empty() && fth.empty() && fs.empty())
+      continue;
+    if (!fm.empty())
+      mid = MaterialId(parse_int(fm, ctx.line_num));
+    if (!ft.empty())
+      t = parse_double(ft, ctx.line_num);
+    if (mid.value == 0 || t <= 0.0)
+      throw ParseError(std::format(
+          "PCOMP {}: ply {} needs a material and a positive thickness (line {})",
+          p.pid.value, p.plies.size() + 1, ctx.line_num));
+    PCompPly ply;
+    ply.mid = mid;
+    ply.t = t;
+    ply.theta = fth.empty() ? 0.0 : parse_double(fth, ctx.line_num);
+    std::string so = fs;
+    std::transform(so.begin(), so.end(), so.begin(), ::toupper);
+    ply.sout = (so == "YES");
+    p.plies.push_back(ply);
+  }
+  if (p.plies.empty())
+    throw ParseError(std::format("PCOMP {}: no plies (line {})", p.pid.value,
+                                 ctx.line_num));
+  if (p.lam == LaminateOption::Sym) {
+    // The listed plies are the bottom half; mirror them about the middle.
+    const auto half = p.plies;
+    p.plies.insert(p.plies.end(), half.rbegin(), half.rend());
+  }
+  ctx.model.properties[p.pid] = p;
+}
+
 void BdfParser::process_psolid(ParseContext &ctx,
                                const std::vector<std::string> &f) {
   // PSOLID, PID, MID, CORDM, IN, STRESS, ISOP, FCTN
@@ -2060,6 +2132,29 @@ void BdfParser::process_pmass(ParseContext &ctx,
   ctx.model.properties[p.pid] = p;
 }
 
+/// CQUAD4/CTRIA3 continuation: blank, blank, TFLAG, T1..Tn (field indices
+/// 11.. of the logical card).
+void BdfParser::parse_corner_thickness(ElementData &e, const std::vector<std::string> &f,
+                            int n_corners, int line) {
+  const auto field = [&](size_t i) -> const std::string & {
+    static const std::string empty;
+    return i < f.size() ? f[i] : empty;
+  };
+  if (!field(11).empty())
+    e.tflag = parse_int(field(11), line);
+  bool any = false;
+  std::vector<std::optional<double>> t(static_cast<size_t>(n_corners));
+  for (int i = 0; i < n_corners; ++i) {
+    const std::string &v = field(static_cast<size_t>(12 + i));
+    if (!v.empty()) {
+      t[static_cast<size_t>(i)] = parse_double(v, line);
+      any = true;
+    }
+  }
+  if (any)
+    e.corner_thickness = std::move(t);
+}
+
 void BdfParser::process_cquad4(ParseContext &ctx,
                                const std::vector<std::string> &f) {
   // CQUAD4, EID, PID, G1, G2, G3, G4, THETA/MCID, ZOFFS
@@ -2077,6 +2172,7 @@ void BdfParser::process_cquad4(ParseContext &ctx,
   }
   if (f.size() > 8 && !f[8].empty())
     e.zoffs = parse_double(f[8], ctx.line_num);
+  parse_corner_thickness(e, f, 4, ctx.line_num);
   ctx.model.elements.push_back(std::move(e));
 }
 
@@ -2097,6 +2193,7 @@ void BdfParser::process_ctria3(ParseContext &ctx,
   }
   if (f.size() > 7 && !f[7].empty())
     e.zoffs = parse_double(f[7], ctx.line_num);
+  parse_corner_thickness(e, f, 3, ctx.line_num);
   ctx.model.elements.push_back(std::move(e));
 }
 

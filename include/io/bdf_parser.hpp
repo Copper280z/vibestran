@@ -59,6 +59,7 @@ private:
     static void process_mat6    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_mat8    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_pshell  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_pcomp   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_psolid  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_pbar    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_pbarl   (ParseContext& ctx, const std::vector<std::string>& fields);
@@ -114,6 +115,9 @@ private:
     // Field parsing helpers
     static double parse_double(const std::string& s, int line);
     static int    parse_int   (const std::string& s, int line);
+    static void parse_corner_thickness(ElementData& e,
+                                       const std::vector<std::string>& f,
+                                       int n_corners, int line);
 
     // Line splitting
     static std::vector<std::string> split_small_field(const std::string& line);
