@@ -376,8 +376,8 @@ TEST(ThermalSteady, CHexa20_LinearFieldReproduction_Full) {
       {5, 0, 0, 1}, {6, 1, 0, 1}, {7, 1, 1, 1}, {8, 0, 1, 1}}};
   const std::array<N, 12> mids{{
       {11, 0.5, 0, 0},   {12, 1, 0.5, 0},  {13, 0.5, 1, 0},  {14, 0, 0.5, 0},
-      {15, 0.5, 0, 1},   {16, 1, 0.5, 1},  {17, 0.5, 1, 1},  {18, 0, 0.5, 1},
-      {19, 0, 0, 0.5},   {20, 1, 0, 0.5},  {21, 1, 1, 0.5},  {22, 0, 1, 0.5}}};
+      {15, 0, 0, 0.5},   {16, 1, 0, 0.5},  {17, 1, 1, 0.5},  {18, 0, 1, 0.5},
+      {19, 0.5, 0, 1},   {20, 1, 0.5, 1},  {21, 0.5, 1, 1},  {22, 0, 0.5, 1}}};
   for (const auto &c : corners)
     bdf << "GRID," << c.id << ",," << c.x << "," << c.y << "," << c.z << "\n";
   for (const auto &m : mids)
@@ -415,12 +415,14 @@ std::string build_cube_chexa20_quadratic_test(int axis, double q_vol, double k) 
   const std::array<N, 8> corners{{
       {1, 0, 0, 0}, {2, 1, 0, 0}, {3, 1, 1, 0}, {4, 0, 1, 0},
       {5, 0, 0, 1}, {6, 1, 0, 1}, {7, 1, 1, 1}, {8, 0, 1, 1}}};
-  // Midnodes 9..20 (stored with IDs 11..22) — same NASTRAN ordering as
-  // CHEXA20: bottom-face edges first, then top-face edges, then vertical.
+  // Midnodes 9..20 (stored with IDs 11..22) in Nastran's CHEXA order:
+  // bottom-face edges, then the vertical edges G1-G5 .. G4-G8, then the top
+  // face.  (The element used to read G13..G20 as top-then-vertical; these
+  // decks were written the same way, so they did not catch it.)
   const std::array<N, 12> mids{{
       {11, 0.5, 0, 0},   {12, 1, 0.5, 0},  {13, 0.5, 1, 0},  {14, 0, 0.5, 0},
-      {15, 0.5, 0, 1},   {16, 1, 0.5, 1},  {17, 0.5, 1, 1},  {18, 0, 0.5, 1},
-      {19, 0, 0, 0.5},   {20, 1, 0, 0.5},  {21, 1, 1, 0.5},  {22, 0, 1, 0.5}}};
+      {15, 0, 0, 0.5},   {16, 1, 0, 0.5},  {17, 1, 1, 0.5},  {18, 0, 1, 0.5},
+      {19, 0.5, 0, 1},   {20, 1, 0.5, 1},  {21, 0.5, 1, 1},  {22, 0, 0.5, 1}}};
 
   // Compute the coordinate of each node along the conduction axis.
   auto axis_coord = [&](double x, double y, double z) {
@@ -467,26 +469,26 @@ TEST(ThermalSteady, CHexa20_QuadraticShapeRecovered_X) {
   // Bar conducting along +x: hold x=0 and x=1 faces at T=0; uniform q_vol = 8;
   // k = 1.  Centerline (x = 0.5) T = q_vol·L²/(8k) = 1.0 — exact for a
   // quadratic element since the analytic solution is degree-2 in x.
-  // Midnodes lying on the x=0.5 plane (IDs 11, 13, 15, 17 in our layout)
+  // Midnodes lying on the x=0.5 plane (IDs 11, 13, 19, 21 in our layout)
   // should all read 1.0 to within tight tolerance.
   const auto r = run_thermal(build_cube_chexa20_quadratic_test(0, 8.0, 1.0));
-  for (int id : {11, 13, 15, 17})
+  for (int id : {11, 13, 19, 21})
     EXPECT_NEAR(temp_at(r, id), 1.0, 1e-10) << "midnode " << id;
 }
 
 TEST(ThermalSteady, CHexa20_QuadraticShapeRecovered_Y) {
   // Same as the X test, but conducting along +y.  Midnodes at y=0.5 are
-  // IDs 12, 14, 16, 18.
+  // IDs 12, 14, 20, 22.
   const auto r = run_thermal(build_cube_chexa20_quadratic_test(1, 8.0, 1.0));
-  for (int id : {12, 14, 16, 18})
+  for (int id : {12, 14, 20, 22})
     EXPECT_NEAR(temp_at(r, id), 1.0, 1e-10) << "midnode " << id;
 }
 
 TEST(ThermalSteady, CHexa20_QuadraticShapeRecovered_Z) {
   // Same as above, conducting along +z.  Midnodes at z=0.5 are the four
-  // vertical-edge midnodes 19, 20, 21, 22.
+  // vertical-edge midnodes 15, 16, 17, 18.
   const auto r = run_thermal(build_cube_chexa20_quadratic_test(2, 8.0, 1.0));
-  for (int id : {19, 20, 21, 22})
+  for (int id : {15, 16, 17, 18})
     EXPECT_NEAR(temp_at(r, id), 1.0, 1e-10) << "midnode " << id;
 }
 

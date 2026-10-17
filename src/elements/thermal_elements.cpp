@@ -4,6 +4,7 @@
 // chbdy_element.cpp.
 
 #include "elements/thermal_elements.hpp"
+#include "elements/hexa20_shape.hpp"
 
 #include <Eigen/Dense>
 #include <algorithm>
@@ -457,80 +458,22 @@ struct Tet10Shape {
 }
 
 // ── Hex20 shape functions (serendipity 20-node brick) ─────────────────────
-// Node ordering (MSC NASTRAN CHEXA):
-//   1..8   = corners at (±1,±1,±1) — see hex8_shape for the sign table.
-//   9..12  = midnodes on the four bottom (zeta=-1) edges:
-//              9 on (1,2)  [along xi]   10 on (2,3) [along eta]
-//             11 on (3,4)  [along xi]   12 on (4,1) [along eta]
-//   13..16 = midnodes on the four top (zeta=+1) edges, same xi/eta pattern.
-//   17..20 = midnodes on the four vertical edges (1,5)(2,6)(3,7)(4,8) [along zeta].
+// Nastran CHEXA grid order (elements/hexa20_shape.hpp, shared with the
+// structural element): corners G1..G8, then the midside nodes of the bottom
+// edges (G9..G12), the vertical edges G1-G5 .. G4-G8 (G13..G16) and the top
+// edges (G17..G20).
 struct Hex20Shape {
   std::array<double, 20> N{}, dN0{}, dN1{}, dN2{};
 };
 
-// edge-direction tag for midnode m (8..19): 0 = along xi, 1 = along eta,
-// 2 = along zeta.  Used to pick the right (1 - α²) factor in the serendipity
-// midnode formula.
-static constexpr std::array<int, 12> kHex20EdgeAxis{
-    0, 1, 0, 1,    // 9..12 (bottom)
-    0, 1, 0, 1,    // 13..16 (top)
-    2, 2, 2, 2,    // 17..20 (vertical)
-};
-
 [[nodiscard]] Hex20Shape hex20_shape(double xi, double eta, double zeta) {
-  const std::array<double, 8> sx{-1, 1, 1, -1, -1, 1, 1, -1};
-  const std::array<double, 8> sy{-1, -1, 1, 1, -1, -1, 1, 1};
-  const std::array<double, 8> sz{-1, -1, -1, -1, 1, 1, 1, 1};
-  // Midnode reference coordinates: signs for the two non-edge axes.
-  // (the third coordinate, along the edge, is zero)
-  // axis: 0=along xi → sy,sz fixed, xi free; 1=along eta → sx,sz fixed; 2=along zeta
-  // For axis 0 (along xi), we use (sy, sz). For axis 1, (sx, sz). For axis 2, (sx, sy).
-  // Below tables encode the two non-edge ±1 signs for each midnode 9..20.
-  static const std::array<std::array<double, 2>, 12> mid_signs{{
-      {-1, -1}, { 1, -1}, { 1, -1}, {-1, -1},   // 9..12 (bottom, axis 0/1/0/1)
-      {-1,  1}, { 1,  1}, { 1,  1}, {-1,  1},   // 13..16 (top)
-      {-1, -1}, { 1, -1}, { 1,  1}, {-1,  1},   // 17..20 (vertical, axis 2: sx,sy)
-  }};
-
+  const Hexa20ShapeData d = hexa20_shape_functions(xi, eta, zeta);
   Hex20Shape s;
-  // First pass: midnodes (need them for the corner correction)
-  for (int m = 0; m < 12; ++m) {
-    const int axis = kHex20EdgeAxis[m];
-    const double a = mid_signs[m][0];  // first non-edge sign
-    const double b = mid_signs[m][1];  // second non-edge sign
-    if (axis == 0) {
-      // along xi: signs are (sy=a, sz=b); shape = ¼(1-ξ²)(1+a·η)(1+b·ζ)
-      const double f = 0.25 * (1 - xi * xi) * (1 + a * eta) * (1 + b * zeta);
-      s.N[8 + m] = f;
-      s.dN0[8 + m] = 0.25 * (-2 * xi) * (1 + a * eta) * (1 + b * zeta);
-      s.dN1[8 + m] = 0.25 * (1 - xi * xi) * a * (1 + b * zeta);
-      s.dN2[8 + m] = 0.25 * (1 - xi * xi) * (1 + a * eta) * b;
-    } else if (axis == 1) {
-      // along eta: signs (sx=a, sz=b); shape = ¼(1+a·ξ)(1-η²)(1+b·ζ)
-      const double f = 0.25 * (1 + a * xi) * (1 - eta * eta) * (1 + b * zeta);
-      s.N[8 + m] = f;
-      s.dN0[8 + m] = 0.25 * a * (1 - eta * eta) * (1 + b * zeta);
-      s.dN1[8 + m] = 0.25 * (1 + a * xi) * (-2 * eta) * (1 + b * zeta);
-      s.dN2[8 + m] = 0.25 * (1 + a * xi) * (1 - eta * eta) * b;
-    } else {
-      // along zeta: signs (sx=a, sy=b); shape = ¼(1+a·ξ)(1+b·η)(1-ζ²)
-      const double f = 0.25 * (1 + a * xi) * (1 + b * eta) * (1 - zeta * zeta);
-      s.N[8 + m] = f;
-      s.dN0[8 + m] = 0.25 * a * (1 + b * eta) * (1 - zeta * zeta);
-      s.dN1[8 + m] = 0.25 * (1 + a * xi) * b * (1 - zeta * zeta);
-      s.dN2[8 + m] = 0.25 * (1 + a * xi) * (1 + b * eta) * (-2 * zeta);
-    }
-  }
-  // Corners: N_i = ⅛(1+sx·ξ)(1+sy·η)(1+sz·ζ)(sx·ξ + sy·η + sz·ζ - 2)
-  for (int i = 0; i < 8; ++i) {
-    const double a = (1 + sx[i] * xi);
-    const double b = (1 + sy[i] * eta);
-    const double c = (1 + sz[i] * zeta);
-    const double t = sx[i] * xi + sy[i] * eta + sz[i] * zeta - 2.0;
-    s.N[i] = 0.125 * a * b * c * t;
-    s.dN0[i] = 0.125 * (sx[i] * b * c * t + a * b * c * sx[i]);
-    s.dN1[i] = 0.125 * (a * sy[i] * c * t + a * b * c * sy[i]);
-    s.dN2[i] = 0.125 * (a * b * sz[i] * t + a * b * c * sz[i]);
+  for (std::size_t a = 0; a < 20; ++a) {
+    s.N[a] = d.N[a];
+    s.dN0[a] = d.dN[a][0];
+    s.dN1[a] = d.dN[a][1];
+    s.dN2[a] = d.dN[a][2];
   }
   return s;
 }
@@ -582,12 +525,8 @@ static constexpr std::array<std::array<int, 2>, 6> kTet10Edges{{
     {0, 1}, {1, 2}, {0, 2}, {0, 3}, {1, 3}, {2, 3},
 }};
 
-// Hex20 edge → adjacent-corner table.
-static constexpr std::array<std::array<int, 2>, 12> kHex20Edges{{
-    {0, 1}, {1, 2}, {2, 3}, {3, 0},   // 9..12 (bottom)
-    {4, 5}, {5, 6}, {6, 7}, {7, 4},   // 13..16 (top)
-    {0, 4}, {1, 5}, {2, 6}, {3, 7},   // 17..20 (vertical)
-}};
+// Hex20 edge → adjacent-corner table (Nastran order).
+static constexpr const auto &kHex20Edges = kHexa20Edges;
 
 // ── Penta6 shape functions ────────────────────────────────────────────────
 struct Penta6Shape {
