@@ -600,7 +600,7 @@ static int write_oes1x_solid(std::ostream& f,
         etype_id = 68;
         ngrids   = 6;
     } else {
-        etype_id = 67;  // CHEXA8
+        etype_id = 67;  // CHEXA8 and CHEXA20: centre and the 8 corners
         ngrids   = 8;
     }
 
@@ -974,7 +974,8 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
 
     // ── OES1X1 tables for solid corner stresses ──────────────────────────────
     for (ElementType etype : {ElementType::CTETRA4, ElementType::CTETRA10,
-                              ElementType::CHEXA8, ElementType::CPENTA6}) {
+                              ElementType::CHEXA8, ElementType::CHEXA20,
+                              ElementType::CPENTA6}) {
         const bool any = std::any_of(
             results.subcases.begin(), results.subcases.end(),
             [&](const auto& sc) {

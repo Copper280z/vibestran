@@ -18,17 +18,17 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 1,878 final failure
+The suite contains 3,226 definitions. The current run has 1,787 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
-| `unsupported_input` | 1,111 | 190 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 540 | 201 | Result exists but differs from the reference or comparator expectation |
+| `unsupported_input` | 963 | 178 | Requires unsupported cards, solution sequences, elements, or formulations |
+| `numerical_mismatch` | 597 | 207 | Result exists but differs from the reference or comparator expectation |
 | `input_parse_error` | 185 | 15 | Parser rejects syntax or a card variant used by a valid deck |
 | `missing_result_data` | 36 | 11 | Solver completes but does not emit the requested result family |
 | `solver_model_error` | 6 | 2 | Parsed model is rejected by a geometry gate or has no free DOFs |
-| **Total** | **1,878** |  |  |
+| **Total** | **1,787** |  |  |
 
 CQUAD4 is the MITC4+/D continuum shell and CTRIA3 the MITC3+ shell (see
 `SHELL_REWRITE_PLAN.md` and `SHELL_BENCHMARKS.md`): six DOFs per grid,
@@ -201,24 +201,23 @@ records, not a solver exit.
 
 ### Unsupported Input
 
-There are 1,111 records across 190 decks. By unique deck, the current logs
+There are 963 records across 178 decks. By unique deck, the current logs
 show:
 
 | Cause | Decks |
 |---|---:|
-| Ignored unsupported BDF or case-control card | 110 |
+| Ignored unsupported BDF or case-control card | 109 |
 | Unsupported solution type | 61 |
-| Explicitly unsupported field or element | 19 |
+| Explicitly unsupported field or element | 8 |
 
-The explicit cases are CBUSH offset/location fields (8 decks) and CHEXA20
-or other elements without an implementation (11 decks). The most
+The explicit cases are CBUSH offset/location fields (8 decks). The most
 widespread ignored keywords across these decks are `ECHO`/`TITLE` (47),
 `DEBUG`/`ID` (46), `CQUAD8` (41), `OLOAD` (34), `CROD`/`PROD` (32),
 `MEFFMASS` (24), `EIGR` (22), `SUBT` (22), `SUBTITLE` (12), and `MPFACTOR`
 (10).
 
 The main implementation work remains CQUAD8 (and CTRIA6), CROD/PROD,
-CHEXA20, modal GPFORCE, EIGR/reduction behavior, and unsupported solution
+modal GPFORCE, EIGR/reduction behavior, and unsupported solution
 sequences such as buckling.
 
 ### Missing Result Data
@@ -377,7 +376,7 @@ values encode MYSTRAN behaviour and are not a correctness oracle.
 
 1. PCOMP ply stress/strain output (`COMPOSITESTRESSES`, 24 records) and
    CQUAD8/CTRIA6 (MITC9/MITC6-type elements; CQUAD8 in 41 decks).
-2. CROD/PROD, CHEXA20, modal GPFORCE (inertia-force rows; 34 decks request
+2. CROD/PROD, modal GPFORCE (inertia-force rows; 34 decks request
    GPFORCE in SOL 103). Solid stress/strain output is in basic; PSOLID CORDM
    is parsed but not yet applied.
 3. Triage the faceted-cylinder free-thermal decks and the SPCFORCES
@@ -576,3 +575,12 @@ most recent entry.
   The three roundoff records introduced by refinement return to passing; the
   run matches the one before refinement except for roundoff-level changes
   in records that fail on other grounds.
+- **CHEXA20 (1,878 -> 1,787).** The projected assumed-strain CHEXA20
+  (`CHEXA20_PLAN.md`) runs the 11 decks that stopped on the unsupported
+  element, and PLOAD4 applies to its 8-node faces. On these decks the CHEXA20
+  stresses match MYSTRAN 18 to the digits vibestran prints. The remaining
+  records in them are 1e-6-level print-precision differences, CQUAD8
+  (`quad4 quad8 hex20 together`), MAT9 for solids (`SNORM membrane-shear
+  coupling thermal`), and shell stresses of `SNORM membrane-shear coupling`
+  that the deck exposes now that it runs. PSOLID IN = TWO on a CHEXA20 uses
+  3x3x3 (`S30 hexa`), as MYSTRAN's current element does.

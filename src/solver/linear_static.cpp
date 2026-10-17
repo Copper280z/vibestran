@@ -15,6 +15,7 @@
 #include "elements/rbe_constraints.hpp"
 #include "elements/solid_elements.hpp"
 #include "elements/solid_hexa8.hpp"
+#include "elements/solid_hexa20.hpp"
 #include "io/system_dump.hpp"
 #include "assembly_parallel.hpp"
 #include "solver/analysis_support.hpp"
@@ -1661,6 +1662,7 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
       }
       res.plate_stresses.push_back(ps);
     } else if (elem_data.type == ElementType::CHEXA8 ||
+               elem_data.type == ElementType::CHEXA20 ||
                elem_data.type == ElementType::CTETRA4 ||
                elem_data.type == ElementType::CTETRA10 ||
                elem_data.type == ElementType::CPENTA6) {
@@ -1973,7 +1975,27 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
                                          mat_.ref_temp);
       };
 
-      if (elem_data.type == ElementType::CTETRA4) {
+      if (elem_data.type == ElementType::CHEXA20) {
+        // The element's assumed-strain operator at the centre and corners.
+        std::array<double, 20> temps{};
+        const auto nids = hexa20_node_array(elem_data.nodes);
+        for (size_t n = 0; n < 20; ++n) {
+          const auto it = nodal_temps_rec.find(elem_data.nodes[n]);
+          temps[n] = (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
+        }
+        const SolidHexa20 hexa(elem_data.id, elem_data.pid, nids, model);
+        const auto points = hexa.recover(
+            std::span<const double>(ue.data(), static_cast<size_t>(ue.size())), temps,
+            mat_.ref_temp);
+        center.eps = points[0].strain;
+        center.sigma = points[0].stress;
+        for (size_t n = 0; n < 8; ++n) {
+          ss.nodal.push_back(make_solid_stress_point(elem_data.nodes[n], points[n + 1].stress));
+          if (want_strain)
+            strain.nodal.push_back(
+                make_solid_strain_point(elem_data.nodes[n], points[n + 1].strain));
+        }
+      } else if (elem_data.type == ElementType::CTETRA4) {
         center = eval_ctetra4();
         for (NodeId nid : elem_data.nodes) {
           ss.nodal.push_back(make_solid_stress_point(nid, center.sigma));

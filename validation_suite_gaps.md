@@ -55,6 +55,12 @@ reference is a MYSTRAN run.
 | Modal analysis requesting all finite modes (ND >= massed DOFs, e.g. a one-DOF spring-mass) | Not checked by any deck | Grounded CELAS2 + CONM2: lambda = k/m |
 | CTETRA10 consistent mass in modal or inertial-load analysis | 12 decks use CTETRA10, none in SOL 103 | Free-free or cantilevered tet10 block in SOL 103, compared with a refined CHEXA/CTETRA4 reference, plus a GRAV case checking total reaction = rho*V*g |
 
+## Solids
+
+| Feature | Check | Suggested deck |
+|---|---|---|
+| PLOAD4 on a CHEXA20 (8-node quadratic face) | 38 decks use 20-node CHEXA, none with PLOAD4 | A curved CHEXA20 shell segment (cylinder panel) under uniform and corner-varying PLOAD4, against the equivalent consistent FORCE set and a refined reference; plus a block under top-face pressure with sliding supports (exact uniform stress, as in `Hexa20Reference.Pload4OnAQuadraticFaceGivesUniformStress`) |
+
 ## Shells (CQUAD4 / CTRIA3)
 
 | Feature | Check | Suggested deck |

@@ -5,6 +5,7 @@
 #include "elements/line_elements.hpp"
 #include "elements/solid_elements.hpp"
 #include "elements/solid_hexa8.hpp"
+#include "elements/solid_hexa20.hpp"
 #include <format>
 
 namespace vibestran {
@@ -34,6 +35,15 @@ std::unique_ptr<ElementBase> make_element(const ElementData& data, const Model& 
                     return std::make_unique<CHexa8>(data.id, data.pid, nids, model);
             }
             return std::make_unique<SolidHexa8>(data.id, data.pid, nids, model);
+        }
+        case ElementType::CHEXA20: {
+            if (data.nodes.size() != 20)
+                throw SolverError(std::format("CHEXA20 {} needs 20 node slots, got {}", data.id.value, data.nodes.size()));
+            const auto nids = hexa20_node_array(data.nodes);
+            // ISOP blank/REDUCED/EAS: projected assumed strain; FULL: standard
+            // displacement element.  Both use 3x3x3 Gauss points (PSOLID IN
+            // is not used: 2x2x2 has six spurious modes per element).
+            return std::make_unique<SolidHexa20>(data.id, data.pid, nids, model);
         }
         case ElementType::CTETRA4: {
             if (data.nodes.size() != 4)

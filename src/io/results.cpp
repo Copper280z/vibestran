@@ -85,6 +85,7 @@ int plate_vertex_count(const ElementType etype) {
 int solid_vertex_count(const ElementType etype) {
     switch (etype) {
     case ElementType::CHEXA8:
+    case ElementType::CHEXA20:
         return 8;
     case ElementType::CTETRA4:
         return 4;
@@ -312,6 +313,7 @@ void F06Writer::write(const SolverResults& results, const Model& model,
             // Solids always report the centre and the grid points, as in
             // Nastran (CORNER/BILIN only select shell output points).
             write_solid_stress_table(sc, out, ElementType::CHEXA8, true);
+            write_solid_stress_table(sc, out, ElementType::CHEXA20, true);
             write_solid_stress_table(sc, out, ElementType::CTETRA4, true);
             write_solid_stress_table(sc, out, ElementType::CTETRA10, true);
             write_solid_stress_table(sc, out, ElementType::CPENTA6, true);
@@ -324,6 +326,7 @@ void F06Writer::write(const SolverResults& results, const Model& model,
                                      do_strain_corner, msc->strain_fiber,
                                      msc->strain_max_shear, shell_props);
             write_solid_strain_table(sc, out, ElementType::CHEXA8, true);
+            write_solid_strain_table(sc, out, ElementType::CHEXA20, true);
             write_solid_strain_table(sc, out, ElementType::CTETRA4, true);
             write_solid_strain_table(sc, out, ElementType::CTETRA10, true);
             write_solid_strain_table(sc, out, ElementType::CPENTA6, true);
@@ -332,6 +335,7 @@ void F06Writer::write(const SolverResults& results, const Model& model,
             write_quad4_gpstress_table(sc, out);
             write_tria3_gpstress_table(sc, out);
             write_solid_gpstress_table(sc, out, ElementType::CHEXA8);
+            write_solid_gpstress_table(sc, out, ElementType::CHEXA20);
             write_solid_gpstress_table(sc, out, ElementType::CTETRA4);
             write_solid_gpstress_table(sc, out, ElementType::CTETRA10);
             write_solid_gpstress_table(sc, out, ElementType::CPENTA6);
@@ -973,6 +977,7 @@ void F06Writer::write_solid_stress_table(const SubCaseResults& sc,
     const char* type_name = "S O L I D";
     switch (etype) {
     case ElementType::CHEXA8:   type_name = "H E X A";   break;
+    case ElementType::CHEXA20:  type_name = "H E X A  20"; break;
     case ElementType::CTETRA4:  type_name = "T E T R A"; break;
     case ElementType::CTETRA10: type_name = "T E T R A"; break;
     case ElementType::CPENTA6:  type_name = "P E N T A"; break;
@@ -1038,6 +1043,7 @@ void F06Writer::write_solid_strain_table(const SubCaseResults& sc,
     const char* type_name = "S O L I D";
     switch (etype) {
     case ElementType::CHEXA8:   type_name = "H E X A";   break;
+    case ElementType::CHEXA20:  type_name = "H E X A  20"; break;
     case ElementType::CTETRA4:  type_name = "T E T R A"; break;
     case ElementType::CTETRA10: type_name = "T E T R A"; break;
     case ElementType::CPENTA6:  type_name = "P E N T A"; break;
@@ -1147,7 +1153,7 @@ void F06Writer::write_solid_gpstress_table(const SubCaseResults& sc,
     if (!contains_solid_nodal_stress_type(sc, etype)) return;
 
     const char* title = "S O L I D";
-    if (etype == ElementType::CHEXA8) {
+    if (etype == ElementType::CHEXA8 || etype == ElementType::CHEXA20) {
         title  = "H E X A H E D R O N   E L E M E N T S   ( C H E X A )";
     } else if (etype == ElementType::CTETRA4) {
         title  = "T E T R A H E D R O N   E L E M E N T S   ( C T E T R A )";
@@ -1327,6 +1333,7 @@ void F06Writer::write_thermal(const SolverResults& results, const Model& model,
                 const char* tn = "?";
                 switch (ef.etype) {
                   case ElementType::CHEXA8:  tn = "CHEXA"; break;
+                  case ElementType::CHEXA20: tn = "CHEXA"; break;
                   case ElementType::CTETRA4: tn = "CTETRA"; break;
                   case ElementType::CTETRA10:tn = "CTETRA10"; break;
                   case ElementType::CPENTA6: tn = "CPENTA"; break;

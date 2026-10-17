@@ -21,6 +21,12 @@ constexpr double GP2 = 1.0 / std::numbers::sqrt3_v<double>;
 constexpr std::array<double, 2> QUAD_GAUSS{-GP2, GP2};
 constexpr std::array<double, 2> QUAD_WEIGHTS{1.0, 1.0};
 
+/// Corners of a face listed as its corners followed by its midside nodes
+/// (3-node and 4-node faces have no midside nodes).
+size_t face_corner_count(const std::vector<int> &face) noexcept {
+  return face.size() == 6 ? 3 : face.size() == 8 ? 4 : face.size();
+}
+
 struct DirectionSpec {
   CoordId cid{0};
   Vec3 direction{0.0, 0.0, 0.0};
@@ -43,7 +49,8 @@ bool is_shell_element(ElementType type) noexcept {
 }
 
 bool is_supported_solid_pressure_element(ElementType type) noexcept {
-  return type == ElementType::CHEXA8 || type == ElementType::CPENTA6 ||
+  return type == ElementType::CHEXA8 || type == ElementType::CHEXA20 ||
+         type == ElementType::CPENTA6 ||
          type == ElementType::CTETRA4 || type == ElementType::CTETRA10;
 }
 
@@ -298,8 +305,84 @@ std::array<Vec3, 6> integrate_tri6_surface_load(
   return nodal_forces;
 }
 
+/// Consistent nodal forces of a pressure on an 8-node (serendipity) face:
+/// corners 0-3, then the midside nodes of edges 01, 12, 23, 30.  The
+/// pressure is interpolated bilinearly from the four corner values, as for
+/// the 4-node face; 3x3 Gauss points.
+std::array<Vec3, 8> integrate_quad8_surface_load(
+    const std::array<Vec3, 8> &coords, const std::array<double, 4> &pressures,
+    const Model &model, const std::optional<DirectionSpec> &direction,
+    const double normal_sign, const std::string &context) {
+  static constexpr std::array<std::array<double, 2>, 8> kNodes{
+      {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}, {0, -1}, {1, 0}, {0, 1}, {-1, 0}}};
+  const double g = std::sqrt(0.6);
+  const std::array<double, 3> pts{-g, 0.0, g};
+  const std::array<double, 3> wts{5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0};
+  std::array<Vec3, 8> nodal_forces{};
+  for (size_t i = 0; i < 3; ++i) {
+    for (size_t j = 0; j < 3; ++j) {
+      const double xi = pts[i];
+      const double eta = pts[j];
+      std::array<double, 8> N{};
+      std::array<double, 8> dxi{};
+      std::array<double, 8> deta{};
+      for (size_t a = 0; a < 8; ++a) {
+        const double cx = kNodes[a][0];
+        const double cy = kNodes[a][1];
+        if (a < 4) {
+          N[a] = 0.25 * (1 + cx * xi) * (1 + cy * eta) * (cx * xi + cy * eta - 1);
+          dxi[a] = 0.25 * cx * (1 + cy * eta) * (2 * cx * xi + cy * eta);
+          deta[a] = 0.25 * cy * (1 + cx * xi) * (cx * xi + 2 * cy * eta);
+        } else if (cx == 0.0) {
+          N[a] = 0.5 * (1 - xi * xi) * (1 + cy * eta);
+          dxi[a] = -xi * (1 + cy * eta);
+          deta[a] = 0.5 * cy * (1 - xi * xi);
+        } else {
+          N[a] = 0.5 * (1 + cx * xi) * (1 - eta * eta);
+          dxi[a] = 0.5 * cx * (1 - eta * eta);
+          deta[a] = -eta * (1 + cx * xi);
+        }
+      }
+      const QuadShapeData bilinear = quad_shape_functions(xi, eta);
+      Vec3 dx_dxi;
+      Vec3 dx_deta;
+      Vec3 position;
+      for (size_t a = 0; a < 8; ++a) {
+        dx_dxi = dx_dxi + coords[a] * dxi[a];
+        dx_deta = dx_deta + coords[a] * deta[a];
+        position = position + coords[a] * N[a];
+      }
+      double pressure = 0.0;
+      for (size_t a = 0; a < 4; ++a)
+        pressure += bilinear.N[a] * pressures[a];
+      const Vec3 area_vector = dx_dxi.cross(dx_deta);
+      Vec3 traction_measure;
+      if (direction) {
+        const Vec3 dir_basic = direction_in_basic(model, *direction, position, context);
+        traction_measure = scaled(dir_basic, pressure * area_vector.norm());
+      } else {
+        traction_measure = scaled(area_vector, normal_sign * pressure);
+      }
+      const double weight = wts[i] * wts[j];
+      for (size_t a = 0; a < 8; ++a)
+        nodal_forces[a] = nodal_forces[a] + traction_measure * (N[a] * weight);
+    }
+  }
+  return nodal_forces;
+}
+
+std::array<Vec3, 8> quad8_face_coords(const ElementData &elem, const Model &model,
+                                      const std::vector<int> &face) {
+  std::array<Vec3, 8> coords{};
+  for (size_t i = 0; i < 8; ++i)
+    coords[i] = model.node(elem.nodes[static_cast<size_t>(face[i])]).position;
+  return coords;
+}
+
 std::vector<int> reverse_face_order(const std::vector<int> &face) {
   switch (face.size()) {
+  case 8: // corners c0..c3, then the midside nodes of c0c1, c1c2, c2c3, c3c0
+    return {face[0], face[3], face[2], face[1], face[7], face[6], face[5], face[4]};
   case 3:
     return {face[0], face[2], face[1]};
   case 4:
@@ -316,7 +399,7 @@ std::vector<int> rotate_face_to_first_corner(const std::vector<int> &face,
   if (face.empty())
     return face;
 
-  const size_t corner_count = (face.size() == 6) ? 3 : face.size();
+  const size_t corner_count = face_corner_count(face);
   size_t first_pos = corner_count;
   for (size_t i = 0; i < corner_count; ++i) {
     if (face[i] == local_corner) {
@@ -345,6 +428,15 @@ std::vector<int> rotate_face_to_first_corner(const std::vector<int> &face,
             face[(first_pos + 2) % 4], face[(first_pos + 3) % 4]};
   }
 
+  if (face.size() == 8) {
+    std::vector<int> out(8);
+    for (size_t i = 0; i < 4; ++i) {
+      out[i] = face[(first_pos + i) % 4];
+      out[4 + i] = face[4 + (first_pos + i) % 4];
+    }
+    return out;
+  }
+
   if (face.size() == 6) {
     if (first_pos == 1)
       return {face[1], face[2], face[0], face[4], face[5], face[3]};
@@ -364,6 +456,17 @@ std::vector<std::vector<int>> candidate_faces(const ElementData &elem) {
         {1, 2, 6, 5},
         {2, 3, 7, 6},
         {3, 0, 4, 7},
+    };
+  case ElementType::CHEXA20:
+    // Corners as for the CHEXA8, then the midside nodes of the four edges
+    // (Nastran order: G9-G12 bottom, G13-G16 vertical, G17-G20 top).
+    return {
+        {0, 1, 2, 3, 8, 9, 10, 11},
+        {4, 5, 6, 7, 16, 17, 18, 19},
+        {0, 1, 5, 4, 8, 13, 16, 12},
+        {1, 2, 6, 5, 9, 14, 17, 13},
+        {2, 3, 7, 6, 10, 15, 18, 14},
+        {3, 0, 4, 7, 11, 12, 19, 15},
     };
   case ElementType::CPENTA6:
     return {
@@ -402,7 +505,7 @@ Vec3 element_centroid(const ElementData &elem, const Model &model) {
 
 Vec3 face_centroid(const ElementData &elem, const Model &model,
                    const std::vector<int> &face) {
-  const size_t corner_count = (face.size() == 6) ? 3 : face.size();
+  const size_t corner_count = face_corner_count(face);
   Vec3 centroid;
   for (size_t i = 0; i < corner_count; ++i)
     centroid = centroid + model.node(elem.nodes[face[i]]).position;
@@ -447,7 +550,7 @@ std::vector<int> select_solid_face(const ElementData &elem, const Model &model,
     std::optional<std::vector<int>> match;
 
     for (const auto &face : faces) {
-      const size_t corner_count = (face.size() == 6) ? 3 : face.size();
+      const size_t corner_count = face_corner_count(face);
       bool has_g1 = false;
       bool has_g4 = false;
       for (size_t i = 0; i < corner_count; ++i) {
@@ -482,7 +585,7 @@ std::vector<int> select_solid_face(const ElementData &elem, const Model &model,
   const NodeId g34 = *load.face_node34;
 
   for (const auto &face : faces) {
-    const size_t corner_count = (face.size() == 6) ? 3 : face.size();
+    const size_t corner_count = face_corner_count(face);
     if (corner_count != 4)
       continue;
 
@@ -813,6 +916,15 @@ void LinearStaticSolver::apply_pressure_loads(const Model &model,
                 apply_element_force_vector(
                     elem, model, dof_map, mpc_handler,
                     solid_face_force_vector(elem, face, forces), F);
+              } else if (face.size() == 8) {
+                const auto coords = quad8_face_coords(elem, model, face);
+                const auto nodal_forces = integrate_quad8_surface_load(
+                    coords, scaled_pressures, model, direction, -1.0, context);
+                const std::vector<Vec3> forces(nodal_forces.begin(),
+                                               nodal_forces.end());
+                apply_element_force_vector(
+                    elem, model, dof_map, mpc_handler,
+                    solid_face_force_vector(elem, face, forces), F);
               } else {
                 throw SolverError(std::format(
                     "PLOAD4 element {} resolved an unsupported face size {}",
@@ -1010,6 +1122,15 @@ void LinearStaticSolver::compute_spc_pressure_loads(
                     scaled_pressures[2]};
                 const auto nodal_forces = integrate_tri6_surface_load(
                     coords, tri_pressures, model, direction, -1.0, context);
+                const std::vector<Vec3> forces(nodal_forces.begin(),
+                                               nodal_forces.end());
+                add_spc_element_force(
+                    elem, solid_face_force_vector(elem, face, forces), spc,
+                    react);
+              } else if (face.size() == 8) {
+                const auto coords = quad8_face_coords(elem, model, face);
+                const auto nodal_forces = integrate_quad8_surface_load(
+                    coords, scaled_pressures, model, direction, -1.0, context);
                 const std::vector<Vec3> forces(nodal_forces.begin(),
                                                nodal_forces.end());
                 add_spc_element_force(
