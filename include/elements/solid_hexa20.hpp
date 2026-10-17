@@ -45,8 +45,9 @@
 // corner whose scaled Jacobian is not positive the recovery operator is
 // extrapolated trilinearly from the 2x2x2 Gauss points.
 //
-// All 20 grids are required (Nastran allows omitted midside nodes; that is
-// not implemented for the structural element).
+// Any of the 12 midside grids may be omitted (NodeId{0}): that edge is then
+// linear, its shape function folded into the corners (midside_nodes.hpp),
+// and the omitted grid has no DOFs.
 
 #include "elements/element_base.hpp"
 #include <array>

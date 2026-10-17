@@ -16,6 +16,7 @@
 #include "elements/solid_elements.hpp"
 #include "elements/solid_hexa8.hpp"
 #include "elements/solid_hexa20.hpp"
+#include "elements/midside_nodes.hpp"
 #include "io/system_dump.hpp"
 #include "assembly_parallel.hpp"
 #include "solver/analysis_support.hpp"
@@ -1283,6 +1284,8 @@ LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
     std::unordered_map<NodeId, std::array<double, 6>> per_grid;
     for (int li = 0; li < ndof; ++li) {
       const auto [nid, comp] = identity[static_cast<size_t>(li)];
+      if (is_omitted_grid(nid))
+        continue; // an omitted midside grid of a CTETRA10/CHEXA20
       per_grid[nid][static_cast<size_t>(comp)] += fe(li);
       internal[nid][static_cast<size_t>(comp)] += fe(li);
     }
@@ -1737,66 +1740,13 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
                                          mat_.ref_temp);
       };
 
-      struct Tetra10ShapeData {
-        std::array<double, 10> N{};
-        std::array<double, 10> dNdL1{};
-        std::array<double, 10> dNdL2{};
-        std::array<double, 10> dNdL3{};
-      };
-      const auto tet10_shape = [](const double L1, const double L2,
-                                  const double L3) {
-        const double L4 = 1.0 - L1 - L2 - L3;
-        Tetra10ShapeData s;
-        s.N[0] = L1 * (2 * L1 - 1);
-        s.N[1] = L2 * (2 * L2 - 1);
-        s.N[2] = L3 * (2 * L3 - 1);
-        s.N[3] = L4 * (2 * L4 - 1);
-        s.N[4] = 4 * L1 * L2;
-        s.N[5] = 4 * L2 * L3;
-        s.N[6] = 4 * L1 * L3;
-        s.N[7] = 4 * L1 * L4;
-        s.N[8] = 4 * L2 * L4;
-        s.N[9] = 4 * L3 * L4;
-        s.dNdL1[0] = 4 * L1 - 1;
-        s.dNdL1[1] = 0.0;
-        s.dNdL1[2] = 0.0;
-        s.dNdL1[3] = -(4 * L4 - 1);
-        s.dNdL1[4] = 4 * L2;
-        s.dNdL1[5] = 0.0;
-        s.dNdL1[6] = 4 * L3;
-        s.dNdL1[7] = 4 * (L4 - L1);
-        s.dNdL1[8] = -4 * L2;
-        s.dNdL1[9] = -4 * L3;
-        s.dNdL2[0] = 0.0;
-        s.dNdL2[1] = 4 * L2 - 1;
-        s.dNdL2[2] = 0.0;
-        s.dNdL2[3] = -(4 * L4 - 1);
-        s.dNdL2[4] = 4 * L1;
-        s.dNdL2[5] = 4 * L3;
-        s.dNdL2[6] = 0.0;
-        s.dNdL2[7] = -4 * L1;
-        s.dNdL2[8] = 4 * (L4 - L2);
-        s.dNdL2[9] = -4 * L3;
-        s.dNdL3[0] = 0.0;
-        s.dNdL3[1] = 0.0;
-        s.dNdL3[2] = 4 * L3 - 1;
-        s.dNdL3[3] = -(4 * L4 - 1);
-        s.dNdL3[4] = 0.0;
-        s.dNdL3[5] = 4 * L2;
-        s.dNdL3[6] = 4 * L1;
-        s.dNdL3[7] = -4 * L1;
-        s.dNdL3[8] = -4 * L2;
-        s.dNdL3[9] = 4 * (L4 - L3);
-        return s;
-      };
       auto eval_ctetra10 = [&](const double L1, const double L2,
                                const double L3) {
-        auto nc = [&]() -> std::array<Vec3, 10> {
-          std::array<Vec3, 10> c;
-          for (int i = 0; i < 10; ++i)
-            c[i] = model.node(elem_data.nodes[static_cast<size_t>(i)]).position;
-          return c;
-        }();
+        // The element's own geometry and shape functions, with omitted
+        // midside grids folded into their corners.
+        const CTetra10 tet(elem_data.id, elem_data.pid,
+                           element_node_array<10>(elem_data.nodes), model);
+        const auto nc = tet.node_coords();
         std::array<double, 10> temp{};
         for (int i = 0; i < 10; ++i) {
           const auto it =
@@ -1804,7 +1754,7 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
           temp[static_cast<size_t>(i)] =
               (it != nodal_temps_rec.end()) ? it->second : mat_.ref_temp;
         }
-        const auto sd = tet10_shape(L1, L2, L3);
+        const auto sd = tet.folded_shape(L1, L2, L3);
         Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
         for (int n = 0; n < 10; ++n) {
           J(0, 0) += sd.dNdL1[static_cast<size_t>(n)] * nc[static_cast<size_t>(n)].x;
@@ -2018,6 +1968,8 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
             {0.0, 0.0, 0.5},
         }};
         for (int n = 0; n < 10; ++n) {
+          if (is_omitted_grid(elem_data.nodes[static_cast<size_t>(n)]))
+            continue; // no grid to report at an omitted midside node
           const auto point =
               eval_ctetra10(kTet10Coords[static_cast<size_t>(n)][0],
                             kTet10Coords[static_cast<size_t>(n)][1],

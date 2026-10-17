@@ -18,17 +18,17 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 1,787 final failure
+The suite contains 3,226 definitions. The current run has 1,786 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
 | `unsupported_input` | 963 | 178 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 597 | 207 | Result exists but differs from the reference or comparator expectation |
+| `numerical_mismatch` | 596 | 207 | Result exists but differs from the reference or comparator expectation |
 | `input_parse_error` | 185 | 15 | Parser rejects syntax or a card variant used by a valid deck |
 | `missing_result_data` | 36 | 11 | Solver completes but does not emit the requested result family |
 | `solver_model_error` | 6 | 2 | Parsed model is rejected by a geometry gate or has no free DOFs |
-| **Total** | **1,787** |  |  |
+| **Total** | **1,786** |  |  |
 
 CQUAD4 is the MITC4+/D continuum shell and CTRIA3 the MITC3+ shell (see
 `SHELL_REWRITE_PLAN.md` and `SHELL_BENCHMARKS.md`): six DOFs per grid,
@@ -584,3 +584,9 @@ most recent entry.
   coupling thermal`), and shell stresses of `SNORM membrane-shear coupling`
   that the deck exposes now that it runs. PSOLID IN = TWO on a CHEXA20 uses
   3x3x3 (`S30 hexa`), as MYSTRAN's current element does.
+- **Omitted midside grids (1,787 -> 1,786).** CHEXA20 and CTETRA10 accept
+  omitted midside grids in structural analysis (linear edge, folded shape
+  functions), and the CTETRA10 consistent mass accepts Nastran's vertex
+  orientation, whose det(J) is negative (SOL 103 and GRAV used to fail on
+  correctly numbered tet10 meshes). No suite deck uses either; the one-record
+  change is the RBE3 10 roundoff flake.

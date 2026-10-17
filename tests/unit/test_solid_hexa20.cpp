@@ -2,7 +2,8 @@
 // Element-level tests of the projected assumed-strain CHEXA20
 // (solid_hexa20.hpp): rank, exact constant strain and constant-stress
 // consistency on curved distorted shapes, invariance under rotation and node
-// relabelling, free thermal expansion, mass, and input errors.  The
+// relabelling, free thermal expansion, mass, omitted midside grids, and an
+// inverted element.  The
 // benchmark-level checks (thin curved shells, patch, Lame, aspect ratio) are
 // in tests/integration/test_hexa20_reference.cpp.
 
@@ -11,6 +12,7 @@
 #include "elements/solid_hexa20.hpp"
 #include <Eigen/Eigenvalues>
 #include <cmath>
+#include <algorithm>
 #include <random>
 
 using namespace vibestran;
@@ -317,18 +319,75 @@ TEST(SolidHexa20, ConsistentMassCarriesTheElementMassAndLumpsPositive) {
   EXPECT_NEAR(L.diagonal().sum(), 3.0 * 3.0 * 8.0, 1e-10);
 }
 
-TEST(SolidHexa20, OmittedMidsideGridsAndInvertedElementsAreRejected) {
-  const Model m = hexa_model(parent());
-  auto order = identity_order();
-  std::array<NodeId, 20> ids = hexa20_node_array(std::array<NodeId, 20>{
-      NodeId{1},  NodeId{2},  NodeId{3},  NodeId{4},  NodeId{5},  NodeId{6},  NodeId{7},
-      NodeId{8},  NodeId{9},  NodeId{10}, NodeId{11}, NodeId{0},  NodeId{13}, NodeId{14},
-      NodeId{15}, NodeId{16}, NodeId{17}, NodeId{18}, NodeId{19}, NodeId{20}});
-  EXPECT_THROW(SolidHexa20(ElementId{1}, PropertyId{1}, ids, m), SolverError);
+TEST(SolidHexa20, OmittedMidsideGridsGiveTheElementWithLinearEdges) {
+  // Omitting a midside grid makes its edge linear.  The element must then
+  // equal the complete element with that grid at the edge midpoint and
+  // constrained to u_m = (u_a + u_b) / 2: K' = T' K T, M' = T' M T and
+  // f' = T' f, where T maps the omitted element's DOFs (zero at the omitted
+  // grids) to the complete element's.  This holds for the assumed strain
+  // too, since Bbar is linear in B column by column.  The omitted grids are
+  // spread over bottom, vertical and top edges of a curved, distorted shape.
+  const std::array<std::size_t, 4> omitted{11, 13, 17, 19}; // G12, G14, G18, G20
+  Shape X = curved_distorted();
+  for (std::size_t m : omitted) {
+    const auto &e = kHexa20Edges[m - 8];
+    X[m] = 0.5 * (X[static_cast<std::size_t>(e[0])] + X[static_cast<std::size_t>(e[1])]);
+  }
+  std::array<int, 20> order = identity_order();
+  for (std::size_t m : omitted)
+    order[m] = 0;
+  Mat60 T = Mat60::Identity();
+  for (std::size_t m : omitted) {
+    const auto &e = kHexa20Edges[m - 8];
+    for (int d = 0; d < 3; ++d) {
+      const auto r = static_cast<Eigen::Index>(3 * m) + d;
+      T(r, r) = 0.0;
+      T(r, 3 * e[0] + d) = 0.5;
+      T(r, 3 * e[1] + d) = 0.5;
+    }
+  }
+  const double alpha = 1e-5;
+  std::vector<double> temps(20);
+  for (std::size_t a = 0; a < 20; ++a)
+    temps[a] = 100.0 + 30.0 * X[a](0) - 20.0 * X[a](2);
+  for (std::size_t m : omitted) {
+    const auto &e = kHexa20Edges[m - 8];
+    temps[m] = 0.5 * (temps[static_cast<std::size_t>(e[0])] + temps[static_cast<std::size_t>(e[1])]);
+  }
+  for (SolidFormulation f : {SolidFormulation::EAS, SolidFormulation::Full}) {
+    const Model m = hexa_model(X, 0.3, f, alpha);
+    const SolidHexa20 full = element(m);
+    const SolidHexa20 part = element(m, order);
+    const Mat60 K = full.stiffness_matrix();
+    const Mat60 Kp = part.stiffness_matrix();
+    EXPECT_LT((Kp - T.transpose() * K * T).cwiseAbs().maxCoeff(), 1e-12 * K.cwiseAbs().maxCoeff());
+    const Mat60 M = full.mass_matrix();
+    EXPECT_LT((part.mass_matrix() - T.transpose() * M * T).cwiseAbs().maxCoeff(),
+              1e-13 * M.cwiseAbs().maxCoeff());
+    const Eigen::VectorXd fth = full.thermal_load(temps, 0.0);
+    EXPECT_LT((part.thermal_load(temps, 0.0) - T.transpose() * fth).cwiseAbs().maxCoeff(),
+              1e-12 * fth.cwiseAbs().maxCoeff());
 
+    // On the 48 active DOFs: exactly the six rigid modes.
+    std::vector<Eigen::Index> active;
+    for (Eigen::Index i = 0; i < 60; ++i)
+      if (std::find(omitted.begin(), omitted.end(), static_cast<std::size_t>(i / 3)) ==
+          omitted.end())
+        active.push_back(i);
+    Eigen::MatrixXd Ka(active.size(), active.size());
+    for (std::size_t i = 0; i < active.size(); ++i)
+      for (std::size_t j = 0; j < active.size(); ++j)
+        Ka(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j)) = Kp(active[i], active[j]);
+    const Eigen::VectorXd ev = Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd>(Ka).eigenvalues();
+    EXPECT_LT(std::abs(ev(5)), 1e-10 * ev.maxCoeff());
+    EXPECT_GT(ev(6), 1e-6 * ev.maxCoeff());
+  }
+}
+
+TEST(SolidHexa20, InvertedElementsAreRejected) {
   // Mirror the element through x = 0: a negative Jacobian everywhere.
   Shape Xm = parent();
   for (auto &x : Xm)
     x(0) = -x(0);
-  EXPECT_THROW((void)element(hexa_model(Xm), order).stiffness_matrix(), SolverError);
+  EXPECT_THROW((void)element(hexa_model(Xm)).stiffness_matrix(), SolverError);
 }

@@ -3,6 +3,7 @@
 // CTETRA4: 4-node linear tetrahedron, closed-form
 
 #include "elements/solid_elements.hpp"
+#include "elements/midside_nodes.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
@@ -777,10 +778,16 @@ Eigen::Matrix<double,6,6> CTetra10::constitutive_D() const {
 }
 
 std::array<Vec3, 10> CTetra10::node_coords() const {
-    std::array<Vec3, 10> c;
-    for (int i = 0; i < 10; ++i)
-        c[i] = model_.node(nodes_[i]).position;
-    return c;
+    return quadratic_solid_positions(model_, nodes_, kTetra10Edges);
+}
+
+CTetra10::ShapeData10 CTetra10::folded_shape(double L1, double L2, double L3) const {
+    ShapeData10 s = shape_functions(L1, L2, L3);
+    fold_omitted_midside(nodes_, kTetra10Edges, s.N);
+    fold_omitted_midside(nodes_, kTetra10Edges, s.dNdL1);
+    fold_omitted_midside(nodes_, kTetra10Edges, s.dNdL2);
+    fold_omitted_midside(nodes_, kTetra10Edges, s.dNdL3);
+    return s;
 }
 
 // Node ordering (Nastran CTETRA10):
@@ -864,7 +871,7 @@ LocalKe CTetra10::stiffness_matrix() const {
 
     for (int gp = 0; gp < 4; ++gp) {
         double L1 = pts[gp][0], L2 = pts[gp][1], L3 = pts[gp][2];
-        auto sd = shape_functions(L1, L2, L3);
+        auto sd = folded_shape(L1, L2, L3);
 
         // Jacobian: maps (L1,L2,L3) → (x,y,z)
         // dX/dL = sum_i dNi/dL * xi
@@ -972,7 +979,7 @@ LocalKe CTetra10::mass_matrix() const {
 
     for (const auto &qp : rule) {
         const double L1 = qp[0], L2 = qp[1], L3 = qp[2];
-        auto sd = shape_functions(L1, L2, L3);
+        auto sd = folded_shape(L1, L2, L3);
 
         // Jacobian: maps (dL1,dL2,dL3) → (dx,dy,dz)
         // J[i][j] = sum_n dN_n/dLj * coords[n][i]
@@ -982,14 +989,17 @@ LocalKe CTetra10::mass_matrix() const {
             J(1,0)+=sd.dNdL1[n]*coords[n].y; J(1,1)+=sd.dNdL2[n]*coords[n].y; J(1,2)+=sd.dNdL3[n]*coords[n].y;
             J(2,0)+=sd.dNdL1[n]*coords[n].z; J(2,1)+=sd.dNdL2[n]*coords[n].z; J(2,2)+=sd.dNdL3[n]*coords[n].z;
         }
-        double detJ = J.determinant();
-        if (detJ <= 0)
-            throw SolverError(std::format("CTetra10 {}: non-positive Jacobian in mass_matrix det={:.6g}", eid_.value, detJ));
+        // The sign of det(J) depends on the vertex order (it is negative for
+        // Nastran's G1-G2-G3 counter-clockwise seen from G4), as in the
+        // stiffness: integrate with |det(J)| and reject only degeneracy.
+        const double absDetJ = std::abs(J.determinant());
+        if (absDetJ < 1e-14)
+            throw SolverError(std::format("CTETRA10 {}: degenerate element in mass_matrix, |det(J)|={:.6g}", eid_.value, absDetJ));
 
         const double weight = qp[3];
         for (int a = 0; a < 10; ++a)
             for (int b = 0; b < 10; ++b) {
-                double v = rho * sd.N[a] * sd.N[b] * detJ * weight;
+                double v = rho * sd.N[a] * sd.N[b] * absDetJ * weight;
                 for (int d = 0; d < 3; ++d)
                     Me(3*a+d, 3*b+d) += v;
             }
@@ -1012,7 +1022,7 @@ LocalFe CTetra10::thermal_load(std::span<const double> temperatures, double t_re
 
     for (int gp = 0; gp < 4; ++gp) {
         double L1 = pts[gp][0], L2 = pts[gp][1], L3 = pts[gp][2];
-        auto sd = shape_functions(L1, L2, L3);
+        auto sd = folded_shape(L1, L2, L3);
 
         double T = 0;
         for (int n = 0; n < 10; ++n) T += sd.N[n] * temperatures[n];

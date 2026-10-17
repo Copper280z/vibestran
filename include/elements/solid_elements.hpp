@@ -223,17 +223,6 @@ public:
         return std::span<const NodeId>{nodes_.data(), NUM_NODES};
     }
 
-private:
-    ElementId   eid_;
-    PropertyId  pid_;
-    std::array<NodeId, NUM_NODES> nodes_;
-    const Model& model_;
-
-    std::array<Vec3, NUM_NODES> node_coords() const;
-    Eigen::Matrix<double,6,6> constitutive_D() const;
-    const Mat1& material() const;
-    const PSolid& psolid() const;
-
     // Shape functions in barycentric coords (L1,L2,L3; L4 = 1-L1-L2-L3)
     struct ShapeData10 {
         std::array<double, 10> N;
@@ -241,6 +230,24 @@ private:
         std::array<double, 10> dNdL2;
         std::array<double, 10> dNdL3;
     };
+
+    /// Shape functions with each omitted midside grid (NodeId{0}) folded
+    /// into the corners of its edge (midside_nodes.hpp).
+    [[nodiscard]] ShapeData10 folded_shape(double L1, double L2, double L3) const;
+
+    /// Grid positions, an omitted midside grid at the midpoint of its edge.
+    [[nodiscard]] std::array<Vec3, NUM_NODES> node_coords() const;
+
+private:
+    ElementId   eid_;
+    PropertyId  pid_;
+    std::array<NodeId, NUM_NODES> nodes_;
+    const Model& model_;
+
+    Eigen::Matrix<double,6,6> constitutive_D() const;
+    const Mat1& material() const;
+    const PSolid& psolid() const;
+
     static ShapeData10 shape_functions(double L1, double L2, double L3) noexcept;
 };
 

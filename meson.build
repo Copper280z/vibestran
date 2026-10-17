@@ -531,6 +531,7 @@ integration_test_sources = files(
   'tests/integration/test_shell_benchmarks.cpp',
   'tests/integration/test_hexa8_reference.cpp',
   'tests/integration/test_hexa20_reference.cpp',
+  'tests/integration/test_omitted_midside.cpp',
 )
 
 integration_tests = executable(

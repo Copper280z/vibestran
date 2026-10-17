@@ -3,6 +3,7 @@
 
 #include "elements/solid_hexa20.hpp"
 #include "elements/hexa20_shape.hpp"
+#include "elements/midside_nodes.hpp"
 #include <Eigen/Dense>
 #include <cmath>
 #include <format>
@@ -43,11 +44,28 @@ struct PointGeometry {
   double detJ{0.0};
 };
 
+/// Shape functions with each omitted midside grid folded into its corners.
+Hexa20ShapeData folded_shape(const std::array<NodeId, 20> &nodes,
+                             const std::array<double, 3> &xi) {
+  Hexa20ShapeData sd = hexa20_shape_functions(xi[0], xi[1], xi[2]);
+  fold_omitted_midside(nodes, kHexa20Edges, sd.N);
+  for (std::size_t k = 0; k < 3; ++k) {
+    std::array<double, 20> d{};
+    for (std::size_t a = 0; a < 20; ++a)
+      d[a] = sd.dN[a][k];
+    fold_omitted_midside(nodes, kHexa20Edges, d);
+    for (std::size_t a = 0; a < 20; ++a)
+      sd.dN[a][k] = d[a];
+  }
+  return sd;
+}
+
 PointGeometry point_geometry(const std::array<Eigen::Vector3d, 20> &X,
+                             const std::array<NodeId, 20> &nodes,
                              const std::array<double, 3> &xi) {
   PointGeometry p;
   p.xi = xi;
-  p.sd = hexa20_shape_functions(xi[0], xi[1], xi[2]);
+  p.sd = folded_shape(nodes, xi);
   p.J.setZero();
   for (std::size_t a = 0; a < 20; ++a)
     for (int i = 0; i < 3; ++i)
@@ -198,11 +216,10 @@ class StrainOperator {
 public:
   StrainOperator(ElementId eid, const std::array<NodeId, 20> &nodes, const Model &model,
                  const PSolid &ps, bool assumed)
-      : eid_(eid), assumed_(assumed) {
-    for (std::size_t a = 0; a < 20; ++a) {
-      const Vec3 &p = model.node(nodes[a]).position;
-      X_[a] = Eigen::Vector3d(p.x, p.y, p.z);
-    }
+      : eid_(eid), assumed_(assumed), nodes_(nodes) {
+    const auto pos = quadratic_solid_positions(model, nodes, kHexa20Edges);
+    for (std::size_t a = 0; a < 20; ++a)
+      X_[a] = Eigen::Vector3d(pos[a].x, pos[a].y, pos[a].z);
     const Mat1 &mat = model.material(ps.mid);
     D_ = isotropic_D(mat.E, mat.nu);
     alpha_ = mat.A;
@@ -214,7 +231,7 @@ public:
     for (std::size_t k = 0; k < 3; ++k)
       for (std::size_t j = 0; j < 3; ++j)
         for (std::size_t i = 0; i < 3; ++i) {
-          PointGeometry p = point_geometry(X_, {pts[i], pts[j], pts[k]});
+          PointGeometry p = point_geometry(X_, nodes_, {pts[i], pts[j], pts[k]});
           if (!(p.detJ > 0.0))
             throw SolverError(std::format(
                 "CHEXA20 {}: non-positive Jacobian {:.6g} at Gauss point ({:.4f}, {:.4f}, "
@@ -242,7 +259,10 @@ public:
   [[nodiscard]] const Mat6 &D() const { return D_; }
   [[nodiscard]] double alpha() const { return alpha_; }
   [[nodiscard]] double rho() const { return rho_; }
-  [[nodiscard]] const std::array<Eigen::Vector3d, 20> &X() const { return X_; }
+  /// Geometry and folded shape functions at a natural point.
+  [[nodiscard]] PointGeometry geometry(const std::array<double, 3> &xi) const {
+    return point_geometry(X_, nodes_, xi);
+  }
 
   /// Strain operator at an arbitrary natural point (positive Jacobian).
   [[nodiscard]] BMat at(const PointGeometry &p) const {
@@ -316,6 +336,7 @@ private:
 
   ElementId eid_;
   bool assumed_;
+  std::array<NodeId, 20> nodes_;
   std::array<Eigen::Vector3d, 20> X_;
   Mat6 D_;
   double alpha_{0.0};
@@ -338,13 +359,6 @@ private:
 SolidHexa20::SolidHexa20(ElementId eid, PropertyId pid, std::array<NodeId, NUM_NODES> node_ids,
                          const Model &model)
     : eid_(eid), pid_(pid), nodes_(node_ids), model_(model) {
-  for (std::size_t a = 8; a < 20; ++a)
-    if (nodes_[a].value == 0)
-      throw SolverError(std::format(
-          "CHEXA {} omits midside grid G{}: CHEXA elements with some but not all midside "
-          "grids are not supported for structural analysis; give all 12 midside grids or "
-          "none",
-          eid_.value, a + 1));
   const auto &prop = model_.property(pid_);
   if (!std::holds_alternative<PSolid>(prop))
     throw SolverError(
@@ -421,7 +435,7 @@ SolidHexa20::recover(std::span<const double> displacements, std::span<const doub
                                                                   {-1.0, 1.0, 1.0}}};
   std::array<PointResponse, 9> out;
   for (std::size_t k = 0; k < kPoints.size(); ++k) {
-    const PointGeometry p = point_geometry(op.X(), kPoints[k]);
+    const PointGeometry p = op.geometry(kPoints[k]);
     Vec6 e;
     if (scaled_jacobian(p) > kMinScaledJacobian) {
       e = op.at(p) * u;
@@ -433,7 +447,7 @@ SolidHexa20::recover(std::span<const double> displacements, std::span<const doub
         const auto &s = kPoints[c];
         const double w = (1.0 + s[0] * p.xi[0] / g) * (1.0 + s[1] * p.xi[1] / g) *
                          (1.0 + s[2] * p.xi[2] / g) / 8.0;
-        e += w * (op.at(point_geometry(op.X(), {s[0] * g, s[1] * g, s[2] * g})) * u);
+        e += w * (op.at(op.geometry({s[0] * g, s[1] * g, s[2] * g})) * u);
       }
     }
     out[k].strain = e;

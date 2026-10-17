@@ -53,7 +53,8 @@ void mark_element_dofs(const ElementData &elem,
   case ElementType::CTETRA10:
   case ElementType::CPENTA6:
     for (NodeId nid : elem.nodes)
-      mark_basic_translations(node_masks[nid]);
+      if (nid.value != 0) // NodeId{0}: an omitted CTETRA10/CHEXA20 midside grid
+        mark_basic_translations(node_masks[nid]);
     break;
   case ElementType::CELAS1:
   case ElementType::CELAS2:

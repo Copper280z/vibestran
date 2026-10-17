@@ -53,13 +53,14 @@ reference is a MYSTRAN run.
 | Modal analysis with massless DOFs (lumped mass, rotations without inertia) | No deck exercises it | Same decks; checks that no spurious modes appear and none are missed |
 | CONM2 with CID = -1 (X is the basic location of the CG) | 19 decks use CONM2, none with CID = -1 | Same offset mass given once with CID = 0 and an offset, once with CID = -1 and the absolute CG location; results must be identical |
 | Modal analysis requesting all finite modes (ND >= massed DOFs, e.g. a one-DOF spring-mass) | Not checked by any deck | Grounded CELAS2 + CONM2: lambda = k/m |
-| CTETRA10 consistent mass in modal or inertial-load analysis | 12 decks use CTETRA10, none in SOL 103 | Free-free or cantilevered tet10 block in SOL 103, compared with a refined CHEXA/CTETRA4 reference, plus a GRAV case checking total reaction = rho*V*g |
+| CTETRA10 consistent mass in modal or inertial-load analysis | 12 decks use CTETRA10, none in SOL 103 (this hid a bug: the mass rejected Nastran's vertex orientation, fixed with `CTetra10.MassIsTheSameForEitherVertexOrientation`) | Free-free or cantilevered tet10 block in SOL 103, compared with a refined CHEXA/CTETRA4 reference, plus a GRAV case checking total reaction = rho*V*g |
 
 ## Solids
 
 | Feature | Check | Suggested deck |
 |---|---|---|
 | PLOAD4 on a CHEXA20 (8-node quadratic face) | 38 decks use 20-node CHEXA, none with PLOAD4 | A curved CHEXA20 shell segment (cylinder panel) under uniform and corner-varying PLOAD4, against the equivalent consistent FORCE set and a refined reference; plus a block under top-face pressure with sliding supports (exact uniform stress, as in `Hexa20Reference.Pload4OnAQuadraticFaceGivesUniformStress`) |
+| Omitted midside grids of a structural CHEXA20 / CTETRA10 | No CHEXA20 or CTETRA10 with a blank midside slot in the 64 of 79 CHEXA/CTETRA decks pyNastran reads (the other 15 it cannot parse) | A CHEXA20 mesh joined to a CHEXA8 mesh (the shared faces' midside grids omitted) and a CTETRA10/CTETRA4 transition, in SOL 101 under PLOAD4 on a face with an omitted grid and in SOL 103, against the same mesh with the grids at edge midpoints tied by MPCs (as in `OmittedMidside.*`) |
 
 ## Shells (CQUAD4 / CTRIA3)
 

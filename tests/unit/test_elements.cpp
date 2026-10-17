@@ -11,6 +11,7 @@
 #include <Eigen/Eigenvalues>
 #include <cmath>
 #include <gtest/gtest.h>
+#include <tuple>
 #include <numbers>
 #include <optional>
 #include <span>
@@ -471,6 +472,76 @@ TEST(CTetra10, StiffnessIsSymmetric) {
   EXPECT_EQ(Ke.cols(), 30);
   double max_asym = (Ke - Ke.transpose()).cwiseAbs().maxCoeff();
   EXPECT_LT(max_asym, 1e-10 * Ke.cwiseAbs().maxCoeff());
+}
+
+TEST(CTetra10, MassIsTheSameForEitherVertexOrientation) {
+  // det(J) of the barycentric map is negative for Nastran's vertex order
+  // (G1-G2-G3 counter-clockwise seen from G4).  The mass matrix used to
+  // reject that, so SOL 103 and GRAV failed on correctly numbered meshes;
+  // it must equal the mirrored element's and carry the element mass.
+  for (const double s : {1.0, -1.0}) {
+    Model m = make_solid_model();
+    m.materials.at(MaterialId{1}).rho = 2.0;
+    add_grid(m, 1, 0, 0, 0);
+    add_grid(m, 2, 1, 0, 0);
+    add_grid(m, 3, 0, 1, 0);
+    add_grid(m, 4, 0, 0, s);
+    add_grid(m, 5, 0.5, 0, 0);
+    add_grid(m, 6, 0.5, 0.5, 0);
+    add_grid(m, 7, 0, 0.5, 0);
+    add_grid(m, 8, 0, 0, 0.5 * s);
+    add_grid(m, 9, 0.5, 0, 0.5 * s);
+    add_grid(m, 10, 0, 0.5, 0.5 * s);
+    const CTetra10 e(ElementId{1}, PropertyId{1},
+                     {NodeId{1}, NodeId{2}, NodeId{3}, NodeId{4}, NodeId{5}, NodeId{6},
+                      NodeId{7}, NodeId{8}, NodeId{9}, NodeId{10}},
+                     m);
+    const LocalKe M = e.mass_matrix();
+    double total = 0.0;
+    for (int a = 0; a < 10; ++a)
+      for (int b = 0; b < 10; ++b)
+        total += M(3 * a, 3 * b);
+    EXPECT_NEAR(total, 2.0 / 6.0, 1e-12) << "orientation " << s;
+  }
+}
+
+TEST(CTetra10, OmittedMidsideGridsGiveTheElementWithLinearEdges) {
+  // A CTETRA10 with G6 and G10 omitted equals the complete element with those
+  // grids at their edge midpoints, constrained to u_m = (u_a + u_b) / 2:
+  // K' = T' K T and M' = T' M T.  A distorted tet with curved edges.
+  Model m = make_solid_model();
+  m.materials.at(MaterialId{1}).rho = 2.0;
+  // Nastran's vertex order: G1-G2-G3 counter-clockwise seen from G4.
+  add_grid(m, 1, 0, 0, 0);
+  add_grid(m, 2, 1.2, 0.1, 0);
+  add_grid(m, 3, 0.2, 1.1, 0.1);
+  add_grid(m, 4, 0.1, 0.2, 0.9);
+  add_grid(m, 5, 0.6, 0.12, 0.05);   // 1-2, curved
+  add_grid(m, 6, 0.7, 0.6, 0.05);    // 2-3: omitted below (midpoint)
+  add_grid(m, 7, 0.08, 0.55, 0.02);  // 1-3, curved
+  add_grid(m, 8, 0.05, 0.1, 0.45);   // 1-4
+  add_grid(m, 9, 0.66, 0.12, 0.47);  // 2-4, curved
+  add_grid(m, 10, 0.15, 0.65, 0.5);  // 3-4: omitted below (midpoint)
+  const std::array<NodeId, 10> all{NodeId{1}, NodeId{2}, NodeId{3}, NodeId{4}, NodeId{5},
+                                   NodeId{6}, NodeId{7}, NodeId{8}, NodeId{9}, NodeId{10}};
+  std::array<NodeId, 10> part = all;
+  part[5] = NodeId{0};
+  part[9] = NodeId{0};
+  const CTetra10 full(ElementId{1}, PropertyId{1}, all, m);
+  const CTetra10 omitted(ElementId{1}, PropertyId{1}, part, m);
+  Eigen::MatrixXd T = Eigen::MatrixXd::Identity(30, 30);
+  for (const auto &[mid, a, b] : {std::tuple{5, 1, 2}, std::tuple{9, 2, 3}})
+    for (int d = 0; d < 3; ++d) {
+      T(3 * mid + d, 3 * mid + d) = 0.0;
+      T(3 * mid + d, 3 * a + d) = 0.5;
+      T(3 * mid + d, 3 * b + d) = 0.5;
+    }
+  const LocalKe K = full.stiffness_matrix();
+  EXPECT_LT((omitted.stiffness_matrix() - T.transpose() * K * T).cwiseAbs().maxCoeff(),
+            1e-12 * K.cwiseAbs().maxCoeff());
+  const LocalKe M = full.mass_matrix();
+  EXPECT_LT((omitted.mass_matrix() - T.transpose() * M * T).cwiseAbs().maxCoeff(),
+            1e-13 * M.cwiseAbs().maxCoeff());
 }
 
 TEST(CTetra10, StiffnessIsPositiveSemiDefinite) {

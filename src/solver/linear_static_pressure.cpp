@@ -3,6 +3,7 @@
 #include "core/coord_sys.hpp"
 #include "elements/element_factory.hpp"
 #include "elements/line_elements.hpp"
+#include "elements/midside_nodes.hpp"
 
 #include <algorithm>
 #include <array>
@@ -26,6 +27,9 @@ constexpr std::array<double, 2> QUAD_WEIGHTS{1.0, 1.0};
 size_t face_corner_count(const std::vector<int> &face) noexcept {
   return face.size() == 6 ? 3 : face.size() == 8 ? 4 : face.size();
 }
+
+Vec3 face_node_position(const ElementData &elem, const Model &model,
+                        const std::vector<int> &face, size_t i);
 
 struct DirectionSpec {
   CoordId cid{0};
@@ -375,7 +379,7 @@ std::array<Vec3, 8> quad8_face_coords(const ElementData &elem, const Model &mode
                                       const std::vector<int> &face) {
   std::array<Vec3, 8> coords{};
   for (size_t i = 0; i < 8; ++i)
-    coords[i] = model.node(elem.nodes[static_cast<size_t>(face[i])]).position;
+    coords[i] = face_node_position(elem, model, face, i);
   return coords;
 }
 
@@ -496,11 +500,35 @@ std::vector<std::vector<int>> candidate_faces(const ElementData &elem) {
 }
 
 Vec3 element_centroid(const ElementData &elem, const Model &model) {
-  const Vec3 centroid = std::accumulate(elem.nodes.begin(), elem.nodes.end(), Vec3{},
-                                        [&](const Vec3 &sum, NodeId nid) {
-                                          return sum + model.node(nid).position;
-                                        });
-  return centroid * (1.0 / static_cast<double>(elem.nodes.size()));
+  // Omitted midside grids (NodeId{0}) of a CTETRA10/CHEXA20 are skipped.
+  Vec3 centroid;
+  int count = 0;
+  for (const NodeId nid : elem.nodes) {
+    if (is_omitted_grid(nid))
+      continue;
+    centroid = centroid + model.node(nid).position;
+    ++count;
+  }
+  return centroid * (1.0 / static_cast<double>(count));
+}
+
+/// The two face corners (positions in `face`) of face midside node i.
+std::array<size_t, 2> face_edge_corners(const std::vector<int> &face, size_t i) {
+  const size_t nc = face_corner_count(face);
+  return {i - nc, (i - nc + 1) % nc};
+}
+
+/// Position of face node i; an omitted midside grid lies at the midpoint of
+/// its face edge.
+Vec3 face_node_position(const ElementData &elem, const Model &model,
+                        const std::vector<int> &face, size_t i) {
+  const NodeId nid = elem.nodes[static_cast<size_t>(face[i])];
+  if (!is_omitted_grid(nid))
+    return model.node(nid).position;
+  const auto c = face_edge_corners(face, i);
+  return (model.node(elem.nodes[static_cast<size_t>(face[c[0]])]).position +
+          model.node(elem.nodes[static_cast<size_t>(face[c[1]])]).position) *
+         0.5;
 }
 
 Vec3 face_centroid(const ElementData &elem, const Model &model,
@@ -638,8 +666,8 @@ std::array<Vec3, 3> tri3_face_coords(const ElementData &elem, const Model &model
 std::array<Vec3, 6> tri6_face_coords(const ElementData &elem, const Model &model,
                                      const std::vector<int> &face) {
   std::array<Vec3, 6> coords{};
-  for (int i = 0; i < 6; ++i)
-    coords[i] = model.node(elem.nodes[face[static_cast<size_t>(i)]]).position;
+  for (size_t i = 0; i < 6; ++i)
+    coords[i] = face_node_position(elem, model, face, i);
   return coords;
 }
 
@@ -670,11 +698,22 @@ std::vector<double> solid_face_force_vector(const ElementData &elem,
                                             const std::vector<Vec3> &forces) {
   const int ndof = num_dofs_for_element(elem);
   std::vector<double> fe(static_cast<size_t>(ndof), 0.0);
-  for (size_t i = 0; i < forces.size(); ++i) {
+  const auto add = [&](size_t i, const Vec3 &f) {
     const int local = face[i];
-    fe[3 * local + 0] += forces[i].x;
-    fe[3 * local + 1] += forces[i].y;
-    fe[3 * local + 2] += forces[i].z;
+    fe[3 * local + 0] += f.x;
+    fe[3 * local + 1] += f.y;
+    fe[3 * local + 2] += f.z;
+  };
+  for (size_t i = 0; i < forces.size(); ++i) {
+    if (i >= face_corner_count(face) &&
+        is_omitted_grid(elem.nodes[static_cast<size_t>(face[i])])) {
+      // An omitted midside grid: its shape function is folded into the two
+      // corners of its edge, and so is its share of the load.
+      for (const size_t c : face_edge_corners(face, i))
+        add(c, forces[i] * 0.5);
+      continue;
+    }
+    add(i, forces[i]);
   }
   return fe;
 }
