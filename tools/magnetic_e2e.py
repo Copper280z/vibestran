@@ -88,7 +88,7 @@ def main():
         for planar in (False, True):
             path = output/("nonlinear2d.bdf" if planar else "nonlinear3d.bdf")
             text = planar_deck("uniform", 4, "quad", .02) if planar else deck("uniform", 3, 2, element="hex")
-            text = text.replace("MATMAG,1,1", "MATMAG,1,1,1\nBHPOINT,1,0,0\nBHPOINT,1,.1,100\nBHPOINT,1,.2,2000")
+            text = text.replace("MATMAG,1,1", "MATMAG,1,,1\nTABLEBH,1\n,0,0,.1,100,.2,2000,ENDT")
             path.write_text(text)
             subprocess.run([str(executable), str(path)], check=True)
             result = json.loads(path.with_suffix(".mag.json").read_text())

@@ -29,61 +29,48 @@ struct Assembly {
   double energy{0}, force_scale{0};
   bool extrapolated{false};
 };
-// Material data resolved once per solve. A MATMAG frame depends only on its
-// coordinate system, so it is built here rather than at quadrature points.
+// Property data resolved once per solve. Remanence is constant for a basic or
+// rectangular frame; curvilinear frames are evaluated at each point.
 struct MaterialData {
   Material material;
   const std::vector<std::pair<double, double>> *curve{nullptr};
   const CoordinateSystem *coordinates{nullptr};
-  Matrix frame{Matrix::Identity()};
+  int axis{1};
+  Vector remanence{Vector::Zero()};
 };
-using Materials = std::map<int, MaterialData>;
+using Materials = std::map<int, MaterialData>; // by property ID
 Materials resolve_materials(const Model &model) {
   static const std::vector<std::pair<double, double>> empty;
   Materials out;
-  for (const auto &[id, m] : model.materials) {
+  for (const auto &[id, p] : model.properties) {
     MaterialData d;
-    d.material = m;
-    d.curve = m.bh_table ? &model.bh_tables.at(m.bh_table) : &empty;
-    if (m.coordinates) {
-      d.coordinates = &model.coordinates.at(m.coordinates);
-      d.frame = coordinate_axes(*d.coordinates);
+    d.material = model.materials.at(p.material);
+    d.curve = d.material.bh_table ? &model.bh_tables.at(d.material.bh_table)
+                                  : &empty;
+    d.axis = p.axis;
+    if (d.material.br != 0) {
+      const auto *cs =
+          p.coordinates ? &model.coordinates.at(p.coordinates) : nullptr;
+      if (cs && cs->type != 'R')
+        d.coordinates = cs;
+      else
+        d.remanence = (p.axis > 0 ? 1 : -1) * d.material.br *
+                      (cs ? coordinate_axes(*cs) : Matrix::Identity())
+                          .col(std::abs(p.axis) - 1);
     }
     out.emplace(id, d);
   }
   return out;
 }
-// Material at x with its MATMAG remanence expressed in basic.
-Material at_point(const MaterialData &d, const Vector &x) {
-  Material m = d.material;
-  if (d.coordinates) {
-    const Matrix &frame = d.frame;
-    const Vector p = frame.transpose() * (x - d.coordinates->a);
-    const char type = d.coordinates->type;
-    if (type == 'C') {
-      const double theta = std::atan2(p.y(), p.x());
-      m.remanence = Eigen::AngleAxisd(theta, Vector::UnitZ()) * m.remanence;
-    } else if (type == 'S') {
-      const double theta = std::atan2(std::hypot(p.x(), p.y()), p.z()),
-                   phi = std::atan2(p.y(), p.x());
-      Matrix spherical;
-      spherical.col(0) =
-          Vector(std::sin(theta) * std::cos(phi),
-                 std::sin(theta) * std::sin(phi), std::cos(theta));
-      spherical.col(1) =
-          Vector(std::cos(theta) * std::cos(phi),
-                 std::cos(theta) * std::sin(phi), -std::sin(theta));
-      spherical.col(2) = Vector(-std::sin(phi), std::cos(phi), 0);
-      m.remanence = spherical * m.remanence;
-    }
-    m.remanence = frame * m.remanence;
-  }
-  return m;
+// Remanence in basic at x.
+Vector remanence_at(const MaterialData &d, const Vector &x) {
+  if (!d.coordinates)
+    return d.remanence;
+  return (d.axis > 0 ? 1 : -1) * d.material.br *
+         local_axes(*d.coordinates, x).col(std::abs(d.axis) - 1);
 }
 Response response_at(const MaterialData &d, const Vector &x, const Vector &b) {
-  if (!d.coordinates)
-    return material_response(d.material, *d.curve, b);
-  return material_response(at_point(d, x), *d.curve, b);
+  return material_response(d.material, *d.curve, b, remanence_at(d, x));
 }
 Assembly assemble(const Materials &materials, const Mesh &mesh,
                   const Gauge &gauge, const Eigen::VectorXd &a,
@@ -93,7 +80,7 @@ Assembly assemble(const Materials &materials, const Mesh &mesh,
   std::vector<Triplet> entries;
   for (const auto &cell : mesh.cells) {
     const int ne = static_cast<int>(cell.edges.size());
-    const MaterialData &material = materials.at(cell.material);
+    const MaterialData &material = materials.at(cell.property);
     Eigen::MatrixXd local = Eigen::MatrixXd::Zero(ne, ne);
     Eigen::VectorXd residual = Eigen::VectorXd::Zero(ne);
     Vector average_b = Vector::Zero(), average_h = Vector::Zero();
@@ -375,7 +362,7 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
             "MFORCE surface must lie strictly inside the magnetic domain"};
       for (int ci : f.cells) {
         const auto &m = model.materials.at(mesh.cells[ci].material);
-        if (m.mur != 1 || m.bh_table || !m.remanence.isZero(0))
+        if (m.mur != 1 || m.bh_table || m.br != 0)
           return Error{std::format(
               "MFORCE {}: surface face ({}) touches magnetic element {}; "
               "both sides of every face must be mu_r=1 without remanence",
@@ -454,15 +441,6 @@ Result<Results> solve(const Model &model) {
   result.mesh = std::get<Mesh>(std::move(built));
   const auto &mesh = result.mesh;
   const Materials materials = resolve_materials(model);
-  if (mesh.planar)
-    for (const auto &c : mesh.cells) {
-      const MaterialData &data = materials.at(c.material);
-      for (const auto &q : quadrature(mesh, c)) {
-        const Vector remanence = at_point(data, q.position).remanence;
-        if (std::abs(remanence.dot(mesh.normal)) > 1e-12 * remanence.norm())
-          return Error{"MAG2D remanence must lie in the simulation plane"};
-      }
-    }
   auto gauged = make_gauge(mesh);
   if (auto *e = std::get_if<Error>(&gauged))
     return *e;
@@ -566,7 +544,7 @@ Result<Results> solve(const Model &model) {
         if (contains(cell, probe.position)) {
           const Vector field = field_at(cell, eq.a, probe.position);
           b += field;
-          h += response_at(materials.at(cell.material), probe.position, field)
+          h += response_at(materials.at(cell.property), probe.position, field)
                    .h;
           ++count;
         }

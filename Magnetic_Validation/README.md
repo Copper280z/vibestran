@@ -116,7 +116,7 @@ do not imply a universal speedup.
 For the planar formulation, [FEMM's magnetostatic tutorial](https://www.femm.info/doku/doku.php?id=MagneticsTutorial)
 is a useful independent comparison workflow. Generate a planar winding or motor
 with `tools/magnetic_planar_examples.py`, reproduce the same in-plane geometry,
-MATMAG/BHPOINT data, axial depth, signed turns and exterior A=0 condition in FEMM,
+MATMAG/TABLEBH data, axial depth, signed turns and exterior A=0 condition in FEMM,
 and compare B probes, energy, circuit linkage and torque. Start with the air
 winding case, then add steel and PMs. Refine both meshes and enlarge the exterior
 before accepting agreement. There is not yet an automated FEMM adapter or a

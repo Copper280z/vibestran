@@ -40,9 +40,11 @@ def planar_deck(kind="winding", n=12, element="quad", depth=.02, angle=0., curre
     lines = ["SOL MAGSTAT","CEND", "MAGBC=1" if kind == "uniform" else "LOAD=1", "BEGIN BULK",
              f"MAG2D,0,{depth:.16g}","MATMAG,1,1","PMAG2D,1,1"]
     if motor:
-        lines += ["MATMAG,2,1,1","PMAG2D,2,2",
-                  f"MATMAG,3,1.05,,{1.2*math.cos(radians):.16g},{1.2*math.sin(radians):.16g},0","PMAG2D,3,3"]
-        lines += [f"BHPOINT,1,{b},{h}" for b,h in [(0,0),(1,200),(1.5,1200),(1.8,8000),(2,50000)]]
+        # Rotor frame 30 turns with the rotor; the magnets follow its x axis.
+        lines += ["MATMAG,2,,1","PMAG2D,2,2",
+                  f"CORD2R,30,,0,0,0,0,0,1,{math.cos(radians):.16g},{math.sin(radians):.16g},0",
+                  "MATMAG,3,1.05,,1.2","PMAG2D,3,3,30,1"]
+        lines += ["TABLEBH,1", ",0,0,1,200,1.5,1200", ",1.8,8000,2,50000,ENDT"]
     for i,(x,y) in enumerate(nodes,1): lines.append(f"GRID,{i},,{x:.16g},{y:.16g},0")
     inside, regions, edges = set(), {}, {}
     for eid,c in enumerate(cells,1):

@@ -111,11 +111,11 @@ def deck(kind="loop", n=8, extent=2.0, angle=0.0, current=1.0, element="tet"):
     lines += ["MAGBC=1"] if kind == "uniform" else ["LOAD=1"]
     lines += ["BEGIN BULK", "MATMAG,1,1", "PSOLID,1,1"]
     if kind == "motor":
-        lines += ["MATMAG,2,1,1", "PSOLID,2,2",
-                  f"MATMAG,3,1.05,,{1.2*math.cos(radians):.16g},{1.2*math.sin(radians):.16g},0",
-                  "PSOLID,3,3"]
-        lines += [f"BHPOINT,1,{b},{h}" for b, h in
-                  [(0, 0), (1, 200), (1.5, 1200), (1.8, 8000), (2, 50000)]]
+        # Rotor frame 30 turns with the rotor; the magnets follow its x axis.
+        lines += ["MATMAG,2,,1", "PSOLID,2,2",
+                  f"CORD2R,30,,0,0,0,0,0,1,{math.cos(radians):.16g},{math.sin(radians):.16g},0",
+                  "MATMAG,3,1.05,,1.2", "PMAG,3,3,30,1"]
+        lines += ["TABLEBH,1", ",0,0,1,200,1.5,1200", ",1.8,8000,2,50000,ENDT"]
     for i, p in enumerate(nodes, 1):
         lines.append(f"GRID,{i},," + ",".join(f"{x:.16g}" for x in p))
     for i, (cell, material) in enumerate(zip(cells, materials), 1):

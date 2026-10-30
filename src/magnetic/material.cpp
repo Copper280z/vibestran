@@ -4,11 +4,11 @@
 namespace vibestran::magnetic {
 Response material_response(const Material &material,
                            const std::vector<std::pair<double, double>> &curve,
-                           const Vector &b) {
+                           const Vector &b, const Vector &remanence) {
   Response r;
   if (curve.empty()) {
     r.tangent = Matrix::Identity() / (mu0 * material.mur);
-    const Vector shifted = b - material.remanence;
+    const Vector shifted = b - remanence;
     r.h = r.tangent * shifted;
     r.energy = 0.5 * shifted.dot(r.h);
     return r;

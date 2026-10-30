@@ -12,7 +12,7 @@ namespace {
 using Triplet = Eigen::Triplet<double>;
 using Sparse = Eigen::SparseMatrix<double>;
 bool air(const Material &m) {
-  return m.mur == 1 && m.bh_table == 0 && m.remanence.isZero(0);
+  return m.mur == 1 && m.bh_table == 0 && m.br == 0;
 }
 double flux_error(const Mesh &mesh, const Eigen::VectorXd &flux) {
   double error = 0;

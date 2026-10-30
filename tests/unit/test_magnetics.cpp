@@ -13,7 +13,7 @@ namespace {
 Model box(int n, double extent = 1) {
   Model m;
   m.materials[1] = {};
-  m.properties[1] = 1;
+  m.properties[1] = {1};
   m.subcases.push_back({});
   auto node = [n](int i, int j, int k) {
     return 1 + i + (n + 1) * (j + (n + 1) * k);
@@ -104,6 +104,26 @@ void loop(Model &m, double radius = 0.6, bool rectangular = false) {
 std::string error_of(const auto &result) {
   const auto *e = std::get_if<Error>(&result);
   return e ? e->message : "";
+}
+// GRID and element cards for a model's mesh, so parser-only features (RID
+// chains, card layouts) can be exercised on the analytical fixtures.
+std::string mesh_cards(const Model &m) {
+  std::string out;
+  for (const auto &[id, g] : m.nodes)
+    out += std::format("GRID,{},,{:.17g},{:.17g},{:.17g}\n", id,
+                       g.position.x(), g.position.y(), g.position.z());
+  for (const auto &c : m.elements) {
+    const char *name = m.options.planar
+                           ? (c.nodes.size() == 3 ? "CTRIA3" : "CQUAD4")
+                           : (c.nodes.size() == 4   ? "CTETRA"
+                              : c.nodes.size() == 6 ? "CPENTA"
+                                                    : "CHEXA");
+    out += std::format("{},{},{}", name, c.id, c.property);
+    for (int n : c.nodes)
+      out += std::format(",{}", n);
+    out += '\n';
+  }
+  return out;
 }
 Vector source_biot(const Source &source, const Vector &x) {
   Vector b = Vector::Zero();
@@ -284,8 +304,9 @@ TEST(MagneticMaterial, NonlinearEnergyGradientTangentAndVacuumExtrapolation) {
   }
   Material pm;
   pm.mur = 1.05;
-  pm.remanence = Vector(0, 0, 1.2);
-  auto response = material_response(pm, {}, Vector::Zero());
+  pm.br = 1.2;
+  auto response =
+      material_response(pm, {}, Vector::Zero(), Vector(0, 0, pm.br));
   EXPECT_NEAR(response.h.z(), -1.2 / (mu0 * 1.05), 1e-9);
 }
 
@@ -469,8 +490,8 @@ TEST(MagneticSolve, LoopEnergyReciprocityReversalAndNonlinearInductance) {
     EXPECT_LT((c.b[i] + result.cases[1].b[i]).norm(), 1e-15);
   model.bh_tables[1] = {
       {0, 0}, {1e-7, 0.001}, {1e-6, 0.02}, {1e-5, 2}, {1e-4, 20}};
-  model.materials[2] = {1, 1, Vector::Zero(), 0};
-  model.properties[2] = 2;
+  model.materials[2] = {1, 1};
+  model.properties[2] = {2};
   for (auto &e : model.elements) {
     Vector center = Vector::Zero();
     for (int n : e.nodes)
@@ -499,8 +520,8 @@ TEST(MagneticSolve, LoopEnergyReciprocityReversalAndNonlinearInductance) {
 
 TEST(MagneticSolve, PermanentMagnetAndNonconvergenceErrors) {
   auto model = box(3);
-  model.materials[2] = {1.05, 0, Vector(0, 0, 1.2), 0};
-  model.properties[2] = 2;
+  model.materials[2] = {1.05, 0, 1.2};
+  model.properties[2] = {2, 0, 3, true};
   for (auto &e : model.elements) {
     Vector center = Vector::Zero();
     for (int n : e.nodes)
@@ -512,7 +533,7 @@ TEST(MagneticSolve, PermanentMagnetAndNonconvergenceErrors) {
   auto solved = solve(model);
   ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
   EXPECT_GT(std::get<Results>(solved).cases[0].probe_b[0].z(), 0.2);
-  model.materials[2].remanence = -model.materials[2].remanence;
+  model.properties[2].axis = -3;
   auto reverse = solve(model);
   ASSERT_TRUE(std::holds_alternative<Results>(reverse)) << error_of(reverse);
   EXPECT_LT((std::get<Results>(solved).cases[0].probe_b[0] +
@@ -521,8 +542,8 @@ TEST(MagneticSolve, PermanentMagnetAndNonconvergenceErrors) {
             1e-12);
   model = box(6, 1.5);
   loop(model);
-  model.materials[2] = {1, 1, Vector::Zero(), 0};
-  model.properties[2] = 2;
+  model.materials[2] = {1, 1};
+  model.properties[2] = {2};
   model.bh_tables[1] = {{0, 0}, {1e-7, 0.001}, {1e-6, 0.02}, {1e-5, 2}};
   for (auto &e : model.elements) {
     Vector center = Vector::Zero();
@@ -801,8 +822,8 @@ TEST(MagneticParser, LargeFieldsAndExecutiveWhitespacePreserveGeometry) {
 
 TEST(MagneticMaterial, PermanentMagnetCoordinateFrameMatchesBasicRemanence) {
   auto model = box(3);
-  model.materials[2].remanence = Vector(1.2, 0, 0);
-  model.properties[2] = 2;
+  model.materials[2].br = 1.2;
+  model.properties[2] = {2, 0, 1, true};
   for (auto &cell : model.elements) {
     Vector center = Vector::Zero();
     for (int node : cell.nodes)
@@ -815,8 +836,8 @@ TEST(MagneticMaterial, PermanentMagnetCoordinateFrameMatchesBasicRemanence) {
   ASSERT_TRUE(std::holds_alternative<Results>(basic)) << error_of(basic);
   model.coordinates[1] = {0, 'R', Vector::Zero(), Vector::UnitX(),
                           Vector::UnitY()};
-  model.materials[2].coordinates = 1;
-  model.materials[2].remanence = Vector(0, 0, 1.2);
+  // Local z of this frame is basic x.
+  model.properties[2] = {2, 1, 3, true};
   auto local = solve(model);
   ASSERT_TRUE(std::holds_alternative<Results>(local)) << error_of(local);
   const auto &a = std::get<Results>(basic).cases[0];
@@ -825,6 +846,105 @@ TEST(MagneticMaterial, PermanentMagnetCoordinateFrameMatchesBasicRemanence) {
   EXPECT_NEAR(a.energy, b.energy, 1e-8);
   for (size_t i = 0; i < a.b.size(); ++i)
     EXPECT_LT((a.b[i] - b.b[i]).norm(), 1e-12);
+}
+
+// Two poles oriented by child systems of one rotor system must match the
+// same magnets given directly in basic frames. Rotating the rotor system is
+// then the only change needed to move every magnet.
+std::string two_pole_deck(bool planar, const std::string &frames,
+                          const std::string &properties) {
+  auto model = planar ? Model{} : box(4);
+  if (planar) {
+    model.options.planar = true;
+    auto node = [](int i, int j) { return 1 + i + 9 * j; };
+    for (int j = 0; j <= 8; ++j)
+      for (int i = 0; i <= 8; ++i)
+        model.nodes[node(i, j)] = {Vector(-1 + i / 4., -1 + j / 4., 0), 0};
+    for (int j = 0; j < 8; ++j)
+      for (int i = 0; i < 8; ++i)
+        model.elements.push_back({static_cast<int>(model.elements.size()) + 1,
+                                  1,
+                                  {node(i, j), node(i + 1, j),
+                                   node(i + 1, j + 1), node(i, j + 1)}});
+  }
+  for (auto &cell : model.elements) {
+    Vector center = Vector::Zero();
+    for (int n : cell.nodes)
+      center += model.nodes.at(n).position /
+                static_cast<double>(cell.nodes.size());
+    if (std::abs(center.y()) < .5 && std::abs(center.z()) < .5 &&
+        std::abs(center.x()) < .5)
+      cell.property = center.x() > 0 ? 2 : 3;
+  }
+  const std::string property = planar ? "PMAG2D" : "PMAG";
+  std::string deck = "SOL MAGSTAT\nCEND\nBEGIN BULK\n";
+  if (planar)
+    deck += "MAG2D,0,0.1\nPMAG2D,1,1\n";
+  else
+    deck += "PSOLID,1,1\n";
+  deck += "MATMAG,1,1\nMATMAG,2,1.05,,1.2\n" + frames +
+          std::vformat(properties, std::make_format_args(property)) +
+          mesh_cards(model) + "ENDDATA\n";
+  return deck;
+}
+
+TEST(MagneticMaterial, RotorChildFramesMatchEquivalentBasicFramesIn2DAnd3D) {
+  const double alpha = 35, pole = 20, degree = std::numbers::pi / 180;
+  auto cosine = [&](double a) { return std::cos(a * degree); };
+  auto sine = [&](double a) { return std::sin(a * degree); };
+  // Rotor frame 10 rotated by alpha about z; pole frames 11 and 12 are given
+  // in rotor coordinates. Pole 2 uses the rotor's negative y axis.
+  const std::string rotor = std::format(
+      "CORD2R,10,,0,0,0,0,0,1\n,{:.17g},{:.17g},0\n"
+      "CORD2R,11,10,0,0,0,0,0,1\n,{:.17g},{:.17g},0\n"
+      "CORD2R,12,10,0,0,0,0,0,1\n,1,0,0\n",
+      cosine(alpha), sine(alpha), cosine(pole), sine(pole));
+  const std::string chained = "{0},2,2,11,1\n{0},3,2,12,-2\n";
+  // The same directions written once in basic: x axes along R(alpha+pole)x
+  // and -R(alpha)y respectively.
+  const std::string basic = std::format(
+      "CORD2R,21,,0,0,0,0,0,1\n,{:.17g},{:.17g},0\n"
+      "CORD2R,22,,0,0,0,0,0,1\n,{:.17g},{:.17g},0\n",
+      cosine(alpha + pole), sine(alpha + pole), sine(alpha), -cosine(alpha));
+  const std::string direct = "{0},2,2,21,1\n{0},3,2,22,1\n";
+  // Reversing pole 2's frame by 180 degrees replaces the negative axis.
+  const std::string reversed = rotor + "CORD2R,13,10,0,0,0,0,0,1\n,-1,0,0\n";
+  for (bool planar : {false, true}) {
+    SCOPED_TRACE(planar);
+    std::vector<Results> results;
+    for (const auto &deck :
+         {two_pole_deck(planar, rotor, chained),
+          two_pole_deck(planar, basic, direct),
+          two_pole_deck(planar, reversed, "{0},2,2,11,1\n{0},3,2,13,2\n")}) {
+      auto parsed = parse_string(deck);
+      ASSERT_TRUE(std::holds_alternative<Model>(parsed)) << error_of(parsed);
+      auto solved = solve(std::get<Model>(parsed));
+      ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+      results.push_back(std::get<Results>(std::move(solved)));
+    }
+    const auto &reference = results[0].cases[0];
+    EXPECT_GT(reference.energy, 0);
+    for (size_t k = 1; k < results.size(); ++k) {
+      const auto &other = results[k].cases[0];
+      EXPECT_NEAR(other.energy / reference.energy, 1, 1e-12);
+      for (size_t i = 0; i < reference.b.size(); ++i)
+        EXPECT_LT((other.b[i] - reference.b[i]).norm(), 1e-12);
+    }
+    // The pole fields really differ, so a mixed-up axis cannot pass.
+    const auto &cells = results[0].mesh.cells;
+    Vector first = Vector::Zero(), second = Vector::Zero();
+    for (size_t i = 0; i < cells.size(); ++i) {
+      if (cells[i].property == 2)
+        first += reference.b[i];
+      if (cells[i].property == 3)
+        second += reference.b[i];
+    }
+    EXPECT_GT(first.normalized().dot(Vector(cosine(alpha + pole),
+                                            sine(alpha + pole), 0)),
+              .9);
+    EXPECT_GT(second.normalized().dot(Vector(sine(alpha), -cosine(alpha), 0)),
+              .9);
+  }
 }
 
 namespace {
@@ -862,7 +982,7 @@ Model planar_box(int n, bool triangles = false, bool mixed = false) {
   m.options.planar = true;
   m.options.depth = .3;
   m.materials[1] = {};
-  m.properties[1] = 1;
+  m.properties[1] = {1};
   m.subcases.push_back({});
   auto node = [n](int i, int j) { return 1 + i + (n + 1) * j; };
   for (int j = 0; j <= n; ++j)
@@ -1108,7 +1228,9 @@ TEST(MagneticPlanar,
 
 TEST(MagneticPlanar, PermanentMagnetReversal) {
   auto m = planar_box(12);
-  m.properties[2] = 2;
+  // Axis 1 of a frame rotated about the plane normal: B_r = (.2, .1, 0).
+  m.coordinates[1] = {0, 'R', Vector::Zero(), Vector::UnitZ(), Vector(2, 1, 0)};
+  m.properties[2] = {2, 1, 1, true};
   for (auto &cell : m.elements) {
     Vector center = Vector::Zero();
     for (int n : cell.nodes)
@@ -1116,10 +1238,10 @@ TEST(MagneticPlanar, PermanentMagnetReversal) {
     if (std::abs(center.x()) < .32 && std::abs(center.y()) < .65)
       cell.property = 2;
   }
-  m.materials[2] = {1.05, 0, Vector(.2, .1, 0), 0};
+  m.materials[2] = {1.05, 0, std::hypot(.2, .1)};
   auto positive = solve(m);
   ASSERT_TRUE(std::holds_alternative<Results>(positive)) << error_of(positive);
-  m.materials[2].remanence *= -1;
+  m.properties[2].axis = -1;
   auto negative = solve(m);
   ASSERT_TRUE(std::holds_alternative<Results>(negative)) << error_of(negative);
   const auto &a = std::get<Results>(positive).cases[0],
@@ -1127,8 +1249,57 @@ TEST(MagneticPlanar, PermanentMagnetReversal) {
   EXPECT_NEAR(a.energy, b.energy, 1e-10);
   for (size_t i = 0; i < a.b.size(); ++i)
     EXPECT_LT((a.b[i] + b.b[i]).norm(), 1e-12);
-  m.materials[2].remanence.z() = .1;
+  m.properties[2].axis = 3; // the plane normal
   EXPECT_NE(error_of(solve(m)).find("remanence must lie"), std::string::npos);
+}
+
+// A ring magnetized along theta has H = 0 everywhere by Ampere's law on
+// concentric circles, so B = B_r theta inside it and zero elsewhere for any
+// recoil permeability. Radial magnetization of the same ring has no
+// equivalent current, so B = 0 and H = -B_r r / (mu0 mu_r) inside. Both
+// evaluate the cylindrical frame at every quadrature point.
+TEST(MagneticPlanar, CylindricalRingMagnetizationMatchesAmpereSolutions) {
+  const double br = 1.2, mur = 1.05, inner = .3, outer = .6;
+  for (int axis : {2, 1}) {
+    SCOPED_TRACE(axis);
+    double previous = 1;
+    for (int n : {32, 64}) {
+      auto m = planar_box(n, true);
+      m.coordinates[1] = {0, 'C', Vector::Zero(), Vector::UnitZ(),
+                          Vector::UnitX()};
+      m.materials[2] = {mur, 0, br};
+      m.properties[2] = {2, 1, axis, true};
+      for (auto &cell : m.elements) {
+        Vector center = Vector::Zero();
+        for (int v : cell.nodes)
+          center += m.nodes.at(v).position / 3;
+        if (center.norm() > inner && center.norm() < outer)
+          cell.property = 2;
+      }
+      const double angle = .4;
+      const Vector radial(std::cos(angle), std::sin(angle), 0),
+          tangential(-std::sin(angle), std::cos(angle), 0);
+      m.probes = {{1, .45 * radial}, {2, .1 * radial}, {3, .8 * radial}};
+      auto solved = solve(m);
+      ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+      const auto &c = std::get<Results>(solved).cases[0];
+      const Vector expected_b =
+          axis == 2 ? Vector(br * tangential) : Vector(Vector::Zero());
+      const Vector expected_h =
+          axis == 2 ? Vector(Vector::Zero()) : Vector(-br / (mu0 * mur) * radial);
+      // The polygonal ring boundary is the only error source; it decays
+      // under refinement.
+      const double error =
+          std::max({(c.probe_b[0] - expected_b).norm(), c.probe_b[1].norm(),
+                    c.probe_b[2].norm(),
+                    mu0 * (c.probe_h[0] - expected_h).norm()}) /
+          br;
+      EXPECT_LT(error, previous);
+      previous = error;
+      if (n == 64)
+        EXPECT_LT(error, .03);
+    }
+  }
 }
 
 TEST(MagneticParser, NativeSolidsPlanarWindingCardsAndUnsupportedGeometry) {
@@ -1957,8 +2128,8 @@ namespace {
 // Three slopes and a vacuum extrapolation branch. Excitations below are chosen
 // to visit each regime; field_regimes asserts that at quadrature points.
 void nonlinear_steel(Model &model) {
-  model.materials[2] = {1, 1, Vector::Zero(), 0};
-  model.properties[2] = 2;
+  model.materials[2] = {1, 1};
+  model.properties[2] = {2};
   model.bh_tables[1] = {{0, 0}, {.1, 100}, {.3, 2000}, {1, 100000}};
   model.options.nonlinear_tolerance = 1e-12;
 }
@@ -2261,8 +2432,8 @@ TEST(MagneticNonlinear, PermanentMagnetDrivesSteelAcrossTheKneeAndReverses) {
     model.planar_coils.clear();
     model.currents.clear();
     model.subcases = {{}};
-    model.materials[3] = {1.05, 0, Vector(1.2, 0, 0), 0};
-    model.properties[3] = 3;
+    model.materials[3] = {1.05, 0, 1.2};
+    model.properties[3] = {3, 0, 1, true};
     for (int set : {1, 2})
       for (int id : model.element_sets.at(set))
         for (auto &cell : model.elements)
@@ -2279,7 +2450,7 @@ TEST(MagneticNonlinear, PermanentMagnetDrivesSteelAcrossTheKneeAndReverses) {
     EXPECT_GT(regimes.points[2], 0);
     EXPECT_FALSE(state.extrapolated);
     EXPECT_LE(state.residual, model.options.nonlinear_tolerance);
-    model.materials[3].remanence *= -1;
+    model.properties[3].axis = -1;
     const auto negative = solve(model);
     ASSERT_TRUE(std::holds_alternative<Results>(negative))
         << error_of(negative);
@@ -2301,25 +2472,24 @@ GRID,3,,0,1,0
 GRID,4,,0,0,1
 CTETRA,1,1,1,2,3,4
 PSOLID,1,1
-MATMAG,1,1,1
+MATMAG,1,,1
 )";
   for (const std::string points :
-       {"BHPOINT,1,0,0\n",                   // insufficient to define a slope
-        "BHPOINT,1,.1,0\nBHPOINT,1,1,100\n", // missing (0,0)
-        "BHPOINT,1,0,0\nBHPOINT,1,1,100\nBHPOINT,1,1,200\n",   // duplicate B
-        "BHPOINT,1,0,0\nBHPOINT,1,1,100\nBHPOINT,1,.5,200\n",  // unsorted B
-        "BHPOINT,1,0,0\nBHPOINT,1,1,100\nBHPOINT,1,2,100\n",   // zero tangent
-        "BHPOINT,1,0,0\nBHPOINT,1,1,100\nBHPOINT,1,2,50\n"}) { // negative
-                                                               // tangent
+       {"TABLEBH,1\n,0,0,ENDT\n",              // insufficient to define a slope
+        "TABLEBH,1\n,.1,0,1,100,ENDT\n",       // missing (0,0)
+        "TABLEBH,1\n,0,0,1,100,1,200,ENDT\n",  // duplicate B
+        "TABLEBH,1\n,0,0,1,100,.5,200,ENDT\n", // unsorted B
+        "TABLEBH,1\n,0,0,1,100,2,100,ENDT\n",  // zero tangent
+        "TABLEBH,1\n,0,0,1,100,2,50,ENDT\n"}) { // negative tangent
     SCOPED_TRACE(points);
     const auto parsed = parse_string(deck + points);
     ASSERT_TRUE(std::holds_alternative<Error>(parsed));
-    EXPECT_NE(error_of(parsed).find("BHPOINT"), std::string::npos);
+    EXPECT_NE(error_of(parsed).find("TABLEBH 1"), std::string::npos);
   }
   // Positive differential permeability is required; the slopes themselves
   // need not increase monotonically for the constitutive tangent to be SPD.
-  const auto valid =
-      parse_string(deck + "BHPOINT,1,0,0\nBHPOINT,1,1,100\nBHPOINT,1,2,150\n");
+  const auto valid = parse_string(deck + "TABLEBH,1,LINEAR\n,0,0,1,100\n,2,"
+                                         "150,ENDT\n");
   ASSERT_TRUE(std::holds_alternative<Model>(valid)) << error_of(valid);
   const auto &model = std::get<Model>(valid);
   const auto response = material_response(
@@ -2327,4 +2497,88 @@ MATMAG,1,1,1
   EXPECT_DOUBLE_EQ(response.h.x(), 125);
   EXPECT_DOUBLE_EQ(response.tangent(0, 0), 50);
   EXPECT_NEAR(response.tangent(1, 1), 125 / 1.5, 1e-12);
+}
+
+TEST(MagneticParser, MagnetOrientationTablesAndRemovedFormsAreExplicit) {
+  const std::string head = R"(SOL MAGSTAT
+CEND
+BEGIN BULK
+GRID,1,,0,0,0
+GRID,2,,1,0,0
+GRID,3,,0,1,0
+GRID,4,,0,0,1
+CTETRA,1,1,1,2,3,4
+CORD2C,5,,0,0,0,0,0,1
+,1,0,0
+)";
+  auto parse = [&](const std::string &cards) {
+    return parse_string(head + cards + "ENDDATA\n");
+  };
+  // A forgotten frame must not silently magnetize along basic x, while an
+  // explicit 0 does mean basic.
+  const std::string magnet = "MATMAG,1,1.05,,1.2\n";
+  EXPECT_NE(error_of(parse(magnet + "PSOLID,1,1\n")).find("without an orient"),
+            std::string::npos);
+  EXPECT_NE(error_of(parse(magnet + "PMAG,1,1,,2\n")).find("without an orient"),
+            std::string::npos);
+  for (const std::string property : {"PSOLID,1,1,0\n", "PMAG,1,1,0\n"}) {
+    auto parsed = parse(magnet + property);
+    ASSERT_TRUE(std::holds_alternative<Model>(parsed)) << error_of(parsed);
+    const auto &p = std::get<Model>(parsed).properties.at(1);
+    EXPECT_TRUE(p.oriented);
+    EXPECT_EQ(p.coordinates, 0);
+    EXPECT_EQ(p.axis, 1);
+  }
+  // PSOLID CORDM is PMAG with AXIS +1; PMAG carries a signed axis.
+  auto cordm = parse(magnet + "PSOLID,1,1,5\n");
+  ASSERT_TRUE(std::holds_alternative<Model>(cordm)) << error_of(cordm);
+  EXPECT_EQ(std::get<Model>(cordm).properties.at(1).coordinates, 5);
+  EXPECT_EQ(std::get<Model>(cordm).properties.at(1).axis, 1);
+  auto signed_axis = parse(magnet + "PMAG,1,1,5,-2\n");
+  ASSERT_TRUE(std::holds_alternative<Model>(signed_axis))
+      << error_of(signed_axis);
+  EXPECT_EQ(std::get<Model>(signed_axis).properties.at(1).axis, -2);
+  EXPECT_NE(error_of(parse(magnet + "PMAG,1,1,5,4\n")).find("AXIS"),
+            std::string::npos);
+  // An unmagnetized material ignores a missing frame.
+  EXPECT_TRUE(std::holds_alternative<Model>(parse("MATMAG,1,2\nPSOLID,1,1\n")));
+  // Removed forms name their replacements.
+  EXPECT_NE(error_of(parse("MATMAG,1,1.05,,1.2,0,0\nPSOLID,1,1,0\n"))
+                .find("PMAG CID,AXIS or PSOLID CORDM"),
+            std::string::npos);
+  EXPECT_NE(error_of(parse("MATMAG,1,1.05,,0,0,0,5\nPSOLID,1,1\n"))
+                .find("PMAG CID,AXIS or PSOLID CORDM"),
+            std::string::npos);
+  EXPECT_NE(error_of(parse("MATMAG,1,,1\nPSOLID,1,1\nBHPOINT,1,0,0\n"))
+                .find("use TABLEBH"),
+            std::string::npos);
+  EXPECT_NE(error_of(parse("MATMAG,1,1,1\nPSOLID,1,1\nTABLEBH,1\n,0,0,1,100,"
+                           "ENDT\n"))
+                .find("mutually exclusive"),
+            std::string::npos);
+
+  // TABLEBH reads B,H pairs across fixed-format continuations, ignoring the
+  // padding blanks, and must end with ENDT.
+  const std::string steel = "MATMAG,1,,1\nPSOLID,1,1\n";
+  std::string fixed = std::format("{:<8}{:<8}{:<8}\n", "TABLEBH", "1", "");
+  fixed += std::format("{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}{:<8}\n", "", "0.", "0.",
+                       ".5", "250.", "1.", "1000.");
+  fixed += std::format("{:<8}{:<8}{:<8}{:<8}\n", "", "1.5", "8.+3", "ENDT");
+  auto table = parse(steel + fixed);
+  ASSERT_TRUE(std::holds_alternative<Model>(table)) << error_of(table);
+  const std::vector<std::pair<double, double>> expected{
+      {0, 0}, {.5, 250}, {1, 1000}, {1.5, 8000}};
+  EXPECT_EQ(std::get<Model>(table).bh_tables.at(1), expected);
+  for (const auto &[cards, message] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"TABLEBH,1\n,0,0,1,100\n", "ending in ENDT"},
+           {"TABLEBH,1\n,0,0,1,ENDT\n", "ending in ENDT"},
+           {"TABLEBH,1\n,0,0,1,100,ENDT,2,200\n", "follows ENDT"},
+           {"TABLEBH,1,SPLINE\n,0,0,1,100,ENDT\n", "LINEAR"},
+           {"TABLEBH,1\n,0,0,1,100,ENDT\nTABLEBH,1\n,0,0,1,50,ENDT\n",
+            "duplicate id 1"}}) {
+    SCOPED_TRACE(cards);
+    EXPECT_NE(error_of(parse(steel + cards)).find(message), std::string::npos)
+        << error_of(parse(steel + cards));
+  }
 }

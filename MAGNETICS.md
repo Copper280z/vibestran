@@ -69,11 +69,12 @@ once on parsing; the C++ magnetic model API takes resolved SI coordinates.
 | `CPENTA` | `EID,PID,G1,...,G6` (triangular ends G1–G3 and G4–G6) |
 | `CTRIA3` / `CQUAD4` | `EID,PID,G1,...` (three/four corners, planar mode only) |
 | `MAG2D` | `CID,DEPTH` (one card activates planar mode; CID=0 uses basic z) |
-| `PMAG2D` | `PID,MID` (planar magnetic property referencing MATMAG) |
+| `PMAG2D` | `PID,MID,CID,AXIS` (planar magnetic property; orientation as PMAG) |
 | `COIL2D` | `CID,ESET,SIGNED_TURNS` (repeat CID for winding legs) |
-| `PSOLID` | `PID,MID,CORDM` (CORDM blank/zero; orientation belongs to MATMAG) |
-| `MATMAG` | `MID,MUR,BHTID,BR1,BR2,BR3,CID` |
-| `BHPOINT` | `TID,B,H` (repeat in strictly increasing B and H order) |
+| `PSOLID` | `PID,MID,CORDM` (CORDM orients remanence along its axis 1) |
+| `PMAG` | `PID,MID,CID,AXIS` (3D magnetic property with a signed orientation axis) |
+| `MATMAG` | `MID,MUR,BHTID,BR` (MUR and BHTID exclusive; BR is a magnitude) |
+| `TABLEBH` | `TID,INTERP` then `B1,H1,B2,H2,...,ENDT` on continuations |
 | `MATCOND` | `MID,SIGMA` (positive conductivity in S/m) |
 | `ESET` | `SID,EID...` (repeatable, `THRU` allowed) |
 | `FSET` | `SID,EID,G1,G2[,G3[,G4]]` (2D edge or 3D triangular/quadrilateral face) |
@@ -190,13 +191,44 @@ twisting paths need shorter segments and a section-refinement study.
 
 ### Materials, boundary and gauge
 
-Linear/PM materials use `H=(B-Br)/(mu0*MUR)`. Br is in tesla. CID rotates the
-remanence; cylindrical and spherical bases are evaluated at integration points.
-The PM model is reversible and has no irreversible demagnetization or hysteresis.
+Linear/PM materials use `H=(B-Br)/(mu0*MUR)`. `BR` on MATMAG is the remanence
+magnitude in tesla; the property that references the material gives its
+direction. `PMAG,PID,MID,CID,AXIS` (or `PMAG2D` in planar mode) magnetizes
+along `sign(AXIS) * e_|AXIS|` of CID, with AXIS in ±1, ±2, ±3 (default +1).
+`PSOLID,PID,MID,CORDM` is the same with AXIS=+1. Cylindrical and spherical
+axes are evaluated at integration points, so `CORD2C` AXIS=1 is radial and
+AXIS=2 tangential. North and south poles share one material by using
+opposite AXIS signs:
 
-BHPOINT starts at `(0,0)` and defines piecewise-linear H(B), with positive slopes.
-Above the final point the tangent is `1/mu0`; results explicitly report this
-extrapolation. A BH table and remanence cannot be combined on one material.
+```text
+CORD2R,100,,0,0,0,0,0,1          $ rotor frame: rotating it moves every magnet
+,0.9848,0.1736,0
+CORD2R,101,100,0,0,0,0,0,1       $ pole frame, given in rotor coordinates
+,1,0,0
+MATMAG,5,1.05,,1.2
+PMAG,11,5,101,1                  $ north pole
+PMAG,12,5,101,-1                 $ south pole
+```
+
+A magnetized material whose property leaves CID/CORDM blank is an error; an
+explicit 0 means basic axes. In planar mode each magnetization must stay in
+the plane: use an in-plane axis of a rectangular system, or AXIS 1 or 2 of a
+cylindrical system whose axis is the plane normal. The PM model is reversible
+and has no irreversible demagnetization or hysteresis.
+
+`TABLEBH,TID,INTERP` lists `B,H` pairs (tesla, A/m) on continuations in the
+`TABLEM1` layout, ending with `ENDT`; blank fields are padding. INTERP is blank
+or LINEAR. The table starts at `(0,0)` and defines piecewise-linear H(B), with
+B and H strictly increasing. Above the final point the tangent is `1/mu0`;
+results explicitly report this extrapolation. A material with BHTID must leave
+MUR blank and has no remanence.
+
+```text
+MATMAG,2,,7
+TABLEBH,7
+,0.,0.,1.,200.,1.5,1200.
+,1.8,8000.,2.,50000.,ENDT
+```
 
 The 3D magnetic domain must be a connected, filled, simply connected volume
 with one closed exterior surface. CTETRA4, CHEXA8 and CPENTA6 can be mixed at
@@ -575,7 +607,7 @@ Additional checks cover:
   return an error instead of a partial solution. Together these take ~106 ms.
 - Permanent magnets driving nonlinear steel across both interior knots on
   planar triangles and quads, including simultaneous magnet reversal (~11 ms).
-- CLI decks with BHPOINT data: exact uniform-field nonlinear energy, exported
+- CLI decks with TABLEBH data: exact uniform-field nonlinear energy, exported
   H and the extrapolation flag in both 2D and 3D.
 
 Run just the new driven cases from `build` with

@@ -272,7 +272,8 @@ Result<Mesh> make_mesh(const Model &model) {
     const auto prop = model.properties.find(model.elements[i].property);
     if (prop == model.properties.end())
       return Error{"Magnetic element references undefined property"};
-    mesh.cells[i].material = prop->second;
+    mesh.cells[i].property = prop->first;
+    mesh.cells[i].material = prop->second.material;
     if (!mesh.element_index.emplace(mesh.cells[i].id, static_cast<int>(i))
              .second)
       return Error{"Duplicate magnetic element id"};

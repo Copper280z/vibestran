@@ -21,11 +21,19 @@ struct Error {
 template <class T> using Result = std::variant<T, Error>;
 using Status = std::optional<Error>;
 
+// MATMAG: constitutive data only. A table and MUR are mutually exclusive;
+// br is the remanence magnitude, directed by the referencing Property.
 struct Material {
   double mur{1};
   int bh_table{0};
-  Vector remanence{Vector::Zero()};
-  int coordinates{0};
+  double br{0};
+};
+// PSOLID, PMAG or PMAG2D. Remanence points along sign(axis) * e_|axis| of the
+// coordinate system at each point. oriented records that the deck stated a
+// frame (coordinates 0 is basic); a magnetized material requires it.
+struct Property {
+  int material{0}, coordinates{0}, axis{1};
+  bool oriented{false};
 };
 struct Response {
   Vector h{Vector::Zero()};
@@ -114,7 +122,7 @@ struct Model {
   std::map<int, Grid> nodes;
   std::map<int, CoordinateSystem> coordinates;
   std::vector<Element> elements;
-  std::map<int, int> properties;
+  std::map<int, Property> properties;
   std::map<int, Material> materials;
   std::map<int, std::vector<std::pair<double, double>>> bh_tables;
   std::map<int, double> conductivity;
@@ -141,10 +149,14 @@ struct Model {
 // Columns are the local x, y, z axes, in basic, of a resolved (parent 0)
 // coordinate system.
 [[nodiscard]] Matrix coordinate_axes(const CoordinateSystem &cs);
+// Columns are the unit vectors of the local coordinate directions at basic
+// point x: (x, y, z), (r, theta, z) or (r, theta, phi) for CORD2R/C/S.
+[[nodiscard]] Matrix local_axes(const CoordinateSystem &cs, const Vector &x);
+// Remanence enters as B_r in basic at the evaluation point.
 [[nodiscard]] Response
 material_response(const Material &material,
                   const std::vector<std::pair<double, double>> &curve,
-                  const Vector &b);
+                  const Vector &b, const Vector &remanence = Vector::Zero());
 [[nodiscard]] Result<std::map<int, double>> load_factors(const Model &model,
                                                          int set);
 

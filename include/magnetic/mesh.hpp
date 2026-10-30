@@ -7,7 +7,7 @@ namespace vibestran::magnetic {
 inline constexpr std::array<std::array<int, 2>, 6> local_edges{
     {{0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}}};
 struct Cell {
-  int id{0}, material{0};
+  int id{0}, material{0}, property{0};
   NodeList nodes, faces, edges, face_sign, edge_sign;
   std::vector<Vector> gradient, curl, points;
   std::array<Vector, 8> map_coefficients;

@@ -351,12 +351,18 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       m.elements.push_back(c);
       // Keep card semantics explicit: four-node solid and planar cells differ.
       element_dimensions.push_back(key == "CTRIA3" || key == "CQUAD4" ? 2 : 3);
-    } else if (key == "PSOLID" || key == "PMAG2D") {
-      int id = r.integer(1), mid = r.integer(2);
-      if (r.integer(3) != 0)
-        r.error = Error{r.where + ": use MATMAG CID for magnetic orientation"};
-      r.last(key == "PSOLID" ? 3 : 2);
-      insert_unique(m.properties, id, mid, r);
+    } else if (key == "PSOLID" || key == "PMAG" || key == "PMAG2D") {
+      // PSOLID CORDM orients remanence along its first axis; PMAG/PMAG2D
+      // give the frame and a signed axis. A blank frame is not basic.
+      Property p;
+      const int id = r.integer(1);
+      p.material = r.integer(2);
+      p.oriented = !r.get(3).empty();
+      p.coordinates = r.integer(3);
+      if (key != "PSOLID")
+        p.axis = r.integer(4, 1);
+      r.last(key == "PSOLID" ? 3 : 4);
+      insert_unique(m.properties, id, p, r);
     } else if (key == "MAG2D") {
       if (m.options.planar)
         r.error = Error{r.where + ": duplicate MAG2D"};
@@ -376,15 +382,47 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       int id = r.integer(1);
       a.mur = r.real(2, 1);
       a.bh_table = r.integer(3);
-      a.remanence = r.vector(4);
-      a.coordinates = r.integer(7);
-      r.last(7);
+      a.br = r.real(4);
+      if (!r.get(5).empty() || !r.get(6).empty() || !r.get(7).empty())
+        return Error{r.where + ": MATMAG BR is a magnitude; give the "
+                               "direction with PMAG CID,AXIS or PSOLID CORDM"};
+      if (a.bh_table && !r.get(2).empty())
+        return Error{r.where + ": MATMAG MUR and BHTID are mutually "
+                               "exclusive; leave MUR blank with a table"};
+      r.last(4);
       insert_unique(m.materials, id, a, r);
+    } else if (key == "TABLEBH") {
+      // TABLEM1 layout: B,H pairs on continuations, ending with ENDT. Blank
+      // fields are padding.
+      const int id = r.integer(1);
+      const auto interpolation = upper(r.get(2));
+      if (!interpolation.empty() && interpolation != "LINEAR")
+        return Error{r.where + ": TABLEBH interpolation must be LINEAR"};
+      std::vector<std::string> values;
+      bool ended = false;
+      for (size_t k = 3; k < r.f.size(); ++k) {
+        if (r.f[k].empty())
+          continue;
+        if (ended)
+          return Error{r.where + ": TABLEBH data follows ENDT"};
+        if (upper(r.f[k]) == "ENDT")
+          ended = true;
+        else
+          values.push_back(r.f[k]);
+      }
+      if (!ended || values.size() % 2 != 0)
+        return Error{r.where + ": TABLEBH requires B,H pairs ending in ENDT"};
+      std::vector<std::pair<double, double>> curve;
+      Reader pairs{{""}, r.where, {}};
+      pairs.f.insert(pairs.f.end(), values.begin(), values.end());
+      for (size_t k = 1; k < pairs.f.size(); k += 2)
+        curve.emplace_back(pairs.real(k), pairs.real(k + 1));
+      if (pairs.error)
+        return *pairs.error;
+      insert_unique(m.bh_tables, id, std::move(curve), r);
     } else if (key == "BHPOINT") {
-      int id = r.integer(1);
-      double b = r.real(2), h = r.real(3);
-      r.last(3);
-      m.bh_tables[id].emplace_back(b, h);
+      return Error{r.where + ": BHPOINT was replaced; use TABLEBH,TID with "
+                             "B,H pairs ending in ENDT"};
     } else if (key == "MATCOND") {
       int id = r.integer(1);
       double sigma = r.real(2);
@@ -593,6 +631,26 @@ Matrix coordinate_axes(const CoordinateSystem &cs) {
   r.col(2) = z;
   return r;
 }
+Matrix local_axes(const CoordinateSystem &cs, const Vector &x) {
+  const Matrix frame = coordinate_axes(cs);
+  if (cs.type == 'R')
+    return frame;
+  const Vector p = frame.transpose() * (x - cs.a);
+  Matrix local;
+  if (cs.type == 'C') {
+    const double theta = std::atan2(p.y(), p.x());
+    local = Eigen::AngleAxisd(theta, Vector::UnitZ()).toRotationMatrix();
+  } else {
+    const double theta = std::atan2(std::hypot(p.x(), p.y()), p.z()),
+                 phi = std::atan2(p.y(), p.x());
+    local.col(0) = Vector(std::sin(theta) * std::cos(phi),
+                          std::sin(theta) * std::sin(phi), std::cos(theta));
+    local.col(1) = Vector(std::cos(theta) * std::cos(phi),
+                          std::cos(theta) * std::sin(phi), -std::sin(theta));
+    local.col(2) = Vector(-std::sin(phi), std::cos(phi), 0);
+  }
+  return frame * local;
+}
 Result<Model> parse_file(const std::filesystem::path &path) {
   std::ifstream in(path);
   if (!in)
@@ -638,24 +696,72 @@ Status validate(const Model &m) {
   for (const auto &[id, curve] : m.bh_tables) {
     if (id <= 0 || curve.size() < 2 ||
         curve.front() != std::pair<double, double>{0, 0})
-      return Error{
-          "BHPOINT table must begin at (0,0) and contain at least two points"};
+      return Error{std::format("TABLEBH {} must begin at (0,0) and contain at "
+                               "least two points",
+                               id)};
     for (size_t i = 1; i < curve.size(); ++i)
       if (!(curve[i].first > curve[i - 1].first &&
             curve[i].second > curve[i - 1].second) ||
           !std::isfinite(curve[i].first) || !std::isfinite(curve[i].second))
-        return Error{
-            "BHPOINT B and H must both be strictly increasing in deck order"};
+        return Error{std::format(
+            "TABLEBH {} B and H must both be strictly increasing", id)};
   }
   for (const auto &[id, mat] : m.materials) {
-    if (!(mat.mur > 0) || !std::isfinite(mat.mur) || !mat.remanence.allFinite())
-      return Error{"Invalid MATMAG " + std::to_string(id)};
+    if (!(mat.mur > 0) || !std::isfinite(mat.mur) || !(mat.br >= 0) ||
+        !std::isfinite(mat.br))
+      return Error{std::format("Invalid MATMAG {}: MUR must be positive and BR "
+                               "a nonnegative magnitude",
+                               id)};
     if (mat.bh_table && (!m.bh_tables.contains(mat.bh_table) ||
-                         mat.remanence.squaredNorm() != 0))
-      return Error{"MATMAG nonlinear curve must exist and cannot be combined "
-                   "with remanence"};
-    if (mat.coordinates && !m.coordinates.contains(mat.coordinates))
-      return Error{"MATMAG references missing coordinates"};
+                         mat.br != 0 || mat.mur != 1))
+      return Error{std::format("MATMAG {} nonlinear curve must exist and "
+                               "cannot be combined with MUR or remanence",
+                               id)};
+  }
+  Vector plane_normal = Vector::UnitZ();
+  if (m.options.plane_coordinates &&
+      m.coordinates.contains(m.options.plane_coordinates))
+    plane_normal = coordinate_axes(m.coordinates.at(m.options.plane_coordinates))
+                       .col(2);
+  for (const auto &[id, p] : m.properties) {
+    auto mat = m.materials.find(p.material);
+    if (mat == m.materials.end())
+      return Error{std::format("Magnetic property {} references undefined "
+                               "MATMAG {}",
+                               id, p.material)};
+    if (p.axis == 0 || std::abs(p.axis) > 3)
+      return Error{std::format("Magnetic property {} AXIS must be 1, 2 or 3, "
+                               "optionally negative",
+                               id)};
+    if (p.coordinates && !m.coordinates.contains(p.coordinates))
+      return Error{std::format("Magnetic property {} references undefined "
+                               "coordinates {}",
+                               id, p.coordinates)};
+    if (mat->second.br == 0)
+      continue;
+    if (!p.oriented)
+      return Error{std::format(
+          "Magnetic property {} references magnetized MATMAG {} without an "
+          "orientation; set PMAG/PMAG2D CID or PSOLID CORDM (0 for basic)",
+          id, p.material)};
+    if (!m.options.planar)
+      continue;
+    // Planar magnets must stay in plane everywhere, so check the frame once.
+    const auto *cs = p.coordinates ? &m.coordinates.at(p.coordinates) : nullptr;
+    const Matrix frame = cs ? coordinate_axes(*cs) : Matrix::Identity();
+    const char type = cs ? cs->type : 'R';
+    const bool in_plane =
+        type == 'R'
+            ? std::abs(frame.col(std::abs(p.axis) - 1).dot(plane_normal)) <=
+                  1e-12
+            : type == 'C' && std::abs(p.axis) < 3 &&
+                  frame.col(2).cross(plane_normal).norm() <= 1e-12;
+    if (!in_plane)
+      return Error{std::format(
+          "MAG2D remanence must lie in the simulation plane (property {}): use "
+          "an in-plane rectangular axis, or AXIS 1 or 2 of a cylindrical "
+          "system about the plane normal",
+          id)};
   }
   for (const auto &[id, sigma] : m.conductivity)
     if (!(sigma > 0) || !std::isfinite(sigma))
@@ -676,10 +782,10 @@ Status validate(const Model &m) {
   for (const auto &c : m.elements) {
     if (c.id <= 0 || !ids.insert(c.id).second)
       return Error{"Invalid/duplicate magnetic element id"};
-    auto p = m.properties.find(c.property);
-    if (p == m.properties.end() || !m.materials.contains(p->second))
-      return Error{
-          "Magnetic element must reference a property with a MATMAG material"};
+    if (!m.properties.contains(c.property))
+      return Error{std::format("Magnetic element {} references undefined "
+                               "property {}",
+                               c.id, c.property)};
   }
   std::set<int> wireids;
   for (const auto &w : m.wires) {

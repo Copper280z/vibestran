@@ -14,7 +14,7 @@ namespace {
 Model box(int n, double extent = 1) {
   Model m;
   m.materials[1] = {};
-  m.properties[1] = 1;
+  m.properties[1] = {1};
   m.subcases.push_back({});
   auto node = [n](int i, int j, int k) {
     return 1 + i + (n + 1) * (j + (n + 1) * k);
