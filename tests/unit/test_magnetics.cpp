@@ -652,6 +652,69 @@ TEST(MagneticIO, IncludesFixedFieldsAndResultFieldValues) {
   std::filesystem::remove_all(directory);
 }
 
+TEST(MagneticIO, IndentedCaseControlLabelsKeepTheirTextAndCase) {
+  // Case control is normally indented; the label must be cut after the '='
+  // of the statement itself, whatever the leading whitespace.
+  const std::string bulk = "BEGIN BULK\nGRID,1,,0,0,0\nGRID,2,,1,0,0\n"
+                           "GRID,3,,0,1,0\nGRID,4,,0,0,1\nCTETRA,1,1,1,2,3,4\n"
+                           "PSOLID,1,1\nMATMAG,1,1\nMBC,1,0,UNIFORM,0,0,0.25\n"
+                           "ENDDATA\n";
+  for (const std::string indent : {"", "  ", "\t", "        "}) {
+    SCOPED_TRACE(indent.size());
+    const std::string deck = "SOL MAGSTAT\nCEND\nMAGBC=1\n" + indent +
+                             "LABEL = Global Field\nSUBCASE 1\n" + indent +
+                             "LABEL=Coil drive A\nSUBCASE 2\n" + bulk;
+    auto parsed = parse_string(deck);
+    ASSERT_TRUE(std::holds_alternative<Model>(parsed)) << error_of(parsed);
+    const auto &subcases = std::get<Model>(parsed).subcases;
+    ASSERT_EQ(subcases.size(), 2u);
+    EXPECT_EQ(subcases[0].label, "Coil drive A");
+    EXPECT_EQ(subcases[1].label, "Global Field");
+  }
+}
+
+TEST(MagneticIO, DeckDetectionLeavesUnreadableIncludesToTheOwningParser) {
+  const auto directory =
+      std::filesystem::temp_directory_path() / "vibestran_magnetic_detect";
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const auto write = [&](const std::string &name, const std::string &text) {
+    std::ofstream(directory / name) << text;
+    return directory / name;
+  };
+  const auto detect = [](const std::filesystem::path &path) {
+    auto detected = is_magnetic_deck(path);
+    EXPECT_TRUE(std::holds_alternative<bool>(detected)) << error_of(detected);
+    return std::holds_alternative<bool>(detected) && std::get<bool>(detected);
+  };
+  // A structural deck is identified without opening its broken or cyclic
+  // includes; those belong to the structural reader.
+  write("loop.inc", "INCLUDE 'loop.inc'\n");
+  EXPECT_FALSE(detect(write("structural.bdf",
+                            "INCLUDE 'missing.inc'\nINCLUDE 'loop.inc'\n"
+                            "SOL 101\nCEND\nBEGIN BULK\nINCLUDE "
+                            "'missing_bulk.inc'\nENDDATA\n")));
+  // SOL after an unreadable include is still found. The magnetic reader then
+  // reports the include rather than silently dropping it.
+  const auto magnetic = write("magnetic.bdf", "INCLUDE 'missing.inc'\n"
+                                              "SOL MAGSTAT\nCEND\nBEGIN "
+                                              "BULK\nENDDATA\n");
+  EXPECT_TRUE(detect(magnetic));
+  auto parsed = parse_file(magnetic);
+  ASSERT_TRUE(std::holds_alternative<Error>(parsed));
+  EXPECT_NE(std::get<Error>(parsed).message.find("cannot open INCLUDE"),
+            std::string::npos)
+      << std::get<Error>(parsed).message;
+  // Detection ends at BEGIN, also when BEGIN BULK comes from an include, so a
+  // later SOL-like bulk line cannot reclassify the deck.
+  write("executive.inc", "SOL 101\n");
+  write("front.inc", "CEND\nBEGIN BULK\n");
+  EXPECT_FALSE(detect(write("executive.bdf", "INCLUDE 'executive.inc'\n")));
+  EXPECT_FALSE(detect(write("bulk_first.bdf", "INCLUDE 'front.inc'\n"
+                                              "SOL MAGSTAT\nENDDATA\n")));
+  std::filesystem::remove_all(directory);
+}
+
 TEST(MagneticSolve, MeshRenumberingAndWireRigidRotationPreservePhysics) {
   auto model = box(4, 1.5);
   loop(model);
@@ -1574,8 +1637,9 @@ TEST(MagneticWarped, RayTransferMatchesPolyhedralIntersectionIntegration) {
       const auto mesh = std::get<Mesh>(make_mesh(model));
       const auto source =
           std::get<std::vector<Source>>(prepare_wires(model))[0];
-      const auto clipped = couple_polyhedral_source(source, mesh),
-                 rays = couple_curved_source(source, mesh);
+      const SpatialIndex index(mesh);
+      const auto clipped = couple_polyhedral_source(source, mesh, index),
+                 rays = couple_curved_source(source, mesh, index);
       ASSERT_TRUE(std::holds_alternative<Eigen::VectorXd>(clipped))
           << error_of(clipped);
       ASSERT_TRUE(std::holds_alternative<Eigen::VectorXd>(rays))
@@ -1779,7 +1843,7 @@ TEST(MagneticWarped, TetTransferIsInvariantToLocalVertexOrderAndRigidMotion) {
     reordered.flux[f] = original.flux[index] *
                         face.normal.dot(original.mesh.faces[index].normal);
   }
-  const auto coupled = couple_source(reordered, mesh);
+  const auto coupled = couple_source(reordered, mesh, SpatialIndex(mesh));
   ASSERT_TRUE(std::holds_alternative<Eigen::VectorXd>(coupled))
       << error_of(coupled);
   EXPECT_LT((std::get<Eigen::VectorXd>(coupled) - original.coupling).norm() /

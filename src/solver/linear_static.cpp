@@ -470,6 +470,11 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   if (want_spc || want_mpc || want_gp) {
     GridForceOutput forces = compute_grid_forces(
         model, sc, mpc_handler, u_free, want_spc, want_mpc, want_gp);
+    if (forces.error) {
+      spdlog::warn("Subcase {}: constraint forces unavailable: {}", sc.id,
+                   *forces.error);
+      result.constraint_force_error = std::move(*forces.error);
+    }
     result.spc_forces = std::move(forces.spc_forces);
     result.mpc_forces = std::move(forces.mpc_forces);
     result.gp_forces = std::move(forces.gp_forces);
@@ -1220,9 +1225,11 @@ LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
       residuals[nid][d] += force[d];
   const auto recovery = mpc_handler.recover_mpc_forces(residuals);
   if (const auto* error = std::get_if<MpcForceRecoveryError>(&recovery)) {
-    // Invalid recovered forces make this analysis unusable. Stop at the
-    // solver boundary rather than publishing incomplete reaction results.
-    throw SolverError(std::format("Subcase {}: {}", sc.id, error->message));
+    // Without valid MPC forces neither the SPC reactions nor the force
+    // balance can be attributed. Report no constraint forces rather than
+    // partial ones; the displacement solution is unaffected.
+    out.error = error->message;
+    return out;
   }
   const auto& mpc_forces = std::get<NodalForces>(recovery);
 

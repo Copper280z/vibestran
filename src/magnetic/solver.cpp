@@ -29,21 +29,41 @@ struct Assembly {
   double energy{0}, force_scale{0};
   bool extrapolated{false};
 };
-Material at_point(const Model &model, int id, const Vector &x) {
-  Material m = model.materials.at(id);
-  if (m.coordinates) {
-    const auto &cs = model.coordinates.at(m.coordinates);
-    const Vector z = (cs.b - cs.a).normalized(),
-                 y = z.cross(cs.c - cs.a).normalized();
-    Matrix frame;
-    frame.col(0) = y.cross(z);
-    frame.col(1) = y;
-    frame.col(2) = z;
-    const Vector p = frame.transpose() * (x - cs.a);
-    if (cs.type == 'C') {
+// Material data resolved once per solve. A MATMAG frame depends only on its
+// coordinate system, so it is built here rather than at quadrature points.
+struct MaterialData {
+  Material material;
+  const std::vector<std::pair<double, double>> *curve{nullptr};
+  const CoordinateSystem *coordinates{nullptr};
+  Matrix frame{Matrix::Identity()};
+};
+using Materials = std::map<int, MaterialData>;
+Materials resolve_materials(const Model &model) {
+  static const std::vector<std::pair<double, double>> empty;
+  Materials out;
+  for (const auto &[id, m] : model.materials) {
+    MaterialData d;
+    d.material = m;
+    d.curve = m.bh_table ? &model.bh_tables.at(m.bh_table) : &empty;
+    if (m.coordinates) {
+      d.coordinates = &model.coordinates.at(m.coordinates);
+      d.frame = coordinate_axes(*d.coordinates);
+    }
+    out.emplace(id, d);
+  }
+  return out;
+}
+// Material at x with its MATMAG remanence expressed in basic.
+Material at_point(const MaterialData &d, const Vector &x) {
+  Material m = d.material;
+  if (d.coordinates) {
+    const Matrix &frame = d.frame;
+    const Vector p = frame.transpose() * (x - d.coordinates->a);
+    const char type = d.coordinates->type;
+    if (type == 'C') {
       const double theta = std::atan2(p.y(), p.x());
       m.remanence = Eigen::AngleAxisd(theta, Vector::UnitZ()) * m.remanence;
-    } else if (cs.type == 'S') {
+    } else if (type == 'S') {
       const double theta = std::atan2(std::hypot(p.x(), p.y()), p.z()),
                    phi = std::atan2(p.y(), p.x());
       Matrix spherical;
@@ -60,14 +80,20 @@ Material at_point(const Model &model, int id, const Vector &x) {
   }
   return m;
 }
-Assembly assemble(const Model &model, const Mesh &mesh, const Gauge &gauge,
-                  const Eigen::VectorXd &a, const Eigen::VectorXd &load) {
+Response response_at(const MaterialData &d, const Vector &x, const Vector &b) {
+  if (!d.coordinates)
+    return material_response(d.material, *d.curve, b);
+  return material_response(at_point(d, x), *d.curve, b);
+}
+Assembly assemble(const Materials &materials, const Mesh &mesh,
+                  const Gauge &gauge, const Eigen::VectorXd &a,
+                  const Eigen::VectorXd &load) {
   Assembly out;
   out.residual = Eigen::VectorXd::Zero(gauge.size);
   std::vector<Triplet> entries;
-  const std::vector<std::pair<double, double>> empty;
   for (const auto &cell : mesh.cells) {
     const int ne = static_cast<int>(cell.edges.size());
+    const MaterialData &material = materials.at(cell.material);
     Eigen::MatrixXd local = Eigen::MatrixXd::Zero(ne, ne);
     Eigen::VectorXd residual = Eigen::VectorXd::Zero(ne);
     Vector average_b = Vector::Zero(), average_h = Vector::Zero();
@@ -76,10 +102,7 @@ Assembly assemble(const Model &model, const Mesh &mesh, const Gauge &gauge,
       Vector b = Vector::Zero();
       for (int e = 0; e < ne; ++e)
         b += a[cell.edges[e]] * curl[e];
-      const Material material = at_point(model, cell.material, s.position);
-      const auto &curve =
-          material.bh_table ? model.bh_tables.at(material.bh_table) : empty;
-      const auto response = material_response(material, curve, b);
+      const auto response = response_at(material, s.position, b);
       average_b += s.weight * b;
       average_h += s.weight * response.h;
       const double weight = s.weight * mesh.depth;
@@ -157,10 +180,10 @@ struct Equilibrium {
   int iterations{0};
   double residual{0};
 };
-Result<Equilibrium> equilibrium(const Model &model, const Mesh &mesh,
-                                const Gauge &gauge, Eigen::VectorXd a,
-                                const Eigen::VectorXd &load) {
-  auto state = assemble(model, mesh, gauge, a, load);
+Result<Equilibrium> equilibrium(const Model &model, const Materials &materials,
+                                const Mesh &mesh, const Gauge &gauge,
+                                Eigen::VectorXd a, const Eigen::VectorXd &load) {
+  auto state = assemble(materials, mesh, gauge, a, load);
   double load_norm = 0;
   for (size_t e = 0; e < mesh.dofs(); ++e)
     if (gauge.equations[e] >= 0)
@@ -196,7 +219,7 @@ Result<Equilibrium> equilibrium(const Model &model, const Mesh &mesh,
       for (size_t e = 0; e < mesh.dofs(); ++e)
         if (gauge.equations[e] >= 0)
           candidate[e] += alpha * step[gauge.equations[e]];
-      auto next = assemble(model, mesh, gauge, candidate, load);
+      auto next = assemble(materials, mesh, gauge, candidate, load);
       if (next.residual.allFinite() &&
           next.residual.norm() <= (1 - 1e-4 * alpha) * norm) {
         a = std::move(candidate);
@@ -314,14 +337,16 @@ Result<Results> solve(const Model &model) {
   Results result;
   result.mesh = std::get<Mesh>(std::move(built));
   const auto &mesh = result.mesh;
+  const Materials materials = resolve_materials(model);
   if (mesh.planar)
-    for (const auto &c : mesh.cells)
+    for (const auto &c : mesh.cells) {
+      const MaterialData &data = materials.at(c.material);
       for (const auto &q : quadrature(mesh, c)) {
-        const auto material = at_point(model, c.material, q.position);
-        if (std::abs(material.remanence.dot(mesh.normal)) >
-            1e-12 * material.remanence.norm())
+        const Vector remanence = at_point(data, q.position).remanence;
+        if (std::abs(remanence.dot(mesh.normal)) > 1e-12 * remanence.norm())
           return Error{"MAG2D remanence must lie in the simulation plane"};
       }
+    }
   auto gauged = make_gauge(mesh);
   if (auto *e = std::get_if<Error>(&gauged))
     return *e;
@@ -343,14 +368,15 @@ Result<Results> solve(const Model &model) {
     if (auto *e = std::get_if<Error>(&imposed))
       return *e;
     const auto &initial = std::get<Eigen::VectorXd>(imposed);
-    auto solved = equilibrium(model, mesh, gauge, initial, load);
+    auto solved = equilibrium(model, materials, mesh, gauge, initial, load);
     if (std::holds_alternative<Error>(solved) && !model.bh_tables.empty()) {
       // Retry with fixed current continuation. Each stage must satisfy the same
       // convergence criterion; a failed stage is never returned as a solution.
       Eigen::VectorXd a = initial;
       int iterations = 0;
       for (int stage = 0; stage <= 8; ++stage) {
-        solved = equilibrium(model, mesh, gauge, a, load * (stage / 8.0));
+        solved = equilibrium(model, materials, mesh, gauge, a,
+                             load * (stage / 8.0));
         if (auto *e = std::get_if<Error>(&solved))
           return Error{std::format("Subcase {}, continuation stage {}: {}",
                                    subcase.id, stage, e->message)};
@@ -423,12 +449,9 @@ Result<Results> solve(const Model &model) {
         const auto &cell = mesh.cells[ci];
         if (contains(cell, probe.position)) {
           const Vector field = field_at(cell, eq.a, probe.position);
-          const auto material = at_point(model, cell.material, probe.position);
-          const std::vector<std::pair<double, double>> empty;
-          const auto &curve =
-              material.bh_table ? model.bh_tables.at(material.bh_table) : empty;
           b += field;
-          h += material_response(material, curve, field).h;
+          h += response_at(materials.at(cell.material), probe.position, field)
+                   .h;
           ++count;
         }
       }

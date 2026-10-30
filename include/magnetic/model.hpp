@@ -138,6 +138,9 @@ struct Model {
 [[nodiscard]] Result<Model> parse_string(const std::string &text);
 [[nodiscard]] Result<bool> is_magnetic_deck(const std::filesystem::path &path);
 [[nodiscard]] Status validate(const Model &model);
+// Columns are the local x, y, z axes, in basic, of a resolved (parent 0)
+// coordinate system.
+[[nodiscard]] Matrix coordinate_axes(const CoordinateSystem &cs);
 [[nodiscard]] Response
 material_response(const Material &material,
                   const std::vector<std::pair<double, double>> &curve,

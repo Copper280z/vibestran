@@ -54,6 +54,7 @@ struct SurfaceSample {
                                      const std::vector<NodeList> &cells,
                                      bool planar = false,
                                      const Vector &normal = Vector::UnitZ());
+// Fixed-size connectivity convenience overload, currently used only by tests.
 template <size_t N>
 [[nodiscard]] Result<Mesh>
 make_mesh(std::vector<Vector> nodes,

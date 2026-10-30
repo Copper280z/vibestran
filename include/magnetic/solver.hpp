@@ -47,15 +47,19 @@ struct Results {
 conserved_flux(const Mesh &mesh, std::span<const std::pair<int, int>> section,
                std::span<const int> terminal_faces, bool stranded,
                double section_area, std::span<const double> resistivity);
-[[nodiscard]] Result<Eigen::VectorXd> couple_source(const Source &source,
-                                                    const Mesh &mesh);
+// The transfer functions take a SpatialIndex built from mesh so one index
+// serves every source and quadrature order.
+[[nodiscard]] Result<Eigen::VectorXd>
+couple_source(const Source &source, const Mesh &mesh, const SpatialIndex &index);
 // Clip-based transfer for convex planar-faced source/background cells.
 [[nodiscard]] Result<Eigen::VectorXd>
-couple_polyhedral_source(const Source &source, const Mesh &mesh);
+couple_polyhedral_source(const Source &source, const Mesh &mesh,
+                         const SpatialIndex &index);
 // Transfer a polyhedral wire source into mapped field cells. forbidden lists
 // field-cell indices occupied by magnetic material or volumetric coils.
 [[nodiscard]] Result<Eigen::VectorXd>
 couple_curved_source(const Source &source, const Mesh &mesh,
+                     const SpatialIndex &index,
                      std::span<const int> forbidden = {});
 [[nodiscard]] Result<std::vector<double>>
 source_currents(const Model &model, std::span<const Source> sources, int set);

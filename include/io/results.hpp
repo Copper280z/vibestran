@@ -189,6 +189,9 @@ struct SubCaseResults {
   /// in each grid's global (CD) system.
   std::vector<SpcForce> mpc_forces;
   std::vector<GridPointForceBalance> gp_forces;
+  /// Nonempty when constraint force recovery failed; spc_forces, mpc_forces
+  /// and gp_forces are then empty although they were requested.
+  std::string constraint_force_error;
   std::vector<LineStress> line_stresses;
   std::vector<PlateStress> plate_stresses;
   std::vector<SolidStress> solid_stresses;

@@ -448,15 +448,33 @@ elif cxx.get_id() == 'msvc'
 endif
 precise_lib = static_library(
   'vibestran_precise',
-  files('src/solver/iterative_refinement.cpp',
-        'src/magnetic/parser.cpp', 'src/magnetic/material.cpp',
+  files('src/solver/iterative_refinement.cpp'),
+  include_directories : [inc],
+  dependencies        : [eigen_dep, spdlog_dep],
+  cpp_args            : precise_args,
+  install             : false,
+)
+
+# Magnetostatics' mandatory validity checks test for nonfinite values, which
+# fast-math lets the compiler assume away, so it is also built without
+# fast-math. Its flags are kept separate from precise_args so either can
+# change without affecting the other.
+magnetic_args = []
+if cxx.get_id() == 'gcc' or cxx.get_id() == 'clang'
+  magnetic_args = ['-fno-fast-math', '-ffp-contract=off']
+elif cxx.get_id() == 'msvc'
+  magnetic_args = ['/fp:precise']
+endif
+magnetic_lib = static_library(
+  'vibestran_magnetic',
+  files('src/magnetic/parser.cpp', 'src/magnetic/material.cpp',
         'src/magnetic/mesh.cpp', 'src/magnetic/elements.cpp',
-        'src/magnetic/geometry.cpp', 'src/magnetic/curved_transfer.cpp', 'src/magnetic/source.cpp',
-        'src/magnetic/wire.cpp', 'src/magnetic/solver.cpp',
-        'src/magnetic/output.cpp'),
+        'src/magnetic/geometry.cpp', 'src/magnetic/curved_transfer.cpp',
+        'src/magnetic/source.cpp', 'src/magnetic/wire.cpp',
+        'src/magnetic/solver.cpp', 'src/magnetic/output.cpp'),
   include_directories : [inc],
   dependencies        : solver_lib_deps,
-  cpp_args            : precise_args + accelerate_args + cholmod_args,
+  cpp_args            : magnetic_args + accelerate_args + cholmod_args,
   install             : false,
 )
 
@@ -465,7 +483,7 @@ solver_lib = static_library(
   [solver_sources, spirv_hdrs],
   include_directories : [inc, src_inc],
   dependencies        : solver_lib_deps,
-  link_whole          : precise_lib,
+  link_whole          : [precise_lib, magnetic_lib],
   cpp_args            : vulkan_compile_args + cuda_compile_args + cholmod_args + tbb_args + accelerate_args,
   install             : false,
 )
@@ -491,7 +509,7 @@ executable(
   'magnetic_wire_benchmark',
   'tools/magnetic_wire_benchmark.cpp',
   dependencies : solver_lib_dep,
-  cpp_args : precise_args,
+  cpp_args : magnetic_args,
   build_by_default : false,
   install : false,
 )

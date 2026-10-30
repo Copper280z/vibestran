@@ -372,8 +372,8 @@ private:
 
 Result<Eigen::VectorXd> couple_curved_source(const Source &source,
                                              const Mesh &mesh,
+                                             const SpatialIndex &index,
                                              std::span<const int> forbidden) {
-  SpatialIndex index(mesh);
   const std::set<int> excluded(forbidden.begin(), forbidden.end());
   std::vector<std::vector<int>> candidates;
   for (const auto &cell : source.mesh.cells) {

@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <format>
+#include <sstream>
 #include <string>
 #include <tuple>
 
@@ -429,4 +430,65 @@ ENDDATA
             expect_grid_balance(result, 1e-10);
         }
     }
+}
+
+TEST(ConstraintForces, FailedRecoveryOmitsForcesButKeepsTheDisplacementSolution) {
+    // Two MPCs tie GRIDs 2 and 3 to the fixed GRID 1. Their finite 1e308
+    // loads sum to an overflowing MPC force at GRID 1, so constraint forces
+    // cannot be recovered. The free spring at GRID 4 is unaffected and its
+    // solution, u = F/k, must still be reported.
+    const Model model = BdfParser::parse_string(R"(
+SOL 101
+CEND
+SPC=1
+MPC=3
+LOAD=2
+DISPLACEMENT=ALL
+SPCFORCES=ALL
+MPCFORCES=ALL
+GPFORCE=ALL
+BEGIN BULK
+GRID,1,,0.,0.,0.
+GRID,2,,1.,0.,0.
+GRID,3,,0.,1.,0.
+GRID,4,,0.,0.,1.
+CELAS2,1,1000.,4,1
+SPC1,1,123456,1
+SPC1,1,23456,2,3,4
+MPC,3,2,1,1.,1,1,-1.
+MPC,3,3,1,1.,1,1,-1.
+FORCE,2,2,0,1.e308,1.,0.,0.
+FORCE,2,3,0,1.e308,1.,0.,0.
+FORCE,2,4,0,10.,1.,0.,0.
+ENDDATA
+)");
+    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    const SolverResults results = solver.solve(model);
+    const auto& result = results.subcases.at(0);
+    EXPECT_NE(result.constraint_force_error.find("force accumulation overflow at GRID 1"),
+              std::string::npos)
+        << result.constraint_force_error;
+    EXPECT_TRUE(result.spc_forces.empty());
+    EXPECT_TRUE(result.mpc_forces.empty());
+    EXPECT_TRUE(result.gp_forces.empty());
+    bool found = false;
+    for (const auto& u : result.displacements) {
+        if (u.node == NodeId{4}) {
+            found = true;
+            EXPECT_NEAR(u.d[0], 0.01, 1e-15);
+        }
+        if (u.node == NodeId{2} || u.node == NodeId{3})
+            EXPECT_EQ(u.d[0], 0.);
+    }
+    EXPECT_TRUE(found);
+
+    // The F06 states why the requested force tables are absent.
+    std::ostringstream f06;
+    F06Writer::write(results, model, f06);
+    const std::string text = f06.str();
+    EXPECT_NE(text.find("WARNING: SPC, MPC and grid point forces are not output"),
+              std::string::npos);
+    EXPECT_NE(text.find(result.constraint_force_error), std::string::npos);
+    EXPECT_EQ(text.find("S P C   F O R C E S"), std::string::npos);
+    EXPECT_NE(text.find("D I S P L A C E M E N T S"), std::string::npos);
 }

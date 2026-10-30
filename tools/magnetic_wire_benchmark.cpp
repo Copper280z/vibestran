@@ -139,7 +139,7 @@ Result<Measurement> measure(const Model &model, const Mesh &mesh, bool tet) {
       ++result.nq;
   result.system = result.nq + result.cells;
   start = Clock::now();
-  auto coupled = couple_source(source, mesh);
+  auto coupled = couple_source(source, mesh, SpatialIndex(mesh));
   result.transfer =
       std::chrono::duration<double, std::milli>(Clock::now() - start).count();
   if (auto *e = std::get_if<Error>(&coupled)) {

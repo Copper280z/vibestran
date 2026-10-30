@@ -31,6 +31,15 @@ std::optional<std::string> solution_name(const std::string &text) {
     return {};
   return trim(text.substr(3));
 }
+// File name of a comment-stripped, trimmed INCLUDE statement, unquoted.
+std::string include_filename(const std::string &statement) {
+  std::string filename = trim(statement.substr(7));
+  if (filename.size() >= 2 &&
+      (filename.front() == '\'' || filename.front() == '\"') &&
+      filename.back() == filename.front())
+    filename = filename.substr(1, filename.size() - 2);
+  return filename;
+}
 Status read_lines(std::istream &in, const std::filesystem::path &base,
                   const std::string &name, std::vector<Line> &lines,
                   std::set<std::filesystem::path> &stack) {
@@ -46,11 +55,7 @@ Status read_lines(std::istream &in, const std::filesystem::path &base,
       continue;
     const std::string location = std::format("{}:{}", name, n);
     if (upper(stripped).starts_with("INCLUDE")) {
-      std::string filename = trim(stripped.substr(7));
-      if (filename.size() >= 2 &&
-          (filename.front() == '\'' || filename.front() == '\"') &&
-          filename.back() == filename.front())
-        filename = filename.substr(1, filename.size() - 2);
+      const std::string filename = include_filename(stripped);
       if (filename.empty())
         return Error{location + ": empty INCLUDE filename"};
       std::error_code ec;
@@ -174,14 +179,6 @@ void insert_unique(Map &map, int id, T value, Reader &r) {
     r.error =
         Error{r.where + ": nonpositive or duplicate id " + std::to_string(id)};
 }
-Matrix axes(const CoordinateSystem &cs) {
-  Vector z = (cs.b - cs.a).normalized(), y = z.cross(cs.c - cs.a).normalized();
-  Matrix r;
-  r.col(0) = y.cross(z);
-  r.col(1) = y;
-  r.col(2) = z;
-  return r;
-}
 Vector transform(const CoordinateSystem &cs, Vector p) {
   const double degree = std::numbers::pi / 180;
   if (cs.type == 'C')
@@ -191,7 +188,7 @@ Vector transform(const CoordinateSystem &cs, Vector p) {
     p = Vector(p.x() * std::sin(p.y() * degree) * std::cos(p.z() * degree),
                p.x() * std::sin(p.y() * degree) * std::sin(p.z() * degree),
                p.x() * std::cos(p.y() * degree));
-  return cs.a + axes(cs) * p;
+  return cs.a + coordinate_axes(cs) * p;
 }
 Status resolve_coordinates(Model &m) {
   std::map<int, int> state;
@@ -302,7 +299,9 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
         else if (key == "MAGBC")
           sc.boundary = r.integer(1);
         else if (key == "LABEL")
-          sc.label = trim(lines[i].text.substr(equals + 1));
+          // equals indexes the trimmed text; take the label from the
+          // trimmed original so its case survives.
+          sc.label = trim(trim(lines[i].text).substr(equals + 1));
         else if (key != "TITLE" && key != "SUBTITLE")
           return Error{lines[i].location +
                        ": unsupported MAGSTAT case control " + key};
@@ -548,8 +547,52 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
     return *e;
   return m;
 }
+struct SolutionScan {
+  std::optional<std::string> solution;
+  bool finished{false}; // SOL or BEGIN reached
+};
+// Finds the SOL statement ahead of BEGIN BULK, following INCLUDEs. Deck type
+// detection must not reject structural decks, so an include that cannot be
+// opened, or that cycles, is skipped here; parse_file reports it if the deck
+// turns out to be magnetic.
+SolutionScan scan_solution(std::istream &in, const std::filesystem::path &base,
+                           std::set<std::filesystem::path> &stack) {
+  std::string raw;
+  while (std::getline(in, raw)) {
+    const auto stripped = trim(raw.substr(0, raw.find('$')));
+    const auto text = upper(stripped);
+    if (auto solution = solution_name(text))
+      return {std::move(solution), true};
+    if (text.starts_with("BEGIN"))
+      return {std::nullopt, true};
+    if (!text.starts_with("INCLUDE"))
+      continue;
+    const std::string filename = include_filename(stripped);
+    if (filename.empty())
+      continue;
+    std::error_code ec;
+    auto path = std::filesystem::weakly_canonical(base / filename, ec);
+    if (ec || stack.size() >= 64 || !stack.insert(path).second)
+      continue;
+    std::ifstream child(path);
+    auto scan = child ? scan_solution(child, path.parent_path(), stack)
+                      : SolutionScan{};
+    stack.erase(path);
+    if (scan.finished)
+      return scan;
+  }
+  return {};
+}
 } // namespace
 
+Matrix coordinate_axes(const CoordinateSystem &cs) {
+  Vector z = (cs.b - cs.a).normalized(), y = z.cross(cs.c - cs.a).normalized();
+  Matrix r;
+  r.col(0) = y.cross(z);
+  r.col(1) = y;
+  r.col(2) = z;
+  return r;
+}
 Result<Model> parse_file(const std::filesystem::path &path) {
   std::ifstream in(path);
   if (!in)
@@ -574,30 +617,10 @@ Result<bool> is_magnetic_deck(const std::filesystem::path &path) {
   std::ifstream in(path);
   if (!in)
     return Error{"Cannot open input " + path.string()};
-  std::string s;
-  while (std::getline(in, s)) {
-    s = upper(trim(s.substr(0, s.find('$'))));
-    if (const auto solution = solution_name(s))
-      return *solution == "MAGSTAT";
-    if (s.starts_with("INCLUDE")) {
-      in.clear();
-      in.seekg(0);
-      std::vector<Line> lines;
-      std::set<std::filesystem::path> stack;
-      std::error_code ec;
-      stack.insert(std::filesystem::weakly_canonical(path, ec));
-      if (auto error =
-              read_lines(in, path.parent_path(), path.string(), lines, stack))
-        return *error;
-      for (const auto &line : lines)
-        if (const auto solution = solution_name(upper(trim(line.text))))
-          return *solution == "MAGSTAT";
-      return false;
-    }
-    if (s.starts_with("BEGIN"))
-      break;
-  }
-  return false;
+  std::set<std::filesystem::path> stack;
+  std::error_code ec;
+  stack.insert(std::filesystem::weakly_canonical(path, ec));
+  return scan_solution(in, path.parent_path(), stack).solution == "MAGSTAT";
 }
 
 Status validate(const Model &m) {

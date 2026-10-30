@@ -152,7 +152,9 @@ Result<Source> sweep(const Model &model, const std::vector<int> &vertices,
   if (closed)
     joints.back() = joints.front();
   std::vector<Vector> nodes = joints.front();
-  std::vector<NodeList> tetra, hexa;
+  // First node of the lower and upper ring of each axial slice. Cells are
+  // generated afterwards, only for the element type that is meshed.
+  std::vector<std::array<int, 2>> slice_rings;
   int previous_ring = 0, last_ring = 0;
   const double step = model.options.wire_step > 0
                           ? model.options.wire_step
@@ -177,30 +179,42 @@ Result<Source> sweep(const Model &model, const std::vector<int> &vertices,
           nodes.push_back((1 - fraction) * joints[segment][j] +
                           fraction * joints[segment + 1][j]);
       }
-      for (const auto &q : section.quads) {
-        NodeList cell;
-        for (int v : q)
-          cell.push_back(previous_ring + v);
-        for (int v : q)
-          cell.push_back(ring + v);
-        hexa.push_back(std::move(cell));
-      }
-      for (auto tri : section.triangles) {
-        std::sort(tri.begin(), tri.end());
-        const int a = previous_ring + tri[0], b = previous_ring + tri[1],
-                  c = previous_ring + tri[2], d = ring + tri[0],
-                  e = ring + tri[1], f = ring + tri[2];
-        tetra.push_back({a, b, c, f});
-        tetra.push_back({a, b, e, f});
-        tetra.push_back({a, d, e, f});
-      }
+      slice_rings.push_back({previous_ring, ring});
       previous_ring = ring;
       last_ring = ring;
     }
   }
+  const auto hexa = [&] {
+    std::vector<NodeList> cells;
+    cells.reserve(slice_rings.size() * section.quads.size());
+    for (const auto [lower, upper] : slice_rings)
+      for (const auto &q : section.quads) {
+        NodeList cell;
+        for (int v : q)
+          cell.push_back(lower + v);
+        for (int v : q)
+          cell.push_back(upper + v);
+        cells.push_back(std::move(cell));
+      }
+    return cells;
+  };
+  const auto tetra = [&] {
+    std::vector<NodeList> cells;
+    cells.reserve(3 * slice_rings.size() * section.triangles.size());
+    for (const auto [lower, upper] : slice_rings)
+      for (auto tri : section.triangles) {
+        std::sort(tri.begin(), tri.end());
+        const int a = lower + tri[0], b = lower + tri[1], c = lower + tri[2],
+                  d = upper + tri[0], e = upper + tri[1], f = upper + tri[2];
+        cells.push_back({a, b, c, f});
+        cells.push_back({a, b, e, f});
+        cells.push_back({a, d, e, f});
+      }
+    return cells;
+  };
   bool tetrahedral = model.options.wire_mesh == WireMesh::Tet;
-  auto built = make_mesh(nodes, tetrahedral ? tetra : hexa);
-  if (const auto *mesh = std::get_if<Mesh>(&built);
+  auto built = make_mesh(std::move(nodes), tetrahedral ? tetra() : hexa());
+  if (auto *mesh = std::get_if<Mesh>(&built);
       mesh && std::any_of(mesh->cells.begin(), mesh->cells.end(),
                           [](const Cell &c) { return !c.polyhedral; })) {
     if (model.options.wire_mesh == WireMesh::Hex)
@@ -208,7 +222,8 @@ Result<Source> sweep(const Model &model, const std::vector<int> &vertices,
                    "use WIREMESH=AUTO or TET for this path"};
     // Twisted spatial paths may have warped loft faces. Fall back for the whole
     // component so no nonconforming quad/triangle interfaces are introduced.
-    built = make_mesh(std::move(nodes), tetra);
+    // make_mesh stores the nodes unchanged, so reuse them.
+    built = make_mesh(std::move(mesh->nodes), tetra());
     tetrahedral = true;
   }
   if (auto *e = std::get_if<Error>(&built))
@@ -325,13 +340,16 @@ Result<std::vector<Source>> prepare_wires(const Model &model) {
       return *e;
     sources.push_back(std::get<Source>(std::move(source)));
   }
+  std::vector<SpatialIndex> indexes;
+  indexes.reserve(sources.size());
+  for (const auto &source : sources)
+    indexes.emplace_back(source.mesh);
   for (size_t i = 0; i < sources.size(); ++i)
     for (size_t j = 0; j < i; ++j) {
       const auto &a = sources[i].mesh;
       const auto &b = sources[j].mesh;
-      SpatialIndex index(b);
       for (const auto &cell : a.cells)
-        for (int ci : index.query(cell.minimum, cell.maximum)) {
+        for (int ci : indexes[j].query(cell.minimum, cell.maximum)) {
           const auto samples = intersection_quadrature(a, cell, b, b.cells[ci]);
           const double volume = std::accumulate(
               samples.begin(), samples.end(), 0.0,

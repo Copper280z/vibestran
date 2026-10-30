@@ -267,9 +267,8 @@ struct Transfer {
   double error;
 };
 Result<Transfer> transfer_source(const Source &source, const Mesh &mesh,
-                                 int order) {
+                                 const SpatialIndex &index, int order) {
   Eigen::VectorXd coupling = Eigen::VectorXd::Zero(mesh.edges.size());
-  SpatialIndex index(mesh);
   if (!source.closed) {
     for (size_t fi = 0; fi < source.mesh.faces.size(); ++fi) {
       const auto &face = source.mesh.faces[fi];
@@ -370,17 +369,19 @@ Result<Transfer> transfer_source(const Source &source, const Mesh &mesh,
   return Transfer{std::move(coupling), error};
 }
 } // namespace
-Result<Eigen::VectorXd> couple_source(const Source &source, const Mesh &mesh) {
+Result<Eigen::VectorXd> couple_source(const Source &source, const Mesh &mesh,
+                                      const SpatialIndex &index) {
   if (source.wire &&
       (std::any_of(mesh.cells.begin(), mesh.cells.end(),
                    [](const Cell &c) { return !c.polyhedral; }) ||
        std::any_of(source.mesh.cells.begin(), source.mesh.cells.end(),
                    [](const Cell &c) { return !c.affine; })))
-    return couple_curved_source(source, mesh);
-  return couple_polyhedral_source(source, mesh);
+    return couple_curved_source(source, mesh, index);
+  return couple_polyhedral_source(source, mesh, index);
 }
 Result<Eigen::VectorXd> couple_polyhedral_source(const Source &source,
-                                                 const Mesh &mesh) {
+                                                 const Mesh &mesh,
+                                                 const SpatialIndex &index) {
   double error = 0, change = 0;
   const bool adaptive =
       source.wire &&
@@ -390,7 +391,7 @@ Result<Eigen::VectorXd> couple_polyhedral_source(const Source &source,
                    [](const Cell &c) { return !c.affine; }));
   std::optional<Eigen::VectorXd> previous;
   for (int order : {6, 8, 10, 12, 14}) {
-    auto result = transfer_source(source, mesh, order);
+    auto result = transfer_source(source, mesh, index, order);
     if (auto *e = std::get_if<Error>(&result))
       return *e;
     auto &transfer = std::get<Transfer>(result);
@@ -490,7 +491,7 @@ Result<std::vector<Source>> prepare_sources(const Model &model,
   for (auto &wire : std::get<std::vector<Source>>(wires)) {
     if (curved || std::any_of(wire.mesh.cells.begin(), wire.mesh.cells.end(),
                               [](const Cell &c) { return !c.affine; })) {
-      auto coupling = couple_curved_source(wire, mesh, forbidden);
+      auto coupling = couple_curved_source(wire, mesh, index, forbidden);
       if (auto *e = std::get_if<Error>(&coupling))
         return *e;
       wire.coupling = std::get<Eigen::VectorXd>(std::move(coupling));
@@ -515,7 +516,7 @@ Result<std::vector<Source>> prepare_sources(const Model &model,
   }
   for (auto &source : sources) {
     if (source.coupling.size() == 0) {
-      auto coupled = couple_source(source, mesh);
+      auto coupled = couple_source(source, mesh, index);
       if (auto *e = std::get_if<Error>(&coupled))
         return *e;
       source.coupling = std::get<Eigen::VectorXd>(std::move(coupled));

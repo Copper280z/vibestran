@@ -294,6 +294,15 @@ void F06Writer::write(const SolverResults& results, const Model& model,
         const bool do_strain_corner = (msc != nullptr) && msc->strain_corner_print;
 
         if (do_disp) write_displacement_table(sc, out);
+        const bool want_constraint_forces =
+            do_spc_force ||
+            (msc != nullptr && (msc->mpc_force_print || msc->gpforce_print));
+        if (want_constraint_forces && !sc.constraint_force_error.empty()) {
+            write_subcase_header(out, sc.id);
+            out << " *** WARNING: SPC, MPC and grid point forces are not "
+                   "output for this subcase\n";
+            out << " ***          " << sc.constraint_force_error << "\n\n";
+        }
         if (do_spc_force) write_spc_force_table(sc, out);
         if (msc != nullptr && msc->mpc_force_print) write_mpc_force_table(sc, out);
         if (msc != nullptr && msc->gpforce_print) write_gpforce_table(sc, out);

@@ -17,6 +17,8 @@
 #include "io/results.hpp"
 #include "solver/solver_backend.hpp"
 #include <memory>
+#include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -102,11 +104,14 @@ private:
         std::vector<SpcForce> spc_forces;
         std::vector<SpcForce> mpc_forces;
         std::vector<GridPointForceBalance> gp_forces;
+        /// Set when MPC force recovery failed; all force lists are empty.
+        std::optional<std::string> error;
     };
 
     /// Recover Ku-F, physical MPC/RBE forces, and support reactions once.
     /// SPCFORCES, MPCFORCES and GPFORCE share the same basic-frame recovery;
-    /// results are rotated to each grid's CD frame only for output.
+    /// results are rotated to each grid's CD frame only for output. A failed
+    /// recovery is returned in `error` rather than thrown.
     GridForceOutput
     compute_grid_forces(const Model& model, const SubCase& sc,
                         const MpcHandler& mpc_handler,
