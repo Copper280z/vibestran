@@ -152,8 +152,23 @@ void reduce_3x3_constraints(NodeId nid, const Mat3 &T3,
   if (count == 0)
     return;
   if (count == 3) {
-    for (int j = 0; j < 3; ++j)
-      direct_constraints.emplace_back(nid, base_offset + j);
+    // A complete CD block specifies a unique basic-frame vector. Preserve
+    // its nonzero components as affine equations so attached RBEs/MPCs and
+    // the reduced load vector receive the prescribed motion.
+    for (int j = 0; j < 3; ++j) {
+      double value = 0.0;
+      for (int i = 0; i < count; ++i)
+        value += T3(j, cd_dofs[i]) * cd_values[i];
+      if (value == 0.0) {
+        direct_constraints.emplace_back(nid, base_offset + j);
+      } else {
+        Mpc prescribed;
+        prescribed.is_spc = true;
+        prescribed.terms.push_back({nid, base_offset + j + 1, 1.0});
+        prescribed.rhs = value;
+        all_mpcs.push_back(std::move(prescribed));
+      }
+    }
     return;
   }
 
@@ -206,6 +221,7 @@ void reduce_3x3_constraints(NodeId nid, const Mat3 &T3,
 
     Mpc mpc;
     mpc.sid = MpcSetId{0};
+    mpc.is_spc = true;
     mpc.rhs = rhs[row];
     for (int col = row; col < 3; ++col) {
       if (std::abs(A[row][col]) > 1e-14)
@@ -335,6 +351,7 @@ void build_analysis_mpc_system(const Model &model, const SubCase &sc,
       if (!spc_values.dofs.has(d + 1) || !dof_map.is_free(nid, d))
         continue;
       Mpc prescribed;
+      prescribed.is_spc = true;
       prescribed.terms.push_back({nid, d + 1, 1.0});
       prescribed.rhs = value;
       all_mpcs.push_back(std::move(prescribed));

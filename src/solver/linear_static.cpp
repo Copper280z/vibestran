@@ -462,28 +462,20 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   const auto t7 = Clock::now();
   spdlog::debug("[subcase {}] recover_results: {:.3f} ms", sc.id, Ms(t7 - t6).count());
 
-  // 7. SPC forces, MPC forces, and grid point force balance (when requested;
-  //    the force balance needs the SPC forces for its SPC rows).
+  // Recover the physical residual and constraint forces once, independently
+  // of which combination of force outputs was requested.
+  const bool want_spc = sc.spc_force_print || sc.spc_force_plot;
   const bool want_mpc = sc.mpc_force_print || sc.mpc_force_plot;
   const bool want_gp = sc.gpforce_print || sc.gpforce_plot;
-  if (sc.spc_force_print || sc.spc_force_plot || want_gp) {
-    std::vector<SpcForce> spc_forces =
-        compute_spc_forces(model, sc, mpc_handler, u_free);
+  if (want_spc || want_mpc || want_gp) {
+    GridForceOutput forces = compute_grid_forces(
+        model, sc, mpc_handler, u_free, want_spc, want_mpc, want_gp);
+    result.spc_forces = std::move(forces.spc_forces);
+    result.mpc_forces = std::move(forces.mpc_forces);
+    result.gp_forces = std::move(forces.gp_forces);
     const auto t8 = Clock::now();
-    spdlog::debug("[subcase {}] compute_spc_forces: {:.3f} ms", sc.id,
+    spdlog::debug("[subcase {}] recover_forces: {:.3f} ms", sc.id,
                   Ms(t8 - t7).count());
-    if (want_mpc || want_gp) {
-      GridForceOutput gf = compute_grid_forces(model, sc, mpc_handler, u_free,
-                                               spc_forces, want_mpc, want_gp);
-      result.mpc_forces = std::move(gf.mpc_forces);
-      result.gp_forces = std::move(gf.gp_forces);
-    }
-    if (sc.spc_force_print || sc.spc_force_plot)
-      result.spc_forces = std::move(spc_forces);
-  } else if (want_mpc) {
-    GridForceOutput gf =
-        compute_grid_forces(model, sc, mpc_handler, u_free, {}, true, false);
-    result.mpc_forces = std::move(gf.mpc_forces);
   }
 
   spdlog::debug("[subcase {}] total: {:.3f} ms", sc.id, Ms(t7 - t0).count());
@@ -1104,119 +1096,9 @@ std::array<double, 6> to_grid_frame(const Model &model, const NodeId nid,
 
 } // namespace
 
-std::vector<SpcForce>
-LinearStaticSolver::compute_spc_forces(const Model &model, const SubCase &sc,
-                                       const MpcHandler &mpc_handler,
-                                       const std::vector<double> &u_free) {
-  const DofMap &dof_map = mpc_handler.full_dof_map();
-
-  const auto spc = active_spc_state(model, sc);
-  if (spc.empty())
-    return {};
-
-  // Internal force at SPC'd DOFs: sum over elements of Ke * ue, taking only
-  // the rows corresponding to constrained DOFs.  This is the MYSTRAN
-  // quantity QSK + QSYS (K_SF*u_F + K_SSe*YSe).
-  std::unordered_map<NodeId, std::array<double, 6>> react;
-  react.reserve(spc.size());
-
-  for (const auto &elem_data : model.elements) {
-    auto elem = make_element(elem_data, model);
-    const auto gdofs = elem->global_dof_indices(dof_map);
-    const auto identity = local_dof_identity(elem_data);
-    const int ndof = elem->num_dofs();
-
-    Eigen::VectorXd ue = Eigen::VectorXd::Zero(ndof);
-    for (int li = 0; li < ndof; ++li) {
-      const EqIndex eq = gdofs[static_cast<size_t>(li)];
-      if (eq != CONSTRAINED_DOF &&
-          eq < static_cast<EqIndex>(u_free.size())) {
-        ue(static_cast<Eigen::Index>(li)) = u_free[static_cast<size_t>(eq)];
-      } else {
-        const auto [nid, comp] = identity[static_cast<size_t>(li)];
-        const auto spc_it = spc.find(nid);
-        if (spc_it != spc.end() &&
-            spc_it->second[static_cast<size_t>(comp)].active)
-          ue(static_cast<Eigen::Index>(li)) =
-              spc_it->second[static_cast<size_t>(comp)].value;
-      }
-    }
-
-    const LocalKe ke = elem->stiffness_matrix();
-    const Eigen::VectorXd fe = ke * ue;
-    for (int li = 0; li < ndof; ++li) {
-      const auto [nid, comp] = identity[static_cast<size_t>(li)];
-      const auto spc_it = spc.find(nid);
-      if (spc_it == spc.end() ||
-          !spc_it->second[static_cast<size_t>(comp)].active)
-        continue;
-      react[nid][static_cast<size_t>(comp)] +=
-          fe(static_cast<Eigen::Index>(li));
-    }
-  }
-
-  // Subtract applied loads at the SPC'd DOFs (P_s term in MYSTRAN).
-  subtract_spc_point_loads(model, sc, spc, react);
-  subtract_spc_inertial_loads(model, sc, spc, react);
-  subtract_spc_thermal_loads(model, sc, spc, react);
-  compute_spc_pressure_loads(model, sc, dof_map, spc, react);
-
-  // Build per-node result in node-ID order.
-  std::vector<NodeId> sorted_nodes;
-  sorted_nodes.reserve(spc.size());
-  for (const auto &[nid, _] : spc)
-    sorted_nodes.push_back(nid);
-  std::sort(sorted_nodes.begin(), sorted_nodes.end());
-
-  // Constrained components per grid, in the grid's CD frame.
-  std::unordered_map<NodeId, DofSet> constrained;
-  for (const Spc &c : model.structural_spcs(sc.spc_set))
-    constrained[c.node].mask |= c.dofs.mask;
-
-  // Reactions are accumulated in basic; report them in each grid's global
-  // (displacement) system, like the displacements.  For a CD grid the full
-  // basic residual is rotated and only its constrained CD components are
-  // kept (the free ones vanish by equilibrium, up to roundoff).
-  std::vector<SpcForce> result;
-  result.reserve(sorted_nodes.size());
-  for (NodeId nid : sorted_nodes) {
-    SpcForce sf;
-    sf.node = nid;
-    const auto it = react.find(nid);
-    if (it != react.end())
-      sf.f = it->second;
-    const GridPoint &gp = model.node(nid);
-    if (gp.cd.value != 0) {
-      const auto cs_it = model.coord_systems.find(gp.cd);
-      if (cs_it == model.coord_systems.end()) {
-        throw SolverError(std::format(
-            "GRID {}: displacement coordinate system {} not found",
-            nid.value, gp.cd.value));
-      }
-      const Mat3 T3 = rotation_matrix(cs_it->second, gp.position);
-      std::array<double, 6> local{};
-      for (int block = 0; block < 2; ++block)
-        for (int i = 0; i < 3; ++i) {
-          double v = 0.0;
-          for (int j = 0; j < 3; ++j)
-            v += T3(j, i) * sf.f[static_cast<size_t>(3 * block + j)];
-          local[static_cast<size_t>(3 * block + i)] = v;
-        }
-      const DofSet mask = constrained[nid];
-      for (int d = 0; d < 6; ++d)
-        if (!mask.has(d + 1))
-          local[static_cast<size_t>(d)] = 0.0;
-      sf.f = local;
-      sf.coord = gp.cd;
-    }
-    result.push_back(std::move(sf));
-  }
-  return result;
-}
-
 LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
     const Model &model, const SubCase &sc, const MpcHandler &mpc_handler,
-    const std::vector<double> &u_free, const std::vector<SpcForce> &spc_forces,
+    const std::vector<double> &u_free, const bool want_spc,
     const bool want_mpc, const bool want_gp) const {
   GridForceOutput out;
   const DofMap &dof_map = mpc_handler.full_dof_map();
@@ -1330,9 +1212,20 @@ LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
       mpc_grids.insert(wg.nodes.begin(), wg.nodes.end());
   }
 
-  std::unordered_map<NodeId, const SpcForce *> spc_by_grid;
-  for (const auto &sf : spc_forces)
-    spc_by_grid.emplace(sf.node, &sf);
+  // Physical nodal residual before constraint elimination. Thermal loads
+  // are already included in internal; neg_applied contains mechanical loads.
+  NodalForces residuals = internal;
+  for (const auto& [nid, force] : neg_applied)
+    for (size_t d = 0; d < 6; ++d)
+      residuals[nid][d] += force[d];
+  const auto recovery = mpc_handler.recover_mpc_forces(residuals);
+  if (const auto* error = std::get_if<MpcForceRecoveryError>(&recovery)) {
+    // Invalid recovered forces make this analysis unusable. Stop at the
+    // solver boundary rather than publishing incomplete reaction results.
+    throw SolverError(std::format("Subcase {}: {}", sc.id, error->message));
+  }
+  const auto& mpc_forces = std::get<NodalForces>(recovery);
+
   std::unordered_map<NodeId, DofSet> constrained;
   for (const Spc &c : model.structural_spcs(sc.spc_set))
     constrained[c.node].mask |= c.dofs.mask;
@@ -1352,18 +1245,28 @@ LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
     // is already inside the element terms).
     const auto f_app = get(neg_applied, nid);  // = -F_applied
     const auto f_th = get(neg_thermal, nid);   // = -F_thermal
-    std::array<double, 6> residual = get(internal, nid);
-    for (size_t d = 0; d < 6; ++d)
-      residual[d] += f_app[d];
+    const auto residual = get(residuals, nid);
+    const auto mpc_basic = get(mpc_forces, nid);
+    SpcForce sf;
+    const auto c_it = constrained.find(nid);
+    const bool has_spc = c_it != constrained.end();
+    if (has_spc) {
+      sf.node = nid;
+      sf.coord = model.node(nid).cd;
+      for (size_t d = 0; d < 6; ++d)
+        sf.f[d] = residual[d] - mpc_basic[d];
+      sf.f = to_grid_frame(model, nid, sf.f);
+      for (int d = 0; d < 6; ++d)
+        if (!c_it->second.has(d + 1))
+          sf.f[static_cast<size_t>(d)] = 0.0;
+      if (want_spc)
+        out.spc_forces.push_back(sf);
+    }
 
     std::array<double, 6> mpc_force{};
     bool has_mpc = false;
     if (mpc_grids.contains(nid)) {
-      mpc_force = to_grid_frame(model, nid, residual);
-      const auto c_it = constrained.find(nid);
-      for (int d = 0; d < 6; ++d)
-        if (c_it != constrained.end() && c_it->second.has(d + 1))
-          mpc_force[static_cast<size_t>(d)] = 0.0; // owned by the SPC force
+      mpc_force = to_grid_frame(model, nid, mpc_basic);
       has_mpc = true;
       if (want_mpc) {
         SpcForce mf;
@@ -1401,8 +1304,8 @@ LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
       add_row(GridForceContribution::Kind::Thermal,
               to_grid_frame(model, nid, minus_thermal), ElementType::CBAR,
               ElementId{0});
-    if (const auto it = spc_by_grid.find(nid); it != spc_by_grid.end())
-      add_row(GridForceContribution::Kind::Spc, it->second->f, ElementType::CBAR,
+    if (has_spc)
+      add_row(GridForceContribution::Kind::Spc, sf.f, ElementType::CBAR,
               ElementId{0});
     if (has_mpc && any_nonzero(mpc_force))
       add_row(GridForceContribution::Kind::Mpc, mpc_force, ElementType::CBAR,

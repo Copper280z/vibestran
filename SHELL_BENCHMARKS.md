@@ -64,18 +64,22 @@ membrane-bending coupling of curved and twisted shells is lost.  The tables
 above include it (the thin benchmarks moved by at most 0.12 points).
 
 A twisted plate under in-plane tension (MYSTRAN `NAS S30 twisted plate
-mit4+`, corner TZ, 1 x 1, twist +-0.1) compared with an EAS CHEXA8 model of
-the same body (48 x 48 x 8, converging):
+mit4+`, corner TZ, 1 x 1, twist +-0.1, 32 x 32 shell mesh) compared with
+converged CHEXA8 models of the same body.  The solid column is MYSTRAN's
+Q1/E21 CHEXA8 (64 x 64 x 10, 64 x 64 x 4 and 96 x 96 x 2 meshes).  The
+first version of this table used vibestran's own CHEXA8, which is
+unreliable on thin curved geometry; see SHELL_SOLID_COMPARISON.md.
 
 | t / L | Shell before | Shell now | Solid |
 |---|---:|---:|---:|
-| 0.06 | +0.9% | +0.17% | -1.154e-2 |
-| 0.2 | +11% | +3.7% | -1.658e-3 |
-| 0.6 | +114% | +35% | -1.73e-4 |
+| 0.06 | +1.3% | +0.50% | -1.1499e-2 |
+| 0.2 | +12% | +4.8% | -1.6415e-3 |
+| 0.6 | +114% | +35% | -1.731e-4 |
 
-The remaining error falls as t^2 (second-order thickness terms and shell
-theory itself; MYSTRAN, which integrates the 3D metric exactly, is 9% above
-the solid at t / L = 0.6).
+The remaining error falls roughly as t^2 (second-order thickness terms and
+shell theory itself).  MYSTRAN 18, which integrates the 3D metric exactly,
+was 9% above the solid at t / L = 0.6; the current MYSTRAN 19 build is
++114%.
 
 ## CTRIA3 = MITC3+ (2026-10-16)
 

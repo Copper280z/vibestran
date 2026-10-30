@@ -540,6 +540,7 @@ test('magnetic_e2e', python,
 # Integration tests
 integration_test_sources = files(
   'tests/integration/test_integration.cpp',
+  'tests/integration/test_constraint_forces.cpp',
   'tests/integration/test_thermal_steady.cpp',
   'tests/integration/test_shell_benchmarks.cpp',
   'tests/integration/test_hexa8_reference.cpp',

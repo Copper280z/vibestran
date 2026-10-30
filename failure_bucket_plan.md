@@ -281,19 +281,23 @@ The shell records fall into these groups:
   element force`, `shell gravity`, `tri3 quad4`, `shell laminate coupling`,
   `tiny principal stress and strain angle bug` (errors 1e-23 to 5e-9).
 - **Very thick twisted plate.** `NAS S30 twisted plate mit4+` (t/L = 0.6,
-  in-plane tension, corner TZ) converges to -2.36e-4; an EAS CHEXA8 model
-  of the same body converges to about -1.75e-4 and MYSTRAN to -1.89e-4.
-  The shell error falls as t^2 (3.7% at t/L = 0.2, 0.17% at 0.06); see
-  `SHELL_BENCHMARKS.md`.
+  in-plane tension, corner TZ) converges to -2.36e-4. MYSTRAN's CHEXA8
+  model of the same body converges to -1.731e-4. MYSTRAN 18 (the stored
+  reference) gives -1.89e-4 and the current MYSTRAN 19 gives -3.71e-4. The
+  shell error falls as t^2 (4.8% at t/L = 0.2, 0.50% at 0.06); see
+  `SHELL_SOLID_COMPARISON.md`.
+- **References from MYSTRAN 18 that are wrong.** The `thermal strain free
+  rectangle/diamond cylinder` criteria encode MYSTRAN 18 values that
+  violate exact free expansion (rectangle TX 0 and TZ 0.141, against
+  -0.18 and 0.09). vibestran and MYSTRAN 19 both give the exact values.
+  For the Raasch hook, MSC Nastran with K6ROT = 10 diverges with refinement
+  and with K6ROT = 1000 converges 7% flexible, while vibestran is within
+  0.1% of the solid. `SHELL_SOLID_COMPARISON.md` has the CHEXA8 references
+  for all of these decks.
 - **Reference conventions.** `gravity SNORM` SPCFORCES TY is a support
   split of -5759.93/-5760.07 (sum exact) against 0.001%. The hemisphere
   and diamond-cylinder records are within a few percent of decks whose
   references are MYSTRAN's coarse-mesh values.
-
-`S30 mitc4 thermal strain free rectangle/diamond cylinder` remain: the
-benchmark faceted ring is stress-free to roundoff, but these decks'
-statically determinate supports on a faceted cylinder leave TX/TZ records
-of 0.04-0.18 against zero references; not yet triaged in detail.
 
 Element and constraint incidence overlaps when a deck contains multiple
 cards: CQUAD4 86 decks, CBAR 81, CTRIA3 31, CHEXA 25, RBE3 19, RBE2 16,
@@ -549,11 +553,15 @@ most recent entry.
   thick (t/L = 0.6) twisted-plate error against a solid model from 114% to
   35%. Warp is a warning. No new failures apart from
   the RBE3 10 flake. Body rewritten for the new elements.
-- **Orthotropic shell thermal correction (1,929 -> 1,928).** Free thermal
-  expansion of curved MAT8/MAT2/PCOMP shells uses the anisotropic free
-  strain; the diamond thermal cylinder's hoop expansion was 120% too large
-  and now matches exact free expansion. The deck's remaining records
-  encode MYSTRAN 18 values that violate it.
+- **CHEXA8 references and orthotropic thermal fix (1,929 -> 1,928).**
+  Refined CHEXA8 models of the open shell decks were run in vibestran and
+  MYSTRAN 19 (`SHELL_SOLID_COMPARISON.md`, `tools/solid_reference/`).
+  MYSTRAN's Q1/E21 CHEXA8 is the reference; vibestran's CHEXA8 locks on
+  thin curved geometry. Orthotropic free thermal expansion of curved
+  shells now uses the anisotropic free strain: the diamond thermal
+  cylinder's hoop expansion was 120% too large. It now matches the exact
+  solution and MYSTRAN 19; the remaining records encode MYSTRAN 18's wrong
+  values. No new failures.
 - **Q1/E21 CHEXA8 (1,928 -> 1,878).** The 9-mode incompatible-mode CHEXA8,
   which locked on thin curved geometry and broke symmetry, is replaced by
   the Q1/E21 enhanced assumed strain element; PSOLID ISOP FULL/1 now

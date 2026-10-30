@@ -8,6 +8,9 @@
 #include "io/bdf_parser.hpp"
 #include <gtest/gtest.h>
 #include <cmath>
+#include <algorithm>
+#include <iterator>
+#include <limits>
 
 using namespace vibestran;
 
@@ -481,4 +484,207 @@ TEST(Rbe3Expansion, TranslationsDetermineReferenceRotation) {
     EXPECT_NEAR(equations[0].terms[0].coeff, 2.0, 1e-12);
     EXPECT_NEAR(equations[0].terms[1].coeff, 1.0, 1e-12);
     EXPECT_NEAR(equations[0].terms[2].coeff, -1.0, 1e-12);
+}
+
+TEST(MpcForceRecovery, CoupledBlockAndChainTransmitLoadsToSupport) {
+    // Two coupled constraints tie nodes 2/3 to node 1; node 4 follows 3.
+    // Loads 7, 11 and 13 must reach node 1, regardless of row order or
+    // whether its support is eliminated directly or represented affinely.
+    Model model = make_model_n_nodes(4);
+    Mpc coupled_a, coupled_b, chain, support;
+    coupled_a.terms = {{NodeId{2}, 1, 2.0}, {NodeId{3}, 1, -1.0},
+                       {NodeId{1}, 1, -0.4}, {NodeId{1}, 1, -0.6}};
+    coupled_b.terms = {{NodeId{3}, 1, 3.0}, {NodeId{2}, 1, -1.0},
+                       {NodeId{1}, 1, -2.0}};
+    chain.terms = {{NodeId{4}, 1, 1.0}, {NodeId{3}, 1, -1.0}};
+    support.terms = {{NodeId{1}, 1, 1.0}};
+    support.rhs = 0.5;
+    support.is_spc = true;
+    NodalForces residual;
+    residual[NodeId{1}][0] = 2.0;
+    residual[NodeId{2}][0] = -7.0;
+    residual[NodeId{3}][0] = -11.0;
+    residual[NodeId{4}][0] = -13.0;
+
+    const std::array<std::array<const Mpc*, 3>, 2> orderings{{
+        {&coupled_a, &coupled_b, &chain}, {&chain, &coupled_b, &coupled_a}}};
+    MpcHandler handler;
+    for (const bool affine : {false, true}) {
+        for (const auto& ordering : orderings) {
+            SCOPED_TRACE(::testing::Message() << "affine=" << affine
+                << " first node=" << ordering.front()->terms.front().node.value);
+            DofMap map = make_full_dof_map(model);
+            if (!affine)
+                map.constrain(NodeId{1}, 0);
+            std::vector<const Mpc*> rows;
+            if (affine)
+                rows.push_back(&support);
+            rows.insert(rows.end(), ordering.begin(), ordering.end());
+            handler.build(rows, map);
+            const auto recovery = handler.recover_mpc_forces(residual);
+            ASSERT_TRUE(std::holds_alternative<NodalForces>(recovery));
+            const auto& forces = std::get<NodalForces>(recovery);
+            EXPECT_NEAR(forces.at(NodeId{1})[0], 31.0, 1e-12);
+            for (int n : {2, 3, 4})
+                EXPECT_NEAR(forces.at(NodeId{n})[0], residual.at(NodeId{n})[0], 1e-12);
+            double resultant = 0.0;
+            for (const auto& [nid, force] : forces)
+                resultant += force[0];
+            EXPECT_NEAR(resultant, 0.0, 1e-12);
+        }
+    }
+}
+
+TEST(MpcForceRecovery, CoupledRecoveryIsInvariantToEquationAndLoadScale) {
+    const Model model = make_model_n_nodes(4);
+    for (const double equation_scale : {1e-12, 1., 1e12}) {
+        Mpc a, b, chain;
+        a.terms = {{NodeId{2}, 1, 2.*equation_scale},
+                   {NodeId{3}, 1, -equation_scale},
+                   {NodeId{1}, 1, -equation_scale}};
+        b.terms = {{NodeId{3}, 1, 3.*equation_scale},
+                   {NodeId{2}, 1, -equation_scale},
+                   {NodeId{1}, 1, -2.*equation_scale}};
+        chain.terms = {{NodeId{4}, 1, equation_scale},
+                       {NodeId{3}, 1, -equation_scale}};
+        const std::array<std::array<const Mpc*, 3>, 2> orderings{{
+            {&a, &b, &chain}, {&chain, &b, &a}}};
+        for (const auto& rows : orderings) {
+            auto map = make_full_dof_map(model);
+            map.constrain(NodeId{1}, 0);
+            MpcHandler handler;
+            handler.build(rows, map);
+            // The largest scale would overflow an unscaled sum of squared
+            // residuals. A zero load must also avoid a 0/0 error estimate.
+            for (const double load_scale : {0., 1e-150, 1., 1e150, 1e307}) {
+                SCOPED_TRACE(::testing::Message() << "equation=" << equation_scale
+                    << " load=" << load_scale << " first=" << rows.front()->terms[0].node.value);
+                NodalForces residual;
+                residual[NodeId{2}][0] = -.7*load_scale;
+                residual[NodeId{3}][0] = -1.1*load_scale;
+                residual[NodeId{4}][0] = -1.3*load_scale;
+                const auto recovery = handler.recover_mpc_forces(residual);
+                const auto* error = std::get_if<MpcForceRecoveryError>(&recovery);
+                ASSERT_EQ(error, nullptr) << (error ? error->message : "");
+                const auto& forces = std::get<NodalForces>(recovery);
+                const double scale = load_scale == 0. ? 1. : load_scale;
+                EXPECT_NEAR(forces.at(NodeId{1})[0]/scale,
+                            load_scale == 0. ? 0. : 3.1, 1e-12);
+                for (int nid : {2, 3, 4})
+                    EXPECT_NEAR(forces.at(NodeId{nid})[0]/scale,
+                                residual.at(NodeId{nid})[0]/scale, 1e-12);
+            }
+        }
+    }
+}
+
+TEST(MpcForceRecovery, NonfiniteResidualReturnsDiagnosticInsteadOfForces) {
+    const Model model = make_model_n_nodes(2);
+    auto map = make_full_dof_map(model);
+    map.constrain(NodeId{1}, 0);
+    Mpc constraint;
+    constraint.terms = {{NodeId{2}, 1, 1.}, {NodeId{1}, 1, -1.}};
+    const std::array<const Mpc*, 1> rows{&constraint};
+    MpcHandler handler;
+    handler.build(rows, map);
+    for (const double value : {std::numeric_limits<double>::quiet_NaN(),
+                              std::numeric_limits<double>::infinity(),
+                              -std::numeric_limits<double>::infinity()}) {
+        NodalForces residual;
+        residual[NodeId{2}][0] = value;
+        const auto recovery = handler.recover_mpc_forces(residual);
+        const auto* error = std::get_if<MpcForceRecoveryError>(&recovery);
+        ASSERT_NE(error, nullptr);
+        EXPECT_NE(error->message.find("nonfinite residual"), std::string::npos);
+        EXPECT_NE(error->message.find("GRID 2 component 1"), std::string::npos);
+    }
+}
+
+TEST(MpcForceRecovery, FiniteInputsWithOverflowReturnDiagnosticsInsteadOfPartialForces) {
+    const Model model = make_model_n_nodes(3);
+    // These systems are full rank. Each overflows at a different stage of
+    // recovery despite finite input coefficients and nodal residuals.
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        SCOPED_TRACE(scenario);
+        auto map = make_full_dof_map(model);
+        map.constrain(NodeId{1}, 0);
+        Mpc a, b;
+        a.terms = {{NodeId{2}, 1, 1.}, {NodeId{1}, 1, -1.}};
+        b.terms = {{NodeId{3}, 1, 1.}, {NodeId{1}, 1, -1.}};
+        NodalForces residual;
+        residual[NodeId{2}][0] = 1e308;
+        residual[NodeId{3}][0] = 1e308;
+        std::string expected;
+        if (scenario == 0) {
+            a.terms[1].coeff = -1e200;
+            residual[NodeId{2}][0] = 1e200;
+            expected = "nonfinite force at GRID 1 component 1";
+        } else if (scenario == 1) {
+            expected = "force accumulation overflow at GRID 1 component 1";
+        } else if (scenario == 2) {
+            b.terms[1].node = NodeId{2};
+            expected = "residual propagation overflow at GRID 2 component 1";
+        } else {
+            a.terms.push_back({NodeId{3}, 1, -1.});
+            b.terms.push_back({NodeId{2}, 1, -(1.-1e-8)});
+            residual[NodeId{2}][0] = 1e307;
+            residual[NodeId{3}][0] = 1e307;
+            expected = "nonfinite multipliers";
+        }
+        const std::array<const Mpc*, 2> rows{&a, &b};
+        MpcHandler handler;
+        handler.build(rows, map);
+        const auto recovery = handler.recover_mpc_forces(residual);
+        const auto* error = std::get_if<MpcForceRecoveryError>(&recovery);
+        ASSERT_NE(error, nullptr);
+        EXPECT_NE(error->message.find(expected), std::string::npos) << error->message;
+    }
+}
+
+TEST(Rbe3Expansion, OffsetReferencePreservesIndependentDofsAndLoadResultants) {
+    Model model = make_model_n_nodes(5);
+    model.nodes.at(NodeId{1}).position = {0., 0., 20.};
+    model.nodes.at(NodeId{2}).position = {20., 0., 20.};
+    model.nodes.at(NodeId{3}).position = {20., 60., 20.};
+    model.nodes.at(NodeId{4}).position = {0., 60., 20.};
+    model.nodes.at(NodeId{5}).position = {60., 30., 210.};
+    Rbe3 rbe;
+    rbe.eid = ElementId{10};
+    rbe.ref_node = NodeId{5};
+    rbe.refc = DofSet::from_int(123456);
+    rbe.weight_groups = {{1., DofSet::from_int(123), {NodeId{1}, NodeId{2}}},
+                         {2., DofSet::from_int(123), {NodeId{3}, NodeId{4}}}};
+    std::vector<Mpc> rows;
+    expand_rbe3(rbe, model, rows);
+    std::vector<const Mpc*> ptrs;
+    std::transform(rows.begin(), rows.end(), std::back_inserter(ptrs),
+                   [](const Mpc& row) { return &row; });
+    auto map = make_full_dof_map(model);
+    MpcHandler handler;
+    handler.build(ptrs, map);
+    // Large lever arms must not turn an independent attachment into a
+    // dependent DOF just because two rows prefer the same reference pivot.
+    for (int d = 0; d < 6; ++d)
+        EXPECT_FALSE(map.is_free(NodeId{5}, d));
+    for (int node = 1; node <= 4; ++node)
+        for (int d = 0; d < 3; ++d)
+            ASSERT_TRUE(map.is_free(NodeId{node}, d));
+    const auto& reference = handler.full_dof_map().block(NodeId{5}).eq;
+    const std::array<double, 6> load{3., 8., -10., 0., 0., 0.};
+    std::vector<double> distributed(static_cast<size_t>(handler.num_reduced()), 0.0);
+    handler.apply_to_force(reference, load, distributed);
+    Vec3 sum_force{}, sum_moment{};
+    for (int n = 1; n <= 4; ++n) {
+        const auto& eq = map.block(NodeId{n}).eq;
+        const Vec3 force{distributed[eq[0]], distributed[eq[1]], distributed[eq[2]]};
+        sum_force = sum_force + force;
+        sum_moment = sum_moment + model.node(NodeId{n}).position.cross(force);
+    }
+    const Vec3 expected_moment = model.node(NodeId{5}).position.cross({3., 8., -10.});
+    EXPECT_NEAR(sum_force.x, 3., 1e-9);
+    EXPECT_NEAR(sum_force.y, 8., 1e-9);
+    EXPECT_NEAR(sum_force.z, -10., 1e-9);
+    EXPECT_NEAR(sum_moment.x, expected_moment.x, 1e-7);
+    EXPECT_NEAR(sum_moment.y, expected_moment.y, 1e-7);
+    EXPECT_NEAR(sum_moment.z, expected_moment.z, 1e-7);
 }

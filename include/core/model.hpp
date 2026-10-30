@@ -608,6 +608,8 @@ struct Mpc {
   MpcSetId sid{0};
   std::vector<MpcTerm> terms;
   double rhs{0.0};
+  /// Internally generated SPC equation; its force belongs to SPCFORCES.
+  bool is_spc{false};
 };
 
 // ── Rigid elements

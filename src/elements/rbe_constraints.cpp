@@ -248,10 +248,14 @@ void expand_rbe3(const Rbe3& rbe, const Model& model, std::vector<Mpc>& out) {
         mpc.terms.push_back(
             {preferred->first.first, preferred->first.second, preferred->second});
         coefficients.erase(preferred);
-        for (const auto& [key, coefficient] : coefficients) {
-            if (std::abs(coefficient) > tolerance)
-                mpc.terms.push_back({key.first, key.second, coefficient});
-        }
+        // Coupled rows can prefer the same reference pivot. Try the other
+        // reference DOFs before any attachment DOF: node-ID ordering must not
+        // reverse the dependency and leave large lever arms in the solve.
+        for (const bool reference_first : {true, false})
+            for (const auto& [key, coefficient] : coefficients)
+                if ((key.first == rbe.ref_node) == reference_first &&
+                    std::abs(coefficient) > tolerance)
+                    mpc.terms.push_back({key.first, key.second, coefficient});
         out.push_back(std::move(mpc));
     }
 }

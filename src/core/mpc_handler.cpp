@@ -17,6 +17,8 @@ void MpcHandler::build(std::span<const Mpc* const> mpcs, DofMap& dof_map) {
     eliminations_.clear();
     dep_to_elim_.clear();
     index_map_.clear();
+    force_equations_.clear();
+    force_blocks_.clear();
 
     // Save pre-MPC dof_map
     full_dof_map_ = dof_map;
@@ -174,6 +176,15 @@ void MpcHandler::build(std::span<const Mpc* const> mpcs, DofMap& dof_map) {
         MpcElimination elim;
         elim.dep = dep_eq;
         const double a_dep = row_coefficients.at(dep_eq);
+        const auto [dep_node, dep_component] = dof_identity.at(dep_eq);
+        ForceRecoveryEquation force_equation{
+            dep_node, dep_component, mpc->is_spc, {}};
+        for (const auto& term : mpc->terms) {
+            if (std::abs(term.coeff) >= 1e-30)
+                force_equation.terms.push_back(
+                    {term.node, term.dof, term.coeff / a_dep});
+        }
+        force_equations_.push_back(std::move(force_equation));
         elim.offset = mpc->rhs / a_dep;
         for (const auto& [eq, coefficient] : row_coefficients) {
             if (eq == dep_eq || std::abs(coefficient) < 1e-30)
@@ -337,6 +348,7 @@ void MpcHandler::build(std::span<const Mpc* const> mpcs, DofMap& dof_map) {
             }
             eliminations_[members[row]] = std::move(resolved);
         }
+        force_blocks_.push_back(members);
         component_state[component_id] = 2;
     };
     for (size_t component = 0; component < components.size(); ++component)
@@ -589,6 +601,127 @@ void MpcHandler::recover_dependent_dofs(std::vector<double>& u_free_full,
         if (elim.dep >= 0 && elim.dep < static_cast<EqIndex>(u_free_full.size()))
             u_free_full[static_cast<size_t>(elim.dep)] = val;
     }
+}
+
+MpcForceRecoveryResult
+MpcHandler::recover_mpc_forces(const NodalForces& residual) const {
+    // C_D^T lambda = r_D, where each retained constraint is C u = b.
+    // C_D has the same coupled blocks as the displacement elimination.
+    std::vector<double> rhs(force_equations_.size(), 0.0);
+    const auto failure = [&](size_t equation, const std::string& detail) {
+        const auto& row = force_equations_[equation];
+        return MpcForceRecoveryError{std::format(
+            "MPC force recovery: equation {}, dependent GRID {} component {}: {}",
+            equation + 1, row.dependent_node.value, row.dependent_component + 1,
+            detail)};
+    };
+    for (size_t i = 0; i < force_equations_.size(); ++i) {
+        const auto& row = force_equations_[i];
+        const auto it = residual.find(row.dependent_node);
+        if (it != residual.end())
+            rhs[i] = it->second[static_cast<size_t>(row.dependent_component)];
+        if (!std::isfinite(rhs[i]))
+            return failure(i, std::format("nonfinite residual {:.6e}", rhs[i]));
+        for (const auto& term : row.terms)
+            if (!std::isfinite(term.coeff))
+                return failure(i, std::format(
+                    "nonfinite coefficient {:.6e} at GRID {} component {}",
+                    term.coeff, term.node.value, term.dof));
+    }
+
+    NodalForces forces;
+    for (auto block = force_blocks_.rbegin(); block != force_blocks_.rend(); ++block) {
+        const auto& members = *block;
+        std::unordered_map<size_t, size_t> local_index;
+        for (size_t i = 0; i < members.size(); ++i)
+            local_index.emplace(members[i], i);
+        Eigen::MatrixXd transpose = Eigen::MatrixXd::Zero(members.size(), members.size());
+        Eigen::VectorXd block_rhs(members.size());
+        for (size_t i = 0; i < members.size(); ++i) {
+            block_rhs(static_cast<Eigen::Index>(i)) = rhs[members[i]];
+            for (const auto& term : force_equations_[members[i]].terms) {
+                const auto dep = dep_to_elim_.find(
+                    full_dof_map_.eq_index(term.node, term.dof - 1));
+                if (dep == dep_to_elim_.end())
+                    continue;
+                const auto local = local_index.find(static_cast<size_t>(dep->second));
+                if (local != local_index.end())
+                    transpose(static_cast<Eigen::Index>(local->second),
+                              static_cast<Eigen::Index>(i)) += term.coeff;
+            }
+        }
+        if (!transpose.allFinite() || !block_rhs.allFinite())
+            return failure(members.front(), std::format(
+                "nonfinite transpose system in block of {} equations", members.size()));
+        Eigen::FullPivLU<Eigen::MatrixXd> decomposition(transpose);
+        decomposition.setThreshold(1e-12);
+        const auto rank = decomposition.rank();
+        if (rank != static_cast<Eigen::Index>(members.size()))
+            return failure(members.front(), std::format(
+                "transpose block has rank {} of {} at relative pivot threshold 1e-12",
+                rank, members.size()));
+        const Eigen::VectorXd multipliers = decomposition.solve(block_rhs);
+        if (!multipliers.allFinite())
+            return failure(members.front(), std::format(
+                "nonfinite multipliers in block of {} equations", members.size()));
+
+        // Check |A*x-b| / (|A|*|x|+|b|) row by row. Normalize the
+        // products before summing, avoiding overflow in the error scale and
+        // keeping the check invariant to force units and equation scaling.
+        constexpr double backward_error_limit = 1e-10;
+        for (Eigen::Index row = 0; row < transpose.rows(); ++row) {
+            const Eigen::VectorXd products =
+                transpose.row(row).transpose().cwiseProduct(multipliers);
+            if (!products.allFinite())
+                return failure(members[static_cast<size_t>(row)],
+                               "nonfinite product in transpose residual check");
+            const double scale = std::max(std::abs(block_rhs(row)),
+                                          products.cwiseAbs().maxCoeff());
+            if (scale == 0.0)
+                continue;
+            const Eigen::VectorXd scaled = products / scale;
+            const double scaled_rhs = block_rhs(row) / scale;
+            const double error = std::abs(scaled.sum() - scaled_rhs) /
+                (scaled.cwiseAbs().sum() + std::abs(scaled_rhs));
+            if (!std::isfinite(error) || error > backward_error_limit)
+                return failure(members[static_cast<size_t>(row)], std::format(
+                    "transpose block of {} equations has componentwise backward "
+                    "error {:.6e}, limit {:.6e}",
+                    members.size(), error, backward_error_limit));
+        }
+        for (size_t i = 0; i < members.size(); ++i) {
+            const auto& row = force_equations_[members[i]];
+            const double multiplier = multipliers(static_cast<Eigen::Index>(i));
+            for (const auto& term : row.terms) {
+                const double force = term.coeff * multiplier;
+                if (!std::isfinite(force))
+                    return failure(members[i], std::format(
+                        "nonfinite force at GRID {} component {} "
+                        "(coefficient {:.6e}, multiplier {:.6e})",
+                        term.node.value, term.dof, term.coeff, multiplier));
+                if (!row.is_spc) {
+                    double& total = forces[term.node][static_cast<size_t>(term.dof - 1)];
+                    total += force;
+                    if (!std::isfinite(total))
+                        return failure(members[i], std::format(
+                            "force accumulation overflow at GRID {} component {}",
+                            term.node.value, term.dof));
+                }
+                const auto dep = dep_to_elim_.find(
+                    full_dof_map_.eq_index(term.node, term.dof - 1));
+                if (dep != dep_to_elim_.end() &&
+                    !local_index.contains(static_cast<size_t>(dep->second))) {
+                    double& remaining = rhs[static_cast<size_t>(dep->second)];
+                    remaining -= force;
+                    if (!std::isfinite(remaining))
+                        return failure(members[i], std::format(
+                            "residual propagation overflow at GRID {} component {}",
+                            term.node.value, term.dof));
+                }
+            }
+        }
+    }
+    return forces;
 }
 
 } // namespace vibestran

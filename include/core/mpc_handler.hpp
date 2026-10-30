@@ -26,9 +26,19 @@
 #include "core/model.hpp"
 #include "core/sparse_matrix.hpp"
 #include <span>
+#include <string>
+#include <variant>
 #include <vector>
 
 namespace vibestran {
+
+/// Nodal force and moment components in the basic coordinate system.
+using NodalForces = std::unordered_map<NodeId, std::array<double, 6>>;
+
+struct MpcForceRecoveryError {
+    std::string message;
+};
+using MpcForceRecoveryResult = std::variant<NodalForces, MpcForceRecoveryError>;
 
 /// Describes how one dependent DOF is expressed in terms of independent DOFs.
 struct MpcElimination {
@@ -84,6 +94,15 @@ public:
     void recover_dependent_dofs(std::vector<double>& u_free_full,
                                 const std::vector<double>& u_reduced) const;
 
+    /// Recover physical MPC/RBE forces, including at fixed DOFs, from Ku-F.
+    /// Generated SPC rows participate in the transpose solve but their forces
+    /// are excluded. SPC reactions are the supported components of the
+    /// residual minus the returned MPC forces.
+    /// Returns an error for nonfinite values, rank loss, or excessive
+    /// componentwise backward error in the transpose solve.
+    [[nodiscard]] MpcForceRecoveryResult
+    recover_mpc_forces(const NodalForces& residual) const;
+
     /// True if any MPCs were registered.
     [[nodiscard]] bool has_constraints() const noexcept {
         return !eliminations_.empty();
@@ -108,6 +127,19 @@ private:
     int n_reduced_{0}; ///< n_free_dofs after MPC elimination
 
     std::vector<MpcElimination> eliminations_;
+
+    struct ForceRecoveryEquation {
+        NodeId dependent_node;
+        int dependent_component; // zero-based
+        bool is_spc;
+        // Original basic-frame row, normalized by its selected pivot.
+        // Includes SPC terms omitted from the displacement elimination.
+        std::vector<MpcTerm> terms;
+    };
+    std::vector<ForceRecoveryEquation> force_equations_;
+    // Coupled blocks in displacement substitution order. Forces propagate
+    // in reverse order through the transpose of the dependent pivot matrix.
+    std::vector<std::vector<size_t>> force_blocks_;
 
     /// O(1) lookup: pre-MPC eq index → index in eliminations_ (-1 if not dep)
     std::unordered_map<EqIndex, int> dep_to_elim_;

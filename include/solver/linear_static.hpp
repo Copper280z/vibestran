@@ -97,31 +97,21 @@ private:
                                    const DofMap& dof_map,
                                    const std::vector<double>& u_free);
 
-    /// Compute SPC constraint forces (global frame) at the active SPC set's
-    /// constrained DOFs: f = (K·u − F) restricted to those DOFs. Only called
-    /// when SPC force output was requested for the subcase.
-    std::vector<SpcForce>
-    compute_spc_forces(const Model& model, const SubCase& sc,
-                       const MpcHandler& mpc_handler,
-                       const std::vector<double>& u_free);
-
     /// Grid point force balance and multipoint-constraint forces.
     struct GridForceOutput {
+        std::vector<SpcForce> spc_forces;
         std::vector<SpcForce> mpc_forces;
         std::vector<GridPointForceBalance> gp_forces;
     };
 
-    /// Compute, for a solved subcase, the per-grid force balance (GPFORCE)
-    /// and/or the forces of multipoint constraint (MPCFORCES), all in each
-    /// grid's global (CD) system.  With R = K u - F the residual at a grid,
-    /// the SPC rows are `spc_forces` and the MPC force is R at the grids
-    /// coupled by MPC/RBE equations, minus the SPC-owned components.
+    /// Recover Ku-F, physical MPC/RBE forces, and support reactions once.
+    /// SPCFORCES, MPCFORCES and GPFORCE share the same basic-frame recovery;
+    /// results are rotated to each grid's CD frame only for output.
     GridForceOutput
     compute_grid_forces(const Model& model, const SubCase& sc,
                         const MpcHandler& mpc_handler,
                         const std::vector<double>& u_free,
-                        const std::vector<SpcForce>& spc_forces,
-                        bool want_mpc, bool want_gp) const;
+                        bool want_spc, bool want_mpc, bool want_gp) const;
 
     /// Subtract pressure-type equivalent nodal loads (PLOAD, PLOAD1, PLOAD2,
     /// PLOAD4) at the given active DOFs from `react` (basic frame), so that

@@ -2,6 +2,7 @@
 // Tests for CalculiX/Abaqus .inp file parser.
 
 #include <gtest/gtest.h>
+#include <sstream>
 #include "io/inp_parser.hpp"
 #include "io/bdf_parser.hpp"
 #include "core/model.hpp"
@@ -770,7 +771,8 @@ S
 )";
 
     Model bdf_model = BdfParser::parse_string(bdf);
-    Model inp_model = InpParser::parse_string(inp);
+    std::istringstream input(inp);
+    Model inp_model = InpParser::parse_stream(input);
 
     // Both models should validate
     EXPECT_NO_THROW(bdf_model.validate());

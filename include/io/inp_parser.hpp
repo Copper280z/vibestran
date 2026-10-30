@@ -99,7 +99,7 @@ public:
     /// Parse .inp content from a string (useful in tests)
     [[nodiscard]] static Model parse_string(const std::string& content);
 
-    /// Parse from an input stream
+    /// Parse from an input stream. Currently used only in tests.
     [[nodiscard]] static Model parse_stream(std::istream& in);
 
     // Forward declaration — defined in the .cpp file.
