@@ -348,8 +348,12 @@ reciprocity consistency. Open-source linkage and inductance are unavailable
 (`null` in JSON) because they depend on an unspecified return path.
 
 MFORCE integrates Maxwell stress on a closed outward-oriented mesh-face surface
-with air on both sides, reporting force and torque about the stated origin.
-Choose a surface clear of every current source and material interface. The
+with mu_r=1, remanence-free material on both sides, reporting force and torque
+about the stated origin. The result is the force on everything the surface
+encloses. A face may bound a winding but must not cut through current: a face
+with COIL or COIL2D cells on both sides, or one crossing a CWIRE conductor
+(including along its internal section faces), is rejected with the face,
+element and source named. Keep the surface clear of material interfaces. The
 field is averaged from its two adjacent cells before stress evaluation. Vary
 the surface and refine the mesh: force and torque generally converge more
 slowly than field values. Thin air gaps need several element layers.

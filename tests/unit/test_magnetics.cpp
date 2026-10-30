@@ -1253,6 +1253,91 @@ TEST(MagneticPlanar, WindingTorqueApproachesAxialCurrentMomentInUniformField) {
   }
 }
 
+// The face set of the axis-aligned cube or square of half-width w, oriented
+// outward. Faces of the cube surface have centroids with max |x_i| = w.
+std::vector<FaceSelection> centered_surface(const Mesh &mesh, double w) {
+  std::vector<FaceSelection> out;
+  for (size_t i = 0; i < mesh.faces.size(); ++i) {
+    const auto &f = mesh.faces[i];
+    const Vector c = mesh.planar ? Vector(f.center.x(), f.center.y(), 0)
+                                 : f.center;
+    if (f.cells[1] >= 0 && std::abs(c.cwiseAbs().maxCoeff() - w) < 1e-12) {
+      // The outward side is the cell whose centroid lies outside the cube.
+      Vector center = Vector::Zero();
+      for (int v : mesh.cells[f.cells[0]].nodes)
+        center += mesh.nodes[v] /
+                  static_cast<double>(mesh.cells[f.cells[0]].nodes.size());
+      const int local = static_cast<int>(
+          std::find(mesh.cells[f.cells[0]].faces.begin(),
+                    mesh.cells[f.cells[0]].faces.end(), static_cast<int>(i)) -
+          mesh.cells[f.cells[0]].faces.begin());
+      const int outward =
+          mesh.cells[f.cells[0]].face_sign[local] *
+          (center.head<3>().cwiseAbs().maxCoeff() < w ? 1 : -1);
+      out.push_back(face_selection(mesh, static_cast<int>(i), outward));
+    }
+  }
+  return out;
+}
+
+TEST(MagneticForce, SurfacesThroughCurrentCarryingVolumeAreRejected) {
+  // CWIRE: the conductor of radius 0.6 lies on the cube plane x = 0.6, so that
+  // surface cuts through it. The cube at 0.9 encloses the loop entirely; cells
+  // inside it still contain the conductor, which is allowed.
+  auto wire = box(8, 1.2);
+  loop(wire);
+  wire.boundaries[1] = {0, Vector(0, 0.001, 0)};
+  wire.subcases[0].boundary = 1;
+  const auto wire_mesh = std::get<Mesh>(make_mesh(wire));
+  wire.forces = {{1, 1, Vector::Zero()}};
+  wire.face_sets[1] = centered_surface(wire_mesh, .6);
+  EXPECT_NE(error_of(solve(wire)).find("crosses CWIRE path 100000"),
+            std::string::npos)
+      << error_of(solve(wire));
+  wire.face_sets[1] = centered_surface(wire_mesh, .9);
+  auto enclosed = solve(wire);
+  ASSERT_TRUE(std::holds_alternative<Results>(enclosed)) << error_of(enclosed);
+  const Vector moment(-4 * .6 * .6 * .001, 0, 0);
+  EXPECT_LT((std::get<Results>(enclosed).cases[0].forces[0].torque - moment)
+                    .norm() /
+                moment.norm(),
+            .2);
+
+  // Volumetric COIL filling the domain: an interior surface has winding on
+  // both sides of every face.
+  auto coil = box(3);
+  open_coil(coil);
+  const auto coil_mesh = std::get<Mesh>(make_mesh(coil));
+  coil.face_sets[3] = centered_surface(coil_mesh, 1. / 3);
+  coil.forces = {{1, 3, Vector::Zero()}};
+  EXPECT_NE(error_of(solve(coil)).find("lies inside current source 1"),
+            std::string::npos)
+      << error_of(solve(coil));
+
+  // COIL2D: winding slots span 0.375 < |x| < 0.625, so the square contour at
+  // 0.5 runs through them, while the one at 0.75 encloses both.
+  auto planar = planar_box(16);
+  for (const auto &c : planar.elements) {
+    Vector center = Vector::Zero();
+    for (int v : c.nodes)
+      center += planar.nodes.at(v).position / 4;
+    if (std::abs(center.y()) < .125 && std::abs(center.x()) > .375 &&
+        std::abs(center.x()) < .625)
+      planar.element_sets[center.x() < 0 ? 1 : 2].push_back(c.id);
+  }
+  planar.planar_coils = {{1, 1, 20}, {1, 2, -20}};
+  planar.currents = {{1, false, 1, {1}}};
+  planar.subcases[0].load = 1;
+  const auto planar_mesh = std::get<Mesh>(make_mesh(planar));
+  planar.forces = {{1, 1, Vector::Zero()}};
+  planar.face_sets[1] = centered_surface(planar_mesh, .5);
+  EXPECT_NE(error_of(solve(planar)).find("lies inside current source 1"),
+            std::string::npos)
+      << error_of(solve(planar));
+  planar.face_sets[1] = centered_surface(planar_mesh, .75);
+  EXPECT_TRUE(std::holds_alternative<Results>(solve(planar)));
+}
+
 TEST(MagneticWire, SpatialLoopFallbackPreservesTheCurrentMoment) {
   auto m = box(1);
   loop(m);

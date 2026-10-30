@@ -245,9 +245,120 @@ Vector field_at(const Cell &c, const Eigen::VectorXd &a, const Vector &x) {
     b += a[c.edges[i]] * curls[i];
   return b;
 }
+// Field cells inside a COIL or COIL2D winding, mapped to their source ID.
+std::map<int, int> winding_cells(const Model &model, const Mesh &mesh) {
+  std::map<int, int> out;
+  for (const auto &c : model.coils)
+    for (int id : model.element_sets.at(c.elements))
+      out[mesh.element_index.at(id)] = c.id;
+  for (const auto &c : model.planar_coils)
+    for (int id : model.element_sets.at(c.elements))
+      out[mesh.element_index.at(id)] = c.id;
+  return out;
+}
+std::string face_grids(const Mesh &mesh, const Face &f) {
+  std::string out;
+  for (int n : f.nodes)
+    out += (out.empty() ? "" : ",") + std::to_string(mesh.node_ids[n]);
+  return out;
+}
+// Positive-area overlap of a flat face of b with the flat face fa, when they
+// are coplanar. Both faces are convex polygons.
+bool coplanar_overlap(const Mesh &a, const Face &fa, const Mesh &b,
+                      const Face &fb) {
+  const double length = std::sqrt(fa.area);
+  if (!fa.flat || !fb.flat || std::abs(fa.normal.dot(fb.normal)) < 1 - 1e-12)
+    return false;
+  std::vector<Vector> polygon;
+  for (int n : fb.nodes) {
+    if (std::abs(fa.normal.dot(b.nodes[n] - fa.center)) > 1e-10 * length)
+      return false;
+    polygon.push_back(b.nodes[n]);
+  }
+  for (size_t i = 0; i < fa.nodes.size() && !polygon.empty(); ++i) {
+    const Vector x0 = a.nodes[fa.nodes[i]],
+                 x1 = a.nodes[fa.nodes[(i + 1) % fa.nodes.size()]];
+    Vector inward = fa.normal.cross(x1 - x0);
+    if (inward.dot(fa.center - x0) < 0)
+      inward = -inward;
+    std::vector<Vector> clipped;
+    for (size_t k = 0; k < polygon.size(); ++k) {
+      const Vector &p = polygon[k], &q = polygon[(k + 1) % polygon.size()];
+      const double dp = inward.dot(p - x0), dq = inward.dot(q - x0);
+      if (dp >= 0)
+        clipped.push_back(p);
+      if ((dp < 0) != (dq < 0))
+        clipped.push_back(p + dp / (dp - dq) * (q - p));
+    }
+    polygon = std::move(clipped);
+  }
+  Vector area = Vector::Zero();
+  for (size_t k = 2; k < polygon.size(); ++k)
+    area += (polygon[k - 1] - polygon[0]).cross(polygon[k] - polygon[0]) / 2;
+  return area.norm() > 1e-10 * std::min(fa.area, fb.area);
+}
+// Maxwell stress gives the force on everything a surface encloses, so a face
+// may bound a winding but must not cut through current-carrying volume.
+Status current_free(const Mesh &mesh, const Face &f, int request,
+                    const std::map<int, int> &windings,
+                    std::span<const Source> sources,
+                    std::span<const SpatialIndex> wire_indexes) {
+  const auto first = windings.find(f.cells[0]),
+             second = windings.find(f.cells[1]);
+  if (first != windings.end() && second != windings.end())
+    return Error{std::format(
+        "MFORCE {}: surface face ({}) of element {} lies inside current "
+        "source {}; move the surface clear of the winding or enclose it",
+        request, face_grids(mesh, f), mesh.cells[f.cells[0]].id,
+        first->second)};
+  if (mesh.planar)
+    return {};
+  Vector lo = mesh.nodes[f.nodes[0]], hi = lo;
+  for (int n : f.nodes) {
+    lo = lo.cwiseMin(mesh.nodes[n]);
+    hi = hi.cwiseMax(mesh.nodes[n]);
+  }
+  size_t wire = 0;
+  for (const auto &source : sources) {
+    if (!source.wire)
+      continue;
+    for (int ci : wire_indexes[wire].query(lo, hi)) {
+      auto crossing = face_intersects_interior(
+          source.mesh, source.mesh.cells[ci], mesh, f);
+      if (auto *e = std::get_if<Error>(&crossing))
+        return *e;
+      // The conductor partition places internal faces on its centerline, so
+      // a surface through the conductor can lie on them without entering any
+      // single cell.
+      const auto &cell = source.mesh.cells[ci];
+      const bool on_internal_face = std::any_of(
+          cell.faces.begin(), cell.faces.end(), [&](int g) {
+            const auto &face = source.mesh.faces[g];
+            return face.cells[1] >= 0 &&
+                   coplanar_overlap(mesh, f, source.mesh, face);
+          });
+      if (std::get<bool>(crossing) || on_internal_face)
+        return Error{std::format(
+            "MFORCE {}: surface face ({}) of element {} crosses CWIRE path "
+            "{}; move the surface clear of the conductor",
+            request, face_grids(mesh, f), mesh.cells[f.cells[0]].id,
+            source.id)};
+    }
+    ++wire;
+  }
+  return {};
+}
 Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
+                                        std::span<const Source> sources,
                                         const Eigen::VectorXd &potential) {
   std::vector<ForceResult> results;
+  if (model.forces.empty())
+    return results;
+  const auto windings = winding_cells(model, mesh);
+  std::vector<SpatialIndex> wire_indexes;
+  for (const auto &source : sources)
+    if (source.wire)
+      wire_indexes.emplace_back(source.mesh);
   for (const auto &request : model.forces) {
     auto selected = selected_faces(model, mesh, request.faces);
     if (auto *e = std::get_if<Error>(&selected))
@@ -265,9 +376,14 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
       for (int ci : f.cells) {
         const auto &m = model.materials.at(mesh.cells[ci].material);
         if (m.mur != 1 || m.bh_table || !m.remanence.isZero(0))
-          return Error{
-              "MFORCE requires air on both sides of every surface face"};
+          return Error{std::format(
+              "MFORCE {}: surface face ({}) touches magnetic element {}; "
+              "both sides of every face must be mu_r=1 without remanence",
+              request.id, face_grids(mesh, f), mesh.cells[ci].id)};
       }
+      if (auto e = current_free(mesh, f, request.id, windings, sources,
+                                wire_indexes))
+        return *e;
       for (const auto &q : face_quadrature(mesh, f)) {
         const Vector normal = sign * q.normal;
         const Vector b =
@@ -461,7 +577,7 @@ Result<Results> solve(const Model &model) {
       output.probe_b.push_back(b / count);
       output.probe_h.push_back(h / count);
     }
-    auto force = forces(model, mesh, eq.a);
+    auto force = forces(model, mesh, result.sources, eq.a);
     if (auto *e = std::get_if<Error>(&force))
       return *e;
     output.forces = std::get<std::vector<ForceResult>>(std::move(force));
