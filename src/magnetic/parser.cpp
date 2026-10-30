@@ -254,10 +254,12 @@ Status resolve_coordinates(Model &m) {
   for (auto &f : m.forces)
     f.origin *= m.options.length_scale;
   m.options.wire_step *= m.options.length_scale;
+  m.options.depth *= m.options.length_scale;
   return {};
 }
 Result<Model> parse_lines(const std::vector<Line> &lines) {
   Model m;
+  std::vector<int> element_dimensions;
   Subcase global, current;
   bool bulk = false, in_case = false, sol = false;
   for (size_t i = 0; i < lines.size(); ++i) {
@@ -334,21 +336,42 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
         r.error = Error{r.where + ": magnetic GRID requires CD=0"};
       r.last(6);
       insert_unique(m.nodes, id, g, r);
-    } else if (key == "CTETRA") {
-      Tetrahedron c;
+    } else if (key == "CTETRA" || key == "CHEXA" || key == "CPENTA" ||
+               key == "CTRIA3" || key == "CQUAD4") {
+      Element c;
       c.id = r.integer(1);
       c.property = r.integer(2);
-      for (int k = 0; k < 4; ++k)
+      const int count = key == "CHEXA"    ? 8
+                        : key == "CPENTA" ? 6
+                        : key == "CTRIA3" ? 3
+                                          : 4;
+      c.nodes.resize(count);
+      for (int k = 0; k < count; ++k)
         c.nodes[k] = r.integer(k + 3);
-      r.last(6);
+      r.last(count + 2);
       m.elements.push_back(c);
-    } else if (key == "PSOLID") {
-      int id = r.integer(1);
-      int mid = r.integer(2);
+      // Keep card semantics explicit: four-node solid and planar cells differ.
+      element_dimensions.push_back(key == "CTRIA3" || key == "CQUAD4" ? 2 : 3);
+    } else if (key == "PSOLID" || key == "PMAG2D") {
+      int id = r.integer(1), mid = r.integer(2);
       if (r.integer(3) != 0)
         r.error = Error{r.where + ": use MATMAG CID for magnetic orientation"};
-      r.last(3);
+      r.last(key == "PSOLID" ? 3 : 2);
       insert_unique(m.properties, id, mid, r);
+    } else if (key == "MAG2D") {
+      if (m.options.planar)
+        r.error = Error{r.where + ": duplicate MAG2D"};
+      m.options.planar = true;
+      m.options.plane_coordinates = r.integer(1);
+      m.options.depth = r.real(2);
+      r.last(2);
+    } else if (key == "COIL2D") {
+      PlanarCoil c;
+      c.id = r.integer(1);
+      c.elements = r.integer(2);
+      c.turns = r.real(3);
+      r.last(3);
+      m.planar_coils.push_back(c);
     } else if (key == "MATMAG") {
       Material a;
       int id = r.integer(1);
@@ -377,9 +400,12 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       int id = r.integer(1);
       FaceSelection f;
       f.element = r.integer(2);
-      for (int k = 0; k < 3; ++k)
-        f.nodes[k] = r.integer(k + 3);
-      r.last(5);
+      f.nodes.clear();
+      for (size_t k = 3; k < r.f.size(); ++k)
+        if (!r.get(k).empty())
+          f.nodes.push_back(r.integer(k));
+      if (f.nodes.size() < 2 || f.nodes.size() > 4)
+        r.error = Error{r.where + ": FSET requires 2, 3 or 4 face nodes"};
       m.face_sets[id].push_back(f);
     } else if (key == "COIL") {
       Coil c;
@@ -494,6 +520,10 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
     if (r.error)
       return *r.error;
   }
+  for (int dimension : element_dimensions)
+    if (dimension != (m.options.planar ? 2 : 3))
+      return Error{"MAG2D requires CTRIA3/CQUAD4 only; 3D MAGSTAT requires "
+                   "CTETRA4/CHEXA8/CPENTA6"};
   if (!sol)
     return Error{"Missing SOL MAGSTAT"};
   if (in_case)
@@ -562,7 +592,7 @@ Result<bool> is_magnetic_deck(const std::filesystem::path &path) {
 
 Status validate(const Model &m) {
   if (m.elements.empty())
-    return Error{"MAGSTAT requires a tetrahedral magnetic volume mesh"};
+    return Error{"MAGSTAT requires a magnetic mesh"};
   if (m.subcases.empty())
     return Error{"MAGSTAT requires at least one subcase"};
   if (m.options.max_iterations < 1 ||
@@ -598,13 +628,25 @@ Status validate(const Model &m) {
     if (!(sigma > 0) || !std::isfinite(sigma))
       return Error{"MATCOND conductivity must be positive: " +
                    std::to_string(id)};
+  if (!(m.options.depth > 0) || !std::isfinite(m.options.depth))
+    return Error{"MAG2D depth must be positive and finite"};
+  if (m.options.plane_coordinates &&
+      (!m.coordinates.contains(m.options.plane_coordinates) ||
+       m.coordinates.at(m.options.plane_coordinates).type != 'R'))
+    return Error{"MAG2D CID must reference CORD2R"};
+  if (m.options.planar && (!m.wires.empty() || !m.coils.empty()))
+    return Error{"MAG2D uses axial COIL2D regions; CWIRE and volumetric COIL "
+                 "require 3D"};
+  if (!m.options.planar && !m.planar_coils.empty())
+    return Error{"COIL2D requires MAG2D"};
   std::set<int> ids;
   for (const auto &c : m.elements) {
     if (c.id <= 0 || !ids.insert(c.id).second)
-      return Error{"Invalid/duplicate CTETRA id"};
+      return Error{"Invalid/duplicate magnetic element id"};
     auto p = m.properties.find(c.property);
     if (p == m.properties.end() || !m.materials.contains(p->second))
-      return Error{"CTETRA must reference a PSOLID with a MATMAG material"};
+      return Error{
+          "Magnetic element must reference a property with a MATMAG material"};
   }
   std::set<int> wireids;
   for (const auto &w : m.wires) {
@@ -636,7 +678,17 @@ Status validate(const Model &m) {
     std::set<int> selected;
     for (int id : m.element_sets.at(c.elements))
       if (!ids.contains(id) || !selected.insert(id).second)
-        return Error{"COIL ESET contains missing or duplicate tetrahedra"};
+        return Error{"COIL ESET contains missing or duplicate elements"};
+  }
+  for (const auto &c : m.planar_coils) {
+    if (c.id <= 0 || c.turns == 0 || !std::isfinite(c.turns) ||
+        !m.element_sets.contains(c.elements))
+      return Error{"Invalid COIL2D definition"};
+    coilids.insert(c.id);
+    std::set<int> selected;
+    for (int id : m.element_sets.at(c.elements))
+      if (!ids.contains(id) || !selected.insert(id).second)
+        return Error{"COIL2D ESET contains missing or duplicate elements"};
   }
   for (const auto &c : m.currents) {
     if (c.set <= 0 || c.targets.empty() || !std::isfinite(c.amperes))

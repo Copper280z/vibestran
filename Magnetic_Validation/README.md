@@ -97,3 +97,33 @@ coenergy difference gave -0.008712 N m. That disagreement is not accepted force
 validation. Refine the air gap, change the integration surface and reduce the
 angle step before interpreting motor torque. The solver reports both results
 without concealing their discretization sensitivity.
+
+
+## First-order element extension checks
+
+The ordinary suite verifies CTETRA4/CHEXA8/CPENTA6 and planar CTRIA3/CQUAD4
+against analytical and manufactured solutions. External comparisons remain
+optional commands in this directory, with no Meson or CI registration.
+
+After the hex wire-preprocessing extension, the existing Magpylib 6.0.1 loop
+comparison was rerun at `--levels 24 --extents 5`: maximum probe vector error
+was **0.699%**, below the 1% threshold. This checks the finite-section source
+against the independent filament field away from the conductor. It does not
+validate finite-section self-inductance, nonlinear materials or force. Source
+transfer took more work for mapped round-wire hexes; fewer preprocessing cells
+do not imply a universal speedup.
+
+For the planar formulation, [FEMM's magnetostatic tutorial](https://www.femm.info/doku/doku.php?id=MagneticsTutorial)
+is a useful independent comparison workflow. Generate a planar winding or motor
+with `tools/magnetic_planar_examples.py`, reproduce the same in-plane geometry,
+MATMAG/BHPOINT data, axial depth, signed turns and exterior A=0 condition in FEMM,
+and compare B probes, energy, circuit linkage and torque. Start with the air
+winding case, then add steel and PMs. Refine both meshes and enlarge the exterior
+before accepting agreement. There is not yet an automated FEMM adapter or a
+claimed independent validation of planar motor torque.
+
+For native 3D hex/wedge comparisons with GetDP or Elmer, use
+`tools/magnetic_examples.py uniform --element hex` (with an output path), then
+`coil` and `loop`, and export scalar reference data using the existing comparison
+schema. Compare the same physical geometry with independent meshes. Include a
+separate distorted-cell refinement study; this pass requires planar solid faces.

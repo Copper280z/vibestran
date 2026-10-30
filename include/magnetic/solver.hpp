@@ -10,6 +10,8 @@ struct Source {
       wire_elements; // element id, direction along path
   Mesh mesh;
   Eigen::VectorXd flux;
+  std::vector<Vector>
+      planar_density;       // axial current density per circuit ampere
   Eigen::VectorXd coupling; // integral N_edge . J_per_ampere dV
   double conservation_error{0}, transfer_error{0};
 };

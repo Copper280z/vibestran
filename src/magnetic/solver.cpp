@@ -67,38 +67,46 @@ Assembly assemble(const Model &model, const Mesh &mesh, const Gauge &gauge,
   std::vector<Triplet> entries;
   const std::vector<std::pair<double, double>> empty;
   for (const auto &cell : mesh.cells) {
-    Vector b = Vector::Zero();
-    for (int e = 0; e < 6; ++e)
-      b += a[cell.edges[e]] * cell.curl[e];
-    Vector h = Vector::Zero();
-    Matrix tangent = Matrix::Zero();
+    const int ne = static_cast<int>(cell.edges.size());
+    Eigen::MatrixXd local = Eigen::MatrixXd::Zero(ne, ne);
+    Eigen::VectorXd residual = Eigen::VectorXd::Zero(ne);
+    Vector average_b = Vector::Zero(), average_h = Vector::Zero();
     for (const auto &s : quadrature(mesh, cell)) {
+      const auto curl = edge_curls(cell, s.position);
+      Vector b = Vector::Zero();
+      for (int e = 0; e < ne; ++e)
+        b += a[cell.edges[e]] * curl[e];
       const Material material = at_point(model, cell.material, s.position);
       const auto &curve =
           material.bh_table ? model.bh_tables.at(material.bh_table) : empty;
       const auto response = material_response(material, curve, b);
-      h += s.weight * response.h;
-      tangent += s.weight * response.tangent;
-      out.energy += s.weight * response.energy;
+      average_b += s.weight * b;
+      average_h += s.weight * response.h;
+      const double weight = s.weight * mesh.depth;
+      out.energy += weight * response.energy;
       out.extrapolated |= response.extrapolated;
+      for (int i = 0; i < ne; ++i) {
+        residual[i] += weight * curl[i].dot(response.h);
+        for (int j = 0; j < ne; ++j)
+          local(i, j) += weight * curl[i].dot(response.tangent * curl[j]);
+      }
     }
-    out.b.push_back(b);
-    out.h.push_back(h / cell.volume);
-    for (int i = 0; i < 6; ++i) {
+    out.b.push_back(average_b / cell.volume);
+    out.h.push_back(average_h / cell.volume);
+    for (int i = 0; i < ne; ++i) {
       const int row = gauge.equations[cell.edges[i]];
       if (row < 0)
         continue;
-      out.residual[row] += cell.curl[i].dot(h);
-      out.force_scale += std::pow(cell.curl[i].dot(h), 2);
-      for (int j = 0; j < 6; ++j) {
+      out.residual[row] += residual[i];
+      out.force_scale += residual[i] * residual[i];
+      for (int j = 0; j < ne; ++j) {
         const int col = gauge.equations[cell.edges[j]];
         if (col >= 0)
-          entries.emplace_back(row, col,
-                               cell.curl[i].dot(tangent * cell.curl[j]));
+          entries.emplace_back(row, col, local(i, j));
       }
     }
   }
-  for (size_t e = 0; e < mesh.edges.size(); ++e)
+  for (size_t e = 0; e < mesh.dofs(); ++e)
     if (gauge.equations[e] >= 0)
       out.residual[gauge.equations[e]] -= load[e];
   out.stiffness.resize(gauge.size, gauge.size);
@@ -107,7 +115,7 @@ Assembly assemble(const Model &model, const Mesh &mesh, const Gauge &gauge,
 }
 Result<Eigen::VectorXd> boundary_potential(const Model &model, const Mesh &mesh,
                                            const Subcase &subcase) {
-  Eigen::VectorXd a = Eigen::VectorXd::Zero(mesh.edges.size());
+  Eigen::VectorXd a = Eigen::VectorXd::Zero(mesh.dofs());
   if (!subcase.boundary)
     return a;
   const auto &bc = model.boundaries.at(subcase.boundary);
@@ -128,7 +136,15 @@ Result<Eigen::VectorXd> boundary_potential(const Model &model, const Mesh &mesh,
         return Error{"MBC must select exterior faces"};
     }
   }
-  for (size_t e = 0; e < mesh.edges.size(); ++e) {
+  if (mesh.planar) {
+    if (std::abs(bc.field.dot(mesh.normal)) > 1e-12 * bc.field.norm())
+      return Error{"MAG2D MBC field must lie in the simulation plane"};
+    for (size_t i = 0; i < mesh.nodes.size(); ++i)
+      a[i] =
+          bc.field.cross(mesh.nodes[i] - mesh.nodes.front()).dot(mesh.normal);
+    return a;
+  }
+  for (size_t e = 0; e < mesh.dofs(); ++e) {
     const Vector &x = mesh.nodes[mesh.edges[e][0]];
     const Vector &y = mesh.nodes[mesh.edges[e][1]];
     a[e] = 0.5 * bc.field.cross((x + y) / 2).dot(y - x);
@@ -146,7 +162,7 @@ Result<Equilibrium> equilibrium(const Model &model, const Mesh &mesh,
                                 const Eigen::VectorXd &load) {
   auto state = assemble(model, mesh, gauge, a, load);
   double load_norm = 0;
-  for (size_t e = 0; e < mesh.edges.size(); ++e)
+  for (size_t e = 0; e < mesh.dofs(); ++e)
     if (gauge.equations[e] >= 0)
       load_norm += load[e] * load[e];
   const double reference =
@@ -177,7 +193,7 @@ Result<Equilibrium> equilibrium(const Model &model, const Mesh &mesh,
     double alpha = 1;
     for (int trial = 0; trial < 30; ++trial) {
       Eigen::VectorXd candidate = a;
-      for (size_t e = 0; e < mesh.edges.size(); ++e)
+      for (size_t e = 0; e < mesh.dofs(); ++e)
         if (gauge.equations[e] >= 0)
           candidate[e] += alpha * step[gauge.equations[e]];
       auto next = assemble(model, mesh, gauge, candidate, load);
@@ -199,14 +215,22 @@ Result<Equilibrium> equilibrium(const Model &model, const Mesh &mesh,
                            "(relative residual {})",
                            iteration, state.residual.norm() / reference)};
 }
+Vector field_at(const Cell &c, const Eigen::VectorXd &a, const Vector &x) {
+  const auto curls = edge_curls(c, x);
+  Vector b = Vector::Zero();
+  for (size_t i = 0; i < curls.size(); ++i)
+    b += a[c.edges[i]] * curls[i];
+  return b;
+}
 Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
-                                        const Assembly &state) {
+                                        const Eigen::VectorXd &potential) {
   std::vector<ForceResult> results;
   for (const auto &request : model.forces) {
     auto selected = selected_faces(model, mesh, request.faces);
     if (auto *e = std::get_if<Error>(&selected))
       return *e;
     std::map<std::array<int, 2>, std::pair<int, int>> boundary;
+    std::map<int, std::pair<int, int>> line_boundary;
     ForceResult result;
     result.id = request.id;
     for (auto [fi, sign] :
@@ -221,14 +245,27 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
           return Error{
               "MFORCE requires air on both sides of every surface face"};
       }
-      const Vector b = 0.5 * (state.b[f.cells[0]] + state.b[f.cells[1]]),
-                   normal = sign * f.normal;
-      const Vector force =
-          f.area / mu0 * (b * b.dot(normal) - 0.5 * b.squaredNorm() * normal);
-      result.force += force;
-      result.torque += (f.center - request.origin).cross(force);
-      for (int i = 0; i < 3; ++i) {
-        int a = f.nodes[i], bnode = f.nodes[(i + 1) % 3], direction = sign;
+      const Vector normal = sign * f.normal;
+      for (const auto &q : face_quadrature(mesh, f)) {
+        const Vector b =
+            .5 * (field_at(mesh.cells[f.cells[0]], potential, q.position) +
+                  field_at(mesh.cells[f.cells[1]], potential, q.position));
+        const Vector force =
+            q.weight * mesh.depth / mu0 *
+            (b * b.dot(normal) - .5 * b.squaredNorm() * normal);
+        result.force += force;
+        result.torque += (q.position - request.origin).cross(force);
+      }
+      if (mesh.planar) {
+        ++line_boundary[f.nodes[0]].first;
+        ++line_boundary[f.nodes[1]].first;
+        line_boundary[f.nodes[0]].second -= sign;
+        line_boundary[f.nodes[1]].second += sign;
+        continue;
+      }
+      for (size_t i = 0; i < f.nodes.size(); ++i) {
+        int a = f.nodes[i], bnode = f.nodes[(i + 1) % f.nodes.size()],
+            direction = sign;
         if (a > bnode) {
           std::swap(a, bnode);
           direction = -direction;
@@ -244,13 +281,20 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
         return Error{
             "MFORCE FSET must be a closed, consistently oriented surface"};
     }
+    for (const auto &[node, count] : line_boundary) {
+      (void)node;
+      if (count.first != 2 || count.second != 0)
+        return Error{"MFORCE planar FSET must be a closed, consistently "
+                     "oriented contour"};
+    }
     // Positive signed enclosed volume distinguishes outward from inward
     // normals.
     double volume = 0;
     for (auto [fi, sign] :
          std::get<std::vector<std::pair<int, int>>>(selected)) {
       const auto &f = mesh.faces[fi];
-      volume += sign * f.area * f.normal.dot(f.center - request.origin) / 3;
+      volume += sign * f.area * f.normal.dot(f.center - request.origin) /
+                (mesh.planar ? 2 : 3);
     }
     if (!(volume > 0))
       return Error{"MFORCE normals must point outward"};
@@ -269,6 +313,14 @@ Result<Results> solve(const Model &model) {
   Results result;
   result.mesh = std::get<Mesh>(std::move(built));
   const auto &mesh = result.mesh;
+  if (mesh.planar)
+    for (const auto &c : mesh.cells)
+      for (const auto &q : quadrature(mesh, c)) {
+        const auto material = at_point(model, c.material, q.position);
+        if (std::abs(material.remanence.dot(mesh.normal)) >
+            1e-12 * material.remanence.norm())
+          return Error{"MAG2D remanence must lie in the simulation plane"};
+      }
   auto gauged = make_gauge(mesh);
   if (auto *e = std::get_if<Error>(&gauged))
     return *e;
@@ -283,7 +335,7 @@ Result<Results> solve(const Model &model) {
     if (auto *e = std::get_if<Error>(&currents))
       return *e;
     const auto &amps = std::get<std::vector<double>>(currents);
-    Eigen::VectorXd load = Eigen::VectorXd::Zero(mesh.edges.size());
+    Eigen::VectorXd load = Eigen::VectorXd::Zero(mesh.dofs());
     for (size_t i = 0; i < amps.size(); ++i)
       load += amps[i] * result.sources[i].coupling;
     auto imposed = boundary_potential(model, mesh, subcase);
@@ -331,6 +383,10 @@ Result<Results> solve(const Model &model) {
     const int ns = static_cast<int>(result.sources.size());
     output.differential_inductance = Eigen::MatrixXd::Constant(
         ns, ns, std::numeric_limits<double>::quiet_NaN());
+    for (int i = 0; i < ns; ++i)
+      for (int j = 0; j < ns; ++j)
+        if (result.sources[i].closed && result.sources[j].closed)
+          output.differential_inductance(i, j) = 0;
     if (gauge.size > 0 && ns > 0) {
       Factor factor;
 #if defined(HAVE_ACCELERATE)
@@ -342,7 +398,7 @@ Result<Results> solve(const Model &model) {
       for (int j = 0; j < ns; ++j)
         if (result.sources[j].closed) {
           Eigen::VectorXd rhs = Eigen::VectorXd::Zero(gauge.size);
-          for (size_t e = 0; e < mesh.edges.size(); ++e)
+          for (size_t e = 0; e < mesh.dofs(); ++e)
             if (gauge.equations[e] >= 0)
               rhs[gauge.equations[e]] = result.sources[j].coupling[e];
           const Eigen::VectorXd response = factor.solve(rhs);
@@ -351,7 +407,7 @@ Result<Results> solve(const Model &model) {
           for (int i = 0; i < ns; ++i)
             if (result.sources[i].closed) {
               double inductance = 0;
-              for (size_t e = 0; e < mesh.edges.size(); ++e)
+              for (size_t e = 0; e < mesh.dofs(); ++e)
                 if (gauge.equations[e] >= 0)
                   inductance += result.sources[i].coupling[e] *
                                 response[gauge.equations[e]];
@@ -363,10 +419,15 @@ Result<Results> solve(const Model &model) {
       Vector b = Vector::Zero(), h = Vector::Zero();
       int count = 0;
       for (int ci : index.query(probe.position, probe.position)) {
-        auto l = barycentric(mesh.cells[ci], probe.position);
-        if (*std::min_element(l.begin(), l.end()) >= -1e-10) {
-          b += output.b[ci];
-          h += output.h[ci];
+        const auto &cell = mesh.cells[ci];
+        if (contains(cell, probe.position)) {
+          const Vector field = field_at(cell, eq.a, probe.position);
+          const auto material = at_point(model, cell.material, probe.position);
+          const std::vector<std::pair<double, double>> empty;
+          const auto &curve =
+              material.bh_table ? model.bh_tables.at(material.bh_table) : empty;
+          b += field;
+          h += material_response(material, curve, field).h;
           ++count;
         }
       }
@@ -376,7 +437,7 @@ Result<Results> solve(const Model &model) {
       output.probe_b.push_back(b / count);
       output.probe_h.push_back(h / count);
     }
-    auto force = forces(model, mesh, eq.assembly);
+    auto force = forces(model, mesh, eq.a);
     if (auto *e = std::get_if<Error>(&force))
       return *e;
     output.forces = std::get<std::vector<ForceResult>>(std::move(force));

@@ -43,99 +43,159 @@ std::array<Sample, 4> tetra_quadrature(const std::array<Vector, 4> &p,
 } // namespace
 
 Result<Mesh> make_mesh(std::vector<Vector> nodes,
-                       const std::vector<std::array<int, 4>> &tetra) {
+                       const std::vector<NodeList> &cells, bool planar,
+                       const Vector &normal) {
   Mesh mesh;
   mesh.nodes = std::move(nodes);
+  mesh.planar = planar;
+  mesh.normal = normal;
   std::map<std::array<int, 2>, int> edges;
-  std::set<std::array<int, 4>> unique;
-  for (const auto &indices : tetra) {
+  std::set<NodeList> unique;
+  for (const auto &indices : cells) {
     Cell c;
     c.nodes = indices;
+    c.planar = planar;
+    c.normal = normal;
     c.id = static_cast<int>(mesh.cells.size()) + 1;
     auto key = indices;
     std::sort(key.begin(), key.end());
-    if (key[0] < 0 || key[3] >= static_cast<int>(mesh.nodes.size()) ||
+    const size_t n = key.size();
+    if ((planar ? (n != 3 && n != 4) : (n != 4 && n != 6 && n != 8)) ||
+        key.front() < 0 || key.back() >= static_cast<int>(mesh.nodes.size()) ||
         std::adjacent_find(key.begin(), key.end()) != key.end() ||
         !unique.insert(key).second)
-      return Error{std::format("Invalid or duplicate tetrahedron {}", c.id)};
+      return Error{
+          std::format("Invalid or duplicate magnetic element {}", c.id)};
     c.origin = mesh.nodes[indices[0]];
-    Matrix j;
-    for (int i = 0; i < 3; ++i)
-      j.col(i) = mesh.nodes[indices[i + 1]] - c.origin;
-    const double det = j.determinant();
-    if (!j.allFinite() ||
-        std::abs(det) <= 1e-14 * std::pow(j.colwise().norm().maxCoeff(), 3))
-      return Error{std::format("Degenerate tetrahedron {}", c.id)};
-    c.volume = std::abs(det) / 6;
-    c.inverse = j.inverse();
-    c.gradient[0] = Vector::Zero();
-    for (int i = 1; i < 4; ++i) {
-      c.gradient[i] = c.inverse.row(i - 1).transpose();
-      c.gradient[0] -= c.gradient[i];
-    }
     c.minimum = c.maximum = c.origin;
-    for (int n : indices) {
-      c.minimum = c.minimum.cwiseMin(mesh.nodes[n]);
-      c.maximum = c.maximum.cwiseMax(mesh.nodes[n]);
+    Vector center = Vector::Zero();
+    for (int v : indices) {
+      c.points.push_back(mesh.nodes[v]);
+      c.minimum = c.minimum.cwiseMin(mesh.nodes[v]);
+      c.maximum = c.maximum.cwiseMax(mesh.nodes[v]);
+      center += mesh.nodes[v];
     }
-    for (int e = 0; e < 6; ++e) {
-      const auto ij = local_edges[e];
+    center /= static_cast<double>(n);
+    const double length = (c.maximum - c.minimum).norm();
+    if (!(length > 0))
+      return Error{"Degenerate magnetic element"};
+    if (planar)
+      for (const auto &x : c.points)
+        if (std::abs(normal.dot(x - mesh.nodes.front())) > 1e-10 * length)
+          return Error{"MAG2D elements must lie in a common plane normal to "
+                       "the specified CID z axis"};
+    initialize_mapping(c);
+    const auto [mapped, jac] = mapping(c, Vector::Zero());
+    c.map_origin = mapped;
+    c.jacobian = jac;
+    c.inverse = jac.inverse();
+    c.affine = true;
+    const double determinant = jac.determinant();
+    const double min_det = 1e-14 * std::pow(length, planar ? 2 : 3);
+    if (!jac.allFinite() || std::abs(determinant) <= min_det)
+      return Error{std::format("Degenerate magnetic element {}", c.id)};
+    for (const auto &q : reference_quadrature(c)) {
+      const auto [x, j] = mapping(c, q.position);
+      if (!j.allFinite() ||
+          j.determinant() * std::copysign(1., determinant) <= min_det)
+        return Error{
+            std::format("Folded or degenerate magnetic element {}", c.id)};
+      c.volume += q.weight * std::abs(j.determinant());
+      c.affine &= (j - jac).norm() <=
+                  1e-12 * (planar ? jac.leftCols<2>().norm() : jac.norm());
+    }
+    const auto topology = cell_edges(c);
+    for (auto ij : topology) {
       std::array<int, 2> edge{indices[ij[0]], indices[ij[1]]};
-      c.edge_sign[e] = edge[0] < edge[1] ? 1 : -1;
+      c.edge_sign.push_back(edge[0] < edge[1] ? 1 : -1);
       std::sort(edge.begin(), edge.end());
       const auto [it, inserted] =
           edges.emplace(edge, static_cast<int>(edges.size()));
       if (inserted)
         mesh.edges.push_back(edge);
-      c.edges[e] = it->second;
-      c.curl[e] =
-          2.0 * c.edge_sign[e] * c.gradient[ij[0]].cross(c.gradient[ij[1]]);
+      c.edges.push_back(it->second);
     }
-    for (int opposite = 0; opposite < 4; ++opposite) {
-      std::array<int, 3> face{};
-      int k = 0;
-      for (int i = 0; i < 4; ++i)
-        if (i != opposite)
-          face[k++] = indices[i];
-      std::sort(face.begin(), face.end());
-      auto [it, inserted] =
-          mesh.face_index.emplace(face, static_cast<int>(mesh.faces.size()));
-      if (inserted) {
-        Face f;
-        f.nodes = face;
-        f.normal = (mesh.nodes[face[1]] - mesh.nodes[face[0]])
-                       .cross(mesh.nodes[face[2]] - mesh.nodes[face[0]]);
-        f.area = f.normal.norm() / 2;
-        f.normal.normalize();
-        f.center =
-            (mesh.nodes[face[0]] + mesh.nodes[face[1]] + mesh.nodes[face[2]]) /
-            3;
-        mesh.faces.push_back(f);
+    if (planar)
+      c.edges = indices; // scalar A_normal nodal degrees of freedom
+    if (!planar && n == 4) {
+      auto shape = reference_shape(c, Vector::Zero());
+      for (const auto &g : shape.gradients)
+        c.gradient.push_back(c.inverse.transpose() * g);
+      for (size_t e = 0; e < topology.size(); ++e)
+        c.curl.push_back(
+            2.0 * c.edge_sign[e] *
+            c.gradient[topology[e][0]].cross(c.gradient[topology[e][1]]));
+    }
+    for (auto face : cell_faces(c)) {
+      for (int &v : face)
+        v = indices[v];
+      // Canonical cyclic order, rather than sorted order, is essential for
+      // quads.
+      std::rotate(face.begin(), std::min_element(face.begin(), face.end()),
+                  face.end());
+      if (face.size() > 2 && face[1] > face.back())
+        std::reverse(face.begin() + 1, face.end());
+      auto sorted = face;
+      std::sort(sorted.begin(), sorted.end());
+      const auto [it, inserted] =
+          mesh.face_index.emplace(sorted, static_cast<int>(mesh.faces.size()));
+      Face candidate;
+      candidate.nodes = face;
+      for (int v : face)
+        candidate.center += mesh.nodes[v];
+      candidate.center /= static_cast<double>(face.size());
+      if (planar) {
+        candidate.normal =
+            (mesh.nodes[face[1]] - mesh.nodes[face[0]]).cross(normal);
+        candidate.area = candidate.normal.norm();
+      } else {
+        for (size_t i = 0; i < face.size(); ++i)
+          candidate.normal +=
+              (mesh.nodes[face[i]] - candidate.center)
+                  .cross(mesh.nodes[face[(i + 1) % face.size()]] -
+                         candidate.center) /
+              2;
+        candidate.area = candidate.normal.norm();
       }
-      auto &f = mesh.faces[it->second];
-      const int ci = static_cast<int>(mesh.cells.size());
+      if (candidate.area <= 1e-14 * std::pow(length, planar ? 1 : 2))
+        return Error{"Degenerate magnetic face"};
+      candidate.normal.normalize();
       const int sign =
-          f.normal.dot(f.center - mesh.nodes[indices[opposite]]) > 0 ? 1 : -1;
+          candidate.normal.dot(candidate.center - center) > 0 ? 1 : -1;
+      for (int v : face)
+        if (std::abs(candidate.normal.dot(mesh.nodes[v] - candidate.center)) >
+            1e-10 * length)
+          return Error{
+              std::format("Warped face in magnetic element {}; first-order "
+                          "solid source intersection requires planar faces",
+                          c.id)};
+      for (const auto &x : c.points)
+        if (sign * candidate.normal.dot(x - candidate.center) > 1e-10 * length)
+          return Error{std::format("Nonconvex magnetic element {}", c.id)};
+      if (inserted)
+        mesh.faces.push_back(candidate);
+      auto &f = mesh.faces[it->second];
+      if (f.nodes != face)
+        return Error{"Inconsistent cyclic ordering on shared magnetic face"};
       if (f.cells[1] >= 0)
-        return Error{"Non-manifold face shared by more than two tetrahedra"};
+        return Error{"Non-manifold magnetic face"};
       if (f.cells[0] < 0)
-        f.cells[0] = ci;
+        f.cells[0] = static_cast<int>(mesh.cells.size());
       else {
         const auto &previous = mesh.cells[f.cells[0]];
-        auto prior =
+        const auto prior =
             std::find(previous.faces.begin(), previous.faces.end(), it->second);
         if (previous.face_sign[prior - previous.faces.begin()] == sign)
-          return Error{
-              "Overlapping tetrahedra on the same side of a shared face"};
-        f.cells[1] = ci;
+          return Error{"Overlapping cells on the same side of a shared face"};
+        f.cells[1] = static_cast<int>(mesh.cells.size());
       }
-      c.faces[opposite] = it->second;
-      c.face_sign[opposite] = sign;
+      c.faces.push_back(it->second);
+      c.face_sign.push_back(sign);
     }
     mesh.cells.push_back(std::move(c));
   }
   if (mesh.cells.empty())
-    return Error{"Magnetic mesh contains no tetrahedra"};
+    return Error{"Magnetic mesh contains no elements"};
   return mesh;
 }
 
@@ -153,61 +213,39 @@ Result<Mesh> make_mesh(const Model &model) {
     index[id] = static_cast<int>(nodes.size());
     nodes.push_back(it->second.position);
   }
-  std::vector<std::array<int, 4>> cells;
+  std::vector<NodeList> cells;
   for (const auto &c : model.elements) {
-    std::array<int, 4> ids{};
-    for (int i = 0; i < 4; ++i)
-      ids[i] = index.at(c.nodes[i]);
+    NodeList ids;
+    for (int n : c.nodes)
+      ids.push_back(index.at(n));
     cells.push_back(ids);
   }
-  auto result = make_mesh(std::move(nodes), cells);
-  if (auto *error = std::get_if<Error>(&result))
-    return *error;
+  Vector normal = Vector::UnitZ();
+  if (model.options.plane_coordinates) {
+    const auto &cs = model.coordinates.at(model.options.plane_coordinates);
+    normal = (cs.b - cs.a).normalized();
+  }
+  auto result =
+      make_mesh(std::move(nodes), cells, model.options.planar, normal);
+  if (auto *e = std::get_if<Error>(&result))
+    return *e;
   auto mesh = std::get<Mesh>(std::move(result));
+  mesh.depth = model.options.planar ? model.options.depth : 1;
   mesh.node_index = index;
   mesh.node_ids.assign(active.begin(), active.end());
   for (size_t i = 0; i < mesh.cells.size(); ++i) {
     mesh.cells[i].id = model.elements[i].id;
-    auto prop = model.properties.find(model.elements[i].property);
+    const auto prop = model.properties.find(model.elements[i].property);
     if (prop == model.properties.end())
-      return Error{std::format("CTETRA {} references undefined PSOLID {}",
-                               model.elements[i].id,
-                               model.elements[i].property)};
+      return Error{"Magnetic element references undefined property"};
     mesh.cells[i].material = prop->second;
     if (!mesh.element_index.emplace(mesh.cells[i].id, static_cast<int>(i))
              .second)
-      return Error{"Duplicate CTETRA id"};
+      return Error{"Duplicate magnetic element id"};
   }
   return mesh;
 }
 
-std::array<double, 4> barycentric(const Cell &c, const Vector &x) {
-  Vector b = c.inverse * (x - c.origin);
-  return {1 - b.sum(), b.x(), b.y(), b.z()};
-}
-std::array<Vector, 6> edge_basis(const Cell &c, const Vector &x) {
-  const auto l = barycentric(c, x);
-  std::array<Vector, 6> n;
-  for (int e = 0; e < 6; ++e) {
-    const auto ij = local_edges[e];
-    n[e] = c.edge_sign[e] *
-           (l[ij[0]] * c.gradient[ij[1]] - l[ij[1]] * c.gradient[ij[0]]);
-  }
-  return n;
-}
-std::array<Vector, 4> flux_basis(const Mesh &m, const Cell &c,
-                                 const Vector &x) {
-  std::array<Vector, 4> n;
-  for (int i = 0; i < 4; ++i)
-    n[i] = c.face_sign[i] * (x - m.nodes[c.nodes[i]]) / (3 * c.volume);
-  return n;
-}
-std::array<Sample, 4> quadrature(const Mesh &m, const Cell &c) {
-  std::array<Vector, 4> p;
-  for (int i = 0; i < 4; ++i)
-    p[i] = m.nodes[c.nodes[i]];
-  return tetra_quadrature(p, c.volume);
-}
 Result<std::vector<std::pair<int, int>>>
 selected_faces(const Model &model, const Mesh &mesh, int selection) {
   auto it = model.face_sets.find(selection);
@@ -218,10 +256,11 @@ selected_faces(const Model &model, const Mesh &mesh, int selection) {
   for (const auto &s : it->second) {
     auto ci = mesh.element_index.find(s.element);
     if (ci == mesh.element_index.end())
-      return Error{std::format("FSET {} references undefined CTETRA {}",
-                               selection, s.element)};
-    std::array<int, 3> ids{};
-    for (int i = 0; i < 3; ++i) {
+      return Error{
+          std::format("FSET {} references undefined magnetic element {}",
+                      selection, s.element)};
+    NodeList ids(s.nodes.size());
+    for (size_t i = 0; i < s.nodes.size(); ++i) {
       auto n = mesh.node_index.find(s.nodes[i]);
       if (n == mesh.node_index.end())
         return Error{std::format("FSET {} references undefined volume grid {}",
@@ -232,14 +271,31 @@ selected_faces(const Model &model, const Mesh &mesh, int selection) {
     std::sort(sorted.begin(), sorted.end());
     auto f = mesh.face_index.find(sorted);
     if (f == mesh.face_index.end())
-      return Error{std::format("FSET {} is not a tetrahedral face", selection)};
+      return Error{std::format("FSET {} is not a magnetic element face/edge",
+                               selection)};
     const auto &face = mesh.faces[f->second];
     if (face.cells[0] != ci->second && face.cells[1] != ci->second)
       return Error{"FSET face does not belong to its specified element"};
     if (!seen.insert(f->second).second)
       return Error{"Duplicate geometric face in FSET"};
-    const Vector normal = (mesh.nodes[ids[1]] - mesh.nodes[ids[0]])
-                              .cross(mesh.nodes[ids[2]] - mesh.nodes[ids[0]]);
+    Vector normal;
+    if (mesh.planar)
+      normal = (mesh.nodes[ids[1]] - mesh.nodes[ids[0]]).cross(mesh.normal);
+    else {
+      normal = (mesh.nodes[ids[1]] - mesh.nodes[ids[0]])
+                   .cross(mesh.nodes[ids[2]] - mesh.nodes[ids[0]]);
+      // Reject crossed or noncyclic quadrilateral selections.
+      if (ids.size() == 4) {
+        auto canonical = ids;
+        std::rotate(canonical.begin(),
+                    std::min_element(canonical.begin(), canonical.end()),
+                    canonical.end());
+        if (canonical[1] > canonical.back())
+          std::reverse(canonical.begin() + 1, canonical.end());
+        if (canonical != face.nodes)
+          return Error{"FSET quadrilateral nodes must be in cyclic order"};
+      }
+    }
     out.emplace_back(f->second, normal.dot(face.normal) > 0 ? 1 : -1);
   }
   return out;
@@ -249,6 +305,23 @@ Result<Gauge> make_gauge(const Mesh &mesh) {
   const int n = static_cast<int>(mesh.nodes.size());
   Disjoint connected(n), boundary(n), tree(n);
   Gauge gauge;
+  if (mesh.planar) {
+    gauge.equations.assign(n, -1);
+    gauge.boundary.assign(n, false);
+    for (const auto &f : mesh.faces)
+      if (f.cells[1] < 0)
+        for (int v : f.nodes)
+          gauge.boundary[v] = true;
+    for (const auto &e : mesh.edges)
+      connected.join(e[0], e[1]);
+    for (int i = 0; i < n; ++i) {
+      if (connected.root(i) != connected.root(0))
+        return Error{"Magnetic domain must be connected"};
+      if (!gauge.boundary[i])
+        gauge.equations[i] = gauge.size++;
+    }
+    return gauge;
+  }
   gauge.equations.assign(mesh.edges.size(), -1);
   gauge.boundary.assign(mesh.edges.size(), false);
   std::set<std::array<int, 2>> bedges;
@@ -257,8 +330,8 @@ Result<Gauge> make_gauge(const Mesh &mesh) {
   for (const auto &f : mesh.faces)
     if (f.cells[1] < 0) {
       ++bf;
-      for (int i = 0; i < 3; ++i) {
-        int a = f.nodes[i], b = f.nodes[(i + 1) % 3];
+      for (size_t i = 0; i < f.nodes.size(); ++i) {
+        int a = f.nodes[i], b = f.nodes[(i + 1) % f.nodes.size()];
         boundary.join(a, b);
         bnodes.insert(a);
         if (a > b)
@@ -352,14 +425,14 @@ std::vector<int> SpatialIndex::query(const Vector &lo, const Vector &hi) const {
 }
 
 std::vector<Sample> intersection_quadrature(const Mesh &a, const Cell &ca,
-                                            const Mesh &b, const Cell &cb) {
+                                            const Mesh &b, const Cell &cb,
+                                            int order) {
   using Polygon = std::vector<Vector>;
   std::vector<Polygon> faces;
-  for (int i = 0; i < 4; ++i) {
+  for (int fi : ca.faces) {
     Polygon p;
-    for (int j = 0; j < 4; ++j)
-      if (j != i)
-        p.push_back(a.nodes[ca.nodes[j]]);
+    for (int v : a.faces[fi].nodes)
+      p.push_back(a.nodes[v]);
     faces.push_back(std::move(p));
   }
   const double scale = std::max((ca.maximum - ca.minimum).norm(),
@@ -367,7 +440,7 @@ std::vector<Sample> intersection_quadrature(const Mesh &a, const Cell &ca,
   const double tolerance =
       64 * std::numeric_limits<double>::epsilon() *
       std::max(scale, std::max(ca.origin.norm(), cb.origin.norm()));
-  for (int plane = 0; plane < 4 && !faces.empty(); ++plane) {
+  for (size_t plane = 0; plane < cb.faces.size() && !faces.empty(); ++plane) {
     const auto &face = b.faces[cb.faces[plane]];
     const Vector normal = cb.face_sign[plane] * face.normal;
     std::vector<Polygon> clipped;
@@ -436,7 +509,34 @@ std::vector<Sample> intersection_quadrature(const Mesh &a, const Cell &ca,
     }
     faces = std::move(clipped);
   }
+  if (faces.empty())
+    return {};
+  std::vector<double> gauss_x(order), gauss_w(order);
+  if (order > 2)
+    for (int i = 0; i < order; ++i) {
+      double z = std::cos(std::acos(-1.) * (i + .75) / (order + .5)),
+             derivative = 0;
+      for (int iteration = 0; iteration < 20; ++iteration) {
+        double p0 = 1, p1 = z;
+        for (int k = 2; k <= order; ++k) {
+          const double p = ((2 * k - 1) * z * p1 - (k - 1) * p0) / k;
+          p0 = p1;
+          p1 = p;
+        }
+        derivative = order * (z * p1 - p0) / (z * z - 1);
+        const double step = p1 / derivative;
+        z -= step;
+        if (std::abs(step) < 1e-15)
+          break;
+      }
+      gauss_x[i] = (z + 1) / 2;
+      gauss_w[i] = 1 / ((1 - z * z) * derivative * derivative);
+    }
   std::vector<Sample> out;
+  size_t pieces = 0;
+  for (const auto &f : faces)
+    pieces += f.size() - 2;
+  out.reserve(pieces * (order <= 2 ? 4 : order * order * order));
   Vector center = Vector::Zero();
   size_t count = 0;
   for (const auto &f : faces)
@@ -455,8 +555,24 @@ std::vector<Sample> intersection_quadrature(const Mesh &a, const Cell &ca,
           6;
       if (volume <= 1e-16 * std::min(ca.volume, cb.volume))
         continue;
-      auto samples = tetra_quadrature({center, f[0], f[i], f[i + 1]}, volume);
-      out.insert(out.end(), samples.begin(), samples.end());
+      if (order <= 2) {
+        auto samples = tetra_quadrature({center, f[0], f[i], f[i + 1]}, volume);
+        out.insert(out.end(), samples.begin(), samples.end());
+      } else {
+        // Duffy-mapped Gauss integration on each intersection tetrahedron.
+        // Mapped Piola bases are rational on nonaffine cells; the old
+        // degree-two tetrahedron rule cannot conserve the transferred current.
+        for (int u = 0; u < order; ++u)
+          for (int v = 0; v < order; ++v)
+            for (int t = 0; t < order; ++t) {
+              const double r = gauss_x[u], s = (1 - r) * gauss_x[v],
+                           z = (1 - r) * (1 - gauss_x[v]) * gauss_x[t];
+              out.push_back({center + r * (f[0] - center) +
+                                 s * (f[i] - center) + z * (f[i + 1] - center),
+                             6 * volume * gauss_w[u] * gauss_w[v] * gauss_w[t] *
+                                 (1 - r) * (1 - r) * (1 - gauss_x[v])});
+            }
+      }
     }
   return out;
 }

@@ -42,18 +42,28 @@ struct Grid {
   Vector position{Vector::Zero()};
   int coordinates{0};
 };
-struct Tetrahedron {
+struct NodeList : std::vector<int> {
+  using std::vector<int>::vector;
+  template <size_t N>
+  NodeList(const std::array<int, N> &a)
+      : std::vector<int>(a.begin(), a.end()) {}
+};
+struct Element {
   int id{0}, property{0};
-  std::array<int, 4> nodes{};
+  NodeList nodes = NodeList(4);
 };
 struct FaceSelection {
   int element{0};
-  std::array<int, 3> nodes{};
+  NodeList nodes = NodeList(3);
 };
 struct Coil {
   int id{0}, elements{0};
   double turns{1};
   int start{0}, end{0};
+};
+struct PlanarCoil {
+  int id{0}, elements{0};
+  double turns{1}; // signed turns: positive current along plane normal
 };
 struct WireProperty {
   int material{0};
@@ -93,12 +103,15 @@ struct ForceSurface {
 struct Options {
   double length_scale{1}, nonlinear_tolerance{1e-8};
   int max_iterations{80}, wire_sides{16}, wire_layers{2};
+  bool planar{false};
+  int plane_coordinates{0};
+  double depth{1};
   double wire_step{0}; // zero: automatic from section size
 };
 struct Model {
   std::map<int, Grid> nodes;
   std::map<int, CoordinateSystem> coordinates;
-  std::vector<Tetrahedron> elements;
+  std::vector<Element> elements;
   std::map<int, int> properties;
   std::map<int, Material> materials;
   std::map<int, std::vector<std::pair<double, double>>> bh_tables;
@@ -106,6 +119,7 @@ struct Model {
   std::map<int, std::vector<int>> element_sets;
   std::map<int, std::vector<FaceSelection>> face_sets;
   std::vector<Coil> coils;
+  std::vector<PlanarCoil> planar_coils;
   std::map<int, WireProperty> wire_properties;
   std::vector<Wire> wires;
   std::vector<Current> currents;

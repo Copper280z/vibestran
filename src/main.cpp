@@ -284,8 +284,8 @@ int main(int argc, const char *argv[]) {
           return 1;
         }
         const auto& magnetic_model = std::get<vibestran::magnetic::Model>(parsed);
-        spdlog::info("Magnetostatics: {} tetrahedra, {} coils, {} wire segments",
-                     magnetic_model.elements.size(), magnetic_model.coils.size(), magnetic_model.wires.size());
+        spdlog::info("Magnetostatics: {} elements, {} winding regions, {} wire segments",
+                     magnetic_model.elements.size(), magnetic_model.coils.size()+magnetic_model.planar_coils.size(), magnetic_model.wires.size());
         auto solved = vibestran::magnetic::solve(magnetic_model);
         if (auto* error = std::get_if<vibestran::magnetic::Error>(&solved)) {
           spdlog::error("{}", error->message);

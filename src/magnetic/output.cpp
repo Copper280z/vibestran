@@ -17,7 +17,8 @@ void number_json(std::ostream &out, double value) {
 }
 Status vtu(const std::filesystem::path &path, const Mesh &mesh,
            const std::vector<Vector> &field, const std::string &name,
-           const std::vector<Vector> &second = {}) {
+           const std::vector<Vector> &second = {},
+           const Eigen::VectorXd &potential = {}) {
   std::ofstream out(path);
   if (!out)
     return Error{"Cannot write " + path.string()};
@@ -32,17 +33,26 @@ Status vtu(const std::filesystem::path &path, const Mesh &mesh,
     out << x.transpose() << '\n';
   out << "</DataArray></Points><Cells><DataArray type=\"Int64\" "
          "Name=\"connectivity\" format=\"ascii\">\n";
-  for (const auto &c : mesh.cells)
-    out << c.nodes[0] << ' ' << c.nodes[1] << ' ' << c.nodes[2] << ' '
-        << c.nodes[3] << '\n';
+  for (const auto &c : mesh.cells) {
+    for (int n : c.nodes)
+      out << n << ' ';
+    out << '\n';
+  }
   out << "</DataArray><DataArray type=\"Int64\" Name=\"offsets\" "
          "format=\"ascii\">\n";
-  for (size_t i = 1; i <= mesh.cells.size(); ++i)
-    out << 4 * i << ' ';
+  size_t offset = 0;
+  for (const auto &c : mesh.cells) {
+    offset += c.nodes.size();
+    out << offset << ' ';
+  }
   out << "</DataArray><DataArray type=\"UInt8\" Name=\"types\" "
          "format=\"ascii\">\n";
-  for (size_t i = 0; i < mesh.cells.size(); ++i)
-    out << "10 ";
+  for (const auto &c : mesh.cells)
+    out << (mesh.planar ? (c.nodes.size() == 3 ? 5 : 9)
+                        : (c.nodes.size() == 4   ? 10
+                           : c.nodes.size() == 6 ? 13
+                                                 : 12))
+        << ' ';
   out << "</DataArray></Cells><CellData><DataArray type=\"Int64\" "
          "Name=\"element_id\" format=\"ascii\">\n";
   for (const auto &c : mesh.cells)
@@ -59,7 +69,16 @@ Status vtu(const std::filesystem::path &path, const Mesh &mesh,
       out << x.transpose() << '\n';
     out << "</DataArray>\n";
   }
-  out << "</CellData></Piece></UnstructuredGrid></VTKFile>\n";
+  out << "</CellData>";
+  if (mesh.planar &&
+      potential.size() == static_cast<Eigen::Index>(mesh.nodes.size())) {
+    out << "<PointData><DataArray type=\"Float64\" Name=\"A_normal_Wb_per_m\" "
+           "format=\"ascii\">\n";
+    for (Eigen::Index i = 0; i < potential.size(); ++i)
+      out << potential[i] << ' ';
+    out << "</DataArray></PointData>";
+  }
+  out << "</Piece></UnstructuredGrid></VTKFile>\n";
   out.close();
   if (!out)
     return Error{"Failed writing " + path.string()};
@@ -78,11 +97,13 @@ Status write_results(const Model &model, const Results &results,
   f06 << std::setprecision(12);
   json << std::setprecision(17);
   csv << std::setprecision(17);
-  f06 << "VIBESTRAN SOL MAGSTAT — SI UNITS\n3D tetrahedral edge elements; CPU "
+  f06 << "VIBESTRAN SOL MAGSTAT — SI UNITS\nFirst-order magnetic elements; CPU "
          "sparse Cholesky\n";
   f06 << "Magnetic volume cells: " << results.mesh.cells.size()
-      << "  edges: " << results.mesh.edges.size() << "\n";
-  json << "{\"schema\":1,\"units\":\"SI\",\"sources\":[";
+      << "  degrees of freedom: " << results.mesh.dofs() << "\n";
+  json << "{\"schema\":1,\"units\":\"SI\",\"dimension\":"
+       << (results.mesh.planar ? 2 : 3) << ",\"depth_m\":" << results.mesh.depth
+       << ",\"sources\":[";
   for (size_t i = 0; i < results.sources.size(); ++i) {
     const auto &source = results.sources[i];
     if (i)
@@ -102,20 +123,26 @@ Status write_results(const Model &model, const Results &results,
     json << "]}";
     f06 << (source.wire ? "WIRE PATH " : "COIL ") << source.id
         << "  conservation error " << source.conservation_error
-        << "  transfer error " << source.transfer_error << '\n';
+        << "  transfer error " << source.transfer_error
+        << "  preprocessing cells " << source.mesh.cells.size() << "  faces "
+        << source.mesh.faces.size() << '\n';
     std::vector<Vector> density;
-    for (const auto &c : source.mesh.cells) {
-      Vector center = std::accumulate(c.nodes.begin(), c.nodes.end(),
-                                      Vector(Vector::Zero()),
-                                      [&](Vector sum, int n) -> Vector {
-                                        return sum + source.mesh.nodes[n] / 4;
-                                      });
-      const auto basis = flux_basis(source.mesh, c, center);
-      Vector j = Vector::Zero();
-      for (int k = 0; k < 4; ++k)
-        j += basis[k] * source.flux[c.faces[k]];
-      density.push_back(j);
-    }
+    if (source.mesh.planar)
+      density = source.planar_density;
+    else
+      for (const auto &c : source.mesh.cells) {
+        Vector center = std::accumulate(
+            c.nodes.begin(), c.nodes.end(), Vector(Vector::Zero()),
+            [&](Vector sum, int n) -> Vector {
+              return sum +
+                     source.mesh.nodes[n] / static_cast<double>(c.nodes.size());
+            });
+        const auto basis = flux_basis(source.mesh, c, center);
+        Vector j = Vector::Zero();
+        for (size_t k = 0; k < c.faces.size(); ++k)
+          j += basis[k] * source.flux[c.faces[k]];
+        density.push_back(j);
+      }
     if (auto e = vtu(prefix + (source.wire ? "_wire" : "_coil") +
                          std::to_string(source.id) + ".vtu",
                      source.mesh, density, "J_per_ampere_per_m2"))
@@ -196,7 +223,7 @@ Status write_results(const Model &model, const Results &results,
     }
     json << "]}";
     if (auto e = vtu(prefix + "_sc" + std::to_string(c.id) + ".vtu",
-                     results.mesh, c.b, "B_T", c.h))
+                     results.mesh, c.b, "B_T", c.h, c.potential))
       return e;
   }
   json << "]}\n";

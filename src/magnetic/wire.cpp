@@ -10,42 +10,57 @@ namespace vibestran::magnetic {
 namespace {
 struct Section {
   std::vector<Eigen::Vector2d> points;
-  std::vector<std::array<int, 3>> triangles;
+  std::vector<NodeList> quads, triangles;
 };
 Section cross_section(const WireProperty &p, int sides, int layers) {
   Section s;
-  if (p.rectangular) {
-    for (int j = 0; j <= layers; ++j)
-      for (int i = 0; i <= layers; ++i)
-        s.points.emplace_back(p.width * (static_cast<double>(i) / layers - 0.5),
-                              p.height *
-                                  (static_cast<double>(j) / layers - 0.5));
-    for (int j = 0; j < layers; ++j)
-      for (int i = 0; i < layers; ++i) {
-        const int a = j * (layers + 1) + i, b = a + 1, c = a + layers + 1,
-                  d = c + 1;
-        s.triangles.push_back({a, b, d});
-        s.triangles.push_back({a, d, c});
-      }
-  } else {
-    s.points.emplace_back(0, 0);
-    for (int r = 1; r <= layers; ++r)
+  const int k = p.rectangular ? layers : (sides + 3) / 4;
+  const double width = p.rectangular ? p.width : .45 * p.width;
+  const double height = p.rectangular ? p.height : width;
+  for (int j = 0; j <= k; ++j)
+    for (int i = 0; i <= k; ++i)
+      s.points.emplace_back(width * (static_cast<double>(i) / k - .5),
+                            height * (static_cast<double>(j) / k - .5));
+  for (int j = 0; j < k; ++j)
+    for (int i = 0; i < k; ++i) {
+      const int a = j * (k + 1) + i;
+      s.quads.push_back({a, a + 1, a + k + 2, a + k + 1});
+    }
+  if (!p.rectangular) {
+    // A square core and quadrilateral annuli avoid collapsed cells on the axis.
+    NodeList perimeter;
+    for (int i = 0; i < k; ++i)
+      perimeter.push_back(i);
+    for (int j = 0; j < k; ++j)
+      perimeter.push_back(j * (k + 1) + k);
+    for (int i = k; i > 0; --i)
+      perimeter.push_back(k * (k + 1) + i);
+    for (int j = k; j > 0; --j)
+      perimeter.push_back(j * (k + 1));
+    const auto core = perimeter;
+    sides = 4 * k;
+    for (int layer = 1; layer <= layers; ++layer) {
+      NodeList ring;
       for (int i = 0; i < sides; ++i) {
-        double theta = 2 * std::numbers::pi * i / sides,
-               radius = 0.5 * p.width * r / layers;
-        s.points.emplace_back(radius * std::cos(theta),
-                              radius * std::sin(theta));
+        const double theta =
+            -3 * std::numbers::pi / 4 + 2 * std::numbers::pi * i / sides;
+        const Eigen::Vector2d outer =
+            .5 * p.width * Eigen::Vector2d(std::cos(theta), std::sin(theta));
+        const double fraction = static_cast<double>(layer) / layers;
+        ring.push_back(static_cast<int>(s.points.size()));
+        s.points.push_back((1 - fraction) * s.points[core[i]] +
+                           fraction * outer);
       }
-    for (int i = 0; i < sides; ++i)
-      s.triangles.push_back({0, 1 + i, 1 + (i + 1) % sides});
-    for (int r = 1; r < layers; ++r)
       for (int i = 0; i < sides; ++i) {
-        int a = 1 + (r - 1) * sides + i,
-            b = 1 + (r - 1) * sides + (i + 1) % sides, c = 1 + r * sides + i,
-            d = 1 + r * sides + (i + 1) % sides;
-        s.triangles.push_back({a, b, d});
-        s.triangles.push_back({a, d, c});
+        const int next = (i + 1) % sides;
+        s.quads.push_back({perimeter[i], ring[i], ring[next], perimeter[next]});
       }
+      perimeter = std::move(ring);
+    }
+  }
+  for (const auto &q : s.quads) {
+    s.triangles.push_back({q[0], q[1], q[2]});
+    s.triangles.push_back({q[0], q[2], q[3]});
   }
   return s;
 }
@@ -136,7 +151,7 @@ Result<Source> sweep(const Model &model, const std::vector<int> &vertices,
   if (closed)
     joints.back() = joints.front();
   std::vector<Vector> nodes = joints.front();
-  std::vector<std::array<int, 4>> tetra;
+  std::vector<NodeList> tetra, hexa;
   int previous_ring = 0, last_ring = 0;
   const double step = model.options.wire_step > 0
                           ? model.options.wire_step
@@ -155,6 +170,14 @@ Result<Source> sweep(const Model &model, const std::vector<int> &vertices,
           nodes.push_back((1 - fraction) * joints[segment][j] +
                           fraction * joints[segment + 1][j]);
       }
+      for (const auto &q : section.quads) {
+        NodeList cell;
+        for (int v : q)
+          cell.push_back(previous_ring + v);
+        for (int v : q)
+          cell.push_back(ring + v);
+        hexa.push_back(std::move(cell));
+      }
       for (auto tri : section.triangles) {
         std::sort(tri.begin(), tri.end());
         const int a = previous_ring + tri[0], b = previous_ring + tri[1],
@@ -168,7 +191,15 @@ Result<Source> sweep(const Model &model, const std::vector<int> &vertices,
       last_ring = ring;
     }
   }
-  auto built = make_mesh(std::move(nodes), tetra);
+  auto built = make_mesh(nodes, hexa);
+  bool tetrahedral = false;
+  if (auto *e = std::get_if<Error>(&built);
+      e && e->message.starts_with("Warped face")) {
+    // Twisted spatial paths may have warped loft faces. Fall back for the whole
+    // component so no nonconforming quad/triangle interfaces are introduced.
+    built = make_mesh(std::move(nodes), tetra);
+    tetrahedral = true;
+  }
   if (auto *e = std::get_if<Error>(&built))
     return Error{"Invalid CWIRE sweep: " + e->message};
   Source source;
@@ -202,7 +233,7 @@ Result<Source> sweep(const Model &model, const std::vector<int> &vertices,
   std::vector<std::pair<int, int>> cut;
   std::vector<int> terminals;
   double area = 0;
-  for (auto tri : section.triangles) {
+  for (auto tri : (tetrahedral ? section.triangles : section.quads)) {
     std::sort(tri.begin(), tri.end());
     int f = source.mesh.face_index.at(tri);
     cut.emplace_back(f,

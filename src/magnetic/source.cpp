@@ -14,19 +14,11 @@ using Sparse = Eigen::SparseMatrix<double>;
 bool air(const Material &m) {
   return m.mur == 1 && m.bh_table == 0 && m.remanence.isZero(0);
 }
-Vector current_density(const Mesh &mesh, const Cell &c,
-                       const Eigen::VectorXd &flux, const Vector &x) {
-  Vector j = Vector::Zero();
-  const auto basis = flux_basis(mesh, c, x);
-  for (int i = 0; i < 4; ++i)
-    j += flux[c.faces[i]] * basis[i];
-  return j;
-}
 double flux_error(const Mesh &mesh, const Eigen::VectorXd &flux) {
   double error = 0;
   for (const auto &c : mesh.cells) {
     double sum = 0;
-    for (int i = 0; i < 4; ++i)
+    for (size_t i = 0; i < c.faces.size(); ++i)
       sum += c.face_sign[i] * flux[c.faces[i]];
     error = std::max(error, std::abs(sum));
   }
@@ -40,14 +32,14 @@ Result<Source> coil_source(const Model &model, const Mesh &mesh,
   source.turns = coil.turns;
   std::map<int, int> index;
   std::vector<Vector> nodes;
-  std::vector<std::array<int, 4>> cells;
+  std::vector<NodeList> cells;
   const auto &ids = model.element_sets.at(coil.elements);
   for (int id : ids) {
     const auto &cell = mesh.cells[mesh.element_index.at(id)];
     if (!air(model.materials.at(cell.material)))
       return Error{"COIL volume must have nonmagnetic MATMAG (mu_r=1)"};
-    std::array<int, 4> n{};
-    for (int i = 0; i < 4; ++i) {
+    NodeList n(cell.nodes.size());
+    for (size_t i = 0; i < cell.nodes.size(); ++i) {
       auto [it, added] = index.emplace(mesh.node_ids[cell.nodes[i]],
                                        static_cast<int>(nodes.size()));
       if (added)
@@ -180,19 +172,20 @@ conserved_flux(const Mesh &mesh, std::span<const std::pair<int, int>> section,
     const auto &c = mesh.cells[ci];
     if (!(resistivity[ci] > 0))
       return Error{"Current resistivity must be positive"};
-    Eigen::Matrix4d local = Eigen::Matrix4d::Zero();
+    Eigen::MatrixXd local =
+        Eigen::MatrixXd::Zero(c.faces.size(), c.faces.size());
     for (const auto &s : quadrature(mesh, c)) {
       auto basis = flux_basis(mesh, c, s.position);
-      for (int i = 0; i < 4; ++i)
-        for (int j = 0; j < 4; ++j)
+      for (size_t i = 0; i < c.faces.size(); ++i)
+        for (size_t j = 0; j < c.faces.size(); ++j)
           local(i, j) += s.weight * resistivity[ci] * basis[i].dot(basis[j]);
     }
-    for (int i = 0; i < 4; ++i) {
+    for (size_t i = 0; i < c.faces.size(); ++i) {
       int row = equation[c.faces[i]];
       if (row < 0)
         continue;
       trace += local(i, i);
-      for (int j = 0; j < 4; ++j)
+      for (size_t j = 0; j < c.faces.size(); ++j)
         if (equation[c.faces[j]] >= 0)
           mass.emplace_back(row, equation[c.faces[j]], local(i, j));
       if (ci < balances) {
@@ -238,14 +231,14 @@ conserved_flux(const Mesh &mesh, std::span<const std::pair<int, int>> section,
     for (int ci = 0; ci < nc; ++ci) {
       const auto &c = mesh.cells[ci];
       for (const auto &s : quadrature(mesh, c)) {
-        Vector j = current_density(mesh, c, flux, s.position);
+        Vector j = flux_value(c, flux, s.position);
         if (j.norm() < 1e-12 / section_area)
           return Error{"Stranded coil has a stagnant region; split branched or "
                        "unsuitable geometry"};
         j.normalize();
         j /= section_area;
         auto basis = flux_basis(mesh, c, s.position);
-        for (int i = 0; i < 4; ++i)
+        for (size_t i = 0; i < c.faces.size(); ++i)
           if (equation[c.faces[i]] >= 0)
             rhs[equation[c.faces[i]]] +=
                 scale * s.weight * resistivity[ci] * basis[i].dot(j);
@@ -268,7 +261,13 @@ conserved_flux(const Mesh &mesh, std::span<const std::pair<int, int>> section,
   return flux;
 }
 
-Result<Eigen::VectorXd> couple_source(const Source &source, const Mesh &mesh) {
+namespace {
+struct Transfer {
+  Eigen::VectorXd coupling;
+  double error;
+};
+Result<Transfer> transfer_source(const Source &source, const Mesh &mesh,
+                                 int order) {
   Eigen::VectorXd coupling = Eigen::VectorXd::Zero(mesh.edges.size());
   SpatialIndex index(mesh);
   if (!source.closed) {
@@ -286,11 +285,12 @@ Result<Eigen::VectorXd> couple_source(const Source &source, const Mesh &mesh) {
         for (int ci : index.query(x - Vector::Constant(tolerance),
                                   x + Vector::Constant(tolerance))) {
           const auto &cell = mesh.cells[ci];
-          const auto l = barycentric(cell, x);
-          if (*std::min_element(l.begin(), l.end()) < -1e-8)
+          if (!contains(cell, x, 1e-8))
             continue;
-          for (int i = 0; i < 4; ++i)
-            if (mesh.faces[cell.faces[i]].cells[1] < 0 && std::abs(l[i]) < 1e-8)
+          for (int f : cell.faces)
+            if (mesh.faces[f].cells[1] < 0 &&
+                std::abs(mesh.faces[f].normal.dot(x - mesh.faces[f].center)) <
+                    tolerance)
               exterior = true;
         }
         if (!exterior)
@@ -303,10 +303,9 @@ Result<Eigen::VectorXd> couple_source(const Source &source, const Mesh &mesh) {
     if (!source.wire && mesh.element_index.contains(cell.id)) {
       const auto &target = mesh.cells[mesh.element_index.at(cell.id)];
       for (const auto &sample : quadrature(source.mesh, cell)) {
-        const Vector j =
-            current_density(source.mesh, cell, source.flux, sample.position);
+        const Vector j = flux_value(cell, source.flux, sample.position);
         const auto basis = edge_basis(target, sample.position);
-        for (int e = 0; e < 6; ++e)
+        for (size_t e = 0; e < target.edges.size(); ++e)
           coupling[target.edges[e]] += sample.weight * basis[e].dot(j);
       }
       continue;
@@ -314,14 +313,39 @@ Result<Eigen::VectorXd> couple_source(const Source &source, const Mesh &mesh) {
     double volume = 0;
     for (int ci : index.query(cell.minimum, cell.maximum)) {
       const auto &target = mesh.cells[ci];
-      for (const auto &sample :
-           intersection_quadrature(source.mesh, cell, mesh, target)) {
+      Vector integral = Vector::Zero();
+      Matrix moment = Matrix::Zero();
+      for (const auto &sample : intersection_quadrature(
+               source.mesh, cell, mesh, target,
+               cell.affine && target.affine ? (target.nodes.size() == 4 ? 2 : 3)
+                                            : order)) {
         volume += sample.weight;
-        const Vector j =
-            current_density(source.mesh, cell, source.flux, sample.position);
-        const auto basis = edge_basis(target, sample.position);
-        for (int e = 0; e < 6; ++e)
-          coupling[target.edges[e]] += sample.weight * basis[e].dot(j);
+        const Vector j = flux_value(cell, source.flux, sample.position);
+        if (target.nodes.size() == 4) {
+          integral += sample.weight * j;
+          moment +=
+              sample.weight * (sample.position - target.origin) * j.transpose();
+        } else {
+          const auto basis = edge_basis(target, sample.position);
+          for (size_t e = 0; e < target.edges.size(); ++e)
+            coupling[target.edges[e]] += sample.weight * basis[e].dot(j);
+        }
+      }
+      if (target.nodes.size() == 4) {
+        // Tetrahedral test functions are affine. Integrate the zeroth and
+        // first current moments once, then contract with all six test
+        // functions.
+        std::array<Vector, 4> weighted;
+        for (int i = 0; i < 4; ++i)
+          weighted[i] = moment.transpose() * target.gradient[i];
+        weighted[0] += integral;
+        for (int e = 0; e < 6; ++e) {
+          const auto ij = local_edges[e];
+          coupling[target.edges[e]] +=
+              target.edge_sign[e] *
+              (target.gradient[ij[1]].dot(weighted[ij[0]]) -
+               target.gradient[ij[0]].dot(weighted[ij[1]]));
+        }
       }
     }
     if (std::abs(volume / cell.volume - 1) > 1e-8)
@@ -342,16 +366,97 @@ Result<Eigen::VectorXd> couple_source(const Source &source, const Mesh &mesh) {
   for (size_t i = 0; i < boundary.size(); ++i)
     if (boundary[i])
       balance[i] = 0;
-  if (balance.norm() > 1e-9 * std::max(coupling.norm(), 1e-300))
-    return Error{"Source transfer violates discrete current continuity; check "
-                 "open endpoints and source intersections"};
-  return coupling;
+  const double error = balance.norm() / std::max(coupling.norm(), 1e-300);
+  return Transfer{std::move(coupling), error};
+}
+} // namespace
+Result<Eigen::VectorXd> couple_source(const Source &source, const Mesh &mesh) {
+  double error = 0, change = 0;
+  const bool adaptive =
+      source.wire &&
+      (std::any_of(source.mesh.cells.begin(), source.mesh.cells.end(),
+                   [](const Cell &c) { return !c.affine; }) ||
+       std::any_of(mesh.cells.begin(), mesh.cells.end(),
+                   [](const Cell &c) { return !c.affine; }));
+  std::optional<Eigen::VectorXd> previous;
+  for (int order : {6, 8, 10, 12, 14}) {
+    auto result = transfer_source(source, mesh, order);
+    if (auto *e = std::get_if<Error>(&result))
+      return *e;
+    auto &transfer = std::get<Transfer>(result);
+    error = transfer.error;
+    change = previous ? (transfer.coupling - *previous).norm() /
+                            std::max(transfer.coupling.norm(), 1e-300)
+                      : 1;
+    if (error <= 1e-9 && (!adaptive || (previous && change <= 1e-8)))
+      return std::move(transfer.coupling);
+    previous = std::move(transfer.coupling);
+  }
+  return Error{std::format(
+      "Source transfer did not converge (current continuity {}, quadrature "
+      "change {}); refine distorted source/field elements",
+      error, change)};
 }
 
 Result<std::vector<Source>> prepare_sources(const Model &model,
                                             const Mesh &mesh) {
   std::vector<Source> sources;
   std::set<int> occupied;
+  if (mesh.planar) {
+    std::map<int, size_t> winding;
+    std::map<int, double> turns, absolute_turns;
+    std::map<int, std::map<int, double>> densities;
+    for (const auto &region : model.planar_coils) {
+      auto [it, added] = winding.emplace(region.id, sources.size());
+      if (added) {
+        Source s;
+        s.id = region.id;
+        s.coupling = Eigen::VectorXd::Zero(mesh.dofs());
+        s.mesh.planar = true;
+        s.mesh.normal = mesh.normal;
+        sources.push_back(std::move(s));
+      }
+      auto &s = sources[it->second];
+      const auto &ids = model.element_sets.at(region.elements);
+      double area = 0;
+      for (int id : ids) {
+        if (!occupied.insert(id).second)
+          return Error{"COIL2D winding regions overlap"};
+        const auto &c = mesh.cells[mesh.element_index.at(id)];
+        if (!air(model.materials.at(c.material)))
+          return Error{"COIL2D region requires nonmagnetic MATMAG"};
+        area += c.volume;
+      }
+      if (!(area > 0))
+        return Error{"Empty COIL2D region"};
+      for (int id : ids) {
+        const auto &c = mesh.cells[mesh.element_index.at(id)];
+        densities[region.id][id] = region.turns / area;
+        for (const auto &q : quadrature(mesh, c)) {
+          const auto basis = edge_basis(c, q.position);
+          for (size_t i = 0; i < c.nodes.size(); ++i)
+            s.coupling[c.nodes[i]] += mesh.depth * q.weight * region.turns /
+                                      area * basis[i].dot(mesh.normal);
+        }
+      }
+      turns[region.id] += region.turns;
+      absolute_turns[region.id] += std::abs(region.turns);
+    }
+    for (auto &s : sources) {
+      s.closed = std::abs(turns[s.id]) <= 1e-12 * absolute_turns[s.id];
+      Model region = model;
+      std::erase_if(region.elements, [&](const Element &c) {
+        return !densities[s.id].contains(c.id);
+      });
+      auto built = make_mesh(region);
+      if (auto *e = std::get_if<Error>(&built))
+        return *e;
+      s.mesh = std::get<Mesh>(std::move(built));
+      for (const auto &c : s.mesh.cells)
+        s.planar_density.push_back(densities[s.id][c.id] * mesh.normal);
+    }
+    return sources;
+  }
   for (const auto &coil : model.coils) {
     for (int id : model.element_sets.at(coil.elements))
       if (!occupied.insert(id).second)

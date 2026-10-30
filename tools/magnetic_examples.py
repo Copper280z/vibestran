@@ -10,7 +10,7 @@ import math
 from pathlib import Path
 
 
-def structured_mesh(axis):
+def structured_mesh(axis, element="tet"):
     nodes = list(itertools.product(axis, repeat=3))
     size = len(axis)
 
@@ -19,6 +19,13 @@ def structured_mesh(axis):
 
     cells = []
     for voxel in itertools.product(range(size - 1), repeat=3):
+        if element != "tet":
+            i,j,k = voxel
+            q = [index(p) for p in [(i,j,k),(i+1,j,k),(i+1,j+1,k),(i,j+1,k),
+                                    (i,j,k+1),(i+1,j,k+1),(i+1,j+1,k+1),(i,j+1,k+1)]]
+            if element == "hex": cells.append(q)
+            else: cells += [[q[v] for v in (0,1,2,4,5,6)],[q[v] for v in (0,2,3,4,6,7)]]
+            continue
         for order in itertools.permutations(range(3)):
             point = list(voxel)
             tetra = [index(point)]
@@ -39,15 +46,15 @@ def cross(a, b):
 
 
 def oriented_face(nodes, face, interior):
-    p, q, r = (nodes[n - 1] for n in face)
+    p, q, r = (nodes[n - 1] for n in face[:3])
     normal = cross(tuple(q[k] - p[k] for k in range(3)),
                    tuple(r[k] - p[k] for k in range(3)))
     if sum(normal[k] * (p[k] - interior[k]) for k in range(3)) < 0:
-        face = [face[0], face[2], face[1]]
+        face = [face[0]] + face[:0:-1]
     return face
 
 
-def deck(kind="loop", n=8, extent=2.0, angle=0.0, current=1.0):
+def deck(kind="loop", n=8, extent=2.0, angle=0.0, current=1.0, element="tet"):
     if n < 2 or extent <= 1:
         raise ValueError("n must be >=2 and extent >1")
     if kind == "motor":
@@ -75,7 +82,7 @@ def deck(kind="loop", n=8, extent=2.0, angle=0.0, current=1.0):
                           [-1+2*i/n for i in range(n+1)] + outer))
     else:
         axis = [-extent+2*extent*i/n for i in range(n+1)]
-    original, cells = structured_mesh(axis)
+    original, cells = structured_mesh(axis,element)
     nodes = original[:]
     materials = [1] * len(cells)
     inside = set()
@@ -112,7 +119,7 @@ def deck(kind="loop", n=8, extent=2.0, angle=0.0, current=1.0):
     for i, p in enumerate(nodes, 1):
         lines.append(f"GRID,{i},," + ",".join(f"{x:.16g}" for x in p))
     for i, (cell, material) in enumerate(zip(cells, materials), 1):
-        lines.append(f"CTETRA,{i},{material}," + ",".join(map(str, cell)))
+        lines.append(f"{ {4: 'CTETRA',6: 'CPENTA',8: 'CHEXA'}[len(cell)]},{i},{material}," + ",".join(map(str, cell)))
     if kind == "uniform":
         lines += ["MBC,1,0,UNIFORM,0.1,0.2,0.3"]
     if kind in ("loop", "motor"):
@@ -136,7 +143,7 @@ def deck(kind="loop", n=8, extent=2.0, angle=0.0, current=1.0):
             next_grid += 4
             next_element += 4
     if kind in ("coil", "motor"):
-        faces = {}
+        faces, face_order = {}, {}
         selected = set()
         if kind == "coil":
             for i, cell in enumerate(cells):
@@ -148,9 +155,16 @@ def deck(kind="loop", n=8, extent=2.0, angle=0.0, current=1.0):
                     selected.add(i)
                     lines.append(f"ESET,1,{i+1}")
         for ci, cell in enumerate(cells):
-            for face in itertools.combinations(cell, 3):
-                faces.setdefault(tuple(sorted(face)), []).append(ci)
-        for face, adjacent in faces.items():
+            topology = {4: [(1,2,3),(0,2,3),(0,1,3),(0,1,2)],
+                        6: [(0,1,2),(3,4,5),(0,1,4,3),(1,2,5,4),(2,0,3,5)],
+                        8: [(0,1,2,3),(4,5,6,7),(0,1,5,4),(1,2,6,5),(2,3,7,6),(3,0,4,7)]}[len(cell)]
+            for indices in topology:
+                face = [cell[v] for v in indices]
+                key = tuple(sorted(face))
+                faces.setdefault(key, []).append(ci)
+                face_order[key] = face
+        for key, adjacent in faces.items():
+            face = face_order[key]
             if kind == "coil" and all(ci in selected for ci in adjacent) and len(adjacent) == 2:
                 p = center(nodes, face)
                 if abs(p[1]) < 1e-12 and p[0] > .4:
@@ -174,13 +188,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("kind", choices=["uniform", "loop", "coil", "motor"])
     parser.add_argument("output", type=Path)
+    parser.add_argument("--element", choices=["tet", "hex", "wedge"], default="tet")
     parser.add_argument("--n", type=int, default=12)
     parser.add_argument("--extent", type=float, default=2)
     parser.add_argument("--angle", type=float, default=0)
     parser.add_argument("--current", type=float, default=1)
     args = parser.parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(deck(args.kind, args.n, args.extent, args.angle, args.current))
+    args.output.write_text(deck(args.kind, args.n, args.extent, args.angle, args.current, args.element))
     print(args.output)
 
 
