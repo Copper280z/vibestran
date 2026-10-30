@@ -3115,3 +3115,64 @@ TEST(MagneticParser, CutForceAndProbeLayoutsRejectTheOldForms) {
         << error_of(parse(cards));
   }
 }
+
+TEST(MagneticIO, OutputRequestsSelectFieldSourceAndProbeFiles) {
+  const auto directory =
+      std::filesystem::temp_directory_path() / "vibestran_magnetic_requests";
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  auto mesh = planar_box(4);
+  mesh.options.planar = true;
+  const auto path = directory / "requests.bdf";
+  auto write = [&](const std::string &case_control) {
+    std::ofstream out(path);
+    out << "SOL MAGSTAT\nCEND\n"
+        << case_control << "BEGIN BULK\nMAG2D,0,.1\nPMAG2D,1,1\nMATMAG,1,1\n"
+        << mesh_cards(mesh)
+        << "ESET,1,6\nESET,2,7\nESET,3,1,THRU,4\nCOIL2D,11,1,10\n"
+           "COIL2D,12,2,-10\nCIRCUIT,1,,11,1,12,1\nICIRC,1,1,2.\n"
+           "MPROBE,1,0,.1,.1,0\nENDDATA\n";
+  };
+  auto run = [&]() -> Status {
+    auto parsed = parse_file(path);
+    if (auto *e = std::get_if<Error>(&parsed))
+      return *e;
+    auto solved = solve(std::get<Model>(parsed));
+    if (auto *e = std::get_if<Error>(&solved))
+      return *e;
+    return write_results(std::get<Model>(parsed), std::get<Results>(solved),
+                         directory / "requests.F06");
+  };
+  // Defaults write every file; requests are inherited by subcases unless
+  // overridden.
+  write("LOAD=1\nMSOURCE=NONE\nBFIELD=NONE\nSUBCASE 1\nSUBCASE 2\n"
+        "  BFIELD=3\n  MPROBE=NONE\nSUBCASE 3\n  BFIELD=ALL\n");
+  ASSERT_FALSE(run().has_value()) << run()->message;
+  EXPECT_FALSE(std::filesystem::exists(directory / "requests_coil11.vtu"));
+  EXPECT_FALSE(std::filesystem::exists(directory / "requests_sc1.vtu"));
+  auto cells = [&](const std::string &name) {
+    std::ifstream in(directory / name);
+    std::stringstream text;
+    text << in.rdbuf();
+    const auto s = text.str();
+    const auto at = s.find("NumberOfCells=\"");
+    return std::stoi(s.substr(at + 15));
+  };
+  EXPECT_EQ(cells("requests_sc2.vtu"), 4);
+  EXPECT_EQ(cells("requests_sc3.vtu"), 16);
+  std::ifstream csv(directory / "requests.probes.csv");
+  std::string line;
+  std::vector<std::string> subcases;
+  std::getline(csv, line);
+  while (std::getline(csv, line))
+    subcases.push_back(line.substr(0, line.find(',')));
+  EXPECT_EQ(subcases, (std::vector<std::string>{"1", "3"}));
+  write("LOAD=1\nSUBCASE 1\n  MSOURCE=NONE\n");
+  EXPECT_NE(run()->message.find("MSOURCE is a global request"),
+            std::string::npos);
+  write("LOAD=1\nBFIELD=9\n");
+  EXPECT_NE(run()->message.find("undefined ESET 9"), std::string::npos);
+  write("LOAD=1\nMPROBE=SOME\n");
+  EXPECT_NE(run()->message.find("ALL or NONE"), std::string::npos);
+  std::filesystem::remove_all(directory);
+}

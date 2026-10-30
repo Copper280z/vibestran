@@ -331,6 +331,22 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
           sc.load = r.integer(1);
         else if (key == "MAGBC")
           sc.boundary = r.integer(1);
+        else if (key == "BFIELD") {
+          sc.field = {value != "NONE", 0};
+          if (value != "ALL" && value != "NONE")
+            sc.field.set = r.integer(1);
+        } else if (key == "MPROBE" || key == "MSOURCE") {
+          if (value != "ALL" && value != "NONE")
+            return Error{lines[i].location + ": " + key +
+                         " must be ALL or NONE"};
+          if (key == "MPROBE")
+            sc.probes = value == "ALL";
+          else if (in_case)
+            return Error{lines[i].location +
+                         ": MSOURCE is a global request, above any SUBCASE"};
+          else
+            m.options.source_output = value == "ALL";
+        }
         else if (key == "LABEL")
           // equals indexes the trimmed text; take the label from the
           // trimmed original so its case survives.
@@ -1015,6 +1031,9 @@ Status validate(const Model &m) {
       return Error{"Subcase ids must be unique and positive"};
     if (sc.boundary && !m.boundaries.contains(sc.boundary))
       return Error{"Subcase references undefined MBC"};
+    if (sc.field.set && !m.element_sets.contains(sc.field.set))
+      return Error{std::format("Subcase {} BFIELD references undefined ESET {}",
+                               sc.id, sc.field.set)};
     auto r = load_factors(m, sc.load);
     if (auto *e = std::get_if<Error>(&r))
       return *e;

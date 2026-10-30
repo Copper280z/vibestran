@@ -90,8 +90,9 @@ once on parsing; the C++ magnetic model API takes resolved SI coordinates.
 | `MPROBE` | `ID,CP,X1,X2,X3,CD` (GRID layout; field also reported in CD axes) |
 | `MFORCE` | `ID,FACES,FSET,CID` or `ID,BODY,ESET,CID,LAYER` (torque about CID origin) |
 
-Case control accepts `LOAD`, `MAGBC`, `LABEL`, `TITLE`, `SUBTITLE` and `SUBCASE`.
-Global LOAD/MAGBC settings are inherited by subcases. Unexcited subcases can
+Case control accepts `LOAD`, `MAGBC`, `BFIELD`, `MPROBE`, `MSOURCE`, `LABEL`,
+`TITLE`, `SUBTITLE` and `SUBCASE`. Global LOAD/MAGBC settings are inherited by
+subcases. Unexcited subcases can
 solve permanent magnets alone. Nested LOAD combinations are additive; cycles
 and undefined sets fail. Positive source current follows the source's stated
 orientation; reversing the load reverses it.
@@ -474,6 +475,14 @@ slowly than field values. Thin air gaps need several element layers.
 ## Results and angle sweeps
 
 For `name.F06`, the solver also writes:
+
+Output requests select the field files. `BFIELD=ALL` (default), `NONE` or an
+ESET ID writes the subcase cell VTU for every cell, none, or only that set
+(points are compacted to the set's cells). `MPROBE=ALL|NONE` keeps or drops the
+subcase's CSV probe rows. Both may be global or set per subcase; a subcase
+value overrides the global one. `MSOURCE=ALL|NONE` is global only and controls
+the coil and wire source VTUs. JSON scalar results, including probes and
+forces, are always written.
 
 - `name.mag.json`: SI scalar results, residuals, source orientation maps,
   conservation checks, linkage, differential inductance, force/torque and probes.

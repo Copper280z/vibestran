@@ -107,9 +107,17 @@ struct Combination {
   double scale{1};
   std::vector<std::pair<double, int>> terms;
 };
+// Case-control output requests. BFIELD writes all, no, or one ESET's cells
+// to the subcase VTU; MPROBE controls the subcase's probe CSV rows.
+struct FieldOutput {
+  bool enabled{true};
+  int set{0}; // 0: every cell
+};
 struct Subcase {
   int id{1}, load{0}, boundary{0};
   std::string label;
+  FieldOutput field;
+  bool probes{true};
 };
 struct Boundary {
   int faces{0};
@@ -139,6 +147,7 @@ struct Options {
   double depth{1};
   double wire_step{0}; // zero: automatic from section size
   WireMesh wire_mesh{WireMesh::Auto};
+  bool source_output{true}; // MSOURCE: coil/wire VTU files
 };
 struct Model {
   std::map<int, Grid> nodes;

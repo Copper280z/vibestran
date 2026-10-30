@@ -30,10 +30,24 @@ void matrix_json(std::ostream &out, const Eigen::MatrixXd &m) {
   }
   out << ']';
 }
+// Writes the selected cells (every cell when `cells` is empty) with their
+// own compacted points.
 Status vtu(const std::filesystem::path &path, const Mesh &mesh,
            const std::vector<Vector> &field, const std::string &name,
            const std::vector<Vector> &second = {},
-           const Eigen::VectorXd &potential = {}) {
+           const Eigen::VectorXd &potential = {},
+           std::vector<int> cells = {}) {
+  if (cells.empty()) {
+    cells.resize(mesh.cells.size());
+    std::iota(cells.begin(), cells.end(), 0);
+  }
+  std::vector<int> point(mesh.nodes.size(), -1), points;
+  for (int c : cells)
+    for (int n : mesh.cells[c].nodes)
+      if (point[n] < 0) {
+        point[n] = static_cast<int>(points.size());
+        points.push_back(n);
+      }
   std::ofstream out(path);
   if (!out)
     return Error{"Cannot write " + path.string()};
@@ -41,47 +55,49 @@ Status vtu(const std::filesystem::path &path, const Mesh &mesh,
   out << "<?xml version=\"1.0\"?>\n<VTKFile type=\"UnstructuredGrid\" "
          "version=\"0.1\" byte_order=\"LittleEndian\"><UnstructuredGrid><Piece "
          "NumberOfPoints=\""
-      << mesh.nodes.size() << "\" NumberOfCells=\"" << mesh.cells.size()
+      << points.size() << "\" NumberOfCells=\"" << cells.size()
       << "\">\n<Points><DataArray type=\"Float64\" NumberOfComponents=\"3\" "
          "format=\"ascii\">\n";
-  for (const auto &x : mesh.nodes)
-    out << x.transpose() << '\n';
+  for (int n : points)
+    out << mesh.nodes[n].transpose() << '\n';
   out << "</DataArray></Points><Cells><DataArray type=\"Int64\" "
          "Name=\"connectivity\" format=\"ascii\">\n";
-  for (const auto &c : mesh.cells) {
-    for (int n : c.nodes)
-      out << n << ' ';
+  for (int c : cells) {
+    for (int n : mesh.cells[c].nodes)
+      out << point[n] << ' ';
     out << '\n';
   }
   out << "</DataArray><DataArray type=\"Int64\" Name=\"offsets\" "
          "format=\"ascii\">\n";
   size_t offset = 0;
-  for (const auto &c : mesh.cells) {
-    offset += c.nodes.size();
+  for (int c : cells) {
+    offset += mesh.cells[c].nodes.size();
     out << offset << ' ';
   }
   out << "</DataArray><DataArray type=\"UInt8\" Name=\"types\" "
          "format=\"ascii\">\n";
-  for (const auto &c : mesh.cells)
-    out << (mesh.planar ? (c.nodes.size() == 3 ? 5 : 9)
-                        : (c.nodes.size() == 4   ? 10
-                           : c.nodes.size() == 6 ? 13
-                                                 : 12))
+  for (int c : cells) {
+    const size_t nodes = mesh.cells[c].nodes.size();
+    out << (mesh.planar ? (nodes == 3 ? 5 : 9)
+                        : (nodes == 4   ? 10
+                           : nodes == 6 ? 13
+                                        : 12))
         << ' ';
+  }
   out << "</DataArray></Cells><CellData><DataArray type=\"Int64\" "
          "Name=\"element_id\" format=\"ascii\">\n";
-  for (const auto &c : mesh.cells)
-    out << c.id << ' ';
+  for (int c : cells)
+    out << mesh.cells[c].id << ' ';
   out << "</DataArray><DataArray type=\"Float64\" Name=\"" << name
       << "\" NumberOfComponents=\"3\" format=\"ascii\">\n";
-  for (const auto &x : field)
-    out << x.transpose() << '\n';
+  for (int c : cells)
+    out << field[c].transpose() << '\n';
   out << "</DataArray>\n";
   if (!second.empty()) {
     out << "<DataArray type=\"Float64\" Name=\"H_A_per_m\" "
            "NumberOfComponents=\"3\" format=\"ascii\">\n";
-    for (const auto &x : second)
-      out << x.transpose() << '\n';
+    for (int c : cells)
+      out << second[c].transpose() << '\n';
     out << "</DataArray>\n";
   }
   out << "</CellData>";
@@ -89,8 +105,8 @@ Status vtu(const std::filesystem::path &path, const Mesh &mesh,
       potential.size() == static_cast<Eigen::Index>(mesh.nodes.size())) {
     out << "<PointData><DataArray type=\"Float64\" Name=\"A_normal_Wb_per_m\" "
            "format=\"ascii\">\n";
-    for (Eigen::Index i = 0; i < potential.size(); ++i)
-      out << potential[i] << ' ';
+    for (int n : points)
+      out << potential[n] << ' ';
     out << "</DataArray></PointData>";
   }
   out << "</Piece></UnstructuredGrid></VTKFile>\n";
@@ -158,10 +174,11 @@ Status write_results(const Model &model, const Results &results,
           j += basis[k] * source.flux[c.faces[k]];
         density.push_back(j);
       }
-    if (auto e = vtu(prefix + (source.wire ? "_wire" : "_coil") +
-                         std::to_string(source.id) + ".vtu",
-                     source.mesh, density, "J_per_ampere_per_m2"))
-      return e;
+    if (model.options.source_output)
+      if (auto e = vtu(prefix + (source.wire ? "_wire" : "_coil") +
+                           std::to_string(source.id) + ".vtu",
+                       source.mesh, density, "J_per_ampere_per_m2"))
+        return e;
   }
   json << "],\"circuits\":[";
   for (size_t i = 0; i < results.circuits.size(); ++i) {
@@ -305,6 +322,8 @@ Status write_results(const Model &model, const Results &results,
       json << ",\"H_local_A_per_m\":";
       vector_json(json, h);
       json << '}';
+      if (!model.subcases[ci].probes)
+        continue;
       csv << c.id << ',' << probe.id;
       for (const Vector *v : {&probe.position, &c.probe_b[i], &c.probe_h[i]})
         for (int k = 0; k < 3; ++k)
@@ -316,9 +335,16 @@ Status write_results(const Model &model, const Results &results,
       csv << '\n';
     }
     json << "]}";
-    if (auto e = vtu(prefix + "_sc" + std::to_string(c.id) + ".vtu",
-                     results.mesh, c.b, "B_T", c.h, c.potential))
-      return e;
+    const auto &request = model.subcases[ci].field;
+    std::vector<int> cells;
+    if (request.set)
+      for (int id : model.element_sets.at(request.set))
+        cells.push_back(results.mesh.element_index.at(id));
+    if (request.enabled)
+      if (auto e = vtu(prefix + "_sc" + std::to_string(c.id) + ".vtu",
+                       results.mesh, c.b, "B_T", c.h, c.potential,
+                       std::move(cells)))
+        return e;
   }
   json << "]}\n";
   f06.close();
