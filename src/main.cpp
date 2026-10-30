@@ -46,6 +46,7 @@
 #include "io/bdf_parser.hpp"
 #include "io/inp_parser.hpp"
 #include "io/results.hpp"
+#include "magnetic/solver.hpp"
 #include "solver/eigensolver_backend.hpp"
 #include "solver/heat_transfer_steady.hpp"
 #include "solver/linear_static.hpp"
@@ -265,6 +266,43 @@ int main(int argc, const char *argv[]) {
     std::string ext = bdf_path.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](unsigned char c) { return std::tolower(c); });
+    if (ext != ".inp") {
+      auto magnetic = vibestran::magnetic::is_magnetic_deck(bdf_path);
+      if (auto* error = std::get_if<vibestran::magnetic::Error>(&magnetic)) {
+        spdlog::error("{}", error->message);
+        return 1;
+      }
+      if (std::get<bool>(magnetic)) {
+        if ((backend_choice != BackendChoice::Auto && backend_choice != BackendChoice::Cpu) ||
+            force_refine || force_checkmode_lenient || skip_quality_checks || !dump_prefix.empty()) {
+          spdlog::error("SOL MAGSTAT supports the CPU direct solver and its mandatory magnetic checks; structural solver overrides are unavailable");
+          return 1;
+        }
+        auto parsed = vibestran::magnetic::parse_file(bdf_path);
+        if (auto* error = std::get_if<vibestran::magnetic::Error>(&parsed)) {
+          spdlog::error("{}", error->message);
+          return 1;
+        }
+        const auto& magnetic_model = std::get<vibestran::magnetic::Model>(parsed);
+        spdlog::info("Magnetostatics: {} tetrahedra, {} coils, {} wire segments",
+                     magnetic_model.elements.size(), magnetic_model.coils.size(), magnetic_model.wires.size());
+        auto solved = vibestran::magnetic::solve(magnetic_model);
+        if (auto* error = std::get_if<vibestran::magnetic::Error>(&solved)) {
+          spdlog::error("{}", error->message);
+          return 1;
+        }
+        const auto& results = std::get<vibestran::magnetic::Results>(solved);
+        if (auto error = vibestran::magnetic::write_results(magnetic_model, results, f06_path)) {
+          spdlog::error("{}", error->message);
+          return 1;
+        }
+        for (const auto& result : results.cases)
+          spdlog::info("Magnetic subcase {}: residual {:.3e}, energy {:.8e} J{}", result.id,
+                       result.residual, result.energy, result.extrapolated ? " (BH extrapolated)" : "");
+        spdlog::info("Wrote magnetic F06, VTU, JSON and probe CSV: {}", f06_path.string());
+        return 0;
+      }
+    }
     vibestran::Model model = (ext == ".inp")
                                  ? vibestran::InpParser::parse_file(bdf_path)
                                  : vibestran::BdfParser::parse_file(bdf_path);

@@ -448,10 +448,14 @@ elif cxx.get_id() == 'msvc'
 endif
 precise_lib = static_library(
   'vibestran_precise',
-  files('src/solver/iterative_refinement.cpp'),
+  files('src/solver/iterative_refinement.cpp',
+        'src/magnetic/parser.cpp', 'src/magnetic/material.cpp',
+        'src/magnetic/mesh.cpp', 'src/magnetic/source.cpp',
+        'src/magnetic/wire.cpp', 'src/magnetic/solver.cpp',
+        'src/magnetic/output.cpp'),
   include_directories : [inc],
-  dependencies        : [eigen_dep, spdlog_dep],
-  cpp_args            : precise_args,
+  dependencies        : solver_lib_deps,
+  cpp_args            : precise_args + accelerate_args + cholmod_args,
   install             : false,
 )
 
@@ -490,6 +494,7 @@ gtest_dep = dependency('gtest',
 
 # Unit tests
 unit_test_sources = files(
+  'tests/unit/test_magnetics.cpp',
   'tests/unit/test_dof_map.cpp',
   'tests/unit/test_quality_checks.cpp',
   'tests/unit/test_factor_ratio_check.cpp',
@@ -522,6 +527,14 @@ unit_tests = executable(
 test('unit_tests', unit_tests,
   timeout : 60,
   suite   : 'unit',
+)
+
+# Analytical CLI checks only. External solvers live in Magnetic_Validation and
+# are deliberately not registered with Meson or ordinary CI.
+test('magnetic_e2e', python,
+  args : [files('tools/magnetic_e2e.py'), vibestran_exe],
+  timeout : 60,
+  suite : 'e2e',
 )
 
 # Integration tests
