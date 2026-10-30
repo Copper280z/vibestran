@@ -83,6 +83,28 @@ def main():
             for i, value in enumerate(potential):
                 x, y = coordinates[3*i:3*i+2]
                 assert math.isclose(value, .1*(y+1)-.2*(x+1), abs_tol=1e-12)
+        # A uniform field is exact even with nonlinear steel: independently
+        # integrate the BH curve and verify exported H and extrapolation status.
+        for planar in (False, True):
+            path = output/("nonlinear2d.bdf" if planar else "nonlinear3d.bdf")
+            text = planar_deck("uniform", 4, "quad", .02) if planar else deck("uniform", 3, 2, element="hex")
+            text = text.replace("MATMAG,1,1", "MATMAG,1,1,1\nBHPOINT,1,0,0\nBHPOINT,1,.1,100\nBHPOINT,1,.2,2000")
+            path.write_text(text)
+            subprocess.run([str(executable), str(path)], check=True)
+            result = json.loads(path.with_suffix(".mag.json").read_text())
+            case = result["cases"][0]
+            assert case["bh_extrapolated"]
+            field = [.1, .2, 0] if planar else [.1, .2, .3]
+            magnitude = math.sqrt(sum(b*b for b in field))
+            extra = magnitude-.2
+            mu0 = 4*math.pi*1e-7
+            energy_density = 110+2000*extra+extra*extra/(2*mu0)
+            volume = 4*.02 if planar else 64
+            assert math.isclose(case["energy_J"], volume*energy_density, rel_tol=1e-11)
+            expected_h = [(2000+extra/mu0)*b/magnitude for b in field]
+            tree = ET.parse(path.with_name(path.stem+"_sc1.vtu"))
+            values = list(map(float, tree.find(".//CellData/DataArray[@Name='H_A_per_m']").text.split()))
+            assert all(math.isclose(v, expected_h[i % 3], rel_tol=1e-11, abs_tol=1e-9) for i, v in enumerate(values))
         path = output/"planar_winding.bdf"
         path.write_text(planar_deck("winding", 12, "mixed", .02))
         subprocess.run([str(executable), str(path)], check=True)

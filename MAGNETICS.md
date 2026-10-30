@@ -507,6 +507,75 @@ and both source element types. Across these benchmark fixtures, HEX versus TET
 load vectors differ by at most 0.229% and center Biot–Savart fields by 0.0141%.
 Those are different current discretizations, not an equal-error comparison.
 The largest current-continuity residual is 5.1e-12, below the unchanged 1e-9
-limit. No acceptance tolerance was relaxed. All six Meson suites pass, with
-42 magnetic tests; the full unit suite decreased from 44.77 to 12.78 seconds,
-including the new cross-checks. Third-party validation remains separate.
+limit. No acceptance tolerance was relaxed. At this profiling checkpoint, all
+six Meson suites passed with 42 magnetic tests; the full unit suite decreased
+from 44.77 to 12.78 seconds, including the new cross-checks. Third-party
+validation remains separate.
+
+
+## Nonlinear verification coverage
+
+The prior single-winding planar test stayed below its first 0.1 T B–H knot.
+Its replacement requires quadrature points in both the 0.1–0.3 T and 0.3–1 T
+segments, and more than one Newton iteration. The original tetrahedral nonlinear
+test now also asserts which B–H range it reaches. These checks inspect the
+reconstructed field at integration points, not the exported cell averages.
+
+The new shared B–H table is `(B,H) = (0,0), (0.1,100), (0.3,2000), (1,100000)`.
+Each planar case has two independent 100-turn circuits at 4000 A and 2500 A;
+each 3D case has one rectangular CWIRE loop at 100000 A. Every fixture solves
+an operating point, a 1% low-current linear limit, a 20x extrapolation case,
+current reversal, and +/-0.01% perturbations of each circuit. These are
+synthetic constitutive stress cases, not representative motor operating points.
+
+Independent current perturbations verify every entry of the differential
+inductance matrix, including nonzero planar mutual coupling, to relative 1e-6.
+They also verify `dW'/dI_i = lambda_i` and
+`dW/dI_i = sum_j I_j * d(lambda_j)/dI_i`. The tests check reciprocity, positive
+differential inductance, saturation's departure from secant inductance and
+quadratic energy, the low-field linear identities, and field/linkage reversal.
+The solver residual tolerance is 1e-12 in these derivative fixtures; the
+production default remains 1e-8. The high-current solutions must actually
+exceed the final B–H knot and report extrapolation.
+
+Representative Release timings on the same Apple arm64/Accelerate build as
+above, measured for the whole test (all subcases, preprocessing and assertions),
+not per Newton iteration:
+
+| Fixture | Field cells | Free field DOFs | Subcases | Operating Newton iterations | Maximum steel B (T) | Test time (ms) |
+|---|---:|---:|---:|---:|---:|---:|
+| Planar CQUAD4 | 144 | 121 | 8 | 5 | 0.643 | 19 |
+| Planar CTRIA3 | 288 | 121 | 8 | 5 | 0.506 | 18 |
+| Planar mixed | 216 | 121 | 8 | 5 | 0.632 | 20 |
+| CTETRA4 | 384 | 289 | 6 | 6 | 0.330 | 53 |
+| CHEXA8 | 64 | 81 | 6 | 3 | 0.369 | 34 |
+| CPENTA6 | 128 | 129 | 6 | 5 | 0.323 | 45 |
+| Warped CHEXA8 | 64 | 81 | 6 | 3 | 0.383 | 93 |
+| Warped CPENTA6 | 128 | 129 | 6 | 5 | 0.335 | 102 |
+
+The planar meshes are distorted in-plane. Each 3D source uses 12 internal
+hexes and a 24-unknown current system; the field meshes above are independent.
+These eight tests take about 0.39 s together in this run. Sizes, field maxima
+and Newton counts are also recorded as Google Test XML properties.
+
+Additional checks cover:
+
+- B–H knot continuity and one-sided radial/transverse material tangents,
+  including the vacuum-slope extrapolation and zero-field limit.
+- Rejection of missing origins, duplicate/unsorted B values, and zero or
+  negative differential slopes; positive slopes need not themselves increase.
+- Successful continuation in both 2D and 3D. A per-stage iteration cap forces
+  the retry; its full-current fields, energy, linkage and tangent must match
+  an unrestricted solve. The hex fixture uses 21 continuation iterations
+  versus 4 direct; the planar fixture uses 32 versus 5. A tighter cap must
+  return an error instead of a partial solution. Together these take ~106 ms.
+- Permanent magnets driving nonlinear steel across both interior knots on
+  planar triangles and quads, including simultaneous magnet reversal (~11 ms).
+- CLI decks with BHPOINT data: exact uniform-field nonlinear energy, exported
+  H and the extrapolation flag in both 2D and 3D.
+
+Run just the new driven cases from `build` with
+`./unit_tests --gtest_filter='MagneticElements/MagneticNonlinear*'`.
+The full magnetic suite uses `--gtest_filter='Magnetic*'` and now has 54 tests.
+All these checks are internal/analytical; third-party nonlinear validation
+remains in the separate workflow described above.

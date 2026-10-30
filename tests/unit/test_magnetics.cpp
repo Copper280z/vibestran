@@ -119,6 +119,34 @@ Vector source_biot(const Source &source, const Vector &x) {
     }
   return b;
 }
+struct FieldRegimes {
+  std::vector<int> points;
+  double maximum{0};
+};
+// Inspect the actual constitutive sampling points, not cell-average B: a
+// nominally nonlinear material can otherwise stay entirely on its first slope.
+FieldRegimes field_regimes(const Model &model, const Results &result,
+                           const CaseResults &state) {
+  const auto &curve = model.bh_tables.at(1);
+  FieldRegimes out{std::vector<int>(curve.size(), 0), 0};
+  for (const auto &cell : result.mesh.cells) {
+    if (model.materials.at(cell.material).bh_table != 1)
+      continue;
+    for (const auto &q : quadrature(result.mesh, cell)) {
+      Vector b = Vector::Zero();
+      const auto curls = edge_curls(cell, q.position);
+      for (size_t i = 0; i < curls.size(); ++i)
+        b += state.potential[cell.edges[i]] * curls[i];
+      const double magnitude = b.norm();
+      size_t segment = 0;
+      while (segment + 1 < curve.size() && magnitude > curve[segment + 1].first)
+        ++segment;
+      ++out.points[segment];
+      out.maximum = std::max(out.maximum, magnitude);
+    }
+  }
+  return out;
+}
 } // namespace
 
 TEST(MagneticBasis,
@@ -456,6 +484,10 @@ TEST(MagneticSolve, LoopEnergyReciprocityReversalAndNonlinearInductance) {
   solved = solve(model);
   ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
   const auto &nonlinear = std::get<Results>(solved).cases;
+  const auto regimes =
+      field_regimes(model, std::get<Results>(solved), nonlinear[0]);
+  EXPECT_GT(regimes.maximum, model.bh_tables.at(1)[2].first);
+  EXPECT_GT(regimes.points[1] + regimes.points[2] + regimes.points[3], 0);
   EXPECT_GT(nonlinear[0].iterations, 1);
   EXPECT_LT(nonlinear[0].residual, 1e-8);
   const double finite_difference =
@@ -1011,35 +1043,16 @@ TEST(MagneticPlanar,
   }
 }
 
-TEST(MagneticPlanar, NonlinearWindingTangentAndPermanentMagnetReversal) {
+TEST(MagneticPlanar, PermanentMagnetReversal) {
   auto m = planar_box(12);
-  m.materials[2] = {1, 1, Vector::Zero(), 0};
   m.properties[2] = 2;
-  m.bh_tables[1] = {{0, 0}, {.1, 100}, {.3, 2000}, {1, 100000}};
-  for (auto &c : m.elements) {
+  for (auto &cell : m.elements) {
     Vector center = Vector::Zero();
-    for (int v : c.nodes)
-      center += m.nodes.at(v).position / 4;
+    for (int n : cell.nodes)
+      center += m.nodes.at(n).position / static_cast<double>(cell.nodes.size());
     if (std::abs(center.x()) < .32 && std::abs(center.y()) < .65)
-      c.property = 2;
-    if (std::abs(center.x()) > .4 && std::abs(center.x()) < .8 &&
-        std::abs(center.y()) < .65)
-      m.element_sets[center.x() < 0 ? 1 : 2].push_back(c.id);
+      cell.property = 2;
   }
-  m.planar_coils = {{1, 1, 100}, {1, 2, -100}};
-  m.currents = {
-      {1, false, 100, {1}}, {2, false, 100.01, {1}}, {3, false, 99.99, {1}}};
-  m.subcases = {{1, 1, 0, ""}, {2, 2, 0, ""}, {3, 3, 0, ""}};
-  auto solved = solve(m);
-  ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
-  const auto &c = std::get<Results>(solved).cases;
-  const double derivative =
-      (c[1].sources[0].linkage - c[2].sources[0].linkage) / .02;
-  EXPECT_NEAR(derivative, c[0].differential_inductance(0, 0),
-              1e-6 * std::abs(derivative));
-  m.currents.clear();
-  m.planar_coils.clear();
-  m.subcases = {{}};
   m.materials[2] = {1.05, 0, Vector(.2, .1, 0), 0};
   auto positive = solve(m);
   ASSERT_TRUE(std::holds_alternative<Results>(positive)) << error_of(positive);
@@ -1789,4 +1802,380 @@ TEST(MagneticWarped, TetTransferIsInvariantToLocalVertexOrderAndRigidMotion) {
             original.mesh.cells.size());
   const auto &load = std::get<std::vector<Source>>(moved)[0].coupling;
   EXPECT_LT((load - original.coupling).norm() / original.coupling.norm(), 1e-8);
+}
+
+namespace {
+// Three slopes and a vacuum extrapolation branch. Excitations below are chosen
+// to visit each regime; field_regimes asserts that at quadrature points.
+void nonlinear_steel(Model &model) {
+  model.materials[2] = {1, 1, Vector::Zero(), 0};
+  model.properties[2] = 2;
+  model.bh_tables[1] = {{0, 0}, {.1, 100}, {.3, 2000}, {1, 100000}};
+  model.options.nonlinear_tolerance = 1e-12;
+}
+Model nonlinear_planar(int kind) {
+  auto model = planar_box(12, kind == 1, kind == 2);
+  nonlinear_steel(model);
+  for (auto &cell : model.elements) {
+    Vector center = Vector::Zero();
+    for (int n : cell.nodes)
+      center +=
+          model.nodes.at(n).position / static_cast<double>(cell.nodes.size());
+    if (center.head<2>().cwiseAbs().maxCoeff() < .32)
+      cell.property = 2;
+    if (std::abs(center.x()) > .4 && std::abs(center.x()) < .8 &&
+        std::abs(center.y()) < .32)
+      model.element_sets[center.x() < 0 ? 1 : 2].push_back(cell.id);
+    if (std::abs(center.y()) > .4 && std::abs(center.y()) < .8 &&
+        std::abs(center.x()) < .32)
+      model.element_sets[center.y() < 0 ? 3 : 4].push_back(cell.id);
+  }
+  model.planar_coils = {{1, 1, 100}, {1, 2, -100}, {2, 3, 100}, {2, 4, -100}};
+  // Planar distorted elements exercise varying gradients as well as P1 cells.
+  for (auto &[id, g] : model.nodes) {
+    (void)id;
+    g.position.x() += .12 * g.position.x() * g.position.y();
+  }
+  return model;
+}
+Model nonlinear_solid(int kind) {
+  auto model = kind == 0 ? box(4) : brick_box(4, kind == 2 || kind == 4);
+  nonlinear_steel(model);
+  for (auto &cell : model.elements) {
+    Vector center = Vector::Zero();
+    for (int n : cell.nodes)
+      center +=
+          model.nodes.at(n).position / static_cast<double>(cell.nodes.size());
+    if (center.cwiseAbs().maxCoeff() < .5)
+      cell.property = 2;
+  }
+  if (kind >= 3)
+    for (auto &[id, g] : model.nodes) {
+      (void)id;
+      g.position.z() += .18 * g.position.x() * g.position.y();
+    }
+  loop(model, .6, true);
+  return model;
+}
+// Cases: operating point, low-field linear limit, vacuum extrapolation,
+// reversal, then independent +/- perturbations of every circuit current.
+void nonlinear_loads(Model &model, const std::vector<double> &amplitudes) {
+  model.currents.clear();
+  model.subcases.clear();
+  auto append = [&](const std::vector<double> &amps) {
+    const int id = static_cast<int>(model.subcases.size()) + 1;
+    for (size_t i = 0; i < amps.size(); ++i)
+      model.currents.push_back(
+          {id, !model.options.planar, amps[i],
+           model.options.planar
+               ? std::vector<int>{static_cast<int>(i) + 1}
+               : std::vector<int>{100000, 100001, 100002, 100003}});
+    model.subcases.push_back({id, id, 0, ""});
+  };
+  for (double factor : {1., .01, 20., -1.}) {
+    auto amps = amplitudes;
+    for (double &a : amps)
+      a *= factor;
+    append(amps);
+  }
+  for (size_t i = 0; i < amplitudes.size(); ++i)
+    for (double factor : {1.0001, .9999}) {
+      auto amps = amplitudes;
+      amps[i] *= factor;
+      append(amps);
+    }
+}
+void check_nonlinear_response(const Model &model, const Results &result) {
+  const auto &base = result.cases[0], &low = result.cases[1],
+             &high = result.cases[2], &reverse = result.cases[3];
+  const auto regimes = field_regimes(model, result, base);
+  ASSERT_GT(regimes.points[1], 0);
+  ASSERT_GT(regimes.points[2], 0);
+  EXPECT_EQ(regimes.points[3], 0);
+  EXPECT_GT(base.iterations, 1);
+  EXPECT_GT(high.iterations, 1);
+  EXPECT_EQ(low.iterations, 1);
+  EXPECT_FALSE(base.extrapolated);
+  EXPECT_FALSE(low.extrapolated);
+  EXPECT_TRUE(high.extrapolated);
+  EXPECT_LT(field_regimes(model, result, low).maximum, .1);
+  EXPECT_GT(field_regimes(model, result, high).maximum, 1.);
+  for (const auto &state : result.cases) {
+    EXPECT_LE(state.residual, model.options.nonlinear_tolerance);
+    EXPECT_TRUE(state.potential.allFinite());
+    EXPECT_GT(state.energy, 0);
+  }
+  EXPECT_LT((base.potential + reverse.potential).norm() / base.potential.norm(),
+            1e-9);
+  EXPECT_NEAR(reverse.energy, base.energy, 1e-9 * base.energy);
+  EXPECT_NEAR(reverse.coenergy, base.coenergy, 1e-9 * base.coenergy);
+  const auto &tangent = base.differential_inductance;
+  EXPECT_LT((tangent - tangent.transpose()).norm() / tangent.norm(), 1e-12);
+  EXPECT_LT((reverse.differential_inductance - tangent).norm() / tangent.norm(),
+            1e-9);
+  Eigen::VectorXd amps(base.sources.size()), linkage(base.sources.size());
+  for (size_t i = 0; i < base.sources.size(); ++i) {
+    amps[i] = base.sources[i].current;
+    linkage[i] = base.sources[i].linkage;
+    EXPECT_GT(tangent(i, i), 0);
+    EXPECT_NEAR(reverse.sources[i].linkage, -linkage[i],
+                1e-9 * std::abs(linkage[i]));
+    const auto &plus = result.cases[4 + 2 * i],
+               &minus = result.cases[5 + 2 * i];
+    const double delta = plus.sources[i].current - minus.sources[i].current;
+    Eigen::VectorXd derivative(linkage.size());
+    for (size_t j = 0; j < base.sources.size(); ++j)
+      derivative[j] =
+          (plus.sources[j].linkage - minus.sources[j].linkage) / delta;
+    EXPECT_LT((derivative - tangent.col(i)).norm() / tangent.col(i).norm(),
+              1e-6);
+    for (size_t j = 0; j < base.sources.size(); ++j)
+      EXPECT_NEAR(derivative[j], tangent(j, i), 1e-6 * std::abs(tangent(j, i)));
+    // At fixed geometry with zero applied exterior field and no PM:
+    // dW'/dI_i=lambda_i and dW/dI_i=sum_j I_j*d(lambda_j)/dI_i.
+    EXPECT_NEAR((plus.coenergy - minus.coenergy) / delta, linkage[i],
+                1e-6 * std::abs(linkage[i]));
+    double energy_derivative = 0;
+    for (size_t j = 0; j < base.sources.size(); ++j)
+      energy_derivative += base.sources[j].current * tangent(j, i);
+    EXPECT_NEAR((plus.energy - minus.energy) / delta, energy_derivative,
+                1e-6 * std::abs(energy_derivative));
+  }
+  Eigen::VectorXd low_linkage(linkage.size()), high_linkage(linkage.size());
+  for (size_t i = 0; i < base.sources.size(); ++i) {
+    low_linkage[i] = low.sources[i].linkage;
+    high_linkage[i] = high.sources[i].linkage;
+  }
+  EXPECT_LT((low.differential_inductance * (.01 * amps) - low_linkage).norm() /
+                low_linkage.norm(),
+            1e-10);
+  EXPECT_NEAR(low.energy, .5 * .01 * amps.dot(low_linkage), 1e-10 * low.energy);
+  EXPECT_LT(amps.dot(high_linkage) / 20, .99 * amps.dot(low_linkage) / .01);
+  const double work = amps.dot(linkage);
+  EXPECT_GT(work - amps.dot(tangent * amps), .001 * work);
+  EXPECT_GT(.5 * work - base.energy, .001 * base.energy);
+  if (amps.size() == 2) {
+    EXPECT_GT(tangent.determinant(), 0);
+    EXPECT_GT(std::abs(tangent(0, 1)),
+              .001 * std::sqrt(tangent(0, 0) * tangent(1, 1)));
+  }
+}
+class MagneticNonlinearPlanar : public ::testing::TestWithParam<int> {};
+class MagneticNonlinearSolids : public ::testing::TestWithParam<int> {};
+} // namespace
+
+TEST_P(MagneticNonlinearPlanar, SaturationMutualTangentEnergyAndReversal) {
+  auto model = nonlinear_planar(GetParam());
+  nonlinear_loads(model, {4000, 2500});
+  const auto solved = solve(model);
+  ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+  const auto &result = std::get<Results>(solved);
+  const auto regimes = field_regimes(model, result, result.cases[0]);
+  RecordProperty("field_cells", static_cast<int>(result.mesh.cells.size()));
+  RecordProperty("free_dofs", std::get<Gauge>(make_gauge(result.mesh)).size);
+  RecordProperty("base_iterations", result.cases[0].iterations);
+  RecordProperty("base_Bmax_T", std::to_string(regimes.maximum));
+  RecordProperty(
+      "high_Bmax_T",
+      std::to_string(field_regimes(model, result, result.cases[2]).maximum));
+  check_nonlinear_response(model, result);
+}
+TEST_P(MagneticNonlinearSolids, SaturationTangentEnergyAndReversal) {
+  auto model = nonlinear_solid(GetParam());
+  nonlinear_loads(model, {100000});
+  const auto solved = solve(model);
+  ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+  const auto &result = std::get<Results>(solved);
+  const auto regimes = field_regimes(model, result, result.cases[0]);
+  RecordProperty("field_cells", static_cast<int>(result.mesh.cells.size()));
+  RecordProperty("free_dofs", std::get<Gauge>(make_gauge(result.mesh)).size);
+  RecordProperty("base_iterations", result.cases[0].iterations);
+  RecordProperty("base_Bmax_T", std::to_string(regimes.maximum));
+  RecordProperty(
+      "high_Bmax_T",
+      std::to_string(field_regimes(model, result, result.cases[2]).maximum));
+  check_nonlinear_response(model, result);
+}
+INSTANTIATE_TEST_SUITE_P(MagneticElements, MagneticNonlinearPlanar,
+                         ::testing::Values(0, 1, 2), ([](const auto &info) {
+                           return std::array{"Quad", "Tri",
+                                             "Mixed"}[info.param];
+                         }));
+INSTANTIATE_TEST_SUITE_P(MagneticElements, MagneticNonlinearSolids,
+                         ::testing::Values(0, 1, 2, 3, 4),
+                         ([](const auto &info) {
+                           return std::array{"Tet", "Hex", "Wedge", "WarpedHex",
+                                             "WarpedWedge"}[info.param];
+                         }));
+
+TEST(MagneticMaterial, KnotContinuityRadialAndTransverseTangents) {
+  Material material;
+  material.bh_table = 1;
+  const std::vector<std::pair<double, double>> curve{
+      {0, 0}, {1, 200}, {1.5, 1000}, {2, 10000}};
+  struct Knot {
+    double b, h, energy, left, right;
+  };
+  const std::array<Knot, 3> knots{{{1, 200, 100, 200, 1600},
+                                   {1.5, 1000, 400, 1600, 18000},
+                                   {2, 10000, 3150, 18000, 1 / mu0}}};
+  const Vector radial(.6, .8, 0), transverse(-.8, .6, 0);
+  for (const auto &k : knots) {
+    const auto at = material_response(material, curve, Vector(k.b, 0, 0));
+    EXPECT_NEAR(at.h.x(), k.h, 1e-12 * k.h);
+    EXPECT_NEAR(at.energy, k.energy, 1e-12 * k.energy);
+    EXPECT_FALSE(at.extrapolated);
+    for (double delta : {-1e-8, 1e-8}) {
+      const double slope = delta < 0 ? k.left : k.right;
+      const double magnitude = k.b + delta, h = k.h + slope * delta;
+      const double energy = k.energy + k.h * delta + .5 * slope * delta * delta;
+      const auto value = material_response(material, curve, magnitude * radial);
+      EXPECT_LT((value.h - h * radial).norm(), 1e-10 * h);
+      EXPECT_NEAR(value.energy, energy, 1e-11 * energy);
+      EXPECT_LT((value.tangent * radial - slope * radial).norm(),
+                1e-10 * slope);
+      EXPECT_LT(
+          (value.tangent * transverse - h / magnitude * transverse).norm(),
+          1e-10 * h / magnitude);
+      EXPECT_LT(
+          (value.tangent * Vector::UnitZ() - h / magnitude * Vector::UnitZ())
+              .norm(),
+          1e-10 * h / magnitude);
+      EXPECT_EQ(value.extrapolated, magnitude > 2);
+      const auto negative =
+          material_response(material, curve, -magnitude * radial);
+      EXPECT_LT((negative.h + value.h).norm(), 1e-10 * h);
+      EXPECT_NEAR(negative.energy, value.energy, 1e-11 * energy);
+      EXPECT_LT((negative.tangent - value.tangent).norm(), 1e-10 * slope);
+    }
+  }
+  const auto origin = material_response(material, curve, Vector::Zero());
+  EXPECT_EQ(origin.energy, 0);
+  EXPECT_EQ(origin.h.norm(), 0);
+  EXPECT_LT((origin.tangent - 200 * Matrix::Identity()).norm(), 1e-12);
+}
+
+TEST(MagneticNonlinear,
+     ContinuationReachesFullCurrentAndRejectsIncompleteStages) {
+  for (bool planar : {false, true}) {
+    SCOPED_TRACE(planar);
+    auto model = planar ? nonlinear_planar(0) : nonlinear_solid(1);
+    const std::vector<double> amplitudes =
+        planar ? std::vector<double>{16000, 10000}
+               : std::vector<double>{150000};
+    nonlinear_loads(model, amplitudes);
+    model.subcases.resize(1);
+    const auto direct = solve(model);
+    ASSERT_TRUE(std::holds_alternative<Results>(direct)) << error_of(direct);
+    const auto &reference = std::get<Results>(direct).cases[0];
+    model.options.max_iterations = planar ? 4 : 3;
+    ASSERT_GT(reference.iterations, model.options.max_iterations);
+    const auto retried = solve(model);
+    ASSERT_TRUE(std::holds_alternative<Results>(retried)) << error_of(retried);
+    const auto &continued = std::get<Results>(retried).cases[0];
+    // More total iterations than the per-stage budget proves the retry ran.
+    EXPECT_GT(continued.iterations, model.options.max_iterations);
+    for (size_t i = 0; i < amplitudes.size(); ++i) {
+      EXPECT_DOUBLE_EQ(continued.sources[i].current, amplitudes[i]);
+      EXPECT_NEAR(continued.sources[i].linkage, reference.sources[i].linkage,
+                  1e-10 * std::abs(reference.sources[i].linkage));
+    }
+    EXPECT_LE(continued.residual, model.options.nonlinear_tolerance);
+    EXPECT_LT((continued.potential - reference.potential).norm() /
+                  reference.potential.norm(),
+              1e-9);
+    EXPECT_NEAR(continued.energy, reference.energy, 1e-10 * reference.energy);
+    EXPECT_LT(
+        (continued.differential_inductance - reference.differential_inductance)
+                .norm() /
+            reference.differential_inductance.norm(),
+        1e-8);
+    RecordProperty(planar ? "planar_direct_iterations"
+                          : "solid_direct_iterations",
+                   reference.iterations);
+    RecordProperty(planar ? "planar_continuation_iterations"
+                          : "solid_continuation_iterations",
+                   continued.iterations);
+    model.options.max_iterations = 1;
+    const auto failed = solve(model);
+    ASSERT_TRUE(std::holds_alternative<Error>(failed));
+    EXPECT_NE(error_of(failed).find("continuation stage"), std::string::npos);
+    EXPECT_NE(error_of(failed).find("Newton did not converge"),
+              std::string::npos);
+  }
+}
+
+TEST(MagneticNonlinear, PermanentMagnetDrivesSteelAcrossTheKneeAndReverses) {
+  for (int kind : {0, 1}) {
+    SCOPED_TRACE(kind);
+    auto model = nonlinear_planar(kind);
+    model.planar_coils.clear();
+    model.currents.clear();
+    model.subcases = {{}};
+    model.materials[3] = {1.05, 0, Vector(1.2, 0, 0), 0};
+    model.properties[3] = 3;
+    for (int set : {1, 2})
+      for (int id : model.element_sets.at(set))
+        for (auto &cell : model.elements)
+          if (cell.id == id)
+            cell.property = 3;
+    const auto positive = solve(model);
+    ASSERT_TRUE(std::holds_alternative<Results>(positive))
+        << error_of(positive);
+    const auto &result = std::get<Results>(positive);
+    const auto &state = result.cases[0];
+    const auto regimes = field_regimes(model, result, state);
+    EXPECT_GT(state.iterations, 1);
+    EXPECT_GT(regimes.points[1], 0);
+    EXPECT_GT(regimes.points[2], 0);
+    EXPECT_FALSE(state.extrapolated);
+    EXPECT_LE(state.residual, model.options.nonlinear_tolerance);
+    model.materials[3].remanence *= -1;
+    const auto negative = solve(model);
+    ASSERT_TRUE(std::holds_alternative<Results>(negative))
+        << error_of(negative);
+    const auto &reversed = std::get<Results>(negative).cases[0];
+    EXPECT_LT((state.potential + reversed.potential).norm() /
+                  state.potential.norm(),
+              1e-9);
+    EXPECT_NEAR(state.energy, reversed.energy, 1e-10 * state.energy);
+  }
+}
+
+TEST(MagneticParser, BHCurvesRejectNonpositiveTangentsAndMissingOrigin) {
+  const std::string deck = R"(SOL MAGSTAT
+CEND
+BEGIN BULK
+GRID,1,,0,0,0
+GRID,2,,1,0,0
+GRID,3,,0,1,0
+GRID,4,,0,0,1
+CTETRA,1,1,1,2,3,4
+PSOLID,1,1
+MATMAG,1,1,1
+)";
+  for (const std::string points :
+       {"BHPOINT,1,0,0\n",                   // insufficient to define a slope
+        "BHPOINT,1,.1,0\nBHPOINT,1,1,100\n", // missing (0,0)
+        "BHPOINT,1,0,0\nBHPOINT,1,1,100\nBHPOINT,1,1,200\n",   // duplicate B
+        "BHPOINT,1,0,0\nBHPOINT,1,1,100\nBHPOINT,1,.5,200\n",  // unsorted B
+        "BHPOINT,1,0,0\nBHPOINT,1,1,100\nBHPOINT,1,2,100\n",   // zero tangent
+        "BHPOINT,1,0,0\nBHPOINT,1,1,100\nBHPOINT,1,2,50\n"}) { // negative
+                                                               // tangent
+    SCOPED_TRACE(points);
+    const auto parsed = parse_string(deck + points);
+    ASSERT_TRUE(std::holds_alternative<Error>(parsed));
+    EXPECT_NE(error_of(parsed).find("BHPOINT"), std::string::npos);
+  }
+  // Positive differential permeability is required; the slopes themselves
+  // need not increase monotonically for the constitutive tangent to be SPD.
+  const auto valid =
+      parse_string(deck + "BHPOINT,1,0,0\nBHPOINT,1,1,100\nBHPOINT,1,2,150\n");
+  ASSERT_TRUE(std::holds_alternative<Model>(valid)) << error_of(valid);
+  const auto &model = std::get<Model>(valid);
+  const auto response = material_response(
+      model.materials.at(1), model.bh_tables.at(1), Vector(1.5, 0, 0));
+  EXPECT_DOUBLE_EQ(response.h.x(), 125);
+  EXPECT_DOUBLE_EQ(response.tangent(0, 0), 50);
+  EXPECT_NEAR(response.tangent(1, 1), 125 / 1.5, 1e-12);
 }
