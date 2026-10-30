@@ -58,6 +58,96 @@ Result<Mesh> region_mesh(const Mesh &mesh, std::span<const int> ids) {
   }
   return out;
 }
+// COIL CUT: internal faces separating coil cells whose centroids have local
+// z < 0 from those with z >= 0, keeping face centroids with local x > 0, and
+// oriented along +z. The zig-zag face set is a valid cut because cut flux is
+// the same through any separating surface of a conserved current.
+Result<std::vector<std::pair<int, int>>>
+plane_cut(const Model &model, const Mesh &coil_mesh, const Coil &coil) {
+  Matrix frame = Matrix::Identity();
+  Vector origin = Vector::Zero();
+  if (coil.cut_coordinates) {
+    const auto &cs = model.coordinates.at(coil.cut_coordinates);
+    frame = coordinate_axes(cs);
+    origin = cs.a;
+  }
+  auto local = [&](const Vector &x) -> Vector {
+    return frame.transpose() * (x - origin);
+  };
+  std::vector<double> z;
+  for (const auto &c : coil_mesh.cells) {
+    Vector center = Vector::Zero();
+    for (const auto &x : c.points)
+      center += x / static_cast<double>(c.points.size());
+    z.push_back(local(center).z());
+  }
+  std::vector<std::pair<int, int>> out;
+  for (size_t fi = 0; fi < coil_mesh.faces.size(); ++fi) {
+    const auto &f = coil_mesh.faces[fi];
+    if (f.cells[1] < 0 || (z[f.cells[0]] < 0) == (z[f.cells[1]] < 0) ||
+        !(local(f.center).x() > 0))
+      continue;
+    const auto &lower = coil_mesh.cells[z[f.cells[0]] < 0 ? f.cells[0]
+                                                          : f.cells[1]];
+    const auto k = std::find(lower.faces.begin(), lower.faces.end(),
+                             static_cast<int>(fi)) -
+                   lower.faces.begin();
+    out.emplace_back(static_cast<int>(fi), lower.face_sign[k]);
+  }
+  if (out.empty())
+    return Error{std::format("COIL {} CUT half-plane (z = 0, x > 0 of "
+                             "coordinates {}) does not cross the winding",
+                             coil.id, coil.cut_coordinates)};
+  return out;
+}
+// A closed coil's cut must be one complete cross section. Its oriented faces
+// must close up except on the winding surface, and removing them must leave
+// the winding connected, so that the cut is crossed exactly once.
+Status closed_cut(const Mesh &coil_mesh,
+                  std::span<const std::pair<int, int>> cut, int id) {
+  std::set<std::pair<int, int>> surface;
+  for (const auto &f : coil_mesh.faces)
+    if (f.cells[1] < 0)
+      for (size_t i = 0; i < f.nodes.size(); ++i)
+        surface.insert(std::minmax(f.nodes[i],
+                                   f.nodes[(i + 1) % f.nodes.size()]));
+  std::map<std::pair<int, int>, int> circulation;
+  std::set<int> faces;
+  for (auto [fi, sign] : cut) {
+    faces.insert(fi);
+    auto nodes = coil_mesh.faces[fi].nodes;
+    if (sign < 0)
+      std::reverse(nodes.begin(), nodes.end());
+    for (size_t i = 0; i < nodes.size(); ++i) {
+      const int a = nodes[i], b = nodes[(i + 1) % nodes.size()];
+      circulation[std::minmax(a, b)] += a < b ? 1 : -1;
+    }
+  }
+  for (const auto &[edge, count] : circulation)
+    if (count != 0 && !surface.contains(edge))
+      return Error{std::format("COIL {} cut does not span a complete cross "
+                               "section of the winding",
+                               id)};
+  std::vector<bool> seen(coil_mesh.cells.size(), false);
+  std::queue<int> queue;
+  queue.push(0);
+  seen[0] = true;
+  while (!queue.empty()) {
+    const int c = queue.front();
+    queue.pop();
+    for (int f : coil_mesh.cells[c].faces)
+      if (!faces.contains(f))
+        for (int neighbor : coil_mesh.faces[f].cells)
+          if (neighbor >= 0 && !seen[neighbor]) {
+            seen[neighbor] = true;
+            queue.push(neighbor);
+          }
+  }
+  if (std::find(seen.begin(), seen.end(), false) != seen.end())
+    return Error{std::format("COIL {} cut crosses the winding more than once",
+                             id)};
+  return {};
+}
 Result<Source> coil_source(const Model &model, const Mesh &mesh,
                            const Coil &coil) {
   Source source;
@@ -79,15 +169,32 @@ Result<Source> coil_source(const Model &model, const Mesh &mesh,
   if (characteristic != (source.closed ? 0 : 1))
     return Error{"COIL must be a single solid loop or an open conductor "
                  "without handles"};
-  auto section = selected_faces(model, source.mesh, coil.start);
+  auto section = coil.plane_cut ? plane_cut(model, source.mesh, coil)
+                                 : selected_faces(model, source.mesh, coil.start);
   if (auto *e = std::get_if<Error>(&section))
     return *e;
   const auto &start = std::get<std::vector<std::pair<int, int>>>(section);
+  if (source.closed)
+    if (auto e = closed_cut(source.mesh, start, coil.id))
+      return *e;
   std::vector<int> terminals;
   double area = 0;
+  // A CUT zig-zags through cells, so its section area is the area projected
+  // onto the cut normal; an FSET section is taken as stated.
+  Vector cut_normal = Vector::Zero();
+  if (coil.plane_cut)
+    cut_normal = coil.cut_coordinates
+                     ? Vector(coordinate_axes(
+                                  model.coordinates.at(coil.cut_coordinates))
+                                  .col(2))
+                     : Vector(Vector::UnitZ());
   for (auto [id, sign] : start) {
     const auto &f = source.mesh.faces[id];
-    area += f.area;
+    if (coil.plane_cut)
+      for (const auto &q : face_quadrature(source.mesh, f))
+        area += sign * q.weight * q.normal.dot(cut_normal);
+    else
+      area += f.area;
     if (source.closed && f.cells[1] < 0)
       return Error{"Closed COIL cut must consist of internal faces"};
     if (!source.closed) {

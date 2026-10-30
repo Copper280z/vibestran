@@ -68,6 +68,10 @@ struct Coil {
   int id{0}, elements{0};
   double turns{1};
   int start{0}, end{0};
+  // COIL CUT: a closed coil's cut is derived from the half-plane z = 0, x > 0
+  // of a rectangular system, with positive circulation along +z.
+  bool plane_cut{false};
+  int cut_coordinates{0};
 };
 struct PlanarCoil {
   int id{0}, elements{0};
@@ -111,13 +115,20 @@ struct Boundary {
   int faces{0};
   Vector field{Vector::Zero()};
 }; // A = B x x / 2
+// MPROBE: position in basic once parsed (CP is resolved like GRID CP); the
+// field is also reported in the local axes of output_coordinates (CD).
 struct Probe {
   int id{0};
   Vector position{Vector::Zero()};
+  int coordinates{0}, output_coordinates{0};
 };
+// MFORCE: FACES integrates an explicit FSET; BODY derives the surface around
+// an ESET through `layers` air layers. Torque is about the origin of
+// coordinates and is also reported in its axes.
 struct ForceSurface {
-  int id{0}, faces{0};
-  Vector origin{Vector::Zero()};
+  int id{0}, set{0};
+  bool body{false};
+  int coordinates{0}, layers{1};
 };
 enum class WireMesh { Auto, Hex, Tet };
 struct Options {

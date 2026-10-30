@@ -55,8 +55,9 @@ ENDDATA
 ```
 
 SI is the default: m, A, T, A/m, S/m, J, N, N m, Wb-turn, H. `PARAM,MAGLEN,s`
-multiplies all deck coordinates, section dimensions, probe positions, torque
-origins, `MAG2D` depth and `WIRESTEP` by `s`. It does not rescale current, conductivity, B–H
+multiplies all deck coordinates (including coordinate-system origins, so
+probe positions and torque origins), section dimensions, `MAG2D` depth and
+`WIRESTEP` by `s`. It does not rescale current, conductivity, B–H
 data or remanence. Use `s=0.001` for millimeter geometry. Lengths are converted
 once on parsing; the C++ magnetic model API takes resolved SI coordinates.
 
@@ -78,7 +79,7 @@ once on parsing; the C++ magnetic model API takes resolved SI coordinates.
 | `MATCOND` | `MID,SIGMA` (positive conductivity in S/m) |
 | `ESET` | `SID,EID...` or `SID,PROP,PID...` (repeatable rows, `THRU` allowed) |
 | `FSET` | `SID,EID,G1,G2[,G3[,G4]]` (2D edge or 3D triangular/quadrilateral face) |
-| `COIL` | `ID,ESET,N,START_FSET,END_FSET` |
+| `COIL` | `ID,ESET,N,START_FSET,END_FSET` or `ID,ESET,N,CUT,CID` (closed coil) |
 | `PWIRE` | `PID,MID,ROUND,DIAMETER` or `PID,MID,RECT,WIDTH,HEIGHT` |
 | `CWIRE` | `EID,PID,G1,G2,G0` or `EID,PID,G1,G2,X1,X2,X3` |
 | `WIREPATH` | `ID,EID` (names the CWIRE path containing EID; positive G1 to G2 of EID) |
@@ -86,8 +87,8 @@ once on parsing; the C++ magnetic model API takes resolved SI coordinates.
 | `ICIRC` | `SID,ID,CURRENT` (terminal current of a circuit or unlisted source) |
 | `LOAD` | `SID,S,S1,L1,S2,L2,...` |
 | `MBC` | `SID,FSET,ZERO` or `SID,FSET,UNIFORM,BX,BY,BZ` |
-| `MPROBE` | `ID,X,Y,Z` |
-| `MFORCE` | `ID,FSET,ORIGIN_X,ORIGIN_Y,ORIGIN_Z` |
+| `MPROBE` | `ID,CP,X1,X2,X3,CD` (GRID layout; field also reported in CD axes) |
+| `MFORCE` | `ID,FACES,FSET,CID` or `ID,BODY,ESET,CID,LAYER` (torque about CID origin) |
 
 Case control accepts `LOAD`, `MAGBC`, `LABEL`, `TITLE`, `SUBTITLE` and `SUBCASE`.
 Global LOAD/MAGBC settings are inherited by subcases. Unexcited subcases can
@@ -142,6 +143,25 @@ $ Repeat FSET for every face covering the one internal cut.
 FSET,41,1001,11,12,13
 COIL,50,40,80,41
 ICIRC,100,50,3.5
+```
+
+`COIL,ID,ESET,N,CUT,CID` derives the cut instead, from the half-plane z = 0,
+x > 0 of the CORD2R CID (0 for basic), with positive circulation along +z.
+Place the CID origin on the coil axis with z along the current where it
+crosses, and x pointing at the crossing to use. The cut is the set of
+internal faces separating coil cells whose centroids have local z < 0 from
+those with z >= 0, keeping faces with local x > 0. It may zig-zag through
+cells. Since a conserved current has the same flux through any separating
+surface, the source is the same as with a flat cut. Its stranded section area
+is the cut's area projected onto z. Any closed-coil cut, FSET or derived,
+must form one complete cross section that the winding crosses once;
+otherwise the error says the cut is incomplete or crosses the winding more
+than once.
+
+```text
+CORD2R,60,,0.,0.,0.,0.,1.,0.     $ z along +y where the coil crosses x > 0
+,1.,0.,0.
+COIL,50,40,80,CUT,60
 ```
 
 For an open winding, START_FSET is the entry cap (normals into the conductor)
@@ -328,10 +348,11 @@ unavailable.
 A volumetric COIL cut or an in-plane CWIRE path does not define an axial current;
 those cards remain exclusive to 3D.
 
-For 2D MFORCE, each FSET row contains two edge grids. Order the contour so that
-`tangent cross n` points outward (counterclockwise when viewed from +n). Use a
-closed contour strictly inside air. Forces and torque vectors use global axes;
-torque about n includes DEPTH. Both nonlinear steel and reversible PMs work in
+For 2D MFORCE FACES, each FSET row contains two edge grids. Order the contour
+so that `tangent cross n` points outward (counterclockwise when viewed from
++n). Use a closed contour strictly inside air; MFORCE BODY derives it instead.
+Forces and torque vectors use global axes, and CID axes when given; torque
+about n includes DEPTH. Both nonlinear steel and reversible PMs work in
 planar mode.
 
 ```sh
@@ -418,8 +439,31 @@ reciprocity consistency. Open-source linkage and inductance are unavailable
 
 MFORCE integrates Maxwell stress on a closed outward-oriented mesh-face surface
 with mu_r=1, remanence-free material on both sides, reporting force and torque
-about the stated origin. The result is the force on everything the surface
-encloses. A face may bound a winding but must not cut through current: a face
+about the origin of CID (basic for 0), in basic and in CID axes. The result is
+the force on everything the surface encloses. `MFORCE,ID,FACES,FSET,CID`
+integrates an explicit FSET surface.
+
+`MFORCE,ID,BODY,ESET,CID,LAYER` derives the surface from a body element set.
+Layer 1 is every cell sharing a grid with the body, and each further layer
+(LAYER defaults to 1) the cells sharing a grid with the previous one. The
+surface is every face with exactly one side in the body plus its layers,
+oriented outward. It includes cavity walls, so a stator's surface has a
+wall in the air gap and excludes the rotor. Every layer cell, and every cell
+just outside the surface, must be nonmagnetic (MUR=1, no table, no
+remanence); plastic, potting and windings qualify. A magnetic cell sharing a
+grid with the body is touching it: Maxwell stress cannot separate the force
+between touching parts, so add it to the body set (rotor = shaft + core +
+magnets) or mesh a gap. A magnetic cell further out means the gap is too
+thin for LAYER, and a body within LAYER cells of the domain exterior is
+rejected; request the opposite body instead. The body need not be connected
+or manifold. A disconnected set reports the total and, in JSON `components`,
+the force on each connected piece.
+
+```text
+ESET,70,PROP,21,22,23       $ shaft, core and magnet properties
+MFORCE,1,BODY,70,100,2      $ torque about the rotor frame origin
+```
+ A face may bound a winding but must not cut through current: a face
 with COIL or COIL2D cells on both sides, or one crossing a CWIRE conductor
 (including along its internal section faces), is rejected with the face,
 element and source named. Keep the surface clear of material interfaces. The
@@ -436,9 +480,11 @@ For `name.F06`, the solver also writes:
 - `name_sc<ID>.vtu`: unsmoothed cell B and H plus element IDs.
 - Planar field VTU also contains nodal `A_normal_Wb_per_m`; JSON records dimension and depth.
 - `name_coil<ID>.vtu` / `name_wire<ID>.vtu`: source meshes and J per ampere.
-- `name.probes.csv`: field at requested probes. On an element boundary this is
-  the arithmetic mean of the incident cell traces, including different materials;
-  place probes within the intended material when a one-sided value is needed.
+- `name.probes.csv`: field at requested probes, in basic components and in the
+  local directions of CD at the probe (`B1_T` ... `H3_A_per_m`, e.g. radial
+  and tangential for a CORD2C). On an element boundary this is the arithmetic
+  mean of the incident cell traces, including different materials; place
+  probes within the intended material when a one-sided value is needed.
 
 JSON `differential_inductance_H` follows the source array and
 `circuit_inductance_H` the circuit array; unavailable entries are `null`. A

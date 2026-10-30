@@ -335,6 +335,154 @@ Status current_free(const Mesh &mesh, const Face &f, int request,
   }
   return {};
 }
+bool magnetic(const Material &m) {
+  return m.mur != 1 || m.bh_table != 0 || m.br != 0;
+}
+// A MFORCE BODY surface: every face with exactly one side in R, the body
+// plus `layers` grid-adjacent layers of nonmagnetic cells, oriented out of R.
+// It includes cavity walls, so an annular body excludes what it surrounds.
+// component[k] is the connected piece of R that face k bounds.
+struct BodySurface {
+  std::vector<std::pair<int, int>> faces;
+  std::vector<int> component;
+  int components{0};
+};
+Result<BodySurface> body_surface(const Model &model, const Mesh &mesh,
+                                 const std::vector<std::vector<int>> &incident,
+                                 const ForceSurface &request) {
+  const int nc = static_cast<int>(mesh.cells.size());
+  std::vector<int> layer(nc, -1); // 0 for the body, k for layer k
+  std::vector<int> frontier;
+  for (int id : model.element_sets.at(request.set)) {
+    const int ci = mesh.element_index.at(id);
+    if (layer[ci] < 0)
+      frontier.push_back(ci);
+    layer[ci] = 0;
+  }
+  auto is_magnetic = [&](int ci) {
+    return magnetic(model.materials.at(mesh.cells[ci].material));
+  };
+  for (int k = 1; k <= request.layers; ++k) {
+    std::vector<int> next;
+    for (int ci : frontier)
+      for (int n : mesh.cells[ci].nodes)
+        for (int neighbor : incident[n])
+          if (layer[neighbor] < 0) {
+            if (is_magnetic(neighbor))
+              return Error{
+                  k == 1 ? std::format(
+                               "MFORCE {}: magnetic element {} touches body "
+                               "ESET {}; add it to the body set or mesh a "
+                               "nonmagnetic gap between them",
+                               request.id, mesh.cells[neighbor].id, request.set)
+                         : std::format(
+                               "MFORCE {}: magnetic element {} lies within {} "
+                               "layers of body ESET {}; use a smaller LAYER or "
+                               "more air layers",
+                               request.id, mesh.cells[neighbor].id, k,
+                               request.set)};
+            layer[neighbor] = k;
+            next.push_back(neighbor);
+          }
+    frontier = std::move(next);
+  }
+  // Connected pieces of R through shared grids.
+  std::vector<int> piece(nc, -1);
+  BodySurface out;
+  for (int seed = 0; seed < nc; ++seed) {
+    if (layer[seed] < 0 || piece[seed] >= 0)
+      continue;
+    std::vector<int> stack{seed};
+    piece[seed] = out.components;
+    while (!stack.empty()) {
+      const int ci = stack.back();
+      stack.pop_back();
+      for (int n : mesh.cells[ci].nodes)
+        for (int neighbor : incident[n])
+          if (layer[neighbor] >= 0 && piece[neighbor] < 0) {
+            piece[neighbor] = out.components;
+            stack.push_back(neighbor);
+          }
+    }
+    ++out.components;
+  }
+  for (int ci = 0; ci < nc; ++ci) {
+    if (layer[ci] < 0)
+      continue;
+    const auto &cell = mesh.cells[ci];
+    for (size_t k = 0; k < cell.faces.size(); ++k) {
+      const auto &f = mesh.faces[cell.faces[k]];
+      const int other = f.cells[0] == ci ? f.cells[1] : f.cells[0];
+      if (other < 0)
+        return Error{std::format(
+            "MFORCE {}: body ESET {} is within {} cells of the domain "
+            "boundary at element {}; request the force on the opposite body",
+            request.id, request.set, request.layers, cell.id)};
+      if (layer[other] >= 0)
+        continue;
+      if (is_magnetic(other))
+        return Error{std::format(
+            "MFORCE {}: magnetic element {} lies within {} layers of body "
+            "ESET {}; use a smaller LAYER or more air layers",
+            request.id, mesh.cells[other].id, request.layers + 1,
+            request.set)};
+      out.faces.emplace_back(cell.faces[k], cell.face_sign[k]);
+      out.component.push_back(piece[ci]);
+    }
+  }
+  return out;
+}
+// Validates an explicit FACES surface: closed, consistently and outwardly
+// oriented, strictly inside the domain.
+Status explicit_surface(const Mesh &mesh,
+                        std::span<const std::pair<int, int>> selected) {
+  std::map<std::array<int, 2>, std::pair<int, int>> boundary;
+  for (auto [fi, sign] : selected) {
+    const auto &f = mesh.faces[fi];
+    if (f.cells[1] < 0)
+      return Error{
+          "MFORCE surface must lie strictly inside the magnetic domain"};
+    // A planar contour closes at its end grids; a 3D surface at its edges.
+    if (mesh.planar) {
+      auto &first = boundary[{f.nodes[0], f.nodes[0]}];
+      auto &second = boundary[{f.nodes[1], f.nodes[1]}];
+      ++first.first;
+      ++second.first;
+      first.second -= sign;
+      second.second += sign;
+      continue;
+    }
+    for (size_t i = 0; i < f.nodes.size(); ++i) {
+      int a = f.nodes[i], b = f.nodes[(i + 1) % f.nodes.size()],
+          direction = sign;
+      if (a > b) {
+        std::swap(a, b);
+        direction = -direction;
+      }
+      auto &count = boundary[{a, b}];
+      ++count.first;
+      count.second += direction;
+    }
+  }
+  for (const auto &[edge, count] : boundary) {
+    (void)edge;
+    if (count.first != 2 || count.second != 0)
+      return Error{mesh.planar ? "MFORCE planar FSET must be a closed, "
+                                 "consistently oriented contour"
+                               : "MFORCE FSET must be a closed, consistently "
+                                 "oriented surface"};
+  }
+  // Positive signed enclosed volume distinguishes outward from inward
+  // normals.
+  double volume = 0;
+  for (auto [fi, sign] : selected)
+    for (const auto &q : face_quadrature(mesh, mesh.faces[fi]))
+      volume += sign * q.weight * q.normal.dot(q.position) /
+                (mesh.planar ? 2 : 3);
+  if (!(volume > 0))
+    return Error{"MFORCE normals must point outward"};
+  return {};
+}
 Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
                                         std::span<const Source> sources,
                                         const Eigen::VectorXd &potential) {
@@ -346,28 +494,43 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
   for (const auto &source : sources)
     if (source.wire)
       wire_indexes.emplace_back(source.mesh);
+  std::vector<std::vector<int>> incident(mesh.nodes.size());
+  for (size_t ci = 0; ci < mesh.cells.size(); ++ci)
+    for (int n : mesh.cells[ci].nodes)
+      incident[n].push_back(static_cast<int>(ci));
   for (const auto &request : model.forces) {
-    auto selected = selected_faces(model, mesh, request.faces);
-    if (auto *e = std::get_if<Error>(&selected))
-      return *e;
-    std::map<std::array<int, 2>, std::pair<int, int>> boundary;
-    std::map<int, std::pair<int, int>> line_boundary;
+    std::vector<std::pair<int, int>> faces;
+    std::vector<int> component;
     ForceResult result;
     result.id = request.id;
-    for (auto [fi, sign] :
-         std::get<std::vector<std::pair<int, int>>>(selected)) {
+    if (request.body) {
+      auto derived = body_surface(model, mesh, incident, request);
+      if (auto *e = std::get_if<Error>(&derived))
+        return *e;
+      auto &surface = std::get<BodySurface>(derived);
+      faces = std::move(surface.faces);
+      component = std::move(surface.component);
+      result.components.resize(surface.components);
+    } else {
+      auto selected = selected_faces(model, mesh, request.set);
+      if (auto *e = std::get_if<Error>(&selected))
+        return *e;
+      faces = std::get<std::vector<std::pair<int, int>>>(std::move(selected));
+      if (auto e = explicit_surface(mesh, faces))
+        return *e;
+    }
+    const Vector origin = request.coordinates
+                              ? model.coordinates.at(request.coordinates).a
+                              : Vector::Zero();
+    for (size_t k = 0; k < faces.size(); ++k) {
+      const auto [fi, sign] = faces[k];
       const auto &f = mesh.faces[fi];
-      if (f.cells[1] < 0)
-        return Error{
-            "MFORCE surface must lie strictly inside the magnetic domain"};
-      for (int ci : f.cells) {
-        const auto &m = model.materials.at(mesh.cells[ci].material);
-        if (m.mur != 1 || m.bh_table || m.br != 0)
+      for (int ci : f.cells)
+        if (magnetic(model.materials.at(mesh.cells[ci].material)))
           return Error{std::format(
               "MFORCE {}: surface face ({}) touches magnetic element {}; "
               "both sides of every face must be mu_r=1 without remanence",
               request.id, face_grids(mesh, f), mesh.cells[ci].id)};
-      }
       if (auto e = current_free(mesh, f, request.id, windings, sources,
                                 wire_indexes))
         return *e;
@@ -379,53 +542,16 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
         const Vector force =
             q.weight * mesh.depth / mu0 *
             (b * b.dot(normal) - .5 * b.squaredNorm() * normal);
+        const Vector torque = (q.position - origin).cross(force);
         result.force += force;
-        result.torque += (q.position - request.origin).cross(force);
-      }
-      if (mesh.planar) {
-        ++line_boundary[f.nodes[0]].first;
-        ++line_boundary[f.nodes[1]].first;
-        line_boundary[f.nodes[0]].second -= sign;
-        line_boundary[f.nodes[1]].second += sign;
-        continue;
-      }
-      for (size_t i = 0; i < f.nodes.size(); ++i) {
-        int a = f.nodes[i], bnode = f.nodes[(i + 1) % f.nodes.size()],
-            direction = sign;
-        if (a > bnode) {
-          std::swap(a, bnode);
-          direction = -direction;
+        result.torque += torque;
+        if (!component.empty()) {
+          result.components[component[k]].force += force;
+          result.components[component[k]].torque += torque;
         }
-        auto &count = boundary[{a, bnode}];
-        ++count.first;
-        count.second += direction;
       }
     }
-    for (const auto &[edge, count] : boundary) {
-      (void)edge;
-      if (count.first != 2 || count.second != 0)
-        return Error{
-            "MFORCE FSET must be a closed, consistently oriented surface"};
-    }
-    for (const auto &[node, count] : line_boundary) {
-      (void)node;
-      if (count.first != 2 || count.second != 0)
-        return Error{"MFORCE planar FSET must be a closed, consistently "
-                     "oriented contour"};
-    }
-    // Positive signed enclosed volume distinguishes outward from inward
-    // normals.
-    double volume = 0;
-    for (auto [fi, sign] :
-         std::get<std::vector<std::pair<int, int>>>(selected)) {
-      const auto &f = mesh.faces[fi];
-      for (const auto &q : face_quadrature(mesh, f))
-        volume += sign * q.weight * q.normal.dot(q.position - request.origin) /
-                  (mesh.planar ? 2 : 3);
-    }
-    if (!(volume > 0))
-      return Error{"MFORCE normals must point outward"};
-    results.push_back(result);
+    results.push_back(std::move(result));
   }
   return results;
 }

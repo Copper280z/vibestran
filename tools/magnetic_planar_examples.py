@@ -78,9 +78,9 @@ def planar_deck(kind="winding", n=12, element="quad", depth=.02, angle=0., curre
             if len(adjacent) == 2 and len(selected) == 1:
                 eid,a,b = selected[0]
                 lines.append(f"FSET,1,{eid},{a},{b}")
-        lines.append("MFORCE,1,1,0,0,0")
-        lines.append("MPROBE,1,.006,.001,0")
-    else: lines.append("MPROBE,1,0,0,0")
+        lines.append("MFORCE,1,FACES,1,0")
+        lines.append("MPROBE,1,0,.006,.001,0")
+    else: lines.append("MPROBE,1,0,0,0,0")
     return "\n".join(lines+["ENDDATA",""])
 
 

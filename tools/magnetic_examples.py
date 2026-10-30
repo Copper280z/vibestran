@@ -181,8 +181,8 @@ def deck(kind="loop", n=8, extent=2.0, angle=0.0, current=1.0, element="tet"):
                 raise ValueError("Mesh too coarse to represent coil; use n=12 or finer")
             lines += ["COIL,1,1,20,1", f"ICIRC,1,1,{current}"]
         else:
-            lines += ["MFORCE,1,1,0,0,0"]
-    lines += ["MPROBE,1,0,0,0", "MPROBE,2,0,0," + ("0.008" if kind == "motor" else "0.3"), "ENDDATA"]
+            lines += ["MFORCE,1,FACES,1,0"]
+    lines += ["MPROBE,1,0,0,0,0", "MPROBE,2,0,0,0," + ("0.008" if kind == "motor" else "0.3"), "ENDDATA"]
     return "\n".join(lines) + "\n"
 
 

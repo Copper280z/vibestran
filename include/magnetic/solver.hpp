@@ -31,9 +31,14 @@ struct CircuitResults {
   int id{0};
   double current{0}, linkage{0};
 };
+struct ForceComponent {
+  Vector force{Vector::Zero()}, torque{Vector::Zero()};
+};
 struct ForceResult {
   int id{0};
-  Vector force{Vector::Zero()}, torque{Vector::Zero()};
+  Vector force{Vector::Zero()}, torque{Vector::Zero()}; // basic axes
+  // BODY requests: one entry per connected piece of the enclosed region.
+  std::vector<ForceComponent> components;
 };
 struct CaseResults {
   int id{0}, iterations{0};

@@ -185,7 +185,7 @@ Status write_results(const Model &model, const Results &results,
   }
   json << "],\"cases\":[";
   csv << "subcase,probe,x_m,y_m,z_m,Bx_T,By_T,Bz_T,Hx_A_per_m,Hy_A_per_m,Hz_A_"
-         "per_m\n";
+         "per_m,cd,B1_T,B2_T,B3_T,H1_A_per_m,H2_A_per_m,H3_A_per_m\n";
   for (size_t ci = 0; ci < results.cases.size(); ++ci) {
     const auto &c = results.cases[ci];
     if (ci)
@@ -239,28 +239,78 @@ Status write_results(const Model &model, const Results &results,
     json << ",\"forces\":[";
     for (size_t i = 0; i < c.forces.size(); ++i) {
       const auto &f = c.forces[i];
+      const auto &request = model.forces[i];
+      // Torque is about the CID origin; the local components use its axes.
+      const Matrix axes =
+          request.coordinates
+              ? coordinate_axes(model.coordinates.at(request.coordinates))
+              : Matrix::Identity();
       if (i)
         json << ',';
-      json << "{\"id\":" << f.id << ",\"force_N\":";
+      json << "{\"id\":" << f.id << ",\"cid\":" << request.coordinates
+           << ",\"force_N\":";
       vector_json(json, f.force);
       json << ",\"torque_Nm\":";
       vector_json(json, f.torque);
-      json << '}';
-      f06 << "SURFACE " << f.id << " force(N): " << f.force.transpose()
-          << " torque(Nm): " << f.torque.transpose() << '\n';
+      json << ",\"force_local_N\":";
+      vector_json(json, axes.transpose() * f.force);
+      json << ",\"torque_local_Nm\":";
+      vector_json(json, axes.transpose() * f.torque);
+      json << ",\"components\":[";
+      for (size_t k = 0; k < f.components.size(); ++k) {
+        if (k)
+          json << ',';
+        json << "{\"force_N\":";
+        vector_json(json, f.components[k].force);
+        json << ",\"torque_Nm\":";
+        vector_json(json, f.components[k].torque);
+        json << '}';
+      }
+      json << "]}";
+      f06 << (request.body ? "BODY " : "SURFACE ") << f.id
+          << " force(N): " << f.force.transpose()
+          << " torque(Nm): " << f.torque.transpose();
+      if (request.coordinates)
+        f06 << "  in CID " << request.coordinates
+            << " force(N): " << (axes.transpose() * f.force).transpose()
+            << " torque(Nm): " << (axes.transpose() * f.torque).transpose();
+      f06 << '\n';
+      for (size_t k = 0; k < f.components.size() && f.components.size() > 1;
+           ++k)
+        f06 << "  piece " << k + 1
+            << " force(N): " << f.components[k].force.transpose()
+            << " torque(Nm): " << f.components[k].torque.transpose() << '\n';
     }
     json << "],\"probes\":[";
     for (size_t i = 0; i < model.probes.size(); ++i) {
+      const auto &probe = model.probes[i];
+      // CD components use the local directions at the probe, e.g. radial
+      // and tangential for a CORD2C.
+      const Matrix axes =
+          probe.output_coordinates
+              ? local_axes(model.coordinates.at(probe.output_coordinates),
+                           probe.position)
+              : Matrix::Identity();
+      const Vector b = axes.transpose() * c.probe_b[i],
+                   h = axes.transpose() * c.probe_h[i];
       if (i)
         json << ',';
-      json << "{\"id\":" << model.probes[i].id << ",\"B_T\":";
+      json << "{\"id\":" << probe.id << ",\"cd\":" << probe.output_coordinates
+           << ",\"B_T\":";
       vector_json(json, c.probe_b[i]);
       json << ",\"H_A_per_m\":";
       vector_json(json, c.probe_h[i]);
+      json << ",\"B_local_T\":";
+      vector_json(json, b);
+      json << ",\"H_local_A_per_m\":";
+      vector_json(json, h);
       json << '}';
-      csv << c.id << ',' << model.probes[i].id;
-      for (const Vector *v :
-           {&model.probes[i].position, &c.probe_b[i], &c.probe_h[i]})
+      csv << c.id << ',' << probe.id;
+      for (const Vector *v : {&probe.position, &c.probe_b[i], &c.probe_h[i]})
+        for (int k = 0; k < 3; ++k)
+          csv << ',' << (*v)[k];
+      csv << ',' << probe.output_coordinates;
+      for (const Vector *v : {&b, &h})
         for (int k = 0; k < 3; ++k)
           csv << ',' << (*v)[k];
       csv << '\n';

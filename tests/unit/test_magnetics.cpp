@@ -476,7 +476,7 @@ TEST(MagneticSolve, UniformFieldEnergyAndZeroNetMaxwellForce) {
       model.face_sets[1].push_back(face_selection(
           mesh, static_cast<int>(fi), f.normal.dot(f.center) > 0 ? 1 : -1));
   }
-  model.forces.push_back({1, 1, Vector::Zero()});
+  model.forces.push_back({1, 1});
   model.probes.push_back({1, Vector(0.11, 0.13, 0.17)});
   auto solved = solve(model);
   ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
@@ -749,8 +749,8 @@ TEST(MagneticIO, IncludesFixedFieldsAndResultFieldValues) {
   {
     std::ofstream out(path);
     out << "SOL MAGSTAT\nCEND\nMAGBC=1\nBEGIN BULK\nINCLUDE "
-           "'volume.inc'\nMBC,1,0,UNIFORM,0,0,0.25\nMPROBE,1,0.1,0.1,0."
-           "1\nENDDATA\n";
+           "'volume.inc'\nMBC,1,0,UNIFORM,0,0,0.25\nMPROBE,1,0,0.1,0.1,"
+           "0.1\nENDDATA\n";
     std::ofstream volume(directory / "volume.inc");
     volume << "GRID           1              0.      0.      0.\n"
               "GRID,2,,1,0,0\nGRID,3,,0,1,0\nGRID,4,,0,0,+1\n"
@@ -908,7 +908,7 @@ TEST(MagneticForce, LoopTorqueApproachesMagneticMomentCrossUniformField) {
         model.face_sets[1].push_back(face_selection(
             mesh, static_cast<int>(fi), f.normal.dot(f.center) > 0 ? 1 : -1));
     }
-    model.forces.push_back({1, 1, Vector::Zero()});
+    model.forces.push_back({1, 1});
     auto solved = solve(model);
     ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
     const auto &force = std::get<Results>(solved).cases[0].forces[0];
@@ -1255,7 +1255,7 @@ TEST(MagneticPlanar,
             face_selection(mesh, static_cast<int>(i), c.face_sign[local]));
       }
     }
-    model.forces.push_back({1, 1, Vector::Zero()});
+    model.forces.push_back({1, 1});
     model.boundaries[1] = {0, field};
     model.subcases[0].boundary = 1;
     model.probes = {{1, Vector(.13, .24, 0)}};
@@ -1545,7 +1545,7 @@ TEST(MagneticPlanar, WindingTorqueApproachesAxialCurrentMomentInUniformField) {
             face_selection(mesh, static_cast<int>(i), c.face_sign[local]));
       }
     }
-    m.forces = {{1, 1, Vector::Zero()}};
+    m.forces = {{1, 1}};
     auto solved = solve(m);
     ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
     const auto &f = std::get<Results>(solved).cases[0].forces[0];
@@ -1595,7 +1595,7 @@ TEST(MagneticForce, SurfacesThroughCurrentCarryingVolumeAreRejected) {
   wire.boundaries[1] = {0, Vector(0, 0.001, 0)};
   wire.subcases[0].boundary = 1;
   const auto wire_mesh = std::get<Mesh>(make_mesh(wire));
-  wire.forces = {{1, 1, Vector::Zero()}};
+  wire.forces = {{1, 1}};
   wire.face_sets[1] = centered_surface(wire_mesh, .6);
   EXPECT_NE(error_of(solve(wire)).find("crosses CWIRE path 100000"),
             std::string::npos)
@@ -1615,7 +1615,7 @@ TEST(MagneticForce, SurfacesThroughCurrentCarryingVolumeAreRejected) {
   open_coil(coil);
   const auto coil_mesh = std::get<Mesh>(make_mesh(coil));
   coil.face_sets[3] = centered_surface(coil_mesh, 1. / 3);
-  coil.forces = {{1, 3, Vector::Zero()}};
+  coil.forces = {{1, 3}};
   EXPECT_NE(error_of(solve(coil)).find("lies inside current source 1"),
             std::string::npos)
       << error_of(solve(coil));
@@ -1636,7 +1636,7 @@ TEST(MagneticForce, SurfacesThroughCurrentCarryingVolumeAreRejected) {
   planar.currents = {{1, 3, 1}};
   planar.subcases[0].load = 1;
   const auto planar_mesh = std::get<Mesh>(make_mesh(planar));
-  planar.forces = {{1, 1, Vector::Zero()}};
+  planar.forces = {{1, 1}};
   planar.face_sets[1] = centered_surface(planar_mesh, .5);
   EXPECT_NE(error_of(solve(planar)).find("lies inside current source 1"),
             std::string::npos)
@@ -1837,7 +1837,7 @@ TEST(MagneticWarped, HexAndWedgeFieldsEnergyAndCurvedForceSurface) {
     const Vector field = .2 * (wedge ? Vector::UnitX() : Vector::UnitZ());
     m.boundaries[1] = {0, field};
     m.subcases[0].boundary = 1;
-    m.forces = {{1, 1, Vector::Zero()}};
+    m.forces = {{1, 1}};
     m.probes = {{1, Vector(.12, .11, .17)}};
     auto solved = solve(m);
     ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
@@ -2720,5 +2720,398 @@ CORD2C,5,,0,0,0,0,0,1
     SCOPED_TRACE(cards);
     EXPECT_NE(error_of(parse(steel + cards)).find(message), std::string::npos)
         << error_of(parse(steel + cards));
+  }
+}
+
+TEST(MagneticCurrent, HalfPlaneCoilCutMatchesTheExplicitSection) {
+  // The square ring of ClosedVolumetricCoilCutAndTurnScaling, cut on y = 0,
+  // x > 0 with normal +y. A CORD2R with local z = basic y and local x = basic
+  // x states the same cut.
+  auto model = box(6, 1.5);
+  const auto mesh = std::get<Mesh>(make_mesh(model));
+  for (const auto &c : mesh.cells) {
+    Vector center = Vector::Zero();
+    for (int n : c.nodes)
+      center += mesh.nodes[n] / 4;
+    const double radius = center.head<2>().cwiseAbs().maxCoeff();
+    if (radius > 0.5 && radius < 1 && std::abs(center.z()) < 0.5)
+      model.element_sets[1].push_back(c.id);
+  }
+  for (size_t fi = 0; fi < mesh.faces.size(); ++fi) {
+    const auto &f = mesh.faces[fi];
+    if (std::abs(f.center.y()) < 1e-12 && f.center.x() > 0.5 &&
+        f.center.x() < 1 && std::abs(f.center.z()) < 0.5)
+      model.face_sets[1].push_back(face_selection(mesh, static_cast<int>(fi),
+                                                  f.normal.y() > 0 ? 1 : -1));
+  }
+  model.coils = {{1, 1, 20, 1, 0}};
+  const auto explicit_cut = prepare_sources(model, mesh);
+  ASSERT_TRUE(std::holds_alternative<std::vector<Source>>(explicit_cut))
+      << error_of(explicit_cut);
+  const auto &reference = std::get<std::vector<Source>>(explicit_cut)[0];
+  auto cut_at = [&](const Vector &origin, const Vector &z, const Vector &x) {
+    auto m = model;
+    m.coordinates[9] = {0, 'R', origin, origin + z, origin + x};
+    m.coils = {{1, 1, 20, 0, 0, true, 9}};
+    return prepare_sources(m, mesh);
+  };
+  // On the mesh plane the derived faces are the explicit ones. Shifted into
+  // a layer of tetrahedra, the cut zig-zags, but a conserved current has the
+  // same flux through any separating surface, so the source is unchanged.
+  for (double offset : {0., .1, -.3}) {
+    SCOPED_TRACE(offset);
+    const auto derived =
+        cut_at(Vector(0, offset, 0), Vector::UnitY(), Vector::UnitX());
+    ASSERT_TRUE(std::holds_alternative<std::vector<Source>>(derived))
+        << error_of(derived);
+    const auto &source = std::get<std::vector<Source>>(derived)[0];
+    EXPECT_LT((source.coupling - reference.coupling).norm(),
+              1e-9 * reference.coupling.norm());
+    EXPECT_LT((source.flux - reference.flux).norm(),
+              1e-9 * reference.flux.norm());
+  }
+  // A plane beside the coil, a half-plane edge through the section, and a
+  // half-plane through both sides of the ring are each rejected.
+  EXPECT_NE(error_of(cut_at(Vector(0, 5, 0), Vector::UnitY(), Vector::UnitX()))
+                .find("does not cross the winding"),
+            std::string::npos);
+  EXPECT_NE(
+      error_of(cut_at(Vector(.75, 0, 0), Vector::UnitY(), Vector::UnitX()))
+          .find("complete cross section"),
+      std::string::npos);
+  EXPECT_NE(error_of(cut_at(Vector(0, 0, -1), Vector::UnitY(), Vector::UnitZ()))
+                .find("more than once"),
+            std::string::npos);
+  // The same complete-section check applies to an explicit FSET cut.
+  auto partial = model;
+  partial.face_sets[1].resize(partial.face_sets[1].size() / 2);
+  EXPECT_NE(error_of(prepare_sources(partial, mesh)).find("complete cross"),
+            std::string::npos);
+}
+
+namespace {
+// Hexahedral voxels of brick_box(n) indexed by integer position.
+std::array<int, 3> voxel(const Model &m, const Element &c, int n) {
+  Vector center = Vector::Zero();
+  for (int v : c.nodes)
+    center += m.nodes.at(v).position / 8;
+  std::array<int, 3> index{};
+  for (int k = 0; k < 3; ++k)
+    index[k] = static_cast<int>(std::floor((center[k] + 1) * n / 2));
+  return index;
+}
+// Outward boundary of a cell set, built independently of the solver's body
+// surface construction.
+std::vector<FaceSelection>
+region_boundary(const Mesh &mesh, const std::function<bool(const Cell &)> &in) {
+  std::vector<FaceSelection> out;
+  for (size_t i = 0; i < mesh.faces.size(); ++i) {
+    const auto &f = mesh.faces[i];
+    if (f.cells[1] < 0 || in(mesh.cells[f.cells[0]]) == in(mesh.cells[f.cells[1]]))
+      continue;
+    const auto &c = mesh.cells[f.cells[in(mesh.cells[f.cells[0]]) ? 0 : 1]];
+    const auto k = std::find(c.faces.begin(), c.faces.end(),
+                             static_cast<int>(i)) -
+                   c.faces.begin();
+    out.push_back(face_selection(mesh, static_cast<int>(i), c.face_sign[k]));
+  }
+  return out;
+}
+// Two x-magnetized blocks in air, 3 voxels apart: A at i in [4, 5], B at
+// i in [9, 10], both with j, k in [6, 7] on a 14^3 hexahedral grid.
+Model magnet_pair() {
+  auto m = brick_box(14);
+  m.materials[2] = {1.05, 0, 1};
+  m.properties[2] = {2, 0, 1, true};
+  for (auto &c : m.elements) {
+    const auto [i, j, k] = voxel(m, c, 14);
+    if (j >= 6 && j <= 7 && k >= 6 && k <= 7 &&
+        ((i >= 4 && i <= 5) || (i >= 9 && i <= 10))) {
+      c.property = 2;
+      m.element_sets[i <= 5 ? 1 : 2].push_back(c.id);
+    }
+  }
+  return m;
+}
+} // namespace
+
+TEST(MagneticForce, BodySurfacesMatchExplicitSurfacesAndDiagnoseContact) {
+  auto model = magnet_pair();
+  const auto mesh = std::get<Mesh>(make_mesh(model));
+  // Body A grown by LAYER voxels in every direction, through shared grids.
+  auto grown = [&](int layers) {
+    return region_boundary(mesh, [&, layers](const Cell &c) {
+      const auto [i, j, k] =
+          voxel(model, model.elements[mesh.element_index.at(c.id)], 14);
+      return i >= 4 - layers && i <= 5 + layers && j >= 6 - layers &&
+             j <= 7 + layers && k >= 6 - layers && k <= 7 + layers;
+    });
+  };
+  for (int layers : {1, 2}) {
+    SCOPED_TRACE(layers);
+    auto m = model;
+    m.face_sets[7] = grown(layers);
+    m.forces = {{1, 1, true, 0, layers}, {2, 7, false, 0, 1}};
+    auto solved = solve(m);
+    ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+    const auto &f = std::get<Results>(solved).cases[0].forces;
+    EXPECT_GT(f[0].force.x(), 0); // A is attracted towards B
+    EXPECT_LT((f[0].force - f[1].force).norm(), 1e-12 * f[0].force.norm());
+    EXPECT_LT((f[0].torque - f[1].torque).norm(),
+              1e-12 * (f[0].torque.norm() + f[0].force.norm()));
+    ASSERT_EQ(f[0].components.size(), 1U);
+    EXPECT_TRUE(f[1].components.empty());
+  }
+  auto with = [&](std::vector<ForceSurface> requests) {
+    auto m = model;
+    m.forces = std::move(requests);
+    return solve(m);
+  };
+  // LAYER 3 reaches the voxel next to B; a half magnet touches its other
+  // half; a body at the domain edge has no room for its layers.
+  EXPECT_NE(error_of(with({{1, 1, true, 0, 3}})).find("within 4 layers"),
+            std::string::npos);
+  auto half = model;
+  std::erase_if(half.element_sets[1], [&](int id) {
+    return voxel(half, half.elements[id - 1], 14)[0] == 5;
+  });
+  half.forces = {{1, 1, true, 0, 1}};
+  EXPECT_NE(error_of(solve(half)).find("touches body ESET 1"),
+            std::string::npos);
+  auto edge = model;
+  edge.element_sets[3] = {1};
+  edge.forces = {{1, 3, true, 0, 1}};
+  EXPECT_NE(error_of(solve(edge)).find("domain boundary"), std::string::npos);
+
+  // Both magnets in one request: two separate pieces whose forces are the
+  // single-body results, and whose sum is the total.
+  auto pair = model;
+  pair.element_sets[3] = pair.element_sets[1];
+  pair.element_sets[3].insert(pair.element_sets[3].end(),
+                              pair.element_sets[2].begin(),
+                              pair.element_sets[2].end());
+  // A plastic sleeve (mu_r = 1, another material) around A changes nothing.
+  pair.materials[3] = {1, 0, 0};
+  pair.properties[3] = {3};
+  for (auto &c : pair.elements) {
+    const auto [i, j, k] = voxel(pair, c, 14);
+    if (c.property == 1 && i >= 3 && i <= 6 && j >= 5 && j <= 8 && k >= 5 &&
+        k <= 8)
+      c.property = 3;
+  }
+  pair.forces = {{1, 3, true, 0, 1}, {2, 1, true, 0, 1}, {3, 2, true, 0, 1}};
+  auto solved = solve(pair);
+  ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+  const auto &f = std::get<Results>(solved).cases[0].forces;
+  ASSERT_EQ(f[0].components.size(), 2U);
+  EXPECT_LT((f[0].components[0].force - f[1].force).norm(),
+            1e-12 * f[1].force.norm());
+  EXPECT_LT((f[0].components[1].force - f[2].force).norm(),
+            1e-12 * f[1].force.norm());
+  EXPECT_LT((f[0].force - f[1].force - f[2].force).norm(),
+            1e-12 * f[1].force.norm());
+  // The magnets attract each other.
+  EXPECT_GT(f[1].force.x(), 0);
+  EXPECT_LT(f[2].force.x(), 0);
+  auto unsleeved = solve([&] {
+    auto m = model;
+    m.forces = {{1, 1, true, 0, 1}};
+    return m;
+  }());
+  ASSERT_TRUE(std::holds_alternative<Results>(unsleeved));
+  EXPECT_LT((std::get<Results>(unsleeved).cases[0].forces[0].force - f[1].force)
+                .norm(),
+            1e-12 * f[1].force.norm());
+  // Torque about a CID origin o is the basic torque less o x F.
+  auto shifted = model;
+  const Vector origin(.3, -.2, .5);
+  shifted.coordinates[4] = {0, 'R', origin, origin + Vector::UnitZ(),
+                            origin + Vector::UnitX()};
+  shifted.forces = {{1, 1, true, 0, 1}, {2, 1, true, 4, 1}};
+  auto about = solve(shifted);
+  ASSERT_TRUE(std::holds_alternative<Results>(about)) << error_of(about);
+  const auto &g = std::get<Results>(about).cases[0].forces;
+  EXPECT_LT((g[1].torque - (g[0].torque - origin.cross(g[0].force))).norm(),
+            1e-12 * g[0].force.norm());
+}
+
+TEST(MagneticForce, PinchedBodySurfaceSumsItsTwoPieces) {
+  // Single-voxel magnets C and D whose one-layer regions meet only along an
+  // edge, so the derived surface has four faces on that edge. It cannot be
+  // given as a closed FSET, but the boundary of the union is still exact.
+  auto m = brick_box(12);
+  m.materials[2] = {1.05, 0, 1};
+  m.properties[2] = {2, 0, 2, true};
+  for (auto &c : m.elements) {
+    const auto [i, j, k] = voxel(m, c, 12);
+    if (k == 5 && ((i == 3 && j == 5) || (i == 6 && j == 8))) {
+      c.property = 2;
+      m.element_sets[i == 3 ? 1 : 2].push_back(c.id);
+      m.element_sets[3].push_back(c.id);
+    }
+  }
+  m.forces = {{1, 3, true, 0, 1}, {2, 1, true, 0, 1}, {3, 2, true, 0, 1}};
+  auto solved = solve(m);
+  ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+  const auto &f = std::get<Results>(solved).cases[0].forces;
+  EXPECT_GT(f[1].force.norm(), 0);
+  EXPECT_LT((f[0].force - f[1].force - f[2].force).norm(),
+            1e-12 * f[1].force.norm());
+  EXPECT_LT((f[0].torque - f[1].torque - f[2].torque).norm(),
+            1e-12 * (f[1].torque.norm() + f[1].force.norm()));
+  // Sharing grids along the edge makes it one connected piece.
+  EXPECT_EQ(f[0].components.size(), 1U);
+}
+
+TEST(MagneticForce, StatorBodyIncludesItsCavityWallSoTorquesBalance) {
+  // A magnet rotor inside a two-tooth steel stator. The stator surface has
+  // an outer wall and a cavity wall in the air gap; without the cavity wall
+  // its result would be the torque on stator and rotor together, about zero.
+  // The reaction torque balances the rotor torque as the mesh is refined
+  // (about 21% then 1.6% imbalance on these meshes).
+  double previous = 1;
+  for (int scale : {1, 2}) {
+    SCOPED_TRACE(scale);
+    const int n = 16 * scale;
+    auto m = brick_box(n);
+    m.materials[2] = {1.05, 0, 1};
+    m.coordinates[1] = {0, 'R', Vector::Zero(), Vector::UnitZ(),
+                        Vector(std::cos(.5), std::sin(.5), 0)};
+    m.properties[2] = {2, 1, 1, true};
+    m.materials[3] = {1000};
+    m.properties[3] = {3};
+    for (auto &c : m.elements) {
+      auto [i, j, k] = voxel(m, c, n);
+      i /= scale;
+      j /= scale;
+      k /= scale;
+      if (k < 6 || k > 9)
+        continue;
+      // Doubled coarse-index distance from the axis: rotor 1, teeth 7,
+      // ring 9 to 11.
+      const int radius = std::max(std::abs(2 * i - 15), std::abs(2 * j - 15));
+      const bool tooth = (i == 4 || i == 11) && j >= 7 && j <= 8;
+      if (radius == 1) {
+        c.property = 2;
+        m.element_sets[1].push_back(c.id);
+      } else if ((radius >= 9 && radius <= 11) || tooth) {
+        c.property = 3;
+        m.element_sets[2].push_back(c.id);
+      }
+    }
+    m.forces = {{1, 1, true, 0, 1}, {2, 2, true, 0, 1}};
+    auto solved = solve(m);
+    ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+    const auto &f = std::get<Results>(solved).cases[0].forces;
+    const double rotor = f[0].torque.z(), stator = f[1].torque.z();
+    // The magnet at 0.5 rad is pulled towards the x-axis teeth.
+    EXPECT_LT(rotor, 0);
+    const double imbalance = std::abs(stator / rotor + 1);
+    EXPECT_LT(imbalance, previous);
+    previous = imbalance;
+    if (scale == 2)
+      EXPECT_LT(imbalance, .03);
+  }
+}
+
+TEST(MagneticIO, ProbeAndForceFramesInTheReports) {
+  const auto directory =
+      std::filesystem::temp_directory_path() / "vibestran_magnetic_frames";
+  std::filesystem::create_directories(directory);
+  const auto path = directory / "frames.bdf";
+  // A uniform field; probe 1 is given and reported in a cylindrical system,
+  // probe 2 is the same point in basic.
+  const double r = 500, theta = 30, degree = std::numbers::pi / 180;
+  {
+    std::ofstream out(path);
+    out << "SOL MAGSTAT\nCEND\nMAGBC=1\nBEGIN BULK\nPARAM,MAGLEN,.001\n"
+        << "CORD2C,5,,0,0,0,0,0,1\n,1,0,0\n"
+        << mesh_cards(box(2, 1000)) << "PSOLID,1,1\nMATMAG,1,1\n"
+        << "MBC,1,0,UNIFORM,.1,.2,.3\n"
+        << std::format("MPROBE,1,5,{},{},100.,5\n", r, theta)
+        << std::format("MPROBE,2,0,{},{},100.\n", r * std::cos(theta * degree),
+                       r * std::sin(theta * degree))
+        << "ENDDATA\n";
+  }
+  auto parsed = parse_file(path);
+  ASSERT_TRUE(std::holds_alternative<Model>(parsed)) << error_of(parsed);
+  const auto &model = std::get<Model>(parsed);
+  EXPECT_LT((model.probes[0].position - model.probes[1].position).norm(),
+            1e-15);
+  EXPECT_NEAR(model.probes[0].position.z(), .1, 1e-15);
+  auto solved = solve(model);
+  ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+  ASSERT_FALSE(
+      write_results(model, std::get<Results>(solved), directory / "frames.F06")
+          .has_value());
+  std::ifstream csv(directory / "frames.probes.csv");
+  std::string header, line;
+  std::getline(csv, header);
+  EXPECT_NE(header.find(",cd,B1_T,B2_T,B3_T,"), std::string::npos);
+  std::vector<std::vector<double>> rows;
+  while (std::getline(csv, line)) {
+    std::vector<double> values;
+    std::stringstream fields(line);
+    for (std::string field; std::getline(fields, field, ',');)
+      values.push_back(std::stod(field));
+    rows.push_back(values);
+  }
+  ASSERT_EQ(rows.size(), 2U);
+  const double c = std::cos(theta * degree), s = std::sin(theta * degree);
+  // Columns: subcase, probe, x, y, z, B, H, cd, B local, H local.
+  EXPECT_EQ(rows[0][11], 5);
+  EXPECT_NEAR(rows[0][12], .1 * c + .2 * s, 1e-12);
+  EXPECT_NEAR(rows[0][13], -.1 * s + .2 * c, 1e-12);
+  EXPECT_NEAR(rows[0][14], .3, 1e-12);
+  EXPECT_EQ(rows[1][11], 0);
+  for (int k = 0; k < 3; ++k) {
+    EXPECT_NEAR(rows[0][5 + k], rows[1][5 + k], 1e-12);
+    EXPECT_NEAR(rows[1][12 + k], rows[1][5 + k], 1e-15);
+  }
+  std::filesystem::remove_all(directory);
+}
+
+TEST(MagneticParser, CutForceAndProbeLayoutsRejectTheOldForms) {
+  const std::string head = "SOL MAGSTAT\nCEND\nBEGIN BULK\nPSOLID,1,1\n"
+                           "MATMAG,1,1\nCORD2R,9,,0,0,0,0,1,0\n,1,0,0\n"
+                           "ESET,1,PROP,1\nFSET,2,1,1,2,3\n" +
+                           mesh_cards(box(1));
+  auto parse = [&](const std::string &cards) {
+    return parse_string(head + cards + "ENDDATA\n");
+  };
+  auto parsed = parse("COIL,5,1,12.,CUT,9\nMFORCE,1,BODY,1,9,2\n"
+                      "MFORCE,2,FACES,2\nMPROBE,3,9,.1,.2,.3,9\n");
+  ASSERT_TRUE(std::holds_alternative<Model>(parsed)) << error_of(parsed);
+  const auto &m = std::get<Model>(parsed);
+  ASSERT_EQ(m.coils.size(), 1U);
+  EXPECT_TRUE(m.coils[0].plane_cut);
+  EXPECT_EQ(m.coils[0].cut_coordinates, 9);
+  EXPECT_EQ(m.coils[0].start, 0);
+  ASSERT_EQ(m.forces.size(), 2U);
+  EXPECT_TRUE(m.forces[0].body);
+  EXPECT_EQ(m.forces[0].set, 1);
+  EXPECT_EQ(m.forces[0].coordinates, 9);
+  EXPECT_EQ(m.forces[0].layers, 2);
+  EXPECT_FALSE(m.forces[1].body);
+  EXPECT_EQ(m.forces[1].layers, 1);
+  // CP 9 has local z = basic y and x = basic x, so local y = basic -z and
+  // (.1, .2, .3) is basic (.1, .3, -.2).
+  EXPECT_LT((m.probes[0].position - Vector(.1, .3, -.2)).norm(), 1e-15);
+  EXPECT_EQ(m.probes[0].output_coordinates, 9);
+  for (const auto &[cards, message] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"MFORCE,1,2,0.,0.,0.\n", "ID,FACES,FSET,CID"},
+           {"MPROBE,1,.1,.2,.3\n", "ID,CP,X1,X2,X3,CD"},
+           {"MPROBE,1,0,0,0\n", "ID,CP,X1,X2,X3,CD"},
+           {"MFORCE,1,BODY,7\n", "undefined ESET 7"},
+           {"MFORCE,1,FACES,7\n", "undefined FSET 7"},
+           {"MFORCE,1,BODY,1,0,0\n", "LAYER must be"},
+           {"COIL,5,1,12.,CUT,4\n", "CUT requires"},
+           {"COIL,5,1,12.,CUT,9\nCORD2C,4,,0,0,0,0,0,1\n,1,0,0\n"
+            "COIL,6,1,1.,CUT,4\n",
+            "CUT requires"}}) {
+    SCOPED_TRACE(cards);
+    EXPECT_NE(error_of(parse(cards)).find(message), std::string::npos)
+        << error_of(parse(cards));
   }
 }

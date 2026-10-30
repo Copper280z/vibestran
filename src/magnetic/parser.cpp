@@ -235,6 +235,16 @@ Status resolve_coordinates(Model &m) {
     }
     g.position *= m.options.length_scale;
   }
+  for (auto &p : m.probes) {
+    if (p.coordinates) {
+      if (!m.coordinates.contains(p.coordinates))
+        return Error{std::format("MPROBE {} uses undefined coordinates {}",
+                                 p.id, p.coordinates)};
+      p.position = transform(m.coordinates.at(p.coordinates), p.position);
+      p.coordinates = 0;
+    }
+    p.position *= m.options.length_scale;
+  }
   for (auto &[id, cs] : m.coordinates) {
     (void)id;
     cs.a *= m.options.length_scale;
@@ -246,10 +256,6 @@ Status resolve_coordinates(Model &m) {
     p.width *= m.options.length_scale;
     p.height *= m.options.length_scale;
   }
-  for (auto &p : m.probes)
-    p.position *= m.options.length_scale;
-  for (auto &f : m.forces)
-    f.origin *= m.options.length_scale;
   m.options.wire_step *= m.options.length_scale;
   m.options.depth *= m.options.length_scale;
   return {};
@@ -483,8 +489,13 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       c.id = r.integer(1);
       c.elements = r.integer(2);
       c.turns = r.real(3, 1);
-      c.start = r.integer(4);
-      c.end = r.integer(5);
+      if (upper(r.get(4)) == "CUT") {
+        c.plane_cut = true;
+        c.cut_coordinates = r.integer(5);
+      } else {
+        c.start = r.integer(4);
+        c.end = r.integer(5);
+      }
       r.last(5);
       m.coils.push_back(c);
     } else if (key == "PWIRE") {
@@ -561,17 +572,31 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       r.last(6);
       insert_unique(m.boundaries, id, bc, r);
     } else if (key == "MPROBE") {
+      // The GRID-like layout needs an integer CP and all three coordinates,
+      // which the old four-field ID,X,Y,Z form never has.
+      if (r.get(2).find_first_of(".EeDd") != std::string::npos ||
+          r.get(3).empty() || r.get(4).empty() || r.get(5).empty())
+        return Error{r.where + ": MPROBE is ID,CP,X1,X2,X3,CD"};
       Probe p;
       p.id = r.integer(1);
-      p.position = r.vector(2);
-      r.last(4);
+      p.coordinates = r.integer(2);
+      p.position = r.vector(3);
+      p.output_coordinates = r.integer(6);
+      r.last(6);
       m.probes.push_back(p);
     } else if (key == "MFORCE") {
       ForceSurface f;
       f.id = r.integer(1);
-      f.faces = r.integer(2);
-      f.origin = r.vector(3);
-      r.last(5);
+      const auto kind = upper(r.get(2));
+      if (kind != "BODY" && kind != "FACES")
+        return Error{r.where + ": MFORCE is ID,FACES,FSET,CID or "
+                               "ID,BODY,ESET,CID,LAYER"};
+      f.body = kind == "BODY";
+      f.set = r.integer(3);
+      f.coordinates = r.integer(4);
+      if (f.body)
+        f.layers = r.integer(5, 1);
+      r.last(f.body ? 5 : 4);
       m.forces.push_back(f);
     } else if (key == "CORD2R" || key == "CORD2C" || key == "CORD2S") {
       int id = r.integer(1);
@@ -871,9 +896,17 @@ Status validate(const Model &m) {
       return e;
     if (!(c.turns > 0) || !std::isfinite(c.turns) ||
         !m.element_sets.contains(c.elements) ||
-        !m.face_sets.contains(c.start) ||
+        (!c.plane_cut && !m.face_sets.contains(c.start)) ||
         (c.end && !m.face_sets.contains(c.end)))
       return Error{"Invalid COIL definition"};
+    if (c.plane_cut &&
+        (c.start || c.end ||
+         (c.cut_coordinates &&
+          (!m.coordinates.contains(c.cut_coordinates) ||
+           m.coordinates.at(c.cut_coordinates).type != 'R'))))
+      return Error{std::format("COIL {} CUT requires a closed coil and a "
+                               "CORD2R (or 0 for basic)",
+                               c.id)};
     std::set<int> selected;
     for (int id : m.element_sets.at(c.elements))
       if (!ids.contains(id) || !selected.insert(id).second)
@@ -941,17 +974,41 @@ Status validate(const Model &m) {
                                c.set, c.target)};
   }
   ids.clear();
-  for (const auto &probe : m.probes)
+  for (const auto &probe : m.probes) {
     if (probe.id <= 0 || !ids.insert(probe.id).second ||
-        !probe.position.allFinite())
-      return Error{
-          "MPROBE requires a unique positive ID and finite coordinates"};
+        !probe.position.allFinite() || probe.coordinates != 0)
+      return Error{"MPROBE requires a unique positive ID and finite, "
+                   "resolved coordinates"};
+    if (probe.output_coordinates &&
+        !m.coordinates.contains(probe.output_coordinates))
+      return Error{std::format("MPROBE {} CD references undefined "
+                               "coordinates {}",
+                               probe.id, probe.output_coordinates)};
+  }
+  std::set<int> element_ids;
+  for (const auto &c : m.elements)
+    element_ids.insert(c.id);
   ids.clear();
-  for (const auto &force : m.forces)
-    if (force.id <= 0 || !ids.insert(force.id).second ||
-        !force.origin.allFinite() || !m.face_sets.contains(force.faces))
-      return Error{"MFORCE requires a unique positive ID, finite origin and "
-                   "defined FSET"};
+  for (const auto &force : m.forces) {
+    if (force.id <= 0 || !ids.insert(force.id).second)
+      return Error{"MFORCE requires a unique positive ID"};
+    if (force.body ? !m.element_sets.contains(force.set)
+                   : !m.face_sets.contains(force.set))
+      return Error{std::format("MFORCE {} references undefined {} {}",
+                               force.id, force.body ? "ESET" : "FSET",
+                               force.set)};
+    if (force.coordinates && !m.coordinates.contains(force.coordinates))
+      return Error{std::format("MFORCE {} references undefined coordinates {}",
+                               force.id, force.coordinates)};
+    if (force.layers < 1 || force.layers > 64)
+      return Error{std::format("MFORCE {} LAYER must be 1 to 64", force.id)};
+    if (force.body)
+      for (int id : m.element_sets.at(force.set))
+        if (!element_ids.contains(id))
+          return Error{std::format("MFORCE {} body ESET references undefined "
+                                   "element {}",
+                                   force.id, id)};
+  }
   ids.clear();
   for (const auto &sc : m.subcases) {
     if (sc.id <= 0 || !ids.insert(sc.id).second)
