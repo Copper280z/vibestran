@@ -493,7 +493,7 @@ TEST(MagneticSolve, LoopEnergyReciprocityReversalAndNonlinearInductance) {
   auto model = box(6, 1.5);
   loop(model);
   model.currents.push_back({2, 100000, -1});
-  model.subcases.push_back({2, 2, 0, "reverse"});
+  model.subcases.push_back({.id = 2, .load = 2, .label = "reverse"});
   auto solved = solve(model);
   ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
   const auto &result = std::get<Results>(solved);
@@ -514,7 +514,9 @@ TEST(MagneticSolve, LoopEnergyReciprocityReversalAndNonlinearInductance) {
     if (center.cwiseAbs().maxCoeff() < 0.51)
       e.property = 2;
   }
-  model.subcases = {{1, 1, 0, ""}, {2, 3, 0, ""}, {3, 4, 0, ""}};
+  model.subcases = {{.id = 1, .load = 1},
+                    {.id = 2, .load = 3},
+                    {.id = 3, .load = 4}};
   model.combinations[3] = {1, {{1.001, 1}}};
   model.combinations[4] = {1, {{0.999, 1}}};
   solved = solve(model);
@@ -628,7 +630,9 @@ TEST(MagneticSolve, MutualInductanceReciprocityAndSuperposition) {
   model.wire_paths.push_back({200000, 200000});
   model.currents.push_back({2, 200000, 2});
   model.combinations[3] = {1, {{1, 1}, {1, 2}}};
-  model.subcases = {{1, 1, 0, ""}, {2, 2, 0, ""}, {3, 3, 0, ""}};
+  model.subcases = {{.id = 1, .load = 1},
+                    {.id = 2, .load = 2},
+                    {.id = 3, .load = 3}};
   auto solved = solve(model);
   ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
   const auto &cases = std::get<Results>(solved).cases;
@@ -733,8 +737,7 @@ TEST(MagneticParser, PropertySetsCircuitsAndSourceNamespaceAreValidated) {
            {"CIRCUIT,20,,10,1\nCIRCUIT,21,,10,1\n", "more than one"},
            {"CIRCUIT,20,,10,1\nICIRC,1,10,2.\n", "give the current on the"},
            {"ICIRC,1,30,2.\n", "undefined circuit or source 30"},
-           {"WIREPATH,11,93\n", "undefined CWIRE 93"},
-           {"IWIRE,1,2.,90\n", "use ICIRC"}}) {
+           {"WIREPATH,11,93\n", "undefined CWIRE 93"}}) {
     SCOPED_TRACE(cards);
     EXPECT_NE(error_of(parse(wires + cards)).find(message), std::string::npos)
         << error_of(parse(wires + cards));
@@ -1310,7 +1313,7 @@ TEST(MagneticPlanar,
       }
       m.circuits[1000000].id = 1000000;
       m.currents = {{1, 1000000, 1}, {2, 1000000, -2}};
-      m.subcases = {{1, 1, 0, ""}, {2, 2, 0, ""}};
+      m.subcases = {{.id = 1, .load = 1}, {.id = 2, .load = 2}};
       auto solved = solve(m);
       ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
       const auto &r = std::get<Results>(solved);
@@ -1462,9 +1465,6 @@ TEST(MagneticParser, NativeSolidsPlanarWindingCardsAndUnsupportedGeometry) {
   repeated.replace(repeated.find("COIL2D,11"), 9, "COIL2D,10");
   EXPECT_NE(error_of(parse_string(repeated)).find("group legs with CIRCUIT"),
             std::string::npos);
-  auto old = deck;
-  old.replace(old.find("ICIRC,1,12,3"), 12, "ICOIL,1,12,3");
-  EXPECT_NE(error_of(parse_string(old)).find("use ICIRC"), std::string::npos);
   auto bad = m;
   bad.options.planar = false;
   EXPECT_NE(error_of(solve(bad)).find("COIL2D requires"), std::string::npos);
@@ -1523,7 +1523,7 @@ TEST(MagneticPlanar, WindingTorqueApproachesAxialCurrentMomentInUniformField) {
     m.circuits[3] = {3, 1, {{1, 1}, {2, 1}}};
     m.currents = {{1, 3, 1}};
     m.boundaries[1] = {0, Vector(.01, 0, 0)};
-    m.subcases = {{1, 1, 1, ""}};
+    m.subcases = {{.id = 1, .load = 1, .boundary = 1}};
     const auto mesh = std::get<Mesh>(make_mesh(m));
     for (size_t i = 0; i < mesh.faces.size(); ++i) {
       const auto &f = mesh.faces[i];
@@ -2329,7 +2329,7 @@ void nonlinear_loads(Model &model, const std::vector<double> &amplitudes) {
       model.currents.push_back(
           {id, model.options.planar ? static_cast<int>(i) + 1 : 100000,
            amps[i]});
-    model.subcases.push_back({id, id, 0, ""});
+    model.subcases.push_back({.id = id, .load = id});
   };
   for (double factor : {1., .01, 20., -1.}) {
     auto amps = amplitudes;
@@ -2639,7 +2639,7 @@ MATMAG,1,,1
   EXPECT_NEAR(response.tangent(1, 1), 125 / 1.5, 1e-12);
 }
 
-TEST(MagneticParser, MagnetOrientationTablesAndRemovedFormsAreExplicit) {
+TEST(MagneticParser, MagnetOrientationAndTablesAreExplicit) {
   const std::string head = R"(SOL MAGSTAT
 CEND
 BEGIN BULK
@@ -2682,16 +2682,6 @@ CORD2C,5,,0,0,0,0,0,1
             std::string::npos);
   // An unmagnetized material ignores a missing frame.
   EXPECT_TRUE(std::holds_alternative<Model>(parse("MATMAG,1,2\nPSOLID,1,1\n")));
-  // Removed forms name their replacements.
-  EXPECT_NE(error_of(parse("MATMAG,1,1.05,,1.2,0,0\nPSOLID,1,1,0\n"))
-                .find("PMAG CID,AXIS or PSOLID CORDM"),
-            std::string::npos);
-  EXPECT_NE(error_of(parse("MATMAG,1,1.05,,0,0,0,5\nPSOLID,1,1\n"))
-                .find("PMAG CID,AXIS or PSOLID CORDM"),
-            std::string::npos);
-  EXPECT_NE(error_of(parse("MATMAG,1,,1\nPSOLID,1,1\nBHPOINT,1,0,0\n"))
-                .find("use TABLEBH"),
-            std::string::npos);
   EXPECT_NE(error_of(parse("MATMAG,1,1,1\nPSOLID,1,1\nTABLEBH,1\n,0,0,1,100,"
                            "ENDT\n"))
                 .find("mutually exclusive"),
@@ -3071,7 +3061,7 @@ TEST(MagneticIO, ProbeAndForceFramesInTheReports) {
   std::filesystem::remove_all(directory);
 }
 
-TEST(MagneticParser, CutForceAndProbeLayoutsRejectTheOldForms) {
+TEST(MagneticParser, CutForceAndProbeCardsParseAndValidate) {
   const std::string head = "SOL MAGSTAT\nCEND\nBEGIN BULK\nPSOLID,1,1\n"
                            "MATMAG,1,1\nCORD2R,9,,0,0,0,0,1,0\n,1,0,0\n"
                            "ESET,1,PROP,1\nFSET,2,1,1,2,3\n" +
@@ -3100,9 +3090,7 @@ TEST(MagneticParser, CutForceAndProbeLayoutsRejectTheOldForms) {
   EXPECT_EQ(m.probes[0].output_coordinates, 9);
   for (const auto &[cards, message] :
        std::vector<std::pair<std::string, std::string>>{
-           {"MFORCE,1,2,0.,0.,0.\n", "ID,FACES,FSET,CID"},
-           {"MPROBE,1,.1,.2,.3\n", "ID,CP,X1,X2,X3,CD"},
-           {"MPROBE,1,0,0,0\n", "ID,CP,X1,X2,X3,CD"},
+           {"MFORCE,1,SURFACE,2\n", "ID,FACES,FSET,CID"},
            {"MFORCE,1,BODY,7\n", "undefined ESET 7"},
            {"MFORCE,1,FACES,7\n", "undefined FSET 7"},
            {"MFORCE,1,BODY,1,0,0\n", "LAYER must be"},

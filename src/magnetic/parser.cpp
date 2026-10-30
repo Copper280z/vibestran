@@ -432,9 +432,6 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       a.mur = r.real(2, 1);
       a.bh_table = r.integer(3);
       a.br = r.real(4);
-      if (!r.get(5).empty() || !r.get(6).empty() || !r.get(7).empty())
-        return Error{r.where + ": MATMAG BR is a magnitude; give the "
-                               "direction with PMAG CID,AXIS or PSOLID CORDM"};
       if (a.bh_table && !r.get(2).empty())
         return Error{r.where + ": MATMAG MUR and BHTID are mutually "
                                "exclusive; leave MUR blank with a table"};
@@ -469,9 +466,6 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       if (pairs.error)
         return *pairs.error;
       insert_unique(m.bh_tables, id, std::move(curve), r);
-    } else if (key == "BHPOINT") {
-      return Error{r.where + ": BHPOINT was replaced; use TABLEBH,TID with "
-                             "B,H pairs ending in ENDT"};
     } else if (key == "MATCOND") {
       int id = r.integer(1);
       double sigma = r.real(2);
@@ -562,10 +556,6 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       c.amperes = r.real(3);
       r.last(3);
       m.currents.push_back(c);
-    } else if (key == "ICOIL" || key == "IWIRE") {
-      return Error{r.where + ": " + key +
-                   " was replaced; use ICIRC,SID,ID,I on a CIRCUIT, COIL, "
-                   "COIL2D or WIREPATH"};
     } else if (key == "LOAD") {
       int id = r.integer(1);
       Combination c;
@@ -588,11 +578,6 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       r.last(6);
       insert_unique(m.boundaries, id, bc, r);
     } else if (key == "MPROBE") {
-      // The GRID-like layout needs an integer CP and all three coordinates,
-      // which the old four-field ID,X,Y,Z form never has.
-      if (r.get(2).find_first_of(".EeDd") != std::string::npos ||
-          r.get(3).empty() || r.get(4).empty() || r.get(5).empty())
-        return Error{r.where + ": MPROBE is ID,CP,X1,X2,X3,CD"};
       Probe p;
       p.id = r.integer(1);
       p.coordinates = r.integer(2);
