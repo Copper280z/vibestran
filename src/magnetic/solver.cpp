@@ -9,6 +9,7 @@
 #include <cmath>
 #include <format>
 #include <limits>
+#include <numeric>
 #include <set>
 
 namespace vibestran::magnetic {
@@ -339,7 +340,8 @@ bool magnetic(const Material &m) {
   return m.mur != 1 || m.bh_table != 0 || m.br != 0;
 }
 // A MFORCE BODY surface: every face with exactly one side in R, the body
-// plus `layers` grid-adjacent layers of nonmagnetic cells, oriented out of R.
+// plus `layers` grid-adjacent layers of nonmagnetic, current-free cells,
+// oriented out of R. Only the selected body may contain current sources.
 // It includes cavity walls, so an annular body excludes what it surrounds.
 // component[k] is the connected piece of R that face k bounds.
 struct BodySurface {
@@ -349,7 +351,10 @@ struct BodySurface {
 };
 Result<BodySurface> body_surface(const Model &model, const Mesh &mesh,
                                  const std::vector<std::vector<int>> &incident,
-                                 const ForceSurface &request) {
+                                 const ForceSurface &request,
+                                 const std::map<int, int> &windings,
+                                 std::span<const Source> sources,
+                                 std::span<const SpatialIndex> wire_indexes) {
   const int nc = static_cast<int>(mesh.cells.size());
   std::vector<int> layer(nc, -1); // 0 for the body, k for layer k
   std::vector<int> frontier;
@@ -381,6 +386,46 @@ Result<BodySurface> body_surface(const Model &model, const Mesh &mesh,
                                "more air layers",
                                request.id, mesh.cells[neighbor].id, k,
                                request.set)};
+            const auto &cell = mesh.cells[neighbor];
+            if (auto it = windings.find(neighbor); it != windings.end())
+              return Error{std::format(
+                  "MFORCE {}: layer {} of body ESET {} includes element {} "
+                  "of current source {}; add the winding to the body set "
+                  "or use a smaller LAYER or more air layers",
+                  request.id, k, request.set, cell.id, it->second)};
+            size_t wire = 0;
+            for (const auto &source : sources) {
+              if (!source.wire)
+                continue;
+              for (int ci : wire_indexes[wire].query(cell.minimum, cell.maximum)) {
+                const auto &conductor = source.mesh.cells[ci];
+                Result<bool> overlap = false;
+                if (cell.polyhedral) {
+                  const auto samples = intersection_quadrature(
+                      source.mesh, conductor, mesh, cell);
+                  const double volume = std::accumulate(
+                      samples.begin(), samples.end(), 0.0,
+                      [](double sum, const Sample &q) { return sum + q.weight; });
+                  overlap = volume > 1e-10 * conductor.volume;
+                } else
+                  overlap = cell_intersects_interior(source.mesh, conductor,
+                                                     cell);
+                if (auto *e = std::get_if<Error>(&overlap))
+                  return Error{std::format(
+                      "MFORCE {}: checking layer {} of body ESET {}, element "
+                      "{}, against CWIRE path {}: {}",
+                      request.id, k, request.set, cell.id, source.id,
+                      e->message)};
+                if (std::get<bool>(overlap))
+                  return Error{std::format(
+                      "MFORCE {}: layer {} of body ESET {} includes element "
+                      "{} containing CWIRE path {}; add all field cells "
+                      "containing the conductor to the body set or use a "
+                      "smaller LAYER or more air layers",
+                      request.id, k, request.set, cell.id, source.id)};
+              }
+              ++wire;
+            }
             layer[neighbor] = k;
             next.push_back(neighbor);
           }
@@ -504,7 +549,8 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
     ForceResult result;
     result.id = request.id;
     if (request.body) {
-      auto derived = body_surface(model, mesh, incident, request);
+      auto derived = body_surface(model, mesh, incident, request, windings,
+                                  sources, wire_indexes);
       if (auto *e = std::get_if<Error>(&derived))
         return *e;
       auto &surface = std::get<BodySurface>(derived);

@@ -1019,6 +1019,12 @@ Status validate(const Model &m) {
     if (sc.field.set && !m.element_sets.contains(sc.field.set))
       return Error{std::format("Subcase {} BFIELD references undefined ESET {}",
                                sc.id, sc.field.set)};
+    if (sc.field.set)
+      for (int id : m.element_sets.at(sc.field.set))
+        if (!element_ids.contains(id))
+          return Error{std::format("Subcase {} BFIELD ESET {} references "
+                                   "undefined field element {}",
+                                   sc.id, sc.field.set, id)};
     auto r = load_factors(m, sc.load);
     if (auto *e = std::get_if<Error>(&r))
       return *e;

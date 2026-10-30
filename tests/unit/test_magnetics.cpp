@@ -2925,6 +2925,132 @@ TEST(MagneticForce, BodySurfacesMatchExplicitSurfacesAndDiagnoseContact) {
             1e-12 * g[0].force.norm());
 }
 
+TEST(MagneticForce, BodyLayersCannotAbsorbPlanarWindings) {
+  for (bool triangles : {false, true}) {
+    SCOPED_TRACE(triangles);
+    auto m = planar_box(32, triangles);
+    for (const auto &c : m.elements) {
+      Vector center = Vector::Zero();
+      for (int v : c.nodes)
+        center += m.nodes.at(v).position / static_cast<double>(c.nodes.size());
+      if (center.cwiseAbs().maxCoeff() < .125)
+        m.element_sets[30].push_back(c.id);
+      if (std::abs(center.y()) < .25 && std::abs(center.x()) > .375 &&
+          std::abs(center.x()) < .625)
+        m.element_sets[center.x() < 0 ? 10 : 20].push_back(c.id);
+      if (center.cwiseAbs().maxCoeff() < .625)
+        m.element_sets[40].push_back(c.id);
+    }
+    m.planar_coils = {{11, 10, 1}, {12, 20, -1}};
+    m.circuits[1] = {1, 1, {{11, 1}, {12, 1}}};
+    m.currents = {{1, 1, 100}};
+    m.boundaries[1] = {0, Vector(.3, 0, 0)};
+    m.subcases = {{.id = 1, .load = 1, .boundary = 1}};
+    // A nonmagnetic body at the center feels no force. Its small contour
+    // excludes the windings; growing it to +/-0.75 would add their -9 Nm
+    // torque even though the final contour does not cut either winding.
+    m.forces = {{7, 30, true, 0, 2}};
+    auto small = solve(m);
+    ASSERT_TRUE(std::holds_alternative<Results>(small)) << error_of(small);
+    const auto &f = std::get<Results>(small).cases[0].forces[0];
+    EXPECT_LT(f.force.norm(), 1e-8);
+    EXPECT_LT(f.torque.norm(), .02);
+    m.forces[0].layers = 10;
+    for (double current : {100., 0.}) {
+      m.currents[0].amperes = current;
+      const auto rejected = solve(m);
+      ASSERT_TRUE(std::holds_alternative<Error>(rejected));
+      const auto message = error_of(rejected);
+      EXPECT_NE(message.find("MFORCE 7"), std::string::npos);
+      EXPECT_NE(message.find("body ESET 30"), std::string::npos);
+      EXPECT_NE(message.find("current source"), std::string::npos);
+    }
+    // Explicitly selecting both windings gives the expected Lorentz torque.
+    // For quads the derived contour is the square at +/-0.75. Grid-adjacent
+    // triangle layers have different corner facets, so both contours must
+    // approximate the analytical torque but need not give identical values.
+    m.currents[0].amperes = 100;
+    m.forces = {{7, 40, true, 0, 2}, {8, 50}};
+    m.face_sets[50] = centered_surface(std::get<Mesh>(make_mesh(m)), .75);
+    auto selected = solve(m);
+    ASSERT_TRUE(std::holds_alternative<Results>(selected)) << error_of(selected);
+    const auto &forces = std::get<Results>(selected).cases[0].forces;
+    const double expected = -100 * .3 * .3; // 2*a*NI*Bx*depth, a=0.5
+    EXPECT_NEAR(forces[0].torque.z(), expected, .03 * std::abs(expected));
+    EXPECT_NEAR(forces[1].torque.z(), expected, .03 * std::abs(expected));
+    if (!triangles) {
+      EXPECT_LT((forces[0].force - forces[1].force).norm(), 1e-8);
+      EXPECT_LT((forces[0].torque - forces[1].torque).norm(), 1e-8);
+    }
+  }
+}
+
+TEST(MagneticForce, BodyLayersCannotAbsorbSolidCoilsOrSweptWires) {
+  // Native COIL, hex/tet CWIRE sources, and a CWIRE on a warped field mesh.
+  for (int kind : {0, 1, 2, 3}) {
+    SCOPED_TRACE(kind);
+    auto m = brick_box(10);
+    for (const auto &c : m.elements) {
+      Vector center = Vector::Zero();
+      for (int v : c.nodes)
+        center += m.nodes.at(v).position / 8;
+      if (center.cwiseAbs().maxCoeff() < .2)
+        m.element_sets[30].push_back(c.id);
+      if (center.cwiseAbs().maxCoeff() < .6)
+        m.element_sets[40].push_back(c.id);
+      const double radius = center.head<2>().cwiseAbs().maxCoeff();
+      if (radius > .4 && radius < .6 && std::abs(center.z()) < .2)
+        m.element_sets[10].push_back(c.id);
+    }
+    if (kind == 0) {
+      m.coordinates[9] = {0, 'R', Vector::Zero(), Vector::UnitY(),
+                          Vector::UnitX()};
+      m.coils = {{11, 10, 1, 0, 0, true, 9}};
+      m.currents = {{1, 11, 1}};
+      m.subcases[0].load = 1;
+    } else {
+      if (kind == 3)
+        for (auto &[id, grid] : m.nodes) {
+          (void)id;
+          grid.position.z() += .1 * grid.position.x() * grid.position.y();
+        }
+      loop(m, .5);
+      m.options.wire_mesh = kind == 2 ? WireMesh::Tet : WireMesh::Hex;
+    }
+    m.boundaries[1] = {0, Vector(0, .001, 0)};
+    m.subcases[0].boundary = 1;
+    m.forces = {{7, 30, true, 0, 1}};
+    auto small = solve(m);
+    ASSERT_TRUE(std::holds_alternative<Results>(small)) << error_of(small);
+    // Layer 2 encloses the entire source while its final surface is clear.
+    m.forces[0].layers = 2;
+    auto rejected = solve(m);
+    ASSERT_TRUE(std::holds_alternative<Error>(rejected));
+    const auto message = error_of(rejected);
+    EXPECT_NE(message.find("MFORCE 7: layer"), std::string::npos) << message;
+    EXPECT_NE(message.find("body ESET 30"), std::string::npos) << message;
+    EXPECT_NE(message.find(kind == 0 ? "current source 11"
+                                     : "CWIRE path 100000"),
+              std::string::npos) << message;
+    // Including all field cells containing the source in the body is valid.
+    // The growth now adds only air, including for the warped field mesh.
+    m.forces = {{7, 40, true, 0, 1}, {8, 50}};
+    const auto mesh = std::get<Mesh>(make_mesh(m));
+    m.face_sets[50] = region_boundary(mesh, [](const Cell &c) {
+      Vector center = Vector::Zero();
+      for (const auto &p : c.points)
+        center += p / static_cast<double>(c.points.size());
+      return center.cwiseAbs().maxCoeff() < .8;
+    });
+    auto selected = solve(m);
+    ASSERT_TRUE(std::holds_alternative<Results>(selected)) << error_of(selected);
+    const auto &forces = std::get<Results>(selected).cases[0].forces;
+    EXPECT_LT((forces[0].force - forces[1].force).norm(), 1e-10);
+    EXPECT_LT((forces[0].torque - forces[1].torque).norm(), 1e-10);
+    EXPECT_LT(forces[0].torque.x(), 0);
+  }
+}
+
 TEST(MagneticForce, PinchedBodySurfaceSumsItsTwoPieces) {
   // Single-voxel magnets C and D whose one-layer regions meet only along an
   // edge, so the derived surface has four faces on that edge. It cannot be
@@ -3102,6 +3228,35 @@ TEST(MagneticParser, CutForceAndProbeCardsParseAndValidate) {
     EXPECT_NE(error_of(parse(cards)).find(message), std::string::npos)
         << error_of(parse(cards));
   }
+}
+
+TEST(MagneticParser, FieldOutputRejectsUndefinedElementsBeforeSolving) {
+  const auto m = planar_box(4);
+  const std::string bulk =
+      "BEGIN BULK\nMAG2D,0,.1\nPMAG2D,1,1\nMATMAG,1,1\n" + mesh_cards(m) +
+      "ESET,99,1,9999\nENDDATA\n";
+  // Selecting a set with a bad element must fail during parsing, whether
+  // inherited globally or selected by a subcase. An unused set is harmless.
+  for (const std::string control : {"BFIELD=99\n", "BFIELD=99\nSUBCASE 2\n",
+                                    "BFIELD=NONE\nSUBCASE 2\nBFIELD=99\n"}) {
+    const auto parsed = parse_string("SOL MAGSTAT\nCEND\n" + control + bulk);
+    ASSERT_TRUE(std::holds_alternative<Error>(parsed));
+    EXPECT_NE(error_of(parsed).find("BFIELD ESET 99"), std::string::npos);
+    EXPECT_NE(error_of(parsed).find("undefined field element 9999"),
+              std::string::npos);
+  }
+  const auto unused = parse_string("SOL MAGSTAT\nCEND\nBFIELD=NONE\n" + bulk);
+  EXPECT_TRUE(std::holds_alternative<Model>(unused)) << error_of(unused);
+  // Programmatic models use the same validation; CWIRE IDs are not field
+  // cell IDs and cannot appear in a field-output selection either.
+  auto solid = brick_box(4);
+  loop(solid);
+  solid.element_sets[99] = {1, 100000};
+  solid.subcases[0].field = {true, 99};
+  const auto rejected = solve(solid);
+  ASSERT_TRUE(std::holds_alternative<Error>(rejected));
+  EXPECT_NE(error_of(rejected).find("undefined field element 100000"),
+            std::string::npos);
 }
 
 TEST(MagneticIO, OutputRequestsSelectFieldSourceAndProbeFiles) {

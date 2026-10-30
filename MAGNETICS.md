@@ -451,7 +451,13 @@ surface is every face with exactly one side in the body plus its layers,
 oriented outward. It includes cavity walls, so a stator's surface has a
 wall in the air gap and excludes the rotor. Every layer cell, and every cell
 just outside the surface, must be nonmagnetic (MUR=1, no table, no
-remanence); plastic, potting and windings qualify. A magnetic cell sharing a
+remanence); plastic and potting qualify. Added layer cells must also be free
+of COIL/COIL2D regions and CWIRE conductor volume, so growing the surface
+cannot include the force on an unrelated winding. To include a winding's
+force, select its elements in the body ESET; for CWIRE, select all field cells
+containing the swept conductor. Winding checks apply even when the source
+has zero current in a subcase. A winding outside the surface may touch it,
+but may not extend into the added layers. A magnetic cell sharing a
 grid with the body is touching it: Maxwell stress cannot separate the force
 between touching parts, so add it to the body set (rotor = shaft + core +
 magnets) or mesh a gap. A magnetic cell further out means the gap is too
@@ -478,11 +484,12 @@ For `name.F06`, the solver also writes:
 
 Output requests select the field files. `BFIELD=ALL` (default), `NONE` or an
 ESET ID writes the subcase cell VTU for every cell, none, or only that set
-(points are compacted to the set's cells). `MPROBE=ALL|NONE` keeps or drops the
-subcase's CSV probe rows. Both may be global or set per subcase; a subcase
-value overrides the global one. `MSOURCE=ALL|NONE` is global only and controls
-the coil and wire source VTUs. JSON scalar results, including probes and
-forces, are always written.
+(points are compacted to the set's cells). A selected ESET must reference
+existing field elements; CWIRE IDs are not field elements. `MPROBE=ALL|NONE`
+keeps or drops the subcase's CSV probe rows. Both may be global or set per
+subcase; a subcase value overrides the global one. `MSOURCE=ALL|NONE` is
+global only and controls the coil and wire source VTUs. JSON scalar results,
+including probes and forces, are always written.
 
 - `name.mag.json`: SI scalar results, residuals, source orientation maps,
   conservation checks, linkage, differential inductance, force/torque and probes.

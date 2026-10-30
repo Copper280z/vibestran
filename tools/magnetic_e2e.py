@@ -35,6 +35,17 @@ def main():
         rows = run(executable, manifest, output/"sweep")
         assert abs(rows[1]["virtual_work_torque_Nm"]) < 1e-8
         assert rows[0]["virtual_work_torque_Nm"] is None
+        # Bad field-output selections must fail before solving or opening
+        # result files, with the ESET and element identified in the error.
+        path = output/"invalid_bfield.bdf"
+        path.write_text(deck("uniform", 3, 2).replace(
+            "BEGIN BULK", "BFIELD=99\nBEGIN BULK\nESET,99,1,999999"))
+        invalid = subprocess.run([str(executable), str(path)], capture_output=True, text=True)
+        diagnostic = invalid.stdout+invalid.stderr
+        assert invalid.returncode != 0
+        assert "BFIELD ESET 99" in diagnostic and "undefined field element 999999" in diagnostic
+        assert not path.with_suffix(".F06").exists()
+        assert not path.with_suffix(".mag.json").exists()
         for element in ("hex","wedge"):
             path = output/f"solid_{element}.bdf"
             path.write_text(deck("uniform",3,2,element=element))
