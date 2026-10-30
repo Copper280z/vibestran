@@ -126,4 +126,8 @@ For native 3D hex/wedge comparisons with GetDP or Elmer, use
 `tools/magnetic_examples.py uniform --element hex` (with an output path), then
 `coil` and `loop`, and export scalar reference data using the existing comparison
 schema. Compare the same physical geometry with independent meshes. Include a
-separate distorted-cell refinement study; this pass requires planar solid faces.
+separate distorted-cell refinement study, including warped CHEXA8/CPENTA6
+faces. The internal tests now exercise these mapped geometries, curved-face
+stress integration, matched coils and independent CWIRE transfer. There is not
+yet a completed third-party comparison specifically for warped background
+meshes; the Magpylib result above used the earlier background geometry.

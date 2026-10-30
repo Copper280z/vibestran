@@ -245,8 +245,8 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
           return Error{
               "MFORCE requires air on both sides of every surface face"};
       }
-      const Vector normal = sign * f.normal;
       for (const auto &q : face_quadrature(mesh, f)) {
+        const Vector normal = sign * q.normal;
         const Vector b =
             .5 * (field_at(mesh.cells[f.cells[0]], potential, q.position) +
                   field_at(mesh.cells[f.cells[1]], potential, q.position));
@@ -293,8 +293,9 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
     for (auto [fi, sign] :
          std::get<std::vector<std::pair<int, int>>>(selected)) {
       const auto &f = mesh.faces[fi];
-      volume += sign * f.area * f.normal.dot(f.center - request.origin) /
-                (mesh.planar ? 2 : 3);
+      for (const auto &q : face_quadrature(mesh, f))
+        volume += sign * q.weight * q.normal.dot(q.position - request.origin) /
+                  (mesh.planar ? 2 : 3);
     }
     if (!(volume > 0))
       return Error{"MFORCE normals must point outward"};

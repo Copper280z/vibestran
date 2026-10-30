@@ -158,9 +158,12 @@ quad grid; round sections use a square quad core and quadrilateral annuli,
 without collapsed cells on the centerline. Each lofted quad makes one hex,
 compared with six tetrahedra for the former split of a rectangular section cell.
 Round sections use fewer cells too, with a different cross-section partition.
-A spatially twisted path can produce warped loft faces: its entire connected
-component falls back to conforming tetrahedra. The source VTU exposes the actual
-cell types and the report includes preprocessing mesh sizes.
+The internal wire hexes retain convex, planar-faced geometry for source
+intersection checks. A spatially twisted path can produce warped loft faces:
+its entire connected component falls back to conforming tetrahedra. This is an
+internal CWIRE meshing choice, not a restriction on user CHEXA/CPENTA elements.
+The source VTU exposes the actual cell types and the report includes
+preprocessing mesh sizes.
 
 This reduces the current-preprocessing system, but is not an unconditional
 end-to-end speedup. Nonmatching integration of distorted hex fields can be more
@@ -196,10 +199,12 @@ The 3D magnetic domain must be a connected, filled, simply connected volume
 with one closed exterior surface. CTETRA4, CHEXA8 and CPENTA6 can be mixed at
 conforming faces. A quad face cannot meet two separate triangle faces: use
 wedges to transition between compatible triangle/quad faces, or choose a mesh
-with matching face topologies. Pyramid magnetic elements are not implemented. This pass
-accepts convex elements with planar faces; warped quad faces are rejected with
-an element diagnostic. It does not silently split the background solids into
-tetrahedra. Quadratic elements are not supported. Mesh the air inside conductor holes;
+with matching face topologies. User CHEXA8 and CPENTA6 elements may have warped
+bilinear quadrilateral faces. Their native isoparametric geometry and magnetic
+basis are retained; background solids are not split into tetrahedra. The
+Jacobian must remain nonsingular with consistent orientation throughout each
+cell. Folded, degenerate or numerically uncertifiable cells are rejected with
+an element diagnostic. Pyramid and quadratic magnetic elements are not supported. Mesh the air inside conductor holes;
 the *conductor* may be a torus but the *magnetic domain* must be filled. The
 default exterior condition is zero tangential A. Increase the air domain to
 check truncation error. Periodic, symmetry, infinite elements and multiply
@@ -283,7 +288,12 @@ Lowest-order [Nedelec edge elements](https://defelement.org/elements/nedelec1.ht
 represent 3D A, with covariant Piola mapping and consistently mapped curls.
 Tetrahedral B is constant; hex/wedge B varies within a cell. Material response,
 energy and tangent are integrated at volume quadrature points. Probes evaluate
-the actual local field and force calculations use face quadrature. Cell VTU
+the actual local field. Face quadrature uses the bilinear surface, local area
+measure and pointwise normal, including in Maxwell stress and enclosed-volume
+checks. Jacobian validation bounds the determinant over the whole reference
+cell using Bernstein coefficients and subdivision (see
+[Johnen, Weill and Remacle](https://arxiv.org/abs/1706.01613)), rather than relying
+only on corner or Gauss-point samples. Cell VTU
 fields are volume averages. A boundary-contracted spanning tree removes the gradient nullspace. The
 reduced curl-curl system is SPD for positive reluctivity. Nonlinear solves use
 the consistent material tangent, residual line search and, on failure, an
@@ -296,12 +306,27 @@ with contravariant Piola mapping for hexes/wedges. Cell balance,
 insulating side walls and unit cut flux constrain a minimum-resistive-energy
 solve. Closed-source preprocessing removes the redundant global cell balance.
 The stranded projection retains these constraints. N multiplies the resulting
-unit-current density exactly once. Wire and magnetic meshes need not match:
-convex polyhedral intersections transfer `integral N.J dV`. Tetrahedral polynomial
-products retain the degree-two rule. Mapped nonaffine wire/field cells use
-higher-order Gauss integration (orders 6, 8, 10, 12, then 14 as needed), checking both
-current continuity and relative coupling-vector change (1e-8). Matched coil
-regions integrate directly on their reference cells. Checks cover per-cell current conservation, source
+unit-current density exactly once. Matched coil regions integrate directly on
+their reference cells, including warped cells and cuts.
+
+Wire and magnetic meshes need not match. Convex planar-faced backgrounds use
+polyhedral intersections to transfer `integral N.J dV`. Tetrahedral polynomial
+products retain the degree-two rule. Nonaffine cells on this path use Gauss
+orders 6, 8, 10, 12, then 14 as needed, checking current continuity and relative
+coupling-vector change (1e-8).
+
+For backgrounds containing warped cells, source-reference integration lines
+are split at the actual bilinear field faces, including both crossings of a
+saddle face. Adaptive Gauss integration evaluates the mapped magnetic basis
+and current on these intervals and across the source section. It checks an
+estimated integration error and retries more tightly if discrete current
+continuity fails; it does not project the load to conceal a continuity error.
+Geometric interval bounds detect material overlaps and exterior crossings
+even when they are too small to hit quadrature samples. Curved transfer costs
+more than planar clipping and has finite refinement budgets; unresolved
+integration/contact returns a diagnostic requesting refinement.
+
+Checks cover per-cell current conservation, source
 volume coverage and orthogonality of the transferred load to interior nodal
 gradients. Conservation residual tolerances are 1e-10, transfer 1e-9, and relative
 coverage 1e-8.
@@ -380,8 +405,14 @@ finite-difference curls and the discrete curl-gradient identity; native mixed
 solid meshes and conserved coils; driven hex/wedge field refinement; planar
 tri/quad manufactured-solution convergence, nonlinear differential inductance,
 PM reversal, rotated distorted meshes, depth scaling and nonzero winding torque
-against its analytical axial-current moment. The wire spatial-loop fallback is
-checked against the current moment. The CLI test checks actual JSON/VTU/CSV
+against its analytical axial-current moment. Warped hex/wedge checks cover
+bilinear-face flux moments, mixed-interface
+continuity, uniform fields and Maxwell stress, folded mappings missed by
+volume quadrature, tiny curved overlaps versus contact, warped coil cuts,
+open-wire endpoints, and independent wire transfer/current moments and energy.
+Ray transfer is also compared with polyhedral intersection integration on a
+shared analytical fixture. The wire spatial-loop fallback is checked against
+the current moment. The CLI test checks actual JSON/VTU/CSV
 values, VTK topology, planar nodal potentials, exported ampere-turn integrals,
 and the prepared-deck sweep.
 

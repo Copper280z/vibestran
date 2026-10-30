@@ -104,6 +104,14 @@ Result<Mesh> make_mesh(std::vector<Vector> nodes,
       c.affine &= (j - jac).norm() <=
                   1e-12 * (planar ? jac.leftCols<2>().norm() : jac.norm());
     }
+    if (!valid_mapping(c, min_det))
+      return Error{std::format("Magnetic element {} has a folded, degenerate "
+                               "or uncertifiable Jacobian",
+                               c.id)};
+    const auto reference = reference_vertices(c);
+    Vector reference_center = Vector::Zero();
+    for (const auto &r : reference)
+      reference_center += r / static_cast<double>(reference.size());
     const auto topology = cell_edges(c);
     for (auto ij : topology) {
       std::array<int, 2> edge{indices[ij[0]], indices[ij[1]]};
@@ -160,18 +168,44 @@ Result<Mesh> make_mesh(std::vector<Vector> nodes,
       if (candidate.area <= 1e-14 * std::pow(length, planar ? 1 : 2))
         return Error{"Degenerate magnetic face"};
       candidate.normal.normalize();
-      const int sign =
-          candidate.normal.dot(candidate.center - center) > 0 ? 1 : -1;
+      int sign = candidate.normal.dot(candidate.center - center) > 0 ? 1 : -1;
+      if (!planar) {
+        std::vector<Vector> r;
+        Vector mid = Vector::Zero(), area = Vector::Zero();
+        for (int v : face) {
+          r.push_back(reference[std::find(indices.begin(), indices.end(), v) -
+                                indices.begin()]);
+          mid += r.back() / static_cast<double>(face.size());
+        }
+        for (size_t i = 0; i < r.size(); ++i)
+          area += (r[i] - mid).cross(r[(i + 1) % r.size()] - mid);
+        sign = area.dot(mid - reference_center) * determinant > 0 ? 1 : -1;
+      }
       for (int v : face)
         if (std::abs(candidate.normal.dot(mesh.nodes[v] - candidate.center)) >
             1e-10 * length)
-          return Error{
-              std::format("Warped face in magnetic element {}; first-order "
-                          "solid source intersection requires planar faces",
-                          c.id)};
+          candidate.flat = false;
+      c.polyhedral &= candidate.flat;
+      if (!candidate.flat) {
+        double previous_area = 0;
+        for (int order : {5, 9, 13}) {
+          candidate.area = 0;
+          for (const auto &q : face_quadrature(mesh, candidate, order))
+            candidate.area += q.weight;
+          if (std::abs(candidate.area - previous_area) <=
+              1e-12 * candidate.area)
+            break;
+          previous_area = candidate.area;
+        }
+      }
       for (const auto &x : c.points)
-        if (sign * candidate.normal.dot(x - candidate.center) > 1e-10 * length)
-          return Error{std::format("Nonconvex magnetic element {}", c.id)};
+        if (sign * candidate.normal.dot(x - candidate.center) >
+            1e-10 * length) {
+          if (planar)
+            return Error{
+                std::format("Nonconvex planar magnetic element {}", c.id)};
+          c.polyhedral = false;
+        }
       if (inserted)
         mesh.faces.push_back(candidate);
       auto &f = mesh.faces[it->second];
@@ -278,25 +312,25 @@ selected_faces(const Model &model, const Mesh &mesh, int selection) {
       return Error{"FSET face does not belong to its specified element"};
     if (!seen.insert(f->second).second)
       return Error{"Duplicate geometric face in FSET"};
-    Vector normal;
-    if (mesh.planar)
-      normal = (mesh.nodes[ids[1]] - mesh.nodes[ids[0]]).cross(mesh.normal);
-    else {
-      normal = (mesh.nodes[ids[1]] - mesh.nodes[ids[0]])
-                   .cross(mesh.nodes[ids[2]] - mesh.nodes[ids[0]]);
-      // Reject crossed or noncyclic quadrilateral selections.
-      if (ids.size() == 4) {
-        auto canonical = ids;
-        std::rotate(canonical.begin(),
-                    std::min_element(canonical.begin(), canonical.end()),
-                    canonical.end());
-        if (canonical[1] > canonical.back())
-          std::reverse(canonical.begin() + 1, canonical.end());
-        if (canonical != face.nodes)
-          return Error{"FSET quadrilateral nodes must be in cyclic order"};
+    auto canonical = ids;
+    int sign = 1;
+    if (canonical.size() == 2) {
+      if (canonical[0] > canonical[1]) {
+        std::reverse(canonical.begin(), canonical.end());
+        sign = -1;
+      }
+    } else {
+      std::rotate(canonical.begin(),
+                  std::min_element(canonical.begin(), canonical.end()),
+                  canonical.end());
+      if (canonical[1] > canonical.back()) {
+        std::reverse(canonical.begin() + 1, canonical.end());
+        sign = -1;
       }
     }
-    out.emplace_back(f->second, normal.dot(face.normal) > 0 ? 1 : -1);
+    if (canonical != face.nodes)
+      return Error{"FSET face nodes must be in cyclic order"};
+    out.emplace_back(f->second, sign);
   }
   return out;
 }

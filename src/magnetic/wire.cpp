@@ -193,8 +193,9 @@ Result<Source> sweep(const Model &model, const std::vector<int> &vertices,
   }
   auto built = make_mesh(nodes, hexa);
   bool tetrahedral = false;
-  if (auto *e = std::get_if<Error>(&built);
-      e && e->message.starts_with("Warped face")) {
+  if (const auto *mesh = std::get_if<Mesh>(&built);
+      mesh && std::any_of(mesh->cells.begin(), mesh->cells.end(),
+                          [](const Cell &c) { return !c.polyhedral; })) {
     // Twisted spatial paths may have warped loft faces. Fall back for the whole
     // component so no nonconforming quad/triangle interfaces are introduced.
     built = make_mesh(std::move(nodes), tetra);

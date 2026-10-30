@@ -15,13 +15,17 @@ struct Cell {
   Vector origin, map_origin, minimum, maximum;
   Vector normal{Vector::UnitZ()};
   bool planar{false}, affine{false};
+  bool polyhedral{true}; // Convex with flat faces; eligible for plane clipping.
   double volume{0};
 };
 struct Face {
   NodeList nodes;
   std::array<int, 2> cells{-1, -1};
+  // Canonical normal at the face center. Use SurfaceSample.normal for
+  // integration on bilinear faces.
   Vector normal{Vector::Zero()}, center{Vector::Zero()};
   double area{0};
+  bool flat{true};
 };
 struct Mesh {
   std::vector<Vector> nodes;
@@ -40,6 +44,10 @@ struct Mesh {
 };
 struct Sample {
   Vector position;
+  double weight;
+};
+struct SurfaceSample {
+  Vector position, normal;
   double weight;
 };
 [[nodiscard]] Result<Mesh> make_mesh(std::vector<Vector> nodes,
@@ -67,8 +75,27 @@ make_mesh(std::vector<Vector> nodes,
                                 const Vector &x);
 [[nodiscard]] std::vector<Sample> quadrature(const Mesh &mesh,
                                              const Cell &cell);
-[[nodiscard]] std::vector<Sample> face_quadrature(const Mesh &mesh,
-                                                  const Face &face);
+[[nodiscard]] std::vector<SurfaceSample>
+face_quadrature(const Mesh &mesh, const Face &face, int order = 5);
+[[nodiscard]] std::vector<Vector> reference_vertices(const Cell &cell);
+[[nodiscard]] Vector reference_coordinates(const Cell &cell, const Vector &x);
+[[nodiscard]] bool valid_mapping(const Cell &cell, double minimum_determinant);
+[[nodiscard]] bool point_on_face(const Mesh &mesh, const Face &face,
+                                 const Vector &x, double tolerance = 1e-9);
+[[nodiscard]] std::vector<double> line_face_intersections(const Mesh &mesh,
+                                                          const Face &face,
+                                                          const Vector &first,
+                                                          const Vector &last);
+[[nodiscard]] std::vector<std::pair<double, double>> gauss_rule(int order);
+// Test positive penetration into a convex, planar-faced source cell. Contact
+// is excluded; unresolved bounds return an error instead of missing an overlap.
+[[nodiscard]] Result<bool> cell_intersects_interior(const Mesh &poly_mesh,
+                                                    const Cell &poly,
+                                                    const Cell &other);
+[[nodiscard]] Result<bool> face_intersects_interior(const Mesh &poly_mesh,
+                                                    const Cell &poly,
+                                                    const Mesh &mesh,
+                                                    const Face &face);
 // Reference-cell geometry and mapping used by mesh validation and basis
 // evaluation.
 struct Shape {
@@ -84,6 +111,7 @@ void initialize_mapping(Cell &cell);
 [[nodiscard]] std::vector<NodeList> cell_faces(const Cell &cell);
 [[nodiscard]] Result<std::vector<std::pair<int, int>>>
 selected_faces(const Model &model, const Mesh &mesh, int selection);
+// Requires both cells to be convex and planar-faced (Cell::polyhedral).
 [[nodiscard]] std::vector<Sample>
 intersection_quadrature(const Mesh &a, const Cell &ca, const Mesh &b,
                         const Cell &cb, int order = 2);

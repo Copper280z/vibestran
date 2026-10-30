@@ -44,6 +44,30 @@ def main():
             tree = ET.parse(output/f"solid_{element}_sc1.vtu")
             types = set(map(int,tree.find(".//Cells/DataArray[@Name='types']").text.split()))
             assert types == ({12} if element == "hex" else {13})
+            # Volume-preserving bilinear shear: warped native solids must
+            # reproduce an exactly representable uniform field and energy.
+            warped = []
+            field = [0., 0., .3] if element == "hex" else [.3, 0., 0.]
+            for line in deck("uniform", 3, 2, element=element).splitlines():
+                if line.startswith("GRID,"):
+                    parts = line.split(",")
+                    x, y, z = map(float, parts[3:6])
+                    position = (x, y, z+.2*x*y) if element == "hex" else (x+.2*y*z, y, z)
+                    line = ",".join(parts[:3]+[f"{v:.16g}" for v in position])
+                elif line.startswith("MBC,"):
+                    line = "MBC,1,0,UNIFORM,"+",".join(map(str, field))
+                warped.append(line)
+            path = output/f"warped_{element}.bdf"
+            path.write_text("\n".join(warped)+"\n")
+            subprocess.run([str(executable), str(path)], check=True)
+            result = json.loads(path.with_suffix(".mag.json").read_text())
+            expected = 64*.3**2/(2*4*math.pi*1e-7)
+            assert math.isclose(result["cases"][0]["energy_J"], expected, rel_tol=1e-12)
+            tree = ET.parse(output/f"warped_{element}_sc1.vtu")
+            values = list(map(float, tree.find(".//CellData/DataArray[@Name='B_T']").text.split()))
+            assert all(math.isclose(v, field[i % 3], abs_tol=1e-12) for i, v in enumerate(values))
+            types = set(map(int, tree.find(".//Cells/DataArray[@Name='types']").text.split()))
+            assert types == ({12} if element == "hex" else {13})
         for element in ("tri", "quad", "mixed"):
             path = output/f"planar_{element}.bdf"
             path.write_text(planar_deck("uniform", 4, element, .02))

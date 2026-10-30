@@ -9,7 +9,8 @@ constexpr int hex[8][3] = {{-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
                            {-1, -1, 1},  {1, -1, 1},  {1, 1, 1},  {-1, 1, 1}};
 const std::array<Vector, 3> tri_grad{Vector(-1, -1, 0), Vector(1, 0, 0),
                                      Vector(0, 1, 0)};
-Vector reference_point(const Cell &c, const Vector &x) {
+} // namespace
+Vector reference_coordinates(const Cell &c, const Vector &x) {
   Vector r = c.inverse * (x - c.map_origin);
   if (c.affine)
     return r;
@@ -22,7 +23,6 @@ Vector reference_point(const Cell &c, const Vector &x) {
   }
   return r;
 }
-} // namespace
 
 std::vector<std::array<int, 2>> cell_edges(const Cell &c) {
   if (c.planar) {
@@ -128,11 +128,11 @@ std::pair<Vector, Matrix> mapping(const Cell &c, const Vector &r) {
   return {p, j};
 }
 std::array<double, 4> barycentric(const Cell &c, const Vector &x) {
-  const Vector r = reference_point(c, x);
+  const Vector r = reference_coordinates(c, x);
   return {1 - r.sum(), r.x(), r.y(), r.z()};
 }
 bool contains(const Cell &c, const Vector &x, double tol) {
-  const Vector r = reference_point(c, x);
+  const Vector r = reference_coordinates(c, x);
   if (!r.allFinite())
     return false;
   if ((mapping(c, r).first - x).norm() > tol * (c.maximum - c.minimum).norm())
@@ -157,7 +157,7 @@ std::vector<Vector> edge_basis(const Cell &c, const Vector &x) {
     }
     return n;
   }
-  const Vector r = reference_point(c, x);
+  const Vector r = reference_coordinates(c, x);
   if (c.planar) {
     auto s = reference_shape(c, r);
     std::vector<Vector> n;
@@ -195,7 +195,7 @@ std::vector<Vector> edge_basis(const Cell &c, const Vector &x) {
 std::vector<Vector> edge_curls(const Cell &c, const Vector &x) {
   if (!c.planar && c.nodes.size() == 4)
     return c.curl;
-  const Vector r = reference_point(c, x);
+  const Vector r = reference_coordinates(c, x);
   const Matrix j = c.affine ? c.jacobian : mapping(c, r).second;
   if (c.planar) {
     const Matrix inv = j.inverse().transpose();
@@ -234,7 +234,7 @@ std::vector<Vector> flux_basis(const Mesh &, const Cell &c, const Vector &x) {
       n[i] = c.face_sign[i] * (x - c.points[i]) / (3 * c.volume);
     return n;
   }
-  const Vector r = reference_point(c, x);
+  const Vector r = reference_coordinates(c, x);
   const Matrix j = c.affine ? c.jacobian : mapping(c, r).second;
   if (c.nodes.size() == 8) {
     constexpr int axes[6] = {2, 2, 1, 0, 1, 0},
@@ -260,7 +260,7 @@ Vector flux_value(const Cell &c, const Eigen::VectorXd &flux, const Vector &x) {
                (3 * c.volume);
     return value;
   }
-  const Vector r = reference_point(c, x);
+  const Vector r = reference_coordinates(c, x);
   const Matrix j = c.affine ? c.jacobian : mapping(c, r).second;
   if (c.nodes.size() == 8) {
     constexpr int axes[6] = {2, 2, 1, 0, 1, 0},
@@ -320,24 +320,5 @@ std::vector<Sample> quadrature(const Mesh &, const Cell &c) {
     s.weight *= std::abs(j.determinant());
   }
   return q;
-}
-std::vector<Sample> face_quadrature(const Mesh &m, const Face &f) {
-  if (m.planar) {
-    const Vector mid = (m.nodes[f.nodes[0]] + m.nodes[f.nodes[1]]) / 2;
-    const Vector half = (m.nodes[f.nodes[1]] - m.nodes[f.nodes[0]]) / 2;
-    const double a = std::sqrt(0.6);
-    return {{mid - a * half, f.area * 5 / 18},
-            {mid, f.area * 4 / 9},
-            {mid + a * half, f.area * 5 / 18}};
-  }
-  Cell c;
-  c.planar = true;
-  c.normal = f.normal;
-  c.nodes = f.nodes;
-  for (int n : f.nodes)
-    c.points.push_back(m.nodes[n]);
-  c.origin = c.points[0];
-  initialize_mapping(c);
-  return quadrature(m, c);
 }
 } // namespace vibestran::magnetic

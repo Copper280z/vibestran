@@ -1030,7 +1030,7 @@ TEST(MagneticParser, NativeSolidsPlanarWindingCardsAndUnsupportedGeometry) {
   auto solved = solve(m);
   ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
   const auto &s = std::get<Results>(solved).sources[0];
-  ASSERT_EQ(s.planar_density.size(), 2);
+  ASSERT_EQ(s.planar_density.size(), 2U);
   EXPECT_NEAR(s.planar_density[0].z(), 4e7, 1e-7);
   EXPECT_NEAR(s.planar_density[1].z(), -4e7, 1e-7);
   EXPECT_NEAR(s.coupling.sum(), 0, 1e-12);
@@ -1042,7 +1042,7 @@ TEST(MagneticParser, NativeSolidsPlanarWindingCardsAndUnsupportedGeometry) {
   EXPECT_NE(error_of(solve(bad)).find("common plane"), std::string::npos);
   auto solid = brick_box(1);
   solid.nodes[1].position.z() += .1;
-  EXPECT_NE(error_of(make_mesh(solid)).find("Warped face"), std::string::npos);
+  EXPECT_TRUE(std::holds_alternative<Mesh>(make_mesh(solid)));
   EXPECT_NE(error_of(parse_string(deck + "CWIRE,99,1,1,2\n")).find("CWIRE"),
             std::string::npos);
 }
@@ -1069,7 +1069,7 @@ TEST(MagneticSolids, DrivenWireFieldConvergesOnNativeHexAndWedgeMeshes) {
       EXPECT_NEAR(c.sources[0].linkage, 2 * c.energy, 1e-15);
       EXPECT_LT(r.sources[0].transfer_error, 1e-9);
       for (const auto &cell : r.sources[0].mesh.cells)
-        EXPECT_EQ(cell.nodes.size(), 8);
+        EXPECT_EQ(cell.nodes.size(), 8U);
       if (n == 16)
         EXPECT_LT(error, .12);
     }
@@ -1131,10 +1131,13 @@ TEST(MagneticWire, SpatialLoopFallbackPreservesTheCurrentMoment) {
   auto m = box(1);
   loop(m);
   m.nodes[100002].position.z() = .3;
+  m.nodes[100002].position.x() = .4;
   auto prepared = prepare_wires(m);
   ASSERT_TRUE(std::holds_alternative<std::vector<Source>>(prepared))
       << error_of(prepared);
   const auto &s = std::get<std::vector<Source>>(prepared)[0];
+  for (const auto &c : s.mesh.cells)
+    EXPECT_EQ(c.nodes.size(), 4U);
   Vector expected = Vector::Zero(), moment = Vector::Zero();
   for (int i = 0; i < 4; ++i)
     expected +=
@@ -1154,7 +1157,12 @@ TEST(MagneticWire, SpatialLoopFallbackPreservesTheCurrentMoment) {
 TEST(MagneticMappedBasis,
      MixedInterfacesPreserveTangentialPotentialAndNormalFlux) {
   std::vector<Mesh> meshes;
-  meshes.push_back(std::get<Mesh>(make_mesh(brick_box(2, false, true))));
+  auto mixed = brick_box(2, false, true);
+  for (auto &[id, g] : mixed.nodes) {
+    (void)id;
+    g.position.x() += .3 * g.position.y() * g.position.z();
+  }
+  meshes.push_back(std::get<Mesh>(make_mesh(mixed)));
   auto built = make_mesh({Vector(0, 0, 0), Vector(1, 0, 0), Vector(0, 1, 0),
                           Vector(0, 0, 1), Vector(1, 0, 1), Vector(0, 1, 1),
                           Vector(.2, .2, 2)},
@@ -1174,6 +1182,7 @@ TEST(MagneticMappedBasis,
       for (const auto &q : face_quadrature(mesh, face)) {
         Vector potential[2] = {Vector::Zero(), Vector::Zero()};
         Vector field[2] = {Vector::Zero(), Vector::Zero()};
+        Vector current[2] = {Vector::Zero(), Vector::Zero()};
         for (int side = 0; side < 2; ++side) {
           const auto &c = mesh.cells[face.cells[side]];
           const auto basis = edge_basis(c, q.position),
@@ -1183,15 +1192,15 @@ TEST(MagneticMappedBasis,
             potential[side] += value * basis[e];
             field[side] += value * curls[e];
           }
-          Vector current = Vector::Zero();
           const auto fb = flux_basis(mesh, c, q.position);
           for (size_t i = 0; i < c.faces.size(); ++i)
-            current += flux[c.faces[i]] * fb[i];
-          EXPECT_LT((flux_value(c, flux, q.position) - current).norm(), 1e-12);
+            current[side] += flux[c.faces[i]] * fb[i];
+          EXPECT_LT((flux_value(c, flux, q.position) - current[side]).norm(),
+                    1e-12);
         }
-        EXPECT_LT((potential[0] - potential[1]).cross(face.normal).norm(),
-                  1e-12);
-        EXPECT_NEAR((field[0] - field[1]).dot(face.normal), 0, 1e-12);
+        EXPECT_LT((potential[0] - potential[1]).cross(q.normal).norm(), 1e-12);
+        EXPECT_NEAR((field[0] - field[1]).dot(q.normal), 0, 1e-12);
+        EXPECT_NEAR((current[0] - current[1]).dot(q.normal), 0, 1e-12);
       }
     }
   }
@@ -1218,4 +1227,312 @@ TEST(MagneticPlanar, LengthScalingPreservesDistortedQuadField) {
     EXPECT_NEAR(c.energy, energy, 1e-11 * energy);
     EXPECT_LT((c.probe_b[0] - field).norm(), 1e-12);
   }
+}
+
+TEST(MagneticWarped, BilinearFacesNormalsFluxesAndTwoLineIntersections) {
+  auto m = brick_box(1);
+  for (auto &[id, g] : m.nodes) {
+    (void)id;
+    g.position.z() += g.position.x() * g.position.y();
+  }
+  auto built = make_mesh(m);
+  ASSERT_TRUE(std::holds_alternative<Mesh>(built)) << error_of(built);
+  const auto &mesh = std::get<Mesh>(built);
+  const auto &cell = mesh.cells[0];
+  EXPECT_FALSE(cell.polyhedral);
+  double volume = 0;
+  Vector area_vector = Vector::Zero();
+  for (size_t i = 0; i < cell.faces.size(); ++i) {
+    const auto &face = mesh.faces[cell.faces[i]];
+    std::vector<double> flux(cell.faces.size(), 0);
+    for (const auto &q : face_quadrature(mesh, face)) {
+      EXPECT_TRUE(point_on_face(mesh, face, q.position));
+      const auto basis = flux_basis(mesh, cell, q.position);
+      for (size_t j = 0; j < flux.size(); ++j)
+        flux[j] += q.weight * q.normal.dot(basis[j]);
+      volume += cell.face_sign[i] * q.weight * q.normal.dot(q.position) / 3;
+      area_vector += cell.face_sign[i] * q.weight * q.normal;
+      if (!face.flat) {
+        const Vector expected =
+            Vector(-q.position.y(), -q.position.x(), 1).normalized();
+        EXPECT_LT((q.normal - expected).norm(), 1e-12);
+      }
+    }
+    for (size_t j = 0; j < flux.size(); ++j)
+      EXPECT_NEAR(flux[j], i == j ? 1 : 0, 1e-12);
+    if (face.center.z() > .9) {
+      auto roots = line_face_intersections(mesh, face, Vector(-.8, -.8, 1.16),
+                                           Vector(.8, .8, 1.16));
+      std::sort(roots.begin(), roots.end());
+      ASSERT_EQ(roots.size(), 2U);
+      EXPECT_NEAR(roots[0], .25, 1e-12);
+      EXPECT_NEAR(roots[1], .75, 1e-12);
+      auto long_ray = line_face_intersections(
+          mesh, face, Vector(-1e8, -1e8, 1.16), Vector(1e8, 1e8, 1.16));
+      std::sort(long_ray.begin(), long_ray.end());
+      ASSERT_EQ(long_ray.size(), 2U);
+      EXPECT_NEAR(long_ray[0], .5 - 2e-9, 1e-15);
+      EXPECT_NEAR(long_ray[1], .5 + 2e-9, 1e-15);
+      auto rule = line_face_intersections(mesh, face, Vector(0, -2, 1),
+                                          Vector(0, 2, 1));
+      std::sort(rule.begin(), rule.end());
+      ASSERT_EQ(rule.size(), 2U);
+      EXPECT_NEAR(rule[0], .25, 1e-12);
+      EXPECT_NEAR(rule[1], .75, 1e-12);
+    }
+  }
+  EXPECT_NEAR(volume, 8, 1e-12);
+  EXPECT_LT(area_vector.norm(), 1e-12);
+}
+
+TEST(MagneticWarped, HexAndWedgeFieldsEnergyAndCurvedForceSurface) {
+  for (bool wedge : {false, true}) {
+    auto m = brick_box(3, wedge);
+    const auto initial = std::get<Mesh>(make_mesh(m));
+    for (size_t i = 0; i < initial.faces.size(); ++i) {
+      const auto &f = initial.faces[i];
+      bool on = false;
+      for (int k = 0; k < 3; ++k)
+        on |= std::abs(std::abs(f.center[k]) - 1. / 3) < 1e-12;
+      if (on && f.center.cwiseAbs().maxCoeff() < 1. / 3 + 1e-12)
+        m.face_sets[1].push_back(face_selection(
+            initial, static_cast<int>(i), f.normal.dot(f.center) > 0 ? 1 : -1));
+    }
+    for (auto &[id, g] : m.nodes) {
+      (void)id;
+      if (wedge)
+        g.position.x() += .4 * g.position.y() * g.position.z();
+      else
+        g.position.z() += .4 * g.position.x() * g.position.y();
+    }
+    const Vector field = .2 * (wedge ? Vector::UnitX() : Vector::UnitZ());
+    m.boundaries[1] = {0, field};
+    m.subcases[0].boundary = 1;
+    m.forces = {{1, 1, Vector::Zero()}};
+    m.probes = {{1, Vector(.12, .11, .17)}};
+    auto solved = solve(m);
+    ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+    const auto &r = std::get<Results>(solved);
+    EXPECT_TRUE(std::any_of(r.mesh.faces.begin(), r.mesh.faces.end(),
+                            [](const Face &f) { return !f.flat; }));
+    EXPECT_NEAR(r.cases[0].energy, 8 * field.squaredNorm() / (2 * mu0), 1e-8);
+    EXPECT_LT((r.cases[0].probe_b[0] - field).norm(), 1e-12);
+    EXPECT_LT(r.cases[0].forces[0].force.norm(), 1e-8);
+    EXPECT_LT(r.cases[0].forces[0].torque.norm(), 1e-8);
+  }
+}
+
+TEST(MagneticWarped, MatchedClosedCoilAndWarpedCutConserveAmpereTurns) {
+  auto m = brick_box(6);
+  const auto initial = std::get<Mesh>(make_mesh(m));
+  for (const auto &c : initial.cells) {
+    const Vector center = (c.minimum + c.maximum) / 2;
+    const double radius = center.head<2>().cwiseAbs().maxCoeff();
+    if (radius > .3 && radius < .7 && std::abs(center.z()) < .4)
+      m.element_sets[1].push_back(c.id);
+  }
+  for (size_t i = 0; i < initial.faces.size(); ++i) {
+    const auto &f = initial.faces[i];
+    if (std::abs(f.center.y()) < 1e-12 && f.center.x() > .3 &&
+        f.center.x() < .7 && std::abs(f.center.z()) < .4)
+      m.face_sets[1].push_back(face_selection(initial, static_cast<int>(i),
+                                              f.normal.y() > 0 ? 1 : -1));
+  }
+  m.coils = {{1, 1, 20, 1, 0}};
+  for (auto &[id, g] : m.nodes) {
+    (void)id;
+    g.position.y() += .4 * g.position.x() * g.position.z();
+  }
+  auto built = make_mesh(m);
+  ASSERT_TRUE(std::holds_alternative<Mesh>(built)) << error_of(built);
+  const auto &mesh = std::get<Mesh>(built);
+  auto prepared = prepare_sources(m, mesh);
+  ASSERT_TRUE(std::holds_alternative<std::vector<Source>>(prepared))
+      << error_of(prepared);
+  const auto &s = std::get<std::vector<Source>>(prepared)[0];
+  EXPECT_LT(s.conservation_error, 1e-10);
+  EXPECT_LT(s.transfer_error, 1e-10);
+  auto selection = selected_faces(m, s.mesh, 1);
+  ASSERT_TRUE(
+      (std::holds_alternative<std::vector<std::pair<int, int>>>(selection)))
+      << error_of(selection);
+  double current = 0;
+  for (auto [f, sign] : std::get<std::vector<std::pair<int, int>>>(selection)) {
+    EXPECT_FALSE(s.mesh.faces[f].flat);
+    current += sign * s.flux[f];
+  }
+  EXPECT_NEAR(current, 20, 1e-10);
+  for (auto &f : m.face_sets[1])
+    std::reverse(f.nodes.begin(), f.nodes.end());
+  auto reversed = prepare_sources(m, mesh);
+  ASSERT_TRUE(std::holds_alternative<std::vector<Source>>(reversed))
+      << error_of(reversed);
+  EXPECT_LT(
+      (std::get<std::vector<Source>>(reversed)[0].coupling + s.coupling).norm(),
+      1e-10);
+}
+
+TEST(MagneticWarped, IndependentWireTransferConservesCurrentAndMagneticMoment) {
+  for (bool wedge : {false, true}) {
+    SCOPED_TRACE(wedge);
+    auto m = brick_box(2, wedge);
+    for (auto &[id, g] : m.nodes) {
+      (void)id;
+      if (wedge)
+        g.position.x() += .35 * g.position.y() * g.position.z();
+      else
+        g.position.z() += .35 * g.position.x() * g.position.y();
+    }
+    loop(m, .6, true);
+    if (wedge) {
+      for (int i = 0; i < 4; ++i) {
+        auto &x = m.nodes[100000 + i].position;
+        x = Vector(x.z(), x.x(), x.y());
+        m.wires[i].orientation = Vector::UnitX();
+      }
+    }
+    auto solved = solve(m);
+    ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+    const auto &result = std::get<Results>(solved);
+    const auto &mesh = result.mesh;
+    const auto &s = result.sources[0];
+    const auto &c = result.cases[0];
+    ASSERT_GT(c.energy, 0);
+    EXPECT_NEAR(c.sources[0].linkage, 2 * c.energy, 1e-10 * c.energy);
+    EXPECT_NEAR(c.differential_inductance(0, 0), 2 * c.energy,
+                1e-10 * c.energy);
+    EXPECT_LT(s.transfer_error, 1e-9);
+    for (const auto &c : s.mesh.cells)
+      EXPECT_TRUE(c.polyhedral);
+    Vector moment = Vector::Zero();
+    for (const auto &c : s.mesh.cells)
+      for (const auto &q : quadrature(s.mesh, c))
+        moment +=
+            .5 * q.weight * q.position.cross(flux_value(c, s.flux, q.position));
+    const Vector direction = wedge ? Vector::UnitX() : Vector::UnitZ();
+    Eigen::VectorXd a(mesh.edges.size());
+    for (size_t e = 0; e < mesh.edges.size(); ++e) {
+      const Vector x = mesh.nodes[mesh.edges[e][0]],
+                   y = mesh.nodes[mesh.edges[e][1]];
+      a[e] = .5 * direction.cross((x + y) / 2).dot(y - x);
+    }
+    EXPECT_NEAR(s.coupling.dot(a), moment.dot(direction), 1e-8 * moment.norm());
+  }
+}
+
+TEST(MagneticWarped, RejectsFoldedHexesAndWedgesMissedByVolumeQuadrature) {
+  for (int count : {6, 8})
+    for (bool interior : {false, true}) {
+      SCOPED_TRACE(std::format("{} nodes, interior fold {}", count, interior));
+      Cell c;
+      c.nodes.resize(count);
+      for (int i = 0; i < count; ++i)
+        c.nodes[i] = i;
+      const auto reference = reference_vertices(c);
+      for (const auto &r : reference) {
+        if (interior)
+          c.points.emplace_back((r.z() - .4) * r.x() + .05 * r.y(),
+                                .05 * r.x() + (r.z() - .4) * r.y(), r.z());
+        else
+          c.points.emplace_back(r.x() + 1.1 * r.y() * r.z(),
+                                r.y() + 1.1 * r.x() * r.z(), r.z());
+      }
+      c.origin = c.points[0];
+      initialize_mapping(c);
+      // det(J) is (t-.4)^2-.05^2 or 1-1.21*t^2. Both are
+      // positive at every existing volume Gauss point, yet folded elsewhere.
+      for (const auto &q : reference_quadrature(c))
+        EXPECT_GT(mapping(c, q.position).second.determinant(), 0);
+      if (interior) {
+        for (const auto &r : reference)
+          EXPECT_GT(mapping(c, r).second.determinant(), 0);
+        EXPECT_LT(mapping(c, Vector(0, 0, .4)).second.determinant(), 0);
+      }
+      auto rejected = make_mesh(c.points, {c.nodes});
+      ASSERT_TRUE(std::holds_alternative<Error>(rejected));
+      EXPECT_NE(error_of(rejected).find("Jacobian"), std::string::npos);
+    }
+}
+
+TEST(MagneticWarped, TinyCurvedPenetrationIsDetectedAndTouchingIsAllowed) {
+  const auto source = std::get<Mesh>(make_mesh(brick_box(1)));
+  for (double penetration : {1e-3, 0., -1e-3}) {
+    auto target = brick_box(1);
+    for (auto &[id, g] : target.nodes) {
+      (void)id;
+      g.position.x() +=
+          2.4 - penetration + .4 * g.position.y() * g.position.z();
+    }
+    auto built = make_mesh(target);
+    ASSERT_TRUE(std::holds_alternative<Mesh>(built)) << error_of(built);
+    const auto &mesh = std::get<Mesh>(built);
+    const auto &cell = mesh.cells[0];
+    // Penetration occurs only near two warped-face corners, outside all
+    // ordinary volume and surface quadrature samples.
+    for (const auto &q : quadrature(mesh, cell))
+      EXPECT_FALSE(contains(source.cells[0], q.position));
+    auto overlap = cell_intersects_interior(source, source.cells[0], cell);
+    ASSERT_TRUE(std::holds_alternative<bool>(overlap)) << error_of(overlap);
+    EXPECT_EQ(std::get<bool>(overlap), penetration > 0);
+    bool crossing = false;
+    for (int f : cell.faces) {
+      auto intersects = face_intersects_interior(source, source.cells[0], mesh,
+                                                 mesh.faces[f]);
+      ASSERT_TRUE(std::holds_alternative<bool>(intersects))
+          << error_of(intersects);
+      crossing |= std::get<bool>(intersects);
+    }
+    EXPECT_EQ(crossing, penetration > 0);
+  }
+}
+
+TEST(MagneticWarped, RayTransferMatchesPolyhedralIntersectionIntegration) {
+  auto model = brick_box(2, false, true);
+  loop(model, .6, true);
+  const auto mesh = std::get<Mesh>(make_mesh(model));
+  const auto source = std::get<std::vector<Source>>(prepare_wires(model))[0];
+  const auto clipped = couple_source(source, mesh),
+             rays = couple_curved_source(source, mesh);
+  ASSERT_TRUE(std::holds_alternative<Eigen::VectorXd>(clipped))
+      << error_of(clipped);
+  ASSERT_TRUE(std::holds_alternative<Eigen::VectorXd>(rays)) << error_of(rays);
+  const auto &expected = std::get<Eigen::VectorXd>(clipped);
+  EXPECT_LT((std::get<Eigen::VectorXd>(rays) - expected).norm() /
+                expected.norm(),
+            1e-9);
+}
+
+TEST(MagneticWarped, OpenWireTerminalsAndMaterialExclusion) {
+  auto model = brick_box(2);
+  for (auto &[id, g] : model.nodes) {
+    (void)id;
+    g.position.z() += .3 * g.position.x() * g.position.y();
+  }
+  model.conductivity[1] = 5.8e7;
+  model.wire_properties[1] = {1, true, .1, .1};
+  model.nodes[100000] = {Vector(-1, .07, .13), 0};
+  model.nodes[100001] = {Vector(1, .07, .13), 0};
+  model.wires.push_back({100000, 1, 100000, 100001, 0, Vector::UnitZ()});
+  model.options.wire_layers = 1;
+  model.options.wire_step = .5;
+  const auto mesh = std::get<Mesh>(make_mesh(model));
+  auto prepared = prepare_sources(model, mesh);
+  ASSERT_TRUE(std::holds_alternative<std::vector<Source>>(prepared))
+      << error_of(prepared);
+  EXPECT_LT(std::get<std::vector<Source>>(prepared)[0].transfer_error, 1e-9);
+  auto invalid = model;
+  invalid.nodes[100000].position.x() = -.8;
+  auto rejected = prepare_sources(invalid, mesh);
+  ASSERT_TRUE(std::holds_alternative<Error>(rejected));
+  EXPECT_NE(error_of(rejected).find("terminate"), std::string::npos);
+  invalid = model;
+  invalid.nodes[100000].position.x() = -1.01;
+  rejected = prepare_sources(invalid, mesh);
+  ASSERT_TRUE(std::holds_alternative<Error>(rejected));
+  EXPECT_NE(error_of(rejected).find("outside"), std::string::npos);
+  invalid = model;
+  invalid.materials[1].mur = 2;
+  rejected = prepare_sources(invalid, mesh);
+  ASSERT_TRUE(std::holds_alternative<Error>(rejected));
+  EXPECT_NE(error_of(rejected).find("overlaps"), std::string::npos);
 }

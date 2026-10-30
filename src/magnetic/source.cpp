@@ -289,8 +289,7 @@ Result<Transfer> transfer_source(const Source &source, const Mesh &mesh,
             continue;
           for (int f : cell.faces)
             if (mesh.faces[f].cells[1] < 0 &&
-                std::abs(mesh.faces[f].normal.dot(x - mesh.faces[f].center)) <
-                    tolerance)
+                point_on_face(mesh, mesh.faces[f], x, 1e-8))
               exterior = true;
         }
         if (!exterior)
@@ -371,6 +370,9 @@ Result<Transfer> transfer_source(const Source &source, const Mesh &mesh,
 }
 } // namespace
 Result<Eigen::VectorXd> couple_source(const Source &source, const Mesh &mesh) {
+  if (source.wire && std::any_of(mesh.cells.begin(), mesh.cells.end(),
+                                 [](const Cell &c) { return !c.polyhedral; }))
+    return couple_curved_source(source, mesh);
   double error = 0, change = 0;
   const bool adaptive =
       source.wire &&
@@ -470,7 +472,22 @@ Result<std::vector<Source>> prepare_sources(const Model &model,
   if (auto *e = std::get_if<Error>(&wires))
     return *e;
   SpatialIndex index(mesh);
+  const bool curved = std::any_of(mesh.cells.begin(), mesh.cells.end(),
+                                  [](const Cell &c) { return !c.polyhedral; });
+  std::vector<int> forbidden;
+  for (size_t i = 0; i < mesh.cells.size(); ++i)
+    if (!air(model.materials.at(mesh.cells[i].material)) ||
+        occupied.contains(mesh.cells[i].id))
+      forbidden.push_back(static_cast<int>(i));
   for (auto &wire : std::get<std::vector<Source>>(wires)) {
+    if (curved) {
+      auto coupling = couple_curved_source(wire, mesh, forbidden);
+      if (auto *e = std::get_if<Error>(&coupling))
+        return *e;
+      wire.coupling = std::get<Eigen::VectorXd>(std::move(coupling));
+      sources.push_back(std::move(wire));
+      continue;
+    }
     for (const auto &cell : wire.mesh.cells)
       for (int ci : index.query(cell.minimum, cell.maximum)) {
         const auto &target = mesh.cells[ci];
@@ -488,10 +505,12 @@ Result<std::vector<Source>> prepare_sources(const Model &model,
     sources.push_back(std::move(wire));
   }
   for (auto &source : sources) {
-    auto coupled = couple_source(source, mesh);
-    if (auto *e = std::get_if<Error>(&coupled))
-      return *e;
-    source.coupling = std::get<Eigen::VectorXd>(std::move(coupled));
+    if (source.coupling.size() == 0) {
+      auto coupled = couple_source(source, mesh);
+      if (auto *e = std::get_if<Error>(&coupled))
+        return *e;
+      source.coupling = std::get<Eigen::VectorXd>(std::move(coupled));
+    }
     source.conservation_error = flux_error(source.mesh, source.flux);
     Eigen::VectorXd divergence = Eigen::VectorXd::Zero(mesh.nodes.size());
     for (size_t e = 0; e < mesh.edges.size(); ++e) {
