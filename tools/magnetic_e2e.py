@@ -110,23 +110,29 @@ def main():
         subprocess.run([str(executable), str(path)], check=True)
         result = json.loads(path.with_suffix(".mag.json").read_text())
         case = result["cases"][0]
-        assert result["sources"][0]["closed"]
-        assert math.isclose(case["sources"][0]["linkage_Wb_turn"], 2*case["energy_J"], rel_tol=1e-10)
-        tree = ET.parse(output/"planar_winding_coil1.vtu")
-        density = list(map(float, tree.find(".//CellData/DataArray[@Name='J_per_ampere_per_m2']").text.split()))
-        xyz = list(map(float, tree.find(".//Points/DataArray").text.split()))
-        nodes = [xyz[i:i+3] for i in range(0,len(xyz),3)]
-        connectivity = list(map(int, tree.find(".//Cells/DataArray[@Name='connectivity']").text.split()))
-        offsets = list(map(int, tree.find(".//Cells/DataArray[@Name='offsets']").text.split()))
-        start, positive, negative = 0, 0., 0.
-        for i,end in enumerate(offsets):
-            polygon = [nodes[v] for v in connectivity[start:end]]
-            area = abs(sum(p[0]*q[1]-p[1]*q[0] for p,q in zip(polygon,polygon[1:]+polygon[:1])))/2
-            assert density[3*i] == 0 and density[3*i+1] == 0
-            amps = area*density[3*i+2]
-            positive += max(amps,0)
-            negative += min(amps,0)
-            start = end
+        # Each leg alone is unbalanced; circuit 1 joins them.
+        assert not result["sources"][0]["closed"]
+        assert result["circuits"] == [{"id": 1, "parallel": 1, "closed": True, "members": [[11, 1], [12, 1]]}]
+        circuit = case["circuits"][0]
+        assert math.isclose(circuit["current_A"]*circuit["linkage_Wb_turn"], 2*case["energy_J"], rel_tol=1e-10)
+        assert math.isclose(case["circuit_inductance_H"][0][0]*circuit["current_A"], circuit["linkage_Wb_turn"], rel_tol=1e-10)
+        positive, negative = 0., 0.
+        for leg in (11, 12):
+            tree = ET.parse(output/f"planar_winding_coil{leg}.vtu")
+            density = list(map(float, tree.find(".//CellData/DataArray[@Name='J_per_ampere_per_m2']").text.split()))
+            xyz = list(map(float, tree.find(".//Points/DataArray").text.split()))
+            nodes = [xyz[i:i+3] for i in range(0,len(xyz),3)]
+            connectivity = list(map(int, tree.find(".//Cells/DataArray[@Name='connectivity']").text.split()))
+            offsets = list(map(int, tree.find(".//Cells/DataArray[@Name='offsets']").text.split()))
+            start = 0
+            for i,end in enumerate(offsets):
+                polygon = [nodes[v] for v in connectivity[start:end]]
+                area = abs(sum(p[0]*q[1]-p[1]*q[0] for p,q in zip(polygon,polygon[1:]+polygon[:1])))/2
+                assert density[3*i] == 0 and density[3*i+1] == 0
+                amps = area*density[3*i+2]
+                positive += max(amps,0)
+                negative += min(amps,0)
+                start = end
         assert math.isclose(positive,100,rel_tol=1e-12)
         assert math.isclose(negative,-100,rel_tol=1e-12)
         # Exercise deck selection through the CLI, and verify the actual source

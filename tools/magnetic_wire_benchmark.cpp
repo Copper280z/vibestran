@@ -55,7 +55,6 @@ void loop(Model &m, double radius = 0.6, bool rectangular = false) {
   m.options.wire_sides = 8;
   m.options.wire_layers = 1;
   m.options.wire_step = 0.4;
-  Current current{1, true, 1, {}};
   for (int i = 0; i < 4; ++i) {
     Wire w;
     w.id = start + i;
@@ -65,9 +64,9 @@ void loop(Model &m, double radius = 0.6, bool rectangular = false) {
     if (rectangular)
       w.orientation = Vector::UnitZ();
     m.wires.push_back(w);
-    current.targets.push_back(w.id);
   }
-  m.currents.push_back(current);
+  m.wire_paths.push_back({start, start});
+  m.currents.push_back({1, start, 1});
   m.subcases[0].load = 1;
   m.probes.push_back({1, Vector::Zero()});
 }

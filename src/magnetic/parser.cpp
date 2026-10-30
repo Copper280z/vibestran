@@ -254,8 +254,35 @@ Status resolve_coordinates(Model &m) {
   m.options.depth *= m.options.length_scale;
   return {};
 }
+// Appends the elements of each ESET PROP row, in element order, then rejects
+// any set that selects an element twice.
+Status expand_property_sets(Model &m,
+                            const std::map<int, std::vector<int>> &rows) {
+  for (const auto &[sid, properties] : rows) {
+    auto &out = m.element_sets[sid];
+    for (int pid : properties) {
+      const size_t before = out.size();
+      for (const auto &c : m.elements)
+        if (c.property == pid)
+          out.push_back(c.id);
+      if (out.size() == before)
+        return Error{std::format("ESET {} PROP {} selects no magnetic "
+                                 "elements",
+                                 sid, pid)};
+    }
+  }
+  for (const auto &[sid, ids] : m.element_sets) {
+    std::set<int> seen;
+    for (int id : ids)
+      if (!seen.insert(id).second)
+        return Error{
+            std::format("ESET {} selects element {} more than once", sid, id)};
+  }
+  return {};
+}
 Result<Model> parse_lines(const std::vector<Line> &lines) {
   Model m;
+  std::map<int, std::vector<int>> property_rows;
   std::vector<int> element_dimensions;
   Subcase global, current;
   bool bulk = false, in_case = false, sol = false;
@@ -430,9 +457,16 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       insert_unique(m.conductivity, id, sigma, r);
     } else if (key == "ESET") {
       int id = r.integer(1);
-      auto values = r.list(2);
-      auto &out = m.element_sets[id];
-      out.insert(out.end(), values.begin(), values.end());
+      if (upper(r.get(2)) == "PROP") {
+        auto values = r.list(3);
+        auto &out = property_rows[id];
+        out.insert(out.end(), values.begin(), values.end());
+        m.element_sets[id];
+      } else {
+        auto values = r.list(2);
+        auto &out = m.element_sets[id];
+        out.insert(out.end(), values.begin(), values.end());
+      }
     } else if (key == "FSET") {
       int id = r.integer(1);
       FaceSelection f;
@@ -478,19 +512,33 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
         w.orientation_node = r.integer(5);
       r.last(7);
       m.wires.push_back(w);
-    } else if (key == "ICOIL" || key == "IWIRE") {
-      Current c;
-      c.wire = key == "IWIRE";
-      c.set = r.integer(1);
-      if (c.wire) {
-        c.amperes = r.real(2);
-        c.targets = r.list(3);
-      } else {
-        c.targets = {r.integer(2)};
-        c.amperes = r.real(3);
-        r.last(3);
+    } else if (key == "WIREPATH") {
+      WirePath w;
+      w.id = r.integer(1);
+      w.element = r.integer(2);
+      r.last(2);
+      m.wire_paths.push_back(w);
+    } else if (key == "CIRCUIT") {
+      Circuit c;
+      c.id = r.integer(1);
+      c.parallel = r.integer(2, 1);
+      for (size_t k = 3; k < r.f.size(); k += 2) {
+        if (r.get(k).empty() && r.get(k + 1).empty())
+          continue;
+        c.members.emplace_back(r.integer(k), r.integer(k + 1));
       }
-      m.currents.push_back(std::move(c));
+      insert_unique(m.circuits, c.id, std::move(c), r);
+    } else if (key == "ICIRC") {
+      Current c;
+      c.set = r.integer(1);
+      c.target = r.integer(2);
+      c.amperes = r.real(3);
+      r.last(3);
+      m.currents.push_back(c);
+    } else if (key == "ICOIL" || key == "IWIRE") {
+      return Error{r.where + ": " + key +
+                   " was replaced; use ICIRC,SID,ID,I on a CIRCUIT, COIL, "
+                   "COIL2D or WIREPATH"};
     } else if (key == "LOAD") {
       int id = r.integer(1);
       Combination c;
@@ -579,6 +627,8 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
     m.subcases.push_back(global);
   if (!(m.options.length_scale > 0))
     return Error{"MAGLEN must be positive"};
+  if (auto e = expand_property_sets(m, property_rows))
+    return *e;
   if (auto e = resolve_coordinates(m))
     return *e;
   if (auto e = validate(m))
@@ -807,10 +857,20 @@ Status validate(const Model &m) {
     if (p.rectangular && !w.orientation_node && !w.orientation)
       return Error{"Rectangular CWIRE requires G0 or an orientation vector"};
   }
-  std::set<int> coilids;
+  // Sources and circuits share one ID namespace.
+  std::set<int> sources, circuits;
+  auto unique_source = [&](int id, const char *card) -> Status {
+    if (id <= 0 || !sources.insert(id).second)
+      return Error{std::format("{} ID {} must be positive and unique among "
+                               "COIL, COIL2D, WIREPATH and CIRCUIT IDs",
+                               card, id)};
+    return {};
+  };
   for (const auto &c : m.coils) {
-    if (c.id <= 0 || !coilids.insert(c.id).second || !(c.turns > 0) ||
-        !std::isfinite(c.turns) || !m.element_sets.contains(c.elements) ||
+    if (auto e = unique_source(c.id, "COIL"))
+      return e;
+    if (!(c.turns > 0) || !std::isfinite(c.turns) ||
+        !m.element_sets.contains(c.elements) ||
         !m.face_sets.contains(c.start) ||
         (c.end && !m.face_sets.contains(c.end)))
       return Error{"Invalid COIL definition"};
@@ -820,23 +880,65 @@ Status validate(const Model &m) {
         return Error{"COIL ESET contains missing or duplicate elements"};
   }
   for (const auto &c : m.planar_coils) {
-    if (c.id <= 0 || c.turns == 0 || !std::isfinite(c.turns) ||
+    if (c.id > 0 && sources.contains(c.id) &&
+        std::count_if(m.planar_coils.begin(), m.planar_coils.end(),
+                      [&](const PlanarCoil &o) { return o.id == c.id; }) > 1)
+      return Error{std::format("COIL2D {} is repeated; COIL2D IDs are unique, "
+                               "group legs with CIRCUIT",
+                               c.id)};
+    if (auto e = unique_source(c.id, "COIL2D"))
+      return e;
+    if (c.turns == 0 || !std::isfinite(c.turns) ||
         !m.element_sets.contains(c.elements))
       return Error{"Invalid COIL2D definition"};
-    coilids.insert(c.id);
     std::set<int> selected;
     for (int id : m.element_sets.at(c.elements))
       if (!ids.contains(id) || !selected.insert(id).second)
         return Error{"COIL2D ESET contains missing or duplicate elements"};
   }
+  for (const auto &w : m.wire_paths) {
+    if (auto e = unique_source(w.id, "WIREPATH"))
+      return e;
+    if (!wireids.contains(w.element))
+      return Error{std::format("WIREPATH {} references undefined CWIRE {}",
+                               w.id, w.element)};
+  }
+  std::set<int> members;
+  for (const auto &[id, c] : m.circuits) {
+    if (auto e = unique_source(id, "CIRCUIT"))
+      return e;
+    circuits.insert(id);
+    if (c.parallel < 1 || c.members.empty())
+      return Error{std::format("CIRCUIT {} requires PARALLEL >= 1 and at "
+                               "least one member",
+                               id)};
+  }
+  for (const auto &[id, c] : m.circuits)
+    for (auto [source, polarity] : c.members) {
+      if (!sources.contains(source) || circuits.contains(source))
+        return Error{std::format("CIRCUIT {} member {} is not a COIL, COIL2D "
+                                 "or WIREPATH",
+                                 id, source)};
+      if (std::abs(polarity) != 1)
+        return Error{std::format("CIRCUIT {} polarity of member {} must be "
+                                 "+1 or -1",
+                                 id, source)};
+      if (!members.insert(source).second)
+        return Error{std::format("Source {} belongs to more than one "
+                                 "CIRCUIT or is listed twice",
+                                 source)};
+    }
   for (const auto &c : m.currents) {
-    if (c.set <= 0 || c.targets.empty() || !std::isfinite(c.amperes))
-      return Error{"Current requires a positive SID and targets"};
-    std::set<int> targets;
-    for (int target : c.targets)
-      if (!(c.wire ? wireids.contains(target) : coilids.contains(target)) ||
-          !targets.insert(target).second)
-        return Error{"Current references missing/duplicate target"};
+    if (c.set <= 0 || !std::isfinite(c.amperes))
+      return Error{"ICIRC requires a positive SID and a finite current"};
+    if (members.contains(c.target))
+      return Error{std::format("ICIRC {} targets source {}, which belongs to "
+                               "a CIRCUIT; give the current on the circuit",
+                               c.set, c.target)};
+    if (!sources.contains(c.target))
+      return Error{std::format("ICIRC {} references undefined circuit or "
+                               "source {}",
+                               c.set, c.target)};
   }
   ids.clear();
   for (const auto &probe : m.probes)

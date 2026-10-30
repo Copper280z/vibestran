@@ -70,19 +70,20 @@ once on parsing; the C++ magnetic model API takes resolved SI coordinates.
 | `CTRIA3` / `CQUAD4` | `EID,PID,G1,...` (three/four corners, planar mode only) |
 | `MAG2D` | `CID,DEPTH` (one card activates planar mode; CID=0 uses basic z) |
 | `PMAG2D` | `PID,MID,CID,AXIS` (planar magnetic property; orientation as PMAG) |
-| `COIL2D` | `CID,ESET,SIGNED_TURNS` (repeat CID for winding legs) |
+| `COIL2D` | `ID,ESET,SIGNED_TURNS` (one planar winding region; ID unique) |
 | `PSOLID` | `PID,MID,CORDM` (CORDM orients remanence along its axis 1) |
 | `PMAG` | `PID,MID,CID,AXIS` (3D magnetic property with a signed orientation axis) |
 | `MATMAG` | `MID,MUR,BHTID,BR` (MUR and BHTID exclusive; BR is a magnitude) |
 | `TABLEBH` | `TID,INTERP` then `B1,H1,B2,H2,...,ENDT` on continuations |
 | `MATCOND` | `MID,SIGMA` (positive conductivity in S/m) |
-| `ESET` | `SID,EID...` (repeatable, `THRU` allowed) |
+| `ESET` | `SID,EID...` or `SID,PROP,PID...` (repeatable rows, `THRU` allowed) |
 | `FSET` | `SID,EID,G1,G2[,G3[,G4]]` (2D edge or 3D triangular/quadrilateral face) |
-| `COIL` | `CID,ESET,N,START_FSET,END_FSET` |
+| `COIL` | `ID,ESET,N,START_FSET,END_FSET` |
 | `PWIRE` | `PID,MID,ROUND,DIAMETER` or `PID,MID,RECT,WIDTH,HEIGHT` |
 | `CWIRE` | `EID,PID,G1,G2,G0` or `EID,PID,G1,G2,X1,X2,X3` |
-| `ICOIL` | `SID,CID,CURRENT` |
-| `IWIRE` | `SID,CURRENT,EID...` (`THRU` allowed) |
+| `WIREPATH` | `ID,EID` (names the CWIRE path containing EID; positive G1 to G2 of EID) |
+| `CIRCUIT` | `ID,PARALLEL,S1,P1,S2,P2,...` (series sources with polarity ±1) |
+| `ICIRC` | `SID,ID,CURRENT` (terminal current of a circuit or unlisted source) |
 | `LOAD` | `SID,S,S1,L1,S2,L2,...` |
 | `MBC` | `SID,FSET,ZERO` or `SID,FSET,UNIFORM,BX,BY,BZ` |
 | `MPROBE` | `ID,X,Y,Z` |
@@ -93,6 +94,36 @@ Global LOAD/MAGBC settings are inherited by subcases. Unexcited subcases can
 solve permanent magnets alone. Nested LOAD combinations are additive; cycles
 and undefined sets fail. Positive source current follows the source's stated
 orientation; reversing the load reverses it.
+
+`ESET,SID,PROP,PID...` selects every magnetic element with those properties,
+which suits preprocessors that export regions as property IDs (Gmsh physical
+groups, for example). Rows with one SID accumulate; a property no element uses,
+or an element selected twice, is an error.
+
+### Circuits
+
+`COIL`, `COIL2D` and `WIREPATH` IDs name current sources. They share one ID
+namespace with `CIRCUIT`. `CIRCUIT,ID,PARALLEL,S1,P1,...` connects sources in
+series with polarity Pi = ±1. PARALLEL (default 1) is the number of identical
+parallel branches the listed sources represent, so each source carries
+`Pi * I / PARALLEL` per turn. A source belongs to at most one circuit. A source
+not listed in any circuit is its own circuit with polarity +1, so single-coil
+decks need no CIRCUIT card.
+
+`ICIRC,SID,ID,I` sets the terminal current I of a circuit, or of an unlisted
+source. Current on a member of an explicit circuit is an error. Circuit
+linkage and differential inductance are
+
+```text
+lambda_c = sum_i P_i lambda_i / a_c
+L_cd     = sum_(i in c) sum_(j in d) P_i P_j L_ij / (a_c a_d)
+```
+
+computed from the circuit coupling vector `sum P_i c_i / a`, so they cost one
+tangent solve per circuit. They are available when every 3D member is closed,
+or when a planar circuit's polarity-weighted signed turns sum to zero. The F06
+and JSON report circuits in ID order, including implicit ones; per-source
+values remain in JSON.
 
 ### Volumetric windings
 
@@ -110,7 +141,7 @@ ESET,40,1001,THRU,1400
 $ Repeat FSET for every face covering the one internal cut.
 FSET,41,1001,11,12,13
 COIL,50,40,80,41
-ICOIL,100,50,3.5
+ICIRC,100,50,3.5
 ```
 
 For an open winding, START_FSET is the entry cap (normals into the conductor)
@@ -121,7 +152,7 @@ source/sink endpoints are not admissible. Coil volumes cannot overlap.
 This is a homogenized stranded approximation. The preprocessor finds a flow
 direction and projects a constant-magnitude target into a conservative flux
 space with the prescribed ampere-turns. It does not represent individual
-strands, arbitrary branching, fill-factor losses or a circuit network.
+strands, arbitrary branching or fill-factor losses.
 
 ### Wires
 
@@ -132,14 +163,16 @@ CWIRE,101,30,1,2
 CWIRE,102,30,2,3
 CWIRE,103,30,3,4
 CWIRE,104,30,4,1
-IWIRE,100,4.0,101,102,103,104
+WIREPATH,60,101
+ICIRC,100,60,4.0
 ```
 
-Positive IWIRE flows from each CWIRE's G1 to G2. If an element is reversed,
-its signed current must be reversed too. All segments of a connected path
-must have the same circulating current after LOAD combinations. Segments not
-selected by a current card carry zero, which is an error if their neighbors
-carry nonzero current. A complete zero-current path is allowed.
+Every connected CWIRE path is named by exactly one `WIREPATH`, which may name
+any of its elements. Positive current flows from G1 to G2 of the named element.
+The solver propagates the direction along the path, so reversed segments need
+no sign bookkeeping; JSON `wire_elements` records each element with its
+traversal sign relative to the path. A path that carries no current is simply
+not in any load set.
 
 Rectangular section orientation is the width axis, projected perpendicular to
 the path. G0 supplies a direction from G1; vector components are in basic axes.
@@ -270,24 +303,28 @@ this formulation, so an explicit PMAG2D property is used.
 
 A winding is a collection of signed axial current regions. For each region,
 `J_n = SIGNED_TURNS * I / region_area`; winding area is computed from the mesh.
-Repeat the same circuit CID for its forward and return legs. For example:
+Each `COIL2D` is one region with a unique ID; a `CIRCUIT` joins forward and
+return legs. For example:
 
 ```text
 MAG2D,0,0.05
 PMAG2D,10,1
 MATMAG,1,1
 $ CQUAD4/CTRIA3 elements reference property 10; ESETs select winding slots.
-COIL2D,20,101,40
-COIL2D,20,102,-40
-ICOIL,7,20,5
+COIL2D,21,101,40
+COIL2D,22,102,-40
+CIRCUIT,20,,21,1,22,1
+ICIRC,7,20,5
 ```
 
 Each leg carries 200 ampere-turns, in opposite directions. `LOAD=7` selects the
 5 A circuit current. A circuit may contain multiple disconnected slot regions;
-turn signs define axial direction. Overlapping regions are rejected. A circuit
-whose signed turns sum to zero has gauge-independent linkage and inductance.
-An unbalanced circuit models an unspecified return at infinity; the field is
-solved with the finite exterior boundary, and linkage/inductance are unavailable.
+the product of turn sign and polarity defines axial direction. Overlapping
+regions are rejected. A circuit whose polarity-weighted signed turns sum to
+zero has gauge-independent linkage and inductance. A single region, or any
+unbalanced circuit, models an unspecified return at infinity; the field is
+solved with the finite exterior boundary, and linkage/inductance are
+unavailable.
 A volumetric COIL cut or an in-plane CWIRE path does not define an axial current;
 those cards remain exclusive to 3D.
 
@@ -403,8 +440,10 @@ For `name.F06`, the solver also writes:
   the arithmetic mean of the incident cell traces, including different materials;
   place probes within the intended material when a one-sided value is needed.
 
-JSON matrix order matches the source array. A wire path ID is its first traversed
-element; `wire_elements` records each constituent element and traversal sign.
+JSON `differential_inductance_H` follows the source array and
+`circuit_inductance_H` the circuit array; unavailable entries are `null`. A
+wire path ID is its WIREPATH ID; `wire_elements` records each constituent
+element and traversal sign.
 No magnetic OP2 tables are emitted. The JSON `coenergy_J` is the source Legendre
 transform `sum(I*lambda)-W`, retaining PM energy constants; it is not generally
 `W` when permanent magnets or imposed exterior fields are present.
@@ -424,9 +463,9 @@ does not remesh or silently rotate selected material regions:
 python3 tools/magnetic_sweep.py manifest.json --vibestran build/vibestran --output /tmp/magnetic/sweep
 ```
 
-`sweep.csv` includes source currents/linkages and surface force/torque. At interior
+`sweep.csv` includes circuit currents/linkages and surface force/torque. At interior
 angles it computes the three-point derivative of coenergy with respect to angle
-in **radians** when source IDs and currents match. This is the fixed-current
+in **radians** when circuit IDs and currents match. This is the fixed-current
 virtual-work torque about the rotation axis. It is blank at endpoints or when
 currents change. Check mesh and angle-step convergence before comparing it with
 the corresponding component of stress torque. Do not differentiate a commutated
@@ -435,8 +474,8 @@ current sequence as if the currents were fixed.
 The example generator deforms the air mesh between the rigid rotor and fixed
 stator and restricts its demonstration angles to +/-20 degrees. Arbitrary
 prepared meshes can be used with the solver. A full BLDC sweep requires suitable
-meshes and phase-current subcases; no circuit, transient or sliding-band model
-is implied.
+meshes and phase-current subcases (one CIRCUIT per phase); no transient,
+voltage-driven or sliding-band model is implied.
 
 ## Verification
 

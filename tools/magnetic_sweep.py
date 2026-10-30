@@ -36,10 +36,10 @@ def run(executable, manifest, output):
                 for field, values in (("force_N", surface["force_N"]), ("torque_Nm", surface["torque_Nm"])):
                     for axis, value in zip("xyz", values):
                         row[f"surface{surface['id']}_{field}_{axis}"] = value
-            for source, definition in zip(case["sources"], results["sources"]):
-                name = ("wire" if definition["wire"] else "coil") + str(source["id"])
-                row[name+"_current_A"] = source["current_A"]
-                row[name+"_linkage_Wb_turn"] = source["linkage_Wb_turn"]
+            for circuit in case["circuits"]:
+                name = f"circuit{circuit['id']}"
+                row[name+"_current_A"] = circuit["current_A"]
+                row[name+"_linkage_Wb_turn"] = circuit["linkage_Wb_turn"]
             rows.append(row)
     # At fixed currents, d(I.lambda-W)/d(theta) is the virtual-work torque.
     # Three adjacent prepared angles are needed; endpoints stay blank.

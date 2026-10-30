@@ -82,11 +82,22 @@ struct Wire {
   int id{0}, property{0}, first{0}, second{0}, orientation_node{0};
   std::optional<Vector> orientation;
 };
+// Names the CWIRE path containing element; positive current flows from the
+// element's G1 to G2.
+struct WirePath {
+  int id{0}, element{0};
+};
+// Series connection of sources (COIL, COIL2D or WIREPATH IDs) with polarity
+// +/-1, representing `parallel` identical branches. Circuit and source IDs
+// share one namespace; an unlisted source is its own implicit circuit.
+struct Circuit {
+  int id{0}, parallel{1};
+  std::vector<std::pair<int, int>> members;
+};
+// ICIRC: terminal current of a circuit, or of a source's implicit circuit.
 struct Current {
-  int set{0};
-  bool wire{false};
+  int set{0}, target{0};
   double amperes{0};
-  std::vector<int> targets;
 };
 struct Combination {
   double scale{1};
@@ -132,6 +143,8 @@ struct Model {
   std::vector<PlanarCoil> planar_coils;
   std::map<int, WireProperty> wire_properties;
   std::vector<Wire> wires;
+  std::vector<WirePath> wire_paths;
+  std::map<int, Circuit> circuits;
   std::vector<Current> currents;
   std::map<int, Combination> combinations;
   std::map<int, Boundary> boundaries;

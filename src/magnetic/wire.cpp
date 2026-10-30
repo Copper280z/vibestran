@@ -340,6 +340,34 @@ Result<std::vector<Source>> prepare_wires(const Model &model) {
       return *e;
     sources.push_back(std::get<Source>(std::move(source)));
   }
+  // A WIREPATH names each path and fixes its positive direction as G1 to G2
+  // of the named element; reversed elements are handled by traversal signs.
+  for (auto &source : sources) {
+    const WirePath *path = nullptr;
+    int sign = 0;
+    for (const auto &w : model.wire_paths)
+      for (auto [id, traversal] : source.wire_elements)
+        if (id == w.element) {
+          if (path)
+            return Error{std::format("CWIRE path containing element {} is "
+                                     "named by WIREPATH {} and {}",
+                                     id, path->id, w.id)};
+          path = &w;
+          sign = traversal;
+        }
+    if (!path)
+      return Error{std::format("CWIRE path containing element {} is not named "
+                               "by a WIREPATH",
+                               source.wire_elements.front().first)};
+    source.id = path->id;
+    if (sign < 0) {
+      source.flux = -source.flux;
+      for (auto &[id, traversal] : source.wire_elements) {
+        (void)id;
+        traversal = -traversal;
+      }
+    }
+  }
   std::vector<SpatialIndex> indexes;
   indexes.reserve(sources.size());
   for (const auto &source : sources)

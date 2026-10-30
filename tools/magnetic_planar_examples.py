@@ -67,10 +67,11 @@ def planar_deck(kind="winding", n=12, element="quad", depth=.02, angle=0., curre
     if kind == "uniform": lines.append("MBC,1,0,UNIFORM,.1,.2,0")
     else:
         if set(regions) != {1,2}: return None
+        # Forward and return legs are sources 11 and 12 of circuit 1.
         for region,ids in regions.items():
             for eid in ids: lines.append(f"ESET,{region},{eid}")
-            lines.append(f"COIL2D,1,{region},{100 if region == 1 else -100}")
-        lines.append(f"ICOIL,1,1,{current:.16g}")
+            lines.append(f"COIL2D,{10+region},{region},{100 if region == 1 else -100}")
+        lines += ["CIRCUIT,1,,11,1,12,1", f"ICIRC,1,1,{current:.16g}"]
     if motor:
         for adjacent in edges.values():
             selected = [e for e in adjacent if e[0] in inside]

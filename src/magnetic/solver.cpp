@@ -449,12 +449,32 @@ Result<Results> solve(const Model &model) {
   if (auto *e = std::get_if<Error>(&prepared))
     return *e;
   result.sources = std::get<std::vector<Source>>(std::move(prepared));
+  auto resolved = resolve_circuits(model, result.sources);
+  if (auto *e = std::get_if<Error>(&resolved))
+    return *e;
+  result.circuits = std::get<std::vector<CircuitDefinition>>(std::move(resolved));
+  const auto &circuits = result.circuits;
+  const int ns = static_cast<int>(result.sources.size()),
+            nc = static_cast<int>(circuits.size());
+  // Circuit coupling g_c = sum P_i c_i / a_c, so circuit linkage is g_c . A
+  // and circuit inductance needs one tangent solve per closed circuit.
+  std::vector<Eigen::VectorXd> circuit_coupling;
+  for (const auto &c : circuits) {
+    Eigen::VectorXd g = Eigen::VectorXd::Zero(mesh.dofs());
+    for (auto [i, polarity] : c.members)
+      g += polarity * result.sources[i].coupling;
+    circuit_coupling.push_back(g / c.parallel);
+  }
   SpatialIndex index(mesh);
   for (const auto &subcase : model.subcases) {
-    auto currents = source_currents(model, result.sources, subcase.load);
-    if (auto *e = std::get_if<Error>(&currents))
+    auto terminal = circuit_currents(model, circuits, subcase.load);
+    if (auto *e = std::get_if<Error>(&terminal))
       return *e;
-    const auto &amps = std::get<std::vector<double>>(currents);
+    const auto &circuit_amps = std::get<std::vector<double>>(terminal);
+    std::vector<double> amps(ns, 0);
+    for (int c = 0; c < nc; ++c)
+      for (auto [i, polarity] : circuits[c].members)
+        amps[i] = polarity * circuit_amps[c] / circuits[c].parallel;
     Eigen::VectorXd load = Eigen::VectorXd::Zero(mesh.dofs());
     for (size_t i = 0; i < amps.size(); ++i)
       load += amps[i] * result.sources[i].coupling;
@@ -493,48 +513,78 @@ Result<Results> solve(const Model &model) {
     output.b = eq.assembly.b;
     output.h = eq.assembly.h;
     output.coenergy = -output.energy;
-    for (size_t i = 0; i < amps.size(); ++i) {
+    constexpr double unavailable = std::numeric_limits<double>::quiet_NaN();
+    for (int i = 0; i < ns; ++i) {
       const auto &source = result.sources[i];
-      double linkage = source.coupling.dot(eq.a);
+      const double linkage = source.coupling.dot(eq.a);
       output.coenergy += amps[i] * linkage;
-      output.sources.push_back(
-          {source.id, source.wire, source.closed, amps[i],
-           source.closed ? linkage : std::numeric_limits<double>::quiet_NaN()});
+      output.sources.push_back({source.id, source.wire, source.closed, amps[i],
+                                source.closed ? linkage : unavailable});
     }
-    const int ns = static_cast<int>(result.sources.size());
-    output.differential_inductance = Eigen::MatrixXd::Constant(
-        ns, ns, std::numeric_limits<double>::quiet_NaN());
-    for (int i = 0; i < ns; ++i)
-      for (int j = 0; j < ns; ++j)
-        if (result.sources[i].closed && result.sources[j].closed)
-          output.differential_inductance(i, j) = 0;
-    if (gauge.size > 0 && ns > 0) {
-      Factor factor;
+    for (int c = 0; c < nc; ++c)
+      output.circuits.push_back({circuits[c].id, circuit_amps[c],
+                                 circuits[c].closed
+                                     ? circuit_coupling[c].dot(eq.a)
+                                     : unavailable});
+    // Differential inductances g_i^T K^-1 g_j, from the converged tangent,
+    // among closed sources and among closed circuits; others are unavailable.
+    output.differential_inductance =
+        Eigen::MatrixXd::Constant(ns, ns, unavailable);
+    output.circuit_inductance = Eigen::MatrixXd::Constant(nc, nc, unavailable);
+    if (gauge.size > 0) {
+      std::optional<Factor> factor;
+      auto inductances = [&](auto &&coupling, auto &&closed, int n,
+                             Eigen::MatrixXd &out) -> Status {
+        std::vector<Eigen::VectorXd> reduced(n), response(n);
+        for (int j = 0; j < n; ++j) {
+          if (!closed(j))
+            continue;
+          if (!factor) {
+            factor.emplace();
 #if defined(HAVE_ACCELERATE)
-      factor.setOrder(SparseOrderMetis);
+            factor->setOrder(SparseOrderMetis);
 #endif
-      factor.compute(eq.assembly.stiffness);
-      if (factor.info() != Eigen::Success)
-        return Error{"Differential inductance factorization failed"};
-      for (int j = 0; j < ns; ++j)
-        if (result.sources[j].closed) {
-          Eigen::VectorXd rhs = Eigen::VectorXd::Zero(gauge.size);
+            factor->compute(eq.assembly.stiffness);
+            if (factor->info() != Eigen::Success)
+              return Error{"Differential inductance factorization failed"};
+          }
+          reduced[j] = Eigen::VectorXd::Zero(gauge.size);
           for (size_t e = 0; e < mesh.dofs(); ++e)
             if (gauge.equations[e] >= 0)
-              rhs[gauge.equations[e]] = result.sources[j].coupling[e];
-          const Eigen::VectorXd response = factor.solve(rhs);
-          if (factor.info() != Eigen::Success || !response.allFinite())
+              reduced[j][gauge.equations[e]] = coupling(j)[e];
+          response[j] = factor->solve(reduced[j]);
+          if (factor->info() != Eigen::Success || !response[j].allFinite())
             return Error{"Differential inductance solve failed"};
-          for (int i = 0; i < ns; ++i)
-            if (result.sources[i].closed) {
-              double inductance = 0;
-              for (size_t e = 0; e < mesh.dofs(); ++e)
-                if (gauge.equations[e] >= 0)
-                  inductance += result.sources[i].coupling[e] *
-                                response[gauge.equations[e]];
-              output.differential_inductance(i, j) = inductance;
-            }
         }
+        for (int i = 0; i < n; ++i)
+          for (int j = 0; j < n; ++j)
+            if (closed(i) && closed(j))
+              out(i, j) = reduced[i].dot(response[j]);
+        return {};
+      };
+      if (auto e = inductances(
+              [&](int i) -> const Eigen::VectorXd & {
+                return result.sources[i].coupling;
+              },
+              [&](int i) { return result.sources[i].closed; }, ns,
+              output.differential_inductance))
+        return *e;
+      if (auto e = inductances(
+              [&](int c) -> const Eigen::VectorXd & {
+                return circuit_coupling[c];
+              },
+              [&](int c) { return circuits[c].closed; }, nc,
+              output.circuit_inductance))
+        return *e;
+    } else {
+      for (int i = 0; i < ns; ++i)
+        for (int j = 0; j < ns; ++j)
+          if (result.sources[i].closed && result.sources[j].closed)
+            output.differential_inductance(i, j) = 0;
+      for (int c = 0; c < nc; ++c)
+        for (int d = 0; d < nc; ++d)
+          if (circuits[c].closed && circuits[d].closed)
+            output.circuit_inductance(c, d) = 0;
     }
     for (const auto &probe : model.probes) {
       Vector b = Vector::Zero(), h = Vector::Zero();

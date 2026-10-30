@@ -24,31 +24,51 @@ double flux_error(const Mesh &mesh, const Eigen::VectorXd &flux) {
   }
   return error / std::max(flux.cwiseAbs().maxCoeff(), 1e-300);
 }
+// The mesh of a winding region, built from its field cells. Element and GRID
+// IDs are kept so FSET selections resolve on it.
+Result<Mesh> region_mesh(const Mesh &mesh, std::span<const int> ids) {
+  std::map<int, int> index;
+  std::vector<Vector> nodes;
+  std::vector<int> grid_ids;
+  std::vector<NodeList> cells;
+  for (int id : ids) {
+    const auto &cell = mesh.cells[mesh.element_index.at(id)];
+    NodeList n(cell.nodes.size());
+    for (size_t i = 0; i < cell.nodes.size(); ++i) {
+      auto [it, added] = index.emplace(mesh.node_ids[cell.nodes[i]],
+                                       static_cast<int>(nodes.size()));
+      if (added) {
+        nodes.push_back(mesh.nodes[cell.nodes[i]]);
+        grid_ids.push_back(it->first);
+      }
+      n[i] = it->second;
+    }
+    cells.push_back(n);
+  }
+  auto built = make_mesh(std::move(nodes), cells, mesh.planar, mesh.normal);
+  if (auto *e = std::get_if<Error>(&built))
+    return *e;
+  auto out = std::get<Mesh>(std::move(built));
+  out.depth = mesh.depth;
+  out.node_index = std::move(index);
+  out.node_ids = std::move(grid_ids);
+  for (size_t i = 0; i < ids.size(); ++i) {
+    out.cells[i].id = ids[i];
+    out.element_index[ids[i]] = static_cast<int>(i);
+  }
+  return out;
+}
 Result<Source> coil_source(const Model &model, const Mesh &mesh,
                            const Coil &coil) {
   Source source;
   source.id = coil.id;
   source.closed = coil.end == 0;
   source.turns = coil.turns;
-  std::map<int, int> index;
-  std::vector<Vector> nodes;
-  std::vector<NodeList> cells;
   const auto &ids = model.element_sets.at(coil.elements);
-  for (int id : ids) {
-    const auto &cell = mesh.cells[mesh.element_index.at(id)];
-    if (!air(model.materials.at(cell.material)))
+  for (int id : ids)
+    if (!air(model.materials.at(mesh.cells[mesh.element_index.at(id)].material)))
       return Error{"COIL volume must have nonmagnetic MATMAG (mu_r=1)"};
-    NodeList n(cell.nodes.size());
-    for (size_t i = 0; i < cell.nodes.size(); ++i) {
-      auto [it, added] = index.emplace(mesh.node_ids[cell.nodes[i]],
-                                       static_cast<int>(nodes.size()));
-      if (added)
-        nodes.push_back(mesh.nodes[cell.nodes[i]]);
-      n[i] = it->second;
-    }
-    cells.push_back(n);
-  }
-  auto built = make_mesh(std::move(nodes), cells);
+  auto built = region_mesh(mesh, ids);
   if (auto *e = std::get_if<Error>(&built))
     return *e;
   source.mesh = std::get<Mesh>(std::move(built));
@@ -59,11 +79,6 @@ Result<Source> coil_source(const Model &model, const Mesh &mesh,
   if (characteristic != (source.closed ? 0 : 1))
     return Error{"COIL must be a single solid loop or an open conductor "
                  "without handles"};
-  source.mesh.node_index = index;
-  for (size_t i = 0; i < ids.size(); ++i) {
-    source.mesh.cells[i].id = ids[i];
-    source.mesh.element_index[ids[i]] = static_cast<int>(i);
-  }
   auto section = selected_faces(model, source.mesh, coil.start);
   if (auto *e = std::get_if<Error>(&section))
     return *e;
@@ -414,20 +429,13 @@ Result<std::vector<Source>> prepare_sources(const Model &model,
   std::vector<Source> sources;
   std::set<int> occupied;
   if (mesh.planar) {
-    std::map<int, size_t> winding;
-    std::map<int, double> turns, absolute_turns;
-    std::map<int, std::map<int, double>> densities;
     for (const auto &region : model.planar_coils) {
-      auto [it, added] = winding.emplace(region.id, sources.size());
-      if (added) {
-        Source s;
-        s.id = region.id;
-        s.coupling = Eigen::VectorXd::Zero(mesh.dofs());
-        s.mesh.planar = true;
-        s.mesh.normal = mesh.normal;
-        sources.push_back(std::move(s));
-      }
-      auto &s = sources[it->second];
+      Source s;
+      s.id = region.id;
+      s.turns = region.turns;
+      // A single signed region is unbalanced; its CIRCUIT decides closure.
+      s.closed = false;
+      s.coupling = Eigen::VectorXd::Zero(mesh.dofs());
       const auto &ids = model.element_sets.at(region.elements);
       double area = 0;
       for (int id : ids) {
@@ -442,7 +450,6 @@ Result<std::vector<Source>> prepare_sources(const Model &model,
         return Error{"Empty COIL2D region"};
       for (int id : ids) {
         const auto &c = mesh.cells[mesh.element_index.at(id)];
-        densities[region.id][id] = region.turns / area;
         for (const auto &q : quadrature(mesh, c)) {
           const auto basis = edge_basis(c, q.position);
           for (size_t i = 0; i < c.nodes.size(); ++i)
@@ -450,21 +457,13 @@ Result<std::vector<Source>> prepare_sources(const Model &model,
                                       area * basis[i].dot(mesh.normal);
         }
       }
-      turns[region.id] += region.turns;
-      absolute_turns[region.id] += std::abs(region.turns);
-    }
-    for (auto &s : sources) {
-      s.closed = std::abs(turns[s.id]) <= 1e-12 * absolute_turns[s.id];
-      Model region = model;
-      std::erase_if(region.elements, [&](const Element &c) {
-        return !densities[s.id].contains(c.id);
-      });
-      auto built = make_mesh(region);
+      auto built = region_mesh(mesh, ids);
       if (auto *e = std::get_if<Error>(&built))
         return *e;
       s.mesh = std::get<Mesh>(std::move(built));
-      for (const auto &c : s.mesh.cells)
-        s.planar_density.push_back(densities[s.id][c.id] * mesh.normal);
+      s.planar_density.assign(s.mesh.cells.size(),
+                              region.turns / area * mesh.normal);
+      sources.push_back(std::move(s));
     }
     return sources;
   }
@@ -537,34 +536,85 @@ Result<std::vector<Source>> prepare_sources(const Model &model,
   return sources;
 }
 
+Result<std::vector<CircuitDefinition>>
+resolve_circuits(const Model &model, std::span<const Source> sources) {
+  std::map<int, size_t> index;
+  for (size_t i = 0; i < sources.size(); ++i)
+    index.emplace(sources[i].id, i);
+  std::map<int, CircuitDefinition> circuits;
+  std::set<size_t> listed;
+  for (const auto &[id, c] : model.circuits) {
+    CircuitDefinition d;
+    d.id = id;
+    d.parallel = c.parallel;
+    for (auto [source, polarity] : c.members) {
+      auto it = index.find(source);
+      if (it == index.end())
+        return Error{std::format("CIRCUIT {} member {} is not a prepared "
+                                 "source",
+                                 id, source)};
+      d.members.emplace_back(it->second, polarity);
+      listed.insert(it->second);
+    }
+    circuits.emplace(id, std::move(d));
+  }
+  for (size_t i = 0; i < sources.size(); ++i)
+    if (!listed.contains(i))
+      circuits.emplace(sources[i].id,
+                       CircuitDefinition{sources[i].id, 1, {{i, 1}}, true});
+  std::vector<CircuitDefinition> out;
+  for (auto &[id, d] : circuits) {
+    (void)id;
+    // A planar circuit is defined only when its signed turns balance; a
+    // solid one only when every member is closed.
+    double turns = 0, absolute = 0;
+    for (auto [i, polarity] : d.members) {
+      d.closed &= sources[i].closed || sources[i].mesh.planar;
+      turns += polarity * sources[i].turns;
+      absolute += std::abs(sources[i].turns);
+    }
+    if (!d.members.empty() && sources[d.members.front().first].mesh.planar)
+      d.closed = std::abs(turns) <= 1e-12 * absolute;
+    out.push_back(std::move(d));
+  }
+  return out;
+}
+
 Result<std::vector<double>>
-source_currents(const Model &model, std::span<const Source> sources, int set) {
+circuit_currents(const Model &model,
+                 std::span<const CircuitDefinition> circuits, int set) {
   auto factored = load_factors(model, set);
   if (auto *e = std::get_if<Error>(&factored))
     return *e;
   const auto &factors = std::get<std::map<int, double>>(factored);
-  std::map<int, double> coils, wires;
+  std::map<int, double> currents;
   for (const auto &c : model.currents)
     if (auto it = factors.find(c.set); it != factors.end())
-      for (int target : c.targets)
-        (c.wire ? wires : coils)[target] += it->second * c.amperes;
+      currents[c.target] += it->second * c.amperes;
   std::vector<double> out;
-  for (const auto &s : sources) {
-    double current = coils[s.id];
-    if (s.wire) {
-      current =
-          wires[s.wire_elements.front().first] * s.wire_elements.front().second;
-      for (auto [id, sign] : s.wire_elements)
-        if (std::abs(sign * wires[id] - current) >
-            1e-10 * std::max({std::abs(current), std::abs(wires[id]), 1e-30}))
-          return Error{std::format(
-              "CWIRE path {} has discontinuous signed current at element {}",
-              s.id, id)};
-    }
+  for (const auto &c : circuits) {
+    const double current = currents[c.id];
     if (!std::isfinite(current))
       return Error{"Current LOAD combination overflow"};
     out.push_back(current);
   }
+  return out;
+}
+
+Result<std::vector<double>>
+source_currents(const Model &model, std::span<const Source> sources, int set) {
+  auto resolved = resolve_circuits(model, sources);
+  if (auto *e = std::get_if<Error>(&resolved))
+    return *e;
+  const auto &circuits = std::get<std::vector<CircuitDefinition>>(resolved);
+  auto currents = circuit_currents(model, circuits, set);
+  if (auto *e = std::get_if<Error>(&currents))
+    return *e;
+  std::vector<double> out(sources.size(), 0);
+  for (size_t c = 0; c < circuits.size(); ++c)
+    for (auto [i, polarity] : circuits[c].members)
+      out[i] = polarity * std::get<std::vector<double>>(currents)[c] /
+               circuits[c].parallel;
   return out;
 }
 } // namespace vibestran::magnetic

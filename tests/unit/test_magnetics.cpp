@@ -71,7 +71,7 @@ void open_coil(Model &m, double turns = 1) {
           face_selection(mesh, static_cast<int>(i), f.normal.x() > 0 ? 1 : -1));
   }
   m.coils.push_back({1, 1, turns, 1, 2});
-  m.currents.push_back({1, false, 1, {1}});
+  m.currents.push_back({1, 1, 1});
   m.subcases[0].load = 1;
 }
 void loop(Model &m, double radius = 0.6, bool rectangular = false) {
@@ -85,7 +85,6 @@ void loop(Model &m, double radius = 0.6, bool rectangular = false) {
   m.options.wire_sides = 8;
   m.options.wire_layers = 1;
   m.options.wire_step = 0.4;
-  Current current{1, true, 1, {}};
   for (int i = 0; i < 4; ++i) {
     Wire w;
     w.id = start + i;
@@ -95,9 +94,9 @@ void loop(Model &m, double radius = 0.6, bool rectangular = false) {
     if (rectangular)
       w.orientation = Vector::UnitZ();
     m.wires.push_back(w);
-    current.targets.push_back(w.id);
   }
-  m.currents.push_back(current);
+  m.wire_paths.push_back({start, start});
+  m.currents.push_back({1, start, 1});
   m.subcases[0].load = 1;
   m.probes.push_back({1, Vector::Zero()});
 }
@@ -328,7 +327,8 @@ MATMAG,1,1
 MATCOND,2,5.8D7
 PWIRE,2,2,RECT,2,1
 CWIRE,2,2,1,2,0.,0.,1.
-IWIRE,10,-2,2
+WIREPATH,7,2
+ICIRC,10,7,-2
 LOAD,20,3.,-4.,10
 ENDDATA
 )";
@@ -387,19 +387,33 @@ TEST(MagneticWire, FiniteLoopCurrentDirectionAndBiotSavartField) {
   auto current = source_currents(model, sources, 1);
   ASSERT_TRUE(std::holds_alternative<std::vector<double>>(current));
   EXPECT_DOUBLE_EQ(std::get<std::vector<double>>(current)[0], 1);
-  model.currents.push_back({1, true, 0.2, {100001}});
-  EXPECT_TRUE(
-      std::holds_alternative<Error>(source_currents(model, sources, 1)));
-  model.currents.pop_back();
+  EXPECT_EQ(sources[0].id, 100000);
+  // Reversing a segment's grid order changes nothing: the WIREPATH element
+  // fixes the direction and the traversal sign records the reversal.
   std::swap(model.wires[1].first, model.wires[1].second);
-  model.currents.push_back({1, true, -2, {100001}});
   auto reversed = prepare_wires(model);
   ASSERT_TRUE(std::holds_alternative<std::vector<Source>>(reversed))
       << error_of(reversed);
-  current = source_currents(model, std::get<std::vector<Source>>(reversed), 1);
-  ASSERT_TRUE(std::holds_alternative<std::vector<double>>(current))
-      << error_of(current);
-  EXPECT_DOUBLE_EQ(std::get<std::vector<double>>(current)[0], 1);
+  const auto &same = std::get<std::vector<Source>>(reversed)[0];
+  EXPECT_LT((same.flux - sources[0].flux).norm(), 1e-12 * sources[0].flux.norm());
+  EXPECT_EQ(same.wire_elements[1], std::make_pair(100001, -1));
+  // Naming the reversed segment instead makes its G1->G2 positive, which
+  // reverses the circulation.
+  model.wire_paths = {{100000, 100001}};
+  auto renamed = prepare_wires(model);
+  ASSERT_TRUE(std::holds_alternative<std::vector<Source>>(renamed))
+      << error_of(renamed);
+  const auto &opposite = std::get<std::vector<Source>>(renamed)[0];
+  EXPECT_LT((opposite.flux + sources[0].flux).norm(),
+            1e-12 * sources[0].flux.norm());
+  EXPECT_EQ(opposite.wire_elements[1], std::make_pair(100001, 1));
+  EXPECT_LT(source_biot(opposite, Vector::Zero()).z(), 0);
+  model.wire_paths = {{100000, 100001}, {100001, 100003}};
+  EXPECT_NE(error_of(prepare_wires(model)).find("named by WIREPATH"),
+            std::string::npos);
+  model.wire_paths.clear();
+  EXPECT_NE(error_of(prepare_wires(model)).find("not named by a WIREPATH"),
+            std::string::npos);
 }
 
 TEST(MagneticWire, RectangularSweepAndInvalidGeometry) {
@@ -431,6 +445,7 @@ TEST(MagneticWire, NonmatchingTransferAndInteriorEndpointsRejected) {
   model.nodes[100000] = {Vector(-1, 0.07, 0.13), 0};
   model.nodes[100001] = {Vector(1, 0.07, 0.13), 0};
   model.wires.push_back({100000, 1, 100000, 100001, 0, {}});
+  model.wire_paths.push_back({100000, 100000});
   model.options.wire_sides = 8;
   model.options.wire_layers = 1;
   model.options.wire_step = 0.5;
@@ -477,7 +492,7 @@ TEST(MagneticSolve, UniformFieldEnergyAndZeroNetMaxwellForce) {
 TEST(MagneticSolve, LoopEnergyReciprocityReversalAndNonlinearInductance) {
   auto model = box(6, 1.5);
   loop(model);
-  model.currents.push_back({2, true, -1, {100000, 100001, 100002, 100003}});
+  model.currents.push_back({2, 100000, -1});
   model.subcases.push_back({2, 2, 0, "reverse"});
   auto solved = solve(model);
   ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
@@ -610,7 +625,8 @@ TEST(MagneticSolve, MutualInductanceReciprocityAndSuperposition) {
     model.wires.push_back(
         {200000 + i, 1, 200000 + i, 200000 + (i + 1) % 4, 0, {}});
   }
-  model.currents.push_back({2, true, 2, {200000, 200001, 200002, 200003}});
+  model.wire_paths.push_back({200000, 200000});
+  model.currents.push_back({2, 200000, 2});
   model.combinations[3] = {1, {{1, 1}, {1, 2}}};
   model.subcases = {{1, 1, 0, ""}, {2, 2, 0, ""}, {3, 3, 0, ""}};
   auto solved = solve(model);
@@ -623,6 +639,106 @@ TEST(MagneticSolve, MutualInductanceReciprocityAndSuperposition) {
             std::sqrt(inductance(0, 0) * inductance(1, 1)));
   for (size_t i = 0; i < cases[0].b.size(); ++i)
     EXPECT_LT((cases[0].b[i] + cases[1].b[i] - cases[2].b[i]).norm(), 1e-14);
+}
+
+// Two loops in series with opposite polarity, representing two parallel
+// branches. Circuit quantities must follow from the independently computed
+// source matrix: lambda_c = sum P_i lambda_i / a and
+// L_c = sum P_i P_j L_ij / a^2.
+TEST(MagneticCircuit, SeriesParallelCircuitsCombineSourceLinkageAndInductance) {
+  auto model = box(4, 1.5);
+  loop(model);
+  for (int i = 0; i < 4; ++i) {
+    model.nodes[100000 + i].position.z() = -0.3;
+    model.nodes[200000 + i] = {
+        model.nodes[100000 + i].position + Vector(0, 0, 0.6), 0};
+    model.wires.push_back(
+        {200000 + i, 1, 200000 + i, 200000 + (i + 1) % 4, 0, {}});
+  }
+  model.wire_paths.push_back({200000, 200000});
+  model.circuits[7] = {7, 2, {{100000, 1}, {200000, -1}}};
+  const double current = 3;
+  model.currents = {{1, 7, current}};
+  auto solved = solve(model);
+  ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+  const auto &r = std::get<Results>(solved);
+  ASSERT_EQ(r.circuits.size(), 1U);
+  EXPECT_EQ(r.circuits[0].id, 7);
+  EXPECT_TRUE(r.circuits[0].closed);
+  const auto &c = r.cases[0];
+  EXPECT_DOUBLE_EQ(c.sources[0].current, current / 2);
+  EXPECT_DOUBLE_EQ(c.sources[1].current, -current / 2);
+  EXPECT_DOUBLE_EQ(c.circuits[0].current, current);
+  const auto &l = c.differential_inductance;
+  ASSERT_GT(std::abs(l(0, 1)), .01 * l(0, 0)); // the coupling matters
+  const double combined = (l(0, 0) - l(0, 1) - l(1, 0) + l(1, 1)) / 4;
+  const double inductance = c.circuit_inductance(0, 0);
+  EXPECT_NEAR(inductance / combined, 1, 1e-12);
+  EXPECT_NEAR(c.circuits[0].linkage /
+                  ((c.sources[0].linkage - c.sources[1].linkage) / 2),
+              1, 1e-12);
+  // Linear material: lambda = L I and W = W' = L I^2 / 2.
+  EXPECT_NEAR(c.circuits[0].linkage / (inductance * current), 1, 1e-10);
+  EXPECT_NEAR(c.energy / (.5 * inductance * current * current), 1, 1e-10);
+  // The same members in series carry the full current and have four times
+  // the inductance.
+  model.circuits[7].parallel = 1;
+  auto series = solve(model);
+  ASSERT_TRUE(std::holds_alternative<Results>(series)) << error_of(series);
+  const auto &s = std::get<Results>(series).cases[0];
+  EXPECT_DOUBLE_EQ(s.sources[0].current, current);
+  EXPECT_NEAR(s.circuit_inductance(0, 0) / (4 * inductance), 1, 1e-12);
+  EXPECT_NEAR(s.energy / (4 * c.energy), 1, 1e-10);
+}
+
+TEST(MagneticParser, PropertySetsCircuitsAndSourceNamespaceAreValidated) {
+  auto mesh = box(1);
+  for (auto &c : mesh.elements)
+    c.property = c.id % 2 ? 1 : 2;
+  const std::string head = "SOL MAGSTAT\nCEND\nBEGIN BULK\nPSOLID,1,1\n"
+                           "PSOLID,2,1\nPSOLID,3,1\nMATMAG,1,1\n" +
+                           mesh_cards(mesh);
+  auto parse = [&](const std::string &cards) {
+    return parse_string(head + cards + "ENDDATA\n");
+  };
+  // A property row selects exactly the elements an explicit row lists, and
+  // rows of one SID accumulate.
+  auto rows = parse("ESET,5,PROP,2\nESET,6,2,4,6\nESET,7,PROP,1\nESET,7,PROP,"
+                    "2\n");
+  ASSERT_TRUE(std::holds_alternative<Model>(rows)) << error_of(rows);
+  const auto &sets = std::get<Model>(rows).element_sets;
+  EXPECT_EQ(sets.at(5), sets.at(6));
+  EXPECT_EQ(sets.at(7).size(), 6U);
+  EXPECT_NE(error_of(parse("ESET,5,PROP,3\n")).find("PROP 3 selects no"),
+            std::string::npos);
+  EXPECT_NE(error_of(parse("ESET,5,PROP,1,THRU,2\nESET,5,4\n"))
+                .find("element 4 more than once"),
+            std::string::npos);
+  // Sources and circuits share one namespace, and current goes on the
+  // circuit rather than on its members.
+  const std::string wires = "MATCOND,2,5.8e7\nPWIRE,2,2,ROUND,.01\n"
+                            "GRID,90,,-.5,-.5,0\nGRID,91,,.5,-.5,0\n"
+                            "GRID,92,,0,.5,0\nCWIRE,90,2,90,91\n"
+                            "CWIRE,91,2,92,91\nCWIRE,92,2,92,90\n"
+                            "WIREPATH,10,90\n";
+  EXPECT_TRUE(std::holds_alternative<Model>(
+      parse(wires + "CIRCUIT,20,,10,-1\nICIRC,1,20,2.\n")));
+  EXPECT_TRUE(std::holds_alternative<Model>(parse(wires + "ICIRC,1,10,2.\n")));
+  for (const auto &[cards, message] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"CIRCUIT,10,,10,1\n", "unique among"},
+           {"CIRCUIT,20,,11,1\n", "member 11 is not"},
+           {"CIRCUIT,20,,10,2\n", "+1 or -1"},
+           {"CIRCUIT,20,0,10,1\n", "PARALLEL >= 1"},
+           {"CIRCUIT,20,,10,1\nCIRCUIT,21,,10,1\n", "more than one"},
+           {"CIRCUIT,20,,10,1\nICIRC,1,10,2.\n", "give the current on the"},
+           {"ICIRC,1,30,2.\n", "undefined circuit or source 30"},
+           {"WIREPATH,11,93\n", "undefined CWIRE 93"},
+           {"IWIRE,1,2.,90\n", "use ICIRC"}}) {
+    SCOPED_TRACE(cards);
+    EXPECT_NE(error_of(parse(wires + cards)).find(message), std::string::npos)
+        << error_of(parse(wires + cards));
+  }
 }
 
 TEST(MagneticIO, IncludesFixedFieldsAndResultFieldValues) {
@@ -1189,17 +1305,20 @@ TEST(MagneticPlanar,
         const double turns = k2 / mu0 * std::sin(pi * center.x()) *
                              std::cos(pi * center.y() / 2) * area;
         m.element_sets[c.id] = {c.id};
-        m.planar_coils.push_back({1, c.id, turns});
+        m.planar_coils.push_back({c.id, c.id, turns});
+        m.circuits[1000000].members.emplace_back(c.id, 1);
       }
-      m.currents = {{1, false, 1, {1}}, {2, false, -2, {1}}};
+      m.circuits[1000000].id = 1000000;
+      m.currents = {{1, 1000000, 1}, {2, 1000000, -2}};
       m.subcases = {{1, 1, 0, ""}, {2, 2, 0, ""}};
       auto solved = solve(m);
       ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
       const auto &r = std::get<Results>(solved);
       const auto &c = r.cases[0];
-      ASSERT_TRUE(r.sources[0].closed);
-      EXPECT_NEAR(c.sources[0].linkage, 2 * c.energy, 1e-7);
-      EXPECT_NEAR(c.differential_inductance(0, 0), c.sources[0].linkage, 1e-7);
+      ASSERT_EQ(r.circuits.size(), 1U);
+      ASSERT_TRUE(r.circuits[0].closed);
+      EXPECT_NEAR(c.circuits[0].linkage, 2 * c.energy, 1e-7);
+      EXPECT_NEAR(c.circuit_inductance(0, 0), c.circuits[0].linkage, 1e-7);
       EXPECT_NEAR(r.cases[1].energy, 4 * c.energy, 1e-7);
       double error = 0;
       for (const auto &cell : r.mesh.cells)
@@ -1318,19 +1437,34 @@ TEST(MagneticParser, NativeSolidsPlanarWindingCardsAndUnsupportedGeometry) {
       "SOL MAGSTAT\nCEND\nLOAD=1\nBEGIN BULK\nMAG2D,0,20\nPARAM,MAGLEN,.001\n" +
       grids +
       "CTRIA3,1,1,1,2,3\nCTRIA3,2,1,1,3,4\nPMAG2D,1,1\nMATMAG,1,1\n"
-      "ESET,1,1\nESET,2,2\nCOIL2D,10,1,20\nCOIL2D,10,2,-20\nICOIL,1,10,3\nFSET,"
-      "1,1,1,2\n";
+      "ESET,1,1\nESET,2,2\nCOIL2D,10,1,20\nCOIL2D,11,2,-20\n"
+      "CIRCUIT,12,,10,1,11,1\nICIRC,1,12,3\nFSET,1,1,1,2\n";
   auto parsed = parse_string(deck);
   ASSERT_TRUE(std::holds_alternative<Model>(parsed)) << error_of(parsed);
   const auto &m = std::get<Model>(parsed);
   EXPECT_DOUBLE_EQ(m.options.depth, .02);
   auto solved = solve(m);
   ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
-  const auto &s = std::get<Results>(solved).sources[0];
-  ASSERT_EQ(s.planar_density.size(), 2U);
-  EXPECT_NEAR(s.planar_density[0].z(), 4e7, 1e-7);
-  EXPECT_NEAR(s.planar_density[1].z(), -4e7, 1e-7);
-  EXPECT_NEAR(s.coupling.sum(), 0, 1e-12);
+  const auto &r = std::get<Results>(solved);
+  ASSERT_EQ(r.sources.size(), 2U);
+  ASSERT_EQ(r.sources[0].planar_density.size(), 1U);
+  EXPECT_NEAR(r.sources[0].planar_density[0].z(), 4e7, 1e-7);
+  EXPECT_NEAR(r.sources[1].planar_density[0].z(), -4e7, 1e-7);
+  // Each leg alone is unbalanced; the circuit is balanced.
+  EXPECT_FALSE(r.sources[0].closed);
+  ASSERT_EQ(r.circuits.size(), 1U);
+  EXPECT_TRUE(r.circuits[0].closed);
+  EXPECT_NEAR((r.sources[0].coupling + r.sources[1].coupling).sum(), 0, 1e-12);
+  EXPECT_DOUBLE_EQ(r.cases[0].sources[1].current, 3);
+  EXPECT_TRUE(std::isfinite(r.cases[0].circuits[0].linkage));
+  EXPECT_FALSE(std::isfinite(r.cases[0].sources[0].linkage));
+  auto repeated = deck;
+  repeated.replace(repeated.find("COIL2D,11"), 9, "COIL2D,10");
+  EXPECT_NE(error_of(parse_string(repeated)).find("group legs with CIRCUIT"),
+            std::string::npos);
+  auto old = deck;
+  old.replace(old.find("ICIRC,1,12,3"), 12, "ICOIL,1,12,3");
+  EXPECT_NE(error_of(parse_string(old)).find("use ICIRC"), std::string::npos);
   auto bad = m;
   bad.options.planar = false;
   EXPECT_NE(error_of(solve(bad)).find("COIL2D requires"), std::string::npos);
@@ -1385,8 +1519,9 @@ TEST(MagneticPlanar, WindingTorqueApproachesAxialCurrentMomentInUniformField) {
           std::abs(center.x()) < .625)
         m.element_sets[center.x() < 0 ? 1 : 2].push_back(c.id);
     }
-    m.planar_coils = {{1, 1, 20}, {1, 2, -20}};
-    m.currents = {{1, false, 1, {1}}};
+    m.planar_coils = {{1, 1, 20}, {2, 2, -20}};
+    m.circuits[3] = {3, 1, {{1, 1}, {2, 1}}};
+    m.currents = {{1, 3, 1}};
     m.boundaries[1] = {0, Vector(.01, 0, 0)};
     m.subcases = {{1, 1, 1, ""}};
     const auto mesh = std::get<Mesh>(make_mesh(m));
@@ -1496,8 +1631,9 @@ TEST(MagneticForce, SurfacesThroughCurrentCarryingVolumeAreRejected) {
         std::abs(center.x()) < .625)
       planar.element_sets[center.x() < 0 ? 1 : 2].push_back(c.id);
   }
-  planar.planar_coils = {{1, 1, 20}, {1, 2, -20}};
-  planar.currents = {{1, false, 1, {1}}};
+  planar.planar_coils = {{1, 1, 20}, {2, 2, -20}};
+  planar.circuits[3] = {3, 1, {{1, 1}, {2, 1}}};
+  planar.currents = {{1, 3, 1}};
   planar.subcases[0].load = 1;
   const auto planar_mesh = std::get<Mesh>(make_mesh(planar));
   planar.forces = {{1, 1, Vector::Zero()}};
@@ -1921,6 +2057,7 @@ TEST(MagneticWarped, OpenWireTerminalsAndMaterialExclusion) {
     model.nodes[100000] = {Vector(-1, .07, .13), 0};
     model.nodes[100001] = {Vector(1, .07, .13), 0};
     model.wires.push_back({100000, 1, 100000, 100001, 0, Vector::UnitZ()});
+    model.wire_paths.push_back({100000, 100000});
     model.options.wire_layers = 1;
     model.options.wire_step = .5;
     const auto mesh = std::get<Mesh>(make_mesh(model));
@@ -1960,6 +2097,7 @@ CTETRA,1,1,1,2,3,4
 MATCOND,2,5.8e7
 PWIRE,2,2,RECT,.08,.06
 CWIRE,2,2,1,2,0.,0.,1.
+WIREPATH,2,2
 PARAM,WIRELAY,1
 PARAM,WIRESTEP,.4
 ENDDATA
@@ -2150,7 +2288,10 @@ Model nonlinear_planar(int kind) {
         std::abs(center.x()) < .32)
       model.element_sets[center.y() < 0 ? 3 : 4].push_back(cell.id);
   }
-  model.planar_coils = {{1, 1, 100}, {1, 2, -100}, {2, 3, 100}, {2, 4, -100}};
+  model.planar_coils = {
+      {11, 1, 100}, {12, 2, -100}, {13, 3, 100}, {14, 4, -100}};
+  model.circuits[1] = {1, 1, {{11, 1}, {12, 1}}};
+  model.circuits[2] = {2, 1, {{13, 1}, {14, 1}}};
   // Planar distorted elements exercise varying gradients as well as P1 cells.
   for (auto &[id, g] : model.nodes) {
     (void)id;
@@ -2186,10 +2327,8 @@ void nonlinear_loads(Model &model, const std::vector<double> &amplitudes) {
     const int id = static_cast<int>(model.subcases.size()) + 1;
     for (size_t i = 0; i < amps.size(); ++i)
       model.currents.push_back(
-          {id, !model.options.planar, amps[i],
-           model.options.planar
-               ? std::vector<int>{static_cast<int>(i) + 1}
-               : std::vector<int>{100000, 100001, 100002, 100003}});
+          {id, model.options.planar ? static_cast<int>(i) + 1 : 100000,
+           amps[i]});
     model.subcases.push_back({id, id, 0, ""});
   };
   for (double factor : {1., .01, 20., -1.}) {
@@ -2229,44 +2368,44 @@ void check_nonlinear_response(const Model &model, const Results &result) {
             1e-9);
   EXPECT_NEAR(reverse.energy, base.energy, 1e-9 * base.energy);
   EXPECT_NEAR(reverse.coenergy, base.coenergy, 1e-9 * base.coenergy);
-  const auto &tangent = base.differential_inductance;
+  const auto &tangent = base.circuit_inductance;
   EXPECT_LT((tangent - tangent.transpose()).norm() / tangent.norm(), 1e-12);
-  EXPECT_LT((reverse.differential_inductance - tangent).norm() / tangent.norm(),
+  EXPECT_LT((reverse.circuit_inductance - tangent).norm() / tangent.norm(),
             1e-9);
-  Eigen::VectorXd amps(base.sources.size()), linkage(base.sources.size());
-  for (size_t i = 0; i < base.sources.size(); ++i) {
-    amps[i] = base.sources[i].current;
-    linkage[i] = base.sources[i].linkage;
+  Eigen::VectorXd amps(base.circuits.size()), linkage(base.circuits.size());
+  for (size_t i = 0; i < base.circuits.size(); ++i) {
+    amps[i] = base.circuits[i].current;
+    linkage[i] = base.circuits[i].linkage;
     EXPECT_GT(tangent(i, i), 0);
-    EXPECT_NEAR(reverse.sources[i].linkage, -linkage[i],
+    EXPECT_NEAR(reverse.circuits[i].linkage, -linkage[i],
                 1e-9 * std::abs(linkage[i]));
     const auto &plus = result.cases[4 + 2 * i],
                &minus = result.cases[5 + 2 * i];
-    const double delta = plus.sources[i].current - minus.sources[i].current;
+    const double delta = plus.circuits[i].current - minus.circuits[i].current;
     Eigen::VectorXd derivative(linkage.size());
-    for (size_t j = 0; j < base.sources.size(); ++j)
+    for (size_t j = 0; j < base.circuits.size(); ++j)
       derivative[j] =
-          (plus.sources[j].linkage - minus.sources[j].linkage) / delta;
+          (plus.circuits[j].linkage - minus.circuits[j].linkage) / delta;
     EXPECT_LT((derivative - tangent.col(i)).norm() / tangent.col(i).norm(),
               1e-6);
-    for (size_t j = 0; j < base.sources.size(); ++j)
+    for (size_t j = 0; j < base.circuits.size(); ++j)
       EXPECT_NEAR(derivative[j], tangent(j, i), 1e-6 * std::abs(tangent(j, i)));
     // At fixed geometry with zero applied exterior field and no PM:
     // dW'/dI_i=lambda_i and dW/dI_i=sum_j I_j*d(lambda_j)/dI_i.
     EXPECT_NEAR((plus.coenergy - minus.coenergy) / delta, linkage[i],
                 1e-6 * std::abs(linkage[i]));
     double energy_derivative = 0;
-    for (size_t j = 0; j < base.sources.size(); ++j)
-      energy_derivative += base.sources[j].current * tangent(j, i);
+    for (size_t j = 0; j < base.circuits.size(); ++j)
+      energy_derivative += base.circuits[j].current * tangent(j, i);
     EXPECT_NEAR((plus.energy - minus.energy) / delta, energy_derivative,
                 1e-6 * std::abs(energy_derivative));
   }
   Eigen::VectorXd low_linkage(linkage.size()), high_linkage(linkage.size());
-  for (size_t i = 0; i < base.sources.size(); ++i) {
-    low_linkage[i] = low.sources[i].linkage;
-    high_linkage[i] = high.sources[i].linkage;
+  for (size_t i = 0; i < base.circuits.size(); ++i) {
+    low_linkage[i] = low.circuits[i].linkage;
+    high_linkage[i] = high.circuits[i].linkage;
   }
-  EXPECT_LT((low.differential_inductance * (.01 * amps) - low_linkage).norm() /
+  EXPECT_LT((low.circuit_inductance * (.01 * amps) - low_linkage).norm() /
                 low_linkage.norm(),
             1e-10);
   EXPECT_NEAR(low.energy, .5 * .01 * amps.dot(low_linkage), 1e-10 * low.energy);
@@ -2396,9 +2535,9 @@ TEST(MagneticNonlinear,
     // More total iterations than the per-stage budget proves the retry ran.
     EXPECT_GT(continued.iterations, model.options.max_iterations);
     for (size_t i = 0; i < amplitudes.size(); ++i) {
-      EXPECT_DOUBLE_EQ(continued.sources[i].current, amplitudes[i]);
-      EXPECT_NEAR(continued.sources[i].linkage, reference.sources[i].linkage,
-                  1e-10 * std::abs(reference.sources[i].linkage));
+      EXPECT_DOUBLE_EQ(continued.circuits[i].current, amplitudes[i]);
+      EXPECT_NEAR(continued.circuits[i].linkage, reference.circuits[i].linkage,
+                  1e-10 * std::abs(reference.circuits[i].linkage));
     }
     EXPECT_LE(continued.residual, model.options.nonlinear_tolerance);
     EXPECT_LT((continued.potential - reference.potential).norm() /
@@ -2406,9 +2545,9 @@ TEST(MagneticNonlinear,
               1e-9);
     EXPECT_NEAR(continued.energy, reference.energy, 1e-10 * reference.energy);
     EXPECT_LT(
-        (continued.differential_inductance - reference.differential_inductance)
+        (continued.circuit_inductance - reference.circuit_inductance)
                 .norm() /
-            reference.differential_inductance.norm(),
+            reference.circuit_inductance.norm(),
         1e-8);
     RecordProperty(planar ? "planar_direct_iterations"
                           : "solid_direct_iterations",
@@ -2430,6 +2569,7 @@ TEST(MagneticNonlinear, PermanentMagnetDrivesSteelAcrossTheKneeAndReverses) {
     SCOPED_TRACE(kind);
     auto model = nonlinear_planar(kind);
     model.planar_coils.clear();
+    model.circuits.clear();
     model.currents.clear();
     model.subcases = {{}};
     model.materials[3] = {1.05, 0, 1.2};

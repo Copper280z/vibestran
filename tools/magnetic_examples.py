@@ -139,7 +139,9 @@ def deck(kind="loop", n=8, extent=2.0, angle=0.0, current=1.0, element="tet"):
                 eid = next_element+i
                 element_ids.append(eid)
                 lines.append(f"CWIRE,{eid},10,{next_grid+i},{next_grid+(i+1)%4}")
-            lines.append(f"IWIRE,1,{current}," + ",".join(map(str, element_ids)))
+            # Each loop is its own circuit, named after its first segment.
+            lines += [f"WIREPATH,{element_ids[0]},{element_ids[0]}",
+                      f"ICIRC,1,{element_ids[0]},{current}"]
             next_grid += 4
             next_element += 4
     if kind in ("coil", "motor"):
@@ -177,7 +179,7 @@ def deck(kind="loop", n=8, extent=2.0, angle=0.0, current=1.0, element="tet"):
         if kind == "coil":
             if not selected:
                 raise ValueError("Mesh too coarse to represent coil; use n=12 or finer")
-            lines += ["COIL,1,1,20,1", f"ICOIL,1,1,{current}"]
+            lines += ["COIL,1,1,20,1", f"ICIRC,1,1,{current}"]
         else:
             lines += ["MFORCE,1,1,0,0,0"]
     lines += ["MPROBE,1,0,0,0", "MPROBE,2,0,0," + ("0.008" if kind == "motor" else "0.3"), "ENDDATA"]

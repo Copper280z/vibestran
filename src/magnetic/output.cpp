@@ -15,6 +15,21 @@ void number_json(std::ostream &out, double value) {
   else
     out << "null";
 }
+void matrix_json(std::ostream &out, const Eigen::MatrixXd &m) {
+  out << '[';
+  for (Eigen::Index i = 0; i < m.rows(); ++i) {
+    if (i)
+      out << ',';
+    out << '[';
+    for (Eigen::Index j = 0; j < m.cols(); ++j) {
+      if (j)
+        out << ',';
+      number_json(out, m(i, j));
+    }
+    out << ']';
+  }
+  out << ']';
+}
 Status vtu(const std::filesystem::path &path, const Mesh &mesh,
            const std::vector<Vector> &field, const std::string &name,
            const std::vector<Vector> &second = {},
@@ -148,6 +163,26 @@ Status write_results(const Model &model, const Results &results,
                      source.mesh, density, "J_per_ampere_per_m2"))
       return e;
   }
+  json << "],\"circuits\":[";
+  for (size_t i = 0; i < results.circuits.size(); ++i) {
+    const auto &c = results.circuits[i];
+    if (i)
+      json << ',';
+    json << "{\"id\":" << c.id << ",\"parallel\":" << c.parallel
+         << ",\"closed\":" << (c.closed ? "true" : "false")
+         << ",\"members\":[";
+    f06 << "CIRCUIT " << c.id << "  parallel paths " << c.parallel
+        << "  members";
+    for (size_t j = 0; j < c.members.size(); ++j) {
+      const auto [source, polarity] = c.members[j];
+      if (j)
+        json << ',';
+      json << '[' << results.sources[source].id << ',' << polarity << ']';
+      f06 << ' ' << (polarity > 0 ? '+' : '-') << results.sources[source].id;
+    }
+    json << "]}";
+    f06 << '\n';
+  }
   json << "],\"cases\":[";
   csv << "subcase,probe,x_m,y_m,z_m,Bx_T,By_T,Bz_T,Hx_A_per_m,Hy_A_per_m,Hz_A_"
          "per_m\n";
@@ -177,22 +212,31 @@ Status write_results(const Model &model, const Results &results,
       if (s.closed)
         f06 << " linkage(Wb-turn)=" << s.linkage;
       else
-        f06 << " linkage unavailable for open path";
+        f06 << " linkage unavailable for open path or single planar region";
       f06 << '\n';
     }
-    json << "],\"differential_inductance_H\":[";
-    for (Eigen::Index i = 0; i < c.differential_inductance.rows(); ++i) {
+    json << "],\"differential_inductance_H\":";
+    matrix_json(json, c.differential_inductance);
+    json << ",\"circuits\":[";
+    for (size_t i = 0; i < c.circuits.size(); ++i) {
+      const auto &circuit = c.circuits[i];
       if (i)
         json << ',';
-      json << '[';
-      for (Eigen::Index j = 0; j < c.differential_inductance.cols(); ++j) {
-        if (j)
-          json << ',';
-        number_json(json, c.differential_inductance(i, j));
-      }
-      json << ']';
+      json << "{\"id\":" << circuit.id << ",\"current_A\":" << circuit.current
+           << ",\"linkage_Wb_turn\":";
+      number_json(json, circuit.linkage);
+      json << '}';
+      f06 << "CIRCUIT " << circuit.id << " I(A)=" << circuit.current;
+      if (std::isfinite(circuit.linkage))
+        f06 << " linkage(Wb-turn)=" << circuit.linkage
+            << " differential inductance(H)=" << c.circuit_inductance(i, i);
+      else
+        f06 << " linkage unavailable (open or unbalanced circuit)";
+      f06 << '\n';
     }
-    json << "],\"forces\":[";
+    json << "],\"circuit_inductance_H\":";
+    matrix_json(json, c.circuit_inductance);
+    json << ",\"forces\":[";
     for (size_t i = 0; i < c.forces.size(); ++i) {
       const auto &f = c.forces[i];
       if (i)
