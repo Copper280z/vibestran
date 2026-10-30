@@ -24,8 +24,38 @@ class RayIntegral {
 public:
   RayIntegral(const Source &s, const Cell &c, const Mesh &m,
               const std::vector<int> &candidates)
-      : source(s), cell(c), mesh(m), small(gauss_rule(4)),
+      : source(s), cell(c), mesh(m), current(c, s.flux), small(gauss_rule(4)),
         large(gauss_rule(8)) {
+    if (cell.nodes.size() == 4) {
+      // A tetrahedral subdivision has several long diagonals. Integrating
+      // along the edge closest to J avoids nearly tangential crossings caused
+      // solely by the arbitrary local vertex ordering of the subdivision.
+      Vector center = Vector::Zero();
+      for (const auto &p : cell.points)
+        center += p / 4;
+      const Vector direction = current.value(center);
+      double best = -1, length = 0;
+      std::array<int, 2> chosen{0, 3};
+      for (auto edge : local_edges) {
+        const Vector d = cell.points[edge[1]] - cell.points[edge[0]];
+        const double score = std::pow(d.dot(direction), 2) / d.squaredNorm();
+        if (score > best + 1e-12 * direction.squaredNorm() ||
+            (std::abs(score - best) <= 1e-12 * direction.squaredNorm() &&
+             d.squaredNorm() > length)) {
+          best = score;
+          length = d.squaredNorm();
+          chosen = edge;
+        }
+      }
+      const auto vertices = reference_vertices(cell);
+      reference_origin = vertices[chosen[0]];
+      int column = 0;
+      for (int i = 0; i < 4; ++i)
+        if (i != chosen[0] && i != chosen[1])
+          reference_frame.col(column++) = vertices[i] - reference_origin;
+      reference_frame.col(2) = vertices[chosen[1]] - reference_origin;
+      reference_inverse = reference_frame.inverse();
+    }
     std::set<int> edge_set, face_set;
     double minimum_edge = std::numeric_limits<double>::infinity();
     for (int i : candidates) {
@@ -57,51 +87,11 @@ public:
   }
 
   Result<Eigen::VectorXd> integrate(double tolerance) {
-    struct Panel {
-      double x0, x1, y0, y1, estimate;
-      int depth;
-      Eigen::VectorXd value;
+    auto section = [&](double u) {
+      return adaptive([&](double v) { return ray(u, v); }, section_cuts(u),
+                      tolerance / 16);
     };
-    auto evaluate = [&](double x0, double x1, double y0, double y1,
-                        int depth) -> Panel {
-      const Eigen::VectorXd coarse = rectangle_rule(x0, x1, y0, y1, small);
-      Eigen::VectorXd fine = rectangle_rule(x0, x1, y0, y1, large);
-      const double estimate = (fine - coarse).norm();
-      return {x0, x1, y0, y1, estimate, depth, std::move(fine)};
-    };
-    auto compare = [](const Panel &a, const Panel &b) {
-      return a.estimate < b.estimate;
-    };
-    std::priority_queue<Panel, std::vector<Panel>, decltype(compare)> panels(
-        compare);
-    auto root = evaluate(0, 1, 0, 1, 0);
-    Eigen::VectorXd value = root.value;
-    double remaining = root.estimate;
-    panels.push(std::move(root));
-    while (!error && remaining > tolerance * std::max(1., value.norm())) {
-      const auto p = panels.top();
-      panels.pop();
-      if (p.depth >= 20) {
-        error = Error{
-            std::format("Curved current integration did not converge in source "
-                        "cell {} (estimated error {}); refine WIRESTEP/WIRELAY",
-                        cell.id, remaining)};
-        break;
-      }
-      const double xm = (p.x0 + p.x1) / 2, ym = (p.y0 + p.y1) / 2;
-      value -= p.value;
-      remaining = std::max(0., remaining - p.estimate);
-      for (int quadrant = 0; quadrant < 4; ++quadrant) {
-        auto child = evaluate(
-            quadrant & 1 ? xm : p.x0, quadrant & 1 ? p.x1 : xm,
-            quadrant & 2 ? ym : p.y0, quadrant & 2 ? p.y1 : ym, p.depth + 1);
-        value += child.value;
-        remaining += child.estimate;
-        panels.push(std::move(child));
-        if (error)
-          break;
-      }
-    }
+    const Eigen::VectorXd value = adaptive(section, outer_cuts(), tolerance);
     if (error)
       return *error;
     if (std::abs(value[edges.size()] - 1) > 1e-8)
@@ -117,19 +107,162 @@ private:
   const Source &source;
   const Cell &cell;
   const Mesh &mesh;
+  CurrentField current;
   Rule small, large;
   std::vector<Target> targets;
   NodeList faces;
   double scale{1};
   Status error;
   int rays{0};
+  Vector reference_origin{Vector::Zero()};
+  Matrix reference_frame{Matrix::Identity()},
+      reference_inverse{Matrix::Identity()};
+
+  Vector integration_coordinates(const Vector &x) const {
+    const Vector r = reference_coordinates(cell, x);
+    return cell.nodes.size() == 4
+               ? Vector(reference_inverse * (r - reference_origin))
+               : r;
+  }
 
   Vector reference(double u, double v, double t) const {
     if (cell.nodes.size() == 8)
       return Vector(2 * u - 1, 2 * v - 1, 2 * t - 1);
     if (cell.nodes.size() == 6)
       return Vector(u, (1 - u) * v, 2 * t - 1);
-    return Vector(u, (1 - u) * v, (1 - u) * (1 - v) * t);
+    return reference_origin +
+           reference_frame * Vector(u, (1 - u) * v, (1 - u) * (1 - v) * t);
+  }
+
+  static void finish_cuts(std::vector<double> &cuts) {
+    cuts.erase(std::remove_if(cuts.begin(), cuts.end(),
+                              [](double t) {
+                                return !std::isfinite(t) || t < 0 || t > 1;
+                              }),
+               cuts.end());
+    std::sort(cuts.begin(), cuts.end());
+    cuts.erase(
+        std::unique(cuts.begin(), cuts.end(),
+                    [](double a, double b) { return std::abs(a - b) < 1e-12; }),
+        cuts.end());
+  }
+
+  // Changes in ray ownership occur at source/field boundary crossings and
+  // projected field edges. Split there before adaptive integration instead of
+  // repeatedly resolving these kinks with tiny rectangular panels.
+  std::vector<double> outer_cuts() const {
+    std::vector<double> cuts{0, 1};
+    auto append = [&](const Vector &x) {
+      const Vector r = integration_coordinates(x);
+      cuts.push_back(cell.nodes.size() == 8 ? (r.x() + 1) / 2 : r.x());
+    };
+    for (int e : edges) {
+      const auto edge = mesh.edges[e];
+      const Vector a = mesh.nodes[edge[0]], b = mesh.nodes[edge[1]];
+      for (const auto &x : {a, b})
+        if (contains(cell, x))
+          append(x);
+      for (int f : cell.faces)
+        for (double t :
+             line_face_intersections(source.mesh, source.mesh.faces[f], a, b))
+          append(a + t * (b - a));
+    }
+    for (int e : cell.edges) {
+      const auto edge = source.mesh.edges[e];
+      const Vector a = source.mesh.nodes[edge[0]],
+                   b = source.mesh.nodes[edge[1]];
+      for (int f : faces)
+        for (double t : line_face_intersections(mesh, mesh.faces[f], a, b))
+          append(a + t * (b - a));
+    }
+    finish_cuts(cuts);
+    return cuts;
+  }
+
+  std::vector<double> section_cuts(double u) const {
+    std::vector<double> cuts{0, 1};
+    Mesh slice;
+    slice.nodes = {mapping(cell, reference(u, 0, 0)).first,
+                   mapping(cell, reference(u, 1, 0)).first,
+                   mapping(cell, reference(u, 1, 1)).first,
+                   mapping(cell, reference(u, 0, 1)).first};
+    for (int f : faces)
+      for (auto side : {std::array<int, 2>{0, 1}, std::array<int, 2>{3, 2}}) {
+        auto values = line_face_intersections(
+            mesh, mesh.faces[f], slice.nodes[side[0]], slice.nodes[side[1]]);
+        cuts.insert(cuts.end(), values.begin(), values.end());
+      }
+    Face face;
+    face.nodes =
+        cell.nodes.size() == 4 ? NodeList{0, 1, 3} : NodeList{0, 1, 2, 3};
+    face.normal = (slice.nodes[1] - slice.nodes[0])
+                      .cross(slice.nodes[3] - slice.nodes[0])
+                      .normalized();
+    for (int e : edges) {
+      const auto edge = mesh.edges[e];
+      const Vector a = mesh.nodes[edge[0]], b = mesh.nodes[edge[1]];
+      for (double t : line_face_intersections(slice, face, a, b)) {
+        const Vector r = integration_coordinates(a + t * (b - a));
+        cuts.push_back(cell.nodes.size() == 8 ? (r.y() + 1) / 2
+                                              : r.y() / (1 - u));
+      }
+    }
+    finish_cuts(cuts);
+    return cuts;
+  }
+
+  template <class Function>
+  Eigen::VectorXd adaptive(const Function &function,
+                           const std::vector<double> &cuts, double tolerance) {
+    struct Panel {
+      double a, b, estimate;
+      int depth;
+      Eigen::VectorXd value;
+    };
+    auto evaluate = [&](double a, double b, int depth) -> Panel {
+      auto accumulate = [&](double t, double weight, Eigen::VectorXd &out) {
+        out += weight * function(t);
+      };
+      const Eigen::VectorXd coarse = line_rule(accumulate, a, b, small);
+      Eigen::VectorXd fine = line_rule(accumulate, a, b, large);
+      const double estimate = (fine - coarse).norm();
+      return {a, b, estimate, depth, std::move(fine)};
+    };
+    auto compare = [](const Panel &a, const Panel &b) {
+      return a.estimate < b.estimate;
+    };
+    std::priority_queue<Panel, std::vector<Panel>, decltype(compare)> panels(
+        compare);
+    Eigen::VectorXd value = Eigen::VectorXd::Zero(edges.size() + 1);
+    double remaining = 0;
+    for (size_t i = 1; i < cuts.size() && !error; ++i) {
+      auto p = evaluate(cuts[i - 1], cuts[i], 0);
+      value += p.value;
+      remaining += p.estimate;
+      panels.push(std::move(p));
+    }
+    while (!error && remaining > tolerance * std::max(1., value.norm())) {
+      const auto p = panels.top();
+      panels.pop();
+      if (p.depth >= 24) {
+        error = Error{std::format("Curved current integration did not converge "
+                                  "in source cell {}; refine WIRESTEP/WIRELAY",
+                                  cell.id)};
+        break;
+      }
+      const double mid = (p.a + p.b) / 2;
+      value -= p.value;
+      remaining = std::max(0., remaining - p.estimate);
+      for (auto interval : {std::pair{p.a, mid}, std::pair{mid, p.b}}) {
+        auto child = evaluate(interval.first, interval.second, p.depth + 1);
+        value += child.value;
+        remaining += child.estimate;
+        panels.push(std::move(child));
+        if (error)
+          break;
+      }
+    }
+    return value;
   }
 
   template <class Function>
@@ -137,7 +270,7 @@ private:
                             const Rule &rule) {
     Eigen::VectorXd result = Eigen::VectorXd::Zero(edges.size() + 1);
     for (auto [t, w] : rule)
-      result += w * (b - a) * function(a + (b - a) * t);
+      function(a + (b - a) * t, w * (b - a), result);
     return result;
   }
   template <class Function>
@@ -211,41 +344,28 @@ private:
         owners = std::move(interior);
       if (owners.empty())
         continue;
-      auto function = [&](double t) -> Eigen::VectorXd {
-        Eigen::VectorXd value = Eigen::VectorXd::Zero(edges.size() + 1);
-        const auto [position, jacobian] = mapping(cell, reference(u, v, t));
+      auto function = [&](double t, double weight, Eigen::VectorXd &value) {
+        const Vector r = reference(u, v, t);
+        const auto [position, jacobian] = mapping(cell, r);
         const double measure =
             reference_weight * std::abs(jacobian.determinant());
-        const Vector current = flux_value(cell, source.flux, position);
+        const Vector weighted_current =
+            weight * reference_weight * current.weighted_reference(r, jacobian);
         for (const auto *target : owners) {
           const auto basis = edge_basis(*target->cell, position);
           for (size_t e = 0; e < basis.size(); ++e)
             value[target->equations[e]] +=
-                measure * basis[e].dot(current) / (scale * owners.size());
+                basis[e].dot(weighted_current) / (scale * owners.size());
         }
-        value[edges.size()] = measure / cell.volume;
+        value[edges.size()] += weight * measure / cell.volume;
         if (!value.allFinite())
           error = Error{"Nonfinite mapped current integral"};
-        return value;
       };
       result += line_integral(function, a, b, 0);
       if (error)
         return result;
     }
     return result;
-  }
-
-  Eigen::VectorXd rectangle_rule(double x0, double x1, double y0, double y1,
-                                 const Rule &rule) {
-    Eigen::VectorXd value = Eigen::VectorXd::Zero(edges.size() + 1);
-    for (auto [u, wu] : rule)
-      for (auto [v, wv] : rule) {
-        value += wu * wv * (x1 - x0) * (y1 - y0) *
-                 ray(x0 + u * (x1 - x0), y0 + v * (y1 - y0));
-        if (error)
-          return value;
-      }
-    return value;
   }
 };
 } // namespace
@@ -261,8 +381,8 @@ Result<Eigen::VectorXd> couple_curved_source(const Source &source,
     std::set<int> boundary;
     for (int ci : index.query(cell.minimum, cell.maximum)) {
       const auto &target = mesh.cells[ci];
-      if ((cell.maximum.array() < target.minimum.array()).any() ||
-          (target.maximum.array() < cell.minimum.array()).any())
+      if ((cell.maximum.array() <= target.minimum.array()).any() ||
+          (target.maximum.array() <= cell.minimum.array()).any())
         continue;
       cells.push_back(ci);
       if (excluded.contains(ci)) {

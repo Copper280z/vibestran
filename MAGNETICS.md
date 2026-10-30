@@ -153,22 +153,24 @@ branching, joined volumetric/wire sources, overlapping conductors, reversing
 bends and folded miters are rejected. Wire sections provide magnetic geometry;
 no structural stiffness, thermal solve or magnetomechanical coupling is added.
 
-Wire preprocessing now uses native hexahedra. Rectangular sections use a regular
-quad grid; round sections use a square quad core and quadrilateral annuli,
-without collapsed cells on the centerline. Each lofted quad makes one hex,
-compared with six tetrahedra for the former split of a rectangular section cell.
-Round sections use fewer cells too, with a different cross-section partition.
-The internal wire hexes retain convex, planar-faced geometry for source
-intersection checks. A spatially twisted path can produce warped loft faces:
-its entire connected component falls back to conforming tetrahedra. This is an
-internal CWIRE meshing choice, not a restriction on user CHEXA/CPENTA elements.
-The source VTU exposes the actual cell types and the report includes
-preprocessing mesh sizes.
+`PARAM,WIREMESH,AUTO` (the default) prefers native hexahedra. Rectangular
+sections use a regular quad grid; round sections use a square quad core and
+quadrilateral annuli, without collapsed cells on the centerline. Each lofted
+quad makes one hex. If a spatial path produces warped or nonconvex loft faces,
+AUTO falls back to conforming tetrahedra for its whole connected component.
+Folded/invalid sweeps still fail validation.
 
-This reduces the current-preprocessing system, but is not an unconditional
-end-to-end speedup. Nonmatching integration of distorted hex fields can be more
-expensive than the former polynomial tetrahedron integration. Accuracy and
-current continuity remain enforced; integration failure requests mesh refinement.
+Use `PARAM,WIREMESH,HEX` to require hexahedra, or `PARAM,WIREMESH,TET` to split
+each lofted quad prism into six conforming tetrahedra. Both choices use the
+same section partition and axial refinement. HEX returns a diagnostic if the
+sweep needs the geometric fallback. These restrictions apply only to internal
+CWIRE cells; user CHEXA/CPENTA faces may be warped. The source VTU exposes the
+actual cell types and the report includes preprocessing mesh sizes.
+
+Hexes reduce the current-preprocessing system, while tets have cheaper polynomial
+transfer on planar-faced backgrounds. The faster choice depends on the source
+and field meshes; compare both and check refinement. Integration failure returns
+a diagnostic rather than silently changing the requested element type.
 
 Round sections are inscribed polygons. WIRESIDE rounds upward to a multiple of
 four for the quad core. Increase WIRESIDE/WIRELAY and refine
@@ -181,6 +183,7 @@ twisting paths need shorter segments and a section-refinement study.
 | `MAGLEN` | 1 | Deck length to meters |
 | `MAGTOL` | 1e-8 | Relative equilibrium residual |
 | `MAGITER` | 80 | Newton iteration limit per continuation stage |
+| `WIREMESH` | AUTO | Internal CWIRE mesh: AUTO (hex with geometric tet fallback), HEX (required), TET (required) |
 | `WIRESIDE` | 16 | Requested round sides (8–256), rounded up to a multiple of four |
 | `WIRELAY` | 2 | Annular layers outside the square core, or rectangular subdivisions (1–32) |
 | `WIRESTEP` | 0 | Maximum axial slice length; zero uses twice section size |
@@ -309,22 +312,30 @@ The stranded projection retains these constraints. N multiplies the resulting
 unit-current density exactly once. Matched coil regions integrate directly on
 their reference cells, including warped cells and cuts.
 
-Wire and magnetic meshes need not match. Convex planar-faced backgrounds use
-polyhedral intersections to transfer `integral N.J dV`. Tetrahedral polynomial
-products retain the degree-two rule. Nonaffine cells on this path use Gauss
-orders 6, 8, 10, 12, then 14 as needed, checking current continuity and relative
-coupling-vector change (1e-8).
+Wire and magnetic meshes need not match. Affine wire cells on convex planar-faced
+backgrounds use polyhedral intersections to transfer `integral N.J dV`. Disjoint
+bounding boxes are rejected before clipping. Polynomial products use exact
+four-point degree-two (tet field) or five-point degree-three (affine hex/wedge
+field) tetrahedral rules. The latter includes a negative centroid weight.
+Nonaffine field cells on this clipping path retain adaptive Gauss orders 6, 8,
+10, 12, then 14, checking current continuity and relative coupling change (1e-8).
 
-For backgrounds containing warped cells, source-reference integration lines
-are split at the actual bilinear field faces, including both crossings of a
-saddle face. Adaptive Gauss integration evaluates the mapped magnetic basis
-and current on these intervals and across the source section. It checks an
-estimated integration error and retries more tightly if discrete current
-continuity fails; it does not project the load to conceal a continuity error.
-Geometric interval bounds detect material overlaps and exterior crossings
-even when they are too small to hit quadrature samples. Curved transfer costs
-more than planar clipping and has finite refinement budgets; unresolved
-integration/contact returns a diagnostic requesting refinement.
+For nonaffine wire cells or backgrounds containing warped cells, source-reference
+integration lines are split at the actual field faces, including both crossings
+of a saddle face. Nested adaptive Gauss integration also splits the transverse
+coordinates at source/field boundary and edge crossings. Tetrahedral integration
+rays follow the cell edge best aligned with its current, avoiding tangencies
+introduced by arbitrary subdivision diagonals. The RT0 current coefficients are
+cached once per cell; reference-domain integration applies the Piola map directly
+without solving for source coordinates again at every sample.
+
+Adaptive error estimates, coverage checks and discrete current continuity retain
+their existing tolerances. Transfer retries more tightly on a continuity failure;
+it does not project the load to conceal one. Geometric interval bounds detect
+material overlaps and exterior crossings even when quadrature misses them.
+Curved integration/contact has finite refinement budgets; unresolved cases return
+a diagnostic requesting refinement. An independent clipping implementation remains
+available for cross-checking ray integration on planar-faced meshes.
 
 Checks cover per-cell current conservation, source
 volume coverage and orthogonality of the transferred load to interior nodal
@@ -411,8 +422,14 @@ continuity, uniform fields and Maxwell stress, folded mappings missed by
 volume quadrature, tiny curved overlaps versus contact, warped coil cuts,
 open-wire endpoints, and independent wire transfer/current moments and energy.
 Ray transfer is also compared with polyhedral intersection integration on a
-shared analytical fixture. The wire spatial-loop fallback is checked against
-the current moment. The CLI test checks actual JSON/VTU/CSV
+shared analytical fixtures. Both HEX and TET are checked for straight-wire
+current, volume, far field,
+warped-background transfer, open terminals and material exclusion. Cubic monomial
+integrals verify the five-point rule; arbitrary face fluxes verify cached currents
+on affine, warped, reflected and translated cells. Tet transfer is invariant to
+local vertex order and rigid motion. The spatial-loop AUTO fallback and strict
+HEX rejection are checked against the current moment. The CLI test checks
+actual JSON/VTU/CSV
 values, VTK topology, planar nodal potentials, exported ampere-turn integrals,
 and the prepared-deck sweep.
 
@@ -421,3 +438,75 @@ Independent tool comparisons, their dependencies and their outputs live in
 [Magnetic_Validation](Magnetic_Validation/README.md); none are registered in
 Meson or ordinary CI. Detailed external force and nonlinear benchmark validation
 remains necessary before relying on a real motor result.
+
+## CWIRE performance measurements (2026-10-30)
+
+Build and run the optional benchmark from `build`:
+
+```sh
+meson configure -Dbuildtype=release
+ninja magnetic_wire_benchmark
+./magnetic_wire_benchmark 3 > /tmp/magnetic-wire-timings.csv
+```
+
+The second argument can select `flat` or one case name from the table below.
+The target is not built by default or registered as a timing test. It uses the
+production WIREMESH selector, alternates HEX/TET run order, and emits stage times,
+mesh/system sizes, current continuity, volume, moment and center Biot–Savart field.
+All cases use linear unit-current preprocessing. No magnetic field solve is timed;
+field DOFs below are the reduced system size a subsequent solve would use.
+Preparation includes source meshing, validity/overlap checks and the current solve;
+transfer integrates the source against the background edge basis. Background
+construction, diagnostics and file I/O are outside these stage timers.
+
+Measurements used Apple arm64, Apple clang 17, Accelerate sparse direct solves,
+Meson Release (`-O3 -DNDEBUG -march=native`), and precise magnetic kernels
+(`-fno-fast-math -ffp-contract=off`). Baseline is commit `3be86d5` with the existing
+tet fallback forced for comparison; the new selectable TET uses that same split.
+Times below are milliseconds, median of three uninstrumented runs. Old warped
+HEX times marked * are approximate single instrumented profile runs; do not infer
+precise speedup ratios from those two entries.
+
+| Case | Field cells / reduced DOFs | Wire cells HEX / TET | Current system HEX / TET | HEX old → new ms | TET old → new ms |
+|---|---:|---:|---:|---:|---:|
+| `round_tet` | 1296 tets / 1081 | 144 / 864 | 528 / 2496 | 2659.7 → 112.8 | 114.8 → 64.8 |
+| `rect_tet` | 1296 tets / 1081 | 12 / 72 | 24 / 168 | 55.1 → 22.7 | 10.3 → 6.4 |
+| `rect_hex` | 512 hexes / 833 | 12 / 72 | 24 / 168 | 72.3 → 17.3 | 11.4 → 4.7 |
+| `rect_warped_hex` | 8 hexes / 5 | 12 / 72 | 24 / 168 | ~7690* → 44.7 | refinement-budget failure → 311.6 |
+| `rect_warped_wedge` | 16 wedges / 9 | 12 / 72 | 24 / 168 | ~9185* → 49.3 | refinement-budget failure → 411.0 |
+
+The current system includes face-flux unknowns and constraint multipliers;
+closed paths have one fewer independent cell-balance constraint and one cut
+constraint. All loops have side length 1.2 m, diameter 0.08 m or rectangular
+section 0.08 by 0.06 m, WIRESTEP=0.4, WIRESIDE=8 and WIRELAY=1. Flat backgrounds
+have half-width 1.5 m. Warped backgrounds have half-width 1 m before the shear
+`z += 0.35*x*y` (hex) or `x += 0.35*y*z` (wedge, loop in the yz plane).
+These small fixtures isolate transfer costs; they are not motor-scale solve
+benchmarks or a source-mesh convergence study.
+
+On `round_tet`, median preparation/transfer times are 4.3/108.5 ms for HEX and
+35.1/29.7 ms for TET. Hex preprocessing remains smaller and faster; tetrahedral
+transfer still wins overall here. Tets improve 1.6–2.4 times on the three flat
+cases, and hexes improve 2.4–23.6 times. Hexes win the two warped cases.
+
+Separate temporary operation counters identified the costs, without adding
+instrumentation overhead to the timings above:
+
+| Operation / case | Before | After |
+|---|---:|---:|
+| Current evaluations, round HEX on tets | 20,570,112 | 914,112 |
+| Inverse-map Newton steps, round HEX on tets | 78,027,151 | 79,972 |
+| Polygon clips after broad-phase query, round TET | 43,533 | 10,800 |
+| Integration points, rectangular TET on hexes | 53,568 | 9,920 |
+| Rays, HEX on warped hexes | 854,720 | 6,912 |
+| Line quadrature points, HEX on warped hexes | 21,496,608 | 165,888 |
+
+The optimized ray and independent clipping algorithms agree to relative 1e-9
+in regression tests for the same source, including round/rectangular sections
+and both source element types. Across these benchmark fixtures, HEX versus TET
+load vectors differ by at most 0.229% and center Biot–Savart fields by 0.0141%.
+Those are different current discretizations, not an equal-error comparison.
+The largest current-continuity residual is 5.1e-12, below the unchanged 1e-9
+limit. No acceptance tolerance was relaxed. All six Meson suites pass, with
+42 magnetic tests; the full unit suite decreased from 44.77 to 12.78 seconds,
+including the new cross-checks. Third-party validation remains separate.

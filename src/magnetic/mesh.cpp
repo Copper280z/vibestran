@@ -461,6 +461,11 @@ std::vector<int> SpatialIndex::query(const Vector &lo, const Vector &hi) const {
 std::vector<Sample> intersection_quadrature(const Mesh &a, const Cell &ca,
                                             const Mesh &b, const Cell &cb,
                                             int order) {
+  // The spatial index returns whole leaves. Most pairs can be excluded
+  // before allocating polygons; contact alone has no volume contribution.
+  if ((ca.maximum.array() <= cb.minimum.array()).any() ||
+      (cb.maximum.array() <= ca.minimum.array()).any())
+    return {};
   using Polygon = std::vector<Vector>;
   std::vector<Polygon> faces;
   for (int fi : ca.faces) {
@@ -546,7 +551,7 @@ std::vector<Sample> intersection_quadrature(const Mesh &a, const Cell &ca,
   if (faces.empty())
     return {};
   std::vector<double> gauss_x(order), gauss_w(order);
-  if (order > 2)
+  if (order > 3)
     for (int i = 0; i < order; ++i) {
       double z = std::cos(std::acos(-1.) * (i + .75) / (order + .5)),
              derivative = 0;
@@ -570,7 +575,9 @@ std::vector<Sample> intersection_quadrature(const Mesh &a, const Cell &ca,
   size_t pieces = 0;
   for (const auto &f : faces)
     pieces += f.size() - 2;
-  out.reserve(pieces * (order <= 2 ? 4 : order * order * order));
+  out.reserve(pieces * (order <= 2   ? 4
+                        : order == 3 ? 5
+                                     : order * order * order));
   Vector center = Vector::Zero();
   size_t count = 0;
   for (const auto &f : faces)
@@ -592,6 +599,14 @@ std::vector<Sample> intersection_quadrature(const Mesh &a, const Cell &ca,
       if (order <= 2) {
         auto samples = tetra_quadrature({center, f[0], f[i], f[i + 1]}, volume);
         out.insert(out.end(), samples.begin(), samples.end());
+      } else if (order == 3) {
+        // Degree-three tetrahedral rule: exact for affine RT0 currents
+        // paired with affine tet, hex or wedge edge basis functions.
+        const std::array<Vector, 4> p{center, f[0], f[i], f[i + 1]};
+        const Vector sum = p[0] + p[1] + p[2] + p[3];
+        out.push_back({sum / 4, -.8 * volume});
+        for (const auto &x : p)
+          out.push_back({sum / 6 + x / 3, .45 * volume});
       } else {
         // Duffy-mapped Gauss integration on each intersection tetrahedron.
         // Mapped Piola bases are rational on nonaffine cells; the old

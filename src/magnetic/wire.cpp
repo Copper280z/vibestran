@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <limits>
 #include <numbers>
 #include <numeric>
 #include <set>
@@ -160,7 +161,13 @@ Result<Source> sweep(const Model &model, const std::vector<int> &vertices,
     double length = (points[segment + 1] - points[segment]).norm();
     if (length / step > 100000)
       return Error{"CWIRE refinement exceeds 100000 slices per segment"};
-    const int slices = std::max(1, static_cast<int>(std::ceil(length / step)));
+    // Rigid motion can move an integer ratio by a few ulps. Preserve topology
+    // at that boundary instead of creating an extra axial slice.
+    const double ratio = length / step;
+    const int slices =
+        std::max(1, static_cast<int>(std::ceil(
+                        ratio - 32 * std::numeric_limits<double>::epsilon() *
+                                    std::max(1., ratio))));
     for (int slice = 1; slice <= slices; ++slice) {
       int ring = 0;
       if (!(closed && segment + 1 == count && slice == slices)) {
@@ -191,11 +198,14 @@ Result<Source> sweep(const Model &model, const std::vector<int> &vertices,
       last_ring = ring;
     }
   }
-  auto built = make_mesh(nodes, hexa);
-  bool tetrahedral = false;
+  bool tetrahedral = model.options.wire_mesh == WireMesh::Tet;
+  auto built = make_mesh(nodes, tetrahedral ? tetra : hexa);
   if (const auto *mesh = std::get_if<Mesh>(&built);
       mesh && std::any_of(mesh->cells.begin(), mesh->cells.end(),
                           [](const Cell &c) { return !c.polyhedral; })) {
+    if (model.options.wire_mesh == WireMesh::Hex)
+      return Error{"WIREMESH=HEX requires planar-faced convex CWIRE hexes; "
+                   "use WIREMESH=AUTO or TET for this path"};
     // Twisted spatial paths may have warped loft faces. Fall back for the whole
     // component so no nonconforming quad/triangle interfaces are introduced.
     built = make_mesh(std::move(nodes), tetra);

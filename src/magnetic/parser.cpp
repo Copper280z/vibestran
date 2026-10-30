@@ -512,7 +512,17 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
         m.options.wire_layers = r.integer(2);
       else if (option == "WIRESTEP")
         m.options.wire_step = r.real(2);
-      else
+      else if (option == "WIREMESH") {
+        const auto value = upper(r.get(2));
+        if (value == "AUTO")
+          m.options.wire_mesh = WireMesh::Auto;
+        else if (value == "HEX")
+          m.options.wire_mesh = WireMesh::Hex;
+        else if (value == "TET")
+          m.options.wire_mesh = WireMesh::Tet;
+        else
+          return Error{r.where + ": WIREMESH must be AUTO, HEX or TET"};
+      } else
         return Error{r.where + ": unsupported MAGSTAT parameter " + option};
       r.last(2);
     } else

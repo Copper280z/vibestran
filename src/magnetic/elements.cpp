@@ -280,6 +280,41 @@ Vector flux_value(const Cell &c, const Eigen::VectorXd &flux, const Vector &x) {
   }
   return j * value / std::abs(j.determinant());
 }
+CurrentField::CurrentField(const Cell &cell, const Eigen::VectorXd &flux)
+    : cell_(cell) {
+  std::array<double, 6> q{};
+  for (size_t i = 0; i < cell.faces.size(); ++i)
+    q[i] = cell.face_sign[i] * flux[cell.faces[i]];
+  if (cell.nodes.size() == 4) {
+    offset_ = -2 * Vector(q[1], q[2], q[3]);
+    slope_ = Vector::Constant(2 * (q[0] + q[1] + q[2] + q[3]));
+  } else if (cell.nodes.size() == 8) {
+    offset_ = Vector(q[3] - q[5], q[4] - q[2], q[1] - q[0]) / 8;
+    slope_ = Vector(q[3] + q[5], q[4] + q[2], q[1] + q[0]) / 8;
+  } else {
+    offset_ = Vector(-q[4] / 2, -q[2] / 2, q[1] - q[0]);
+    slope_ =
+        Vector((q[2] + q[3] + q[4]) / 2, (q[2] + q[3] + q[4]) / 2, q[0] + q[1]);
+  }
+  if (cell.affine) {
+    const Matrix transform =
+        cell.jacobian / std::abs(cell.jacobian.determinant());
+    affine_offset_ = transform * offset_;
+    affine_slope_ = transform * slope_.asDiagonal() * cell.inverse;
+  }
+}
+Vector CurrentField::weighted_reference(const Vector &r,
+                                        const Matrix &jacobian) const {
+  return jacobian * (offset_ + slope_.cwiseProduct(r));
+}
+Vector CurrentField::value(const Vector &x) const {
+  if (cell_.affine)
+    return affine_offset_ + affine_slope_ * (x - cell_.map_origin);
+  const Vector r = reference_coordinates(cell_, x);
+  const Matrix j = mapping(cell_, r).second;
+  return weighted_reference(r, j) / std::abs(j.determinant());
+}
+
 std::vector<Sample> reference_quadrature(const Cell &c) {
   if (!c.planar && c.nodes.size() == 4) {
     constexpr double a = 0.58541019662496845446, b = 0.13819660112501051518;

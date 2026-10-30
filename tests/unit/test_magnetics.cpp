@@ -183,6 +183,56 @@ TEST(MagneticGeometry, IntersectionIntegratesQuadraticsAndConservesPartition) {
   EXPECT_NEAR(identical, source.cells[0].volume, 1e-14);
 }
 
+TEST(MagneticGeometry,
+     CubicIntersectionRuleIntegratesEveryMonomialAfterPartition) {
+  for (bool transformed : {false, true}) {
+    auto transform = [transformed](Vector x) -> Vector {
+      if (!transformed)
+        return x;
+      Matrix a;
+      a << -1.2, .3, .1, .2, .9, -.1, 0, .4, 1.1;
+      return Vector(8, -4, 3) + a * x;
+    };
+    auto background = box(2);
+    for (auto &[id, g] : background.nodes) {
+      (void)id;
+      g.position = transform(g.position);
+    }
+    const auto mesh = std::get<Mesh>(make_mesh(background));
+    const auto source = std::get<Mesh>(make_mesh(
+        {transform(Vector(-.8, -.7, -.6)), transform(Vector(.7, -.6, -.5)),
+         transform(Vector(-.4, .8, -.3)), transform(Vector(-.2, -.1, .9))},
+        {{2, 0, 1, 3}}));
+    const auto &cell = source.cells[0];
+    std::vector<Sample> samples;
+    for (const auto &target : mesh.cells) {
+      auto part = intersection_quadrature(source, cell, mesh, target, 3);
+      samples.insert(samples.end(), part.begin(), part.end());
+    }
+    auto factorial = [](int n) {
+      double f = 1;
+      for (int i = 2; i <= n; ++i)
+        f *= i;
+      return f;
+    };
+    for (int a = 0; a <= 3; ++a)
+      for (int b = 0; b <= 3 - a; ++b)
+        for (int c = 0; c <= 3 - a - b; ++c) {
+          double integral = 0;
+          for (const auto &q : samples) {
+            const Vector r = reference_coordinates(cell, q.position);
+            integral += q.weight * std::pow(r.x(), a) * std::pow(r.y(), b) *
+                        std::pow(r.z(), c);
+          }
+          const double expected = 6 * cell.volume * factorial(a) *
+                                  factorial(b) * factorial(c) /
+                                  factorial(a + b + c + 3);
+          EXPECT_NEAR(integral, expected, 2e-12 * cell.volume)
+              << a << b << c << transformed;
+        }
+  }
+}
+
 TEST(MagneticMaterial, NonlinearEnergyGradientTangentAndVacuumExtrapolation) {
   Material material;
   material.bh_table = 1;
@@ -1152,6 +1202,17 @@ TEST(MagneticWire, SpatialLoopFallbackPreservesTheCurrentMoment) {
       moment += .5 * q.weight * q.position.cross(j);
     }
   EXPECT_LT((moment - expected).norm() / expected.norm(), .005);
+  m.options.wire_mesh = WireMesh::Hex;
+  const auto rejected = prepare_wires(m);
+  ASSERT_TRUE(std::holds_alternative<Error>(rejected));
+  EXPECT_NE(error_of(rejected).find("WIREMESH=HEX"), std::string::npos);
+  m.options.wire_mesh = WireMesh::Tet;
+  const auto selected = prepare_wires(m);
+  ASSERT_TRUE(std::holds_alternative<std::vector<Source>>(selected))
+      << error_of(selected);
+  const auto &t = std::get<std::vector<Source>>(selected)[0];
+  EXPECT_EQ(t.mesh.cells.size(), s.mesh.cells.size());
+  EXPECT_LT((t.flux - s.flux).norm(), 1e-12);
 }
 
 TEST(MagneticMappedBasis,
@@ -1373,50 +1434,55 @@ TEST(MagneticWarped, MatchedClosedCoilAndWarpedCutConserveAmpereTurns) {
 }
 
 TEST(MagneticWarped, IndependentWireTransferConservesCurrentAndMagneticMoment) {
-  for (bool wedge : {false, true}) {
-    SCOPED_TRACE(wedge);
-    auto m = brick_box(2, wedge);
-    for (auto &[id, g] : m.nodes) {
-      (void)id;
-      if (wedge)
-        g.position.x() += .35 * g.position.y() * g.position.z();
-      else
-        g.position.z() += .35 * g.position.x() * g.position.y();
-    }
-    loop(m, .6, true);
-    if (wedge) {
-      for (int i = 0; i < 4; ++i) {
-        auto &x = m.nodes[100000 + i].position;
-        x = Vector(x.z(), x.x(), x.y());
-        m.wires[i].orientation = Vector::UnitX();
+  for (auto kind : {WireMesh::Hex, WireMesh::Tet}) {
+    SCOPED_TRACE(static_cast<int>(kind));
+    for (bool wedge : {false, true}) {
+      SCOPED_TRACE(wedge);
+      auto m = brick_box(2, wedge);
+      m.options.wire_mesh = kind;
+      for (auto &[id, g] : m.nodes) {
+        (void)id;
+        if (wedge)
+          g.position.x() += .35 * g.position.y() * g.position.z();
+        else
+          g.position.z() += .35 * g.position.x() * g.position.y();
       }
+      loop(m, .6, true);
+      if (wedge) {
+        for (int i = 0; i < 4; ++i) {
+          auto &x = m.nodes[100000 + i].position;
+          x = Vector(x.z(), x.x(), x.y());
+          m.wires[i].orientation = Vector::UnitX();
+        }
+      }
+      auto solved = solve(m);
+      ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+      const auto &result = std::get<Results>(solved);
+      const auto &mesh = result.mesh;
+      const auto &s = result.sources[0];
+      const auto &c = result.cases[0];
+      ASSERT_GT(c.energy, 0);
+      EXPECT_NEAR(c.sources[0].linkage, 2 * c.energy, 1e-10 * c.energy);
+      EXPECT_NEAR(c.differential_inductance(0, 0), 2 * c.energy,
+                  1e-10 * c.energy);
+      EXPECT_LT(s.transfer_error, 1e-9);
+      for (const auto &c : s.mesh.cells)
+        EXPECT_TRUE(c.polyhedral);
+      Vector moment = Vector::Zero();
+      for (const auto &c : s.mesh.cells)
+        for (const auto &q : quadrature(s.mesh, c))
+          moment += .5 * q.weight *
+                    q.position.cross(flux_value(c, s.flux, q.position));
+      const Vector direction = wedge ? Vector::UnitX() : Vector::UnitZ();
+      Eigen::VectorXd a(mesh.edges.size());
+      for (size_t e = 0; e < mesh.edges.size(); ++e) {
+        const Vector x = mesh.nodes[mesh.edges[e][0]],
+                     y = mesh.nodes[mesh.edges[e][1]];
+        a[e] = .5 * direction.cross((x + y) / 2).dot(y - x);
+      }
+      EXPECT_NEAR(s.coupling.dot(a), moment.dot(direction),
+                  1e-8 * moment.norm());
     }
-    auto solved = solve(m);
-    ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
-    const auto &result = std::get<Results>(solved);
-    const auto &mesh = result.mesh;
-    const auto &s = result.sources[0];
-    const auto &c = result.cases[0];
-    ASSERT_GT(c.energy, 0);
-    EXPECT_NEAR(c.sources[0].linkage, 2 * c.energy, 1e-10 * c.energy);
-    EXPECT_NEAR(c.differential_inductance(0, 0), 2 * c.energy,
-                1e-10 * c.energy);
-    EXPECT_LT(s.transfer_error, 1e-9);
-    for (const auto &c : s.mesh.cells)
-      EXPECT_TRUE(c.polyhedral);
-    Vector moment = Vector::Zero();
-    for (const auto &c : s.mesh.cells)
-      for (const auto &q : quadrature(s.mesh, c))
-        moment +=
-            .5 * q.weight * q.position.cross(flux_value(c, s.flux, q.position));
-    const Vector direction = wedge ? Vector::UnitX() : Vector::UnitZ();
-    Eigen::VectorXd a(mesh.edges.size());
-    for (size_t e = 0; e < mesh.edges.size(); ++e) {
-      const Vector x = mesh.nodes[mesh.edges[e][0]],
-                   y = mesh.nodes[mesh.edges[e][1]];
-      a[e] = .5 * direction.cross((x + y) / 2).dot(y - x);
-    }
-    EXPECT_NEAR(s.coupling.dot(a), moment.dot(direction), 1e-8 * moment.norm());
   }
 }
 
@@ -1487,52 +1553,240 @@ TEST(MagneticWarped, TinyCurvedPenetrationIsDetectedAndTouchingIsAllowed) {
 }
 
 TEST(MagneticWarped, RayTransferMatchesPolyhedralIntersectionIntegration) {
-  auto model = brick_box(2, false, true);
-  loop(model, .6, true);
-  const auto mesh = std::get<Mesh>(make_mesh(model));
-  const auto source = std::get<std::vector<Source>>(prepare_wires(model))[0];
-  const auto clipped = couple_source(source, mesh),
-             rays = couple_curved_source(source, mesh);
-  ASSERT_TRUE(std::holds_alternative<Eigen::VectorXd>(clipped))
-      << error_of(clipped);
-  ASSERT_TRUE(std::holds_alternative<Eigen::VectorXd>(rays)) << error_of(rays);
-  const auto &expected = std::get<Eigen::VectorXd>(clipped);
-  EXPECT_LT((std::get<Eigen::VectorXd>(rays) - expected).norm() /
-                expected.norm(),
-            1e-9);
+  for (bool round : {false, true})
+    for (auto kind : {WireMesh::Hex, WireMesh::Tet}) {
+      auto model = round ? box(6, 1.5) : brick_box(2, false, true);
+      loop(model, .6, !round);
+      model.options.wire_mesh = kind;
+      const auto mesh = std::get<Mesh>(make_mesh(model));
+      const auto source =
+          std::get<std::vector<Source>>(prepare_wires(model))[0];
+      const auto clipped = couple_polyhedral_source(source, mesh),
+                 rays = couple_curved_source(source, mesh);
+      ASSERT_TRUE(std::holds_alternative<Eigen::VectorXd>(clipped))
+          << error_of(clipped);
+      ASSERT_TRUE(std::holds_alternative<Eigen::VectorXd>(rays))
+          << error_of(rays);
+      const auto &expected = std::get<Eigen::VectorXd>(clipped);
+      EXPECT_LT((std::get<Eigen::VectorXd>(rays) - expected).norm() /
+                    expected.norm(),
+                1e-9);
+    }
 }
 
 TEST(MagneticWarped, OpenWireTerminalsAndMaterialExclusion) {
+  for (auto kind : {WireMesh::Hex, WireMesh::Tet}) {
+    SCOPED_TRACE(static_cast<int>(kind));
+    auto model = brick_box(2);
+    model.options.wire_mesh = kind;
+    for (auto &[id, g] : model.nodes) {
+      (void)id;
+      g.position.z() += .3 * g.position.x() * g.position.y();
+    }
+    model.conductivity[1] = 5.8e7;
+    model.wire_properties[1] = {1, true, .1, .1};
+    model.nodes[100000] = {Vector(-1, .07, .13), 0};
+    model.nodes[100001] = {Vector(1, .07, .13), 0};
+    model.wires.push_back({100000, 1, 100000, 100001, 0, Vector::UnitZ()});
+    model.options.wire_layers = 1;
+    model.options.wire_step = .5;
+    const auto mesh = std::get<Mesh>(make_mesh(model));
+    auto prepared = prepare_sources(model, mesh);
+    ASSERT_TRUE(std::holds_alternative<std::vector<Source>>(prepared))
+        << error_of(prepared);
+    EXPECT_LT(std::get<std::vector<Source>>(prepared)[0].transfer_error, 1e-9);
+    auto invalid = model;
+    invalid.nodes[100000].position.x() = -.8;
+    auto rejected = prepare_sources(invalid, mesh);
+    ASSERT_TRUE(std::holds_alternative<Error>(rejected));
+    EXPECT_NE(error_of(rejected).find("terminate"), std::string::npos);
+    invalid = model;
+    invalid.nodes[100000].position.x() = -1.01;
+    rejected = prepare_sources(invalid, mesh);
+    ASSERT_TRUE(std::holds_alternative<Error>(rejected));
+    EXPECT_NE(error_of(rejected).find("outside"), std::string::npos);
+    invalid = model;
+    invalid.materials[1].mur = 2;
+    rejected = prepare_sources(invalid, mesh);
+    ASSERT_TRUE(std::holds_alternative<Error>(rejected));
+    EXPECT_NE(error_of(rejected).find("overlaps"), std::string::npos)
+        << error_of(rejected);
+  }
+}
+
+TEST(MagneticParser,
+     WireMeshSelectsActualSourceTopologyAndRejectsInvalidValue) {
+  const std::string prefix = "SOL MAGSTAT\nCEND\nBEGIN BULK\n";
+  const std::string body = R"(GRID,1,,0,0,0
+GRID,2,,1,0,0
+GRID,3,,0,1,0
+GRID,4,,0,0,1
+MATMAG,1,1
+PSOLID,1,1
+CTETRA,1,1,1,2,3,4
+MATCOND,2,5.8e7
+PWIRE,2,2,RECT,.08,.06
+CWIRE,2,2,1,2,0.,0.,1.
+PARAM,WIRELAY,1
+PARAM,WIRESTEP,.4
+ENDDATA
+)";
+  for (const std::string name : {"", "AUTO", "hex", "TeT"}) {
+    const auto parsed = parse_string(
+        prefix + (name.empty() ? "" : "PARAM,WIREMESH," + name + "\n") + body);
+    ASSERT_TRUE(std::holds_alternative<Model>(parsed)) << error_of(parsed);
+    const auto &model = std::get<Model>(parsed);
+    EXPECT_EQ(model.options.wire_mesh, name == "TeT"   ? WireMesh::Tet
+                                       : name == "hex" ? WireMesh::Hex
+                                                       : WireMesh::Auto);
+    const auto prepared = prepare_wires(model);
+    ASSERT_TRUE(std::holds_alternative<std::vector<Source>>(prepared))
+        << error_of(prepared);
+    const auto &source = std::get<std::vector<Source>>(prepared)[0];
+    double volume = 0;
+    for (const auto &cell : source.mesh.cells) {
+      EXPECT_EQ(cell.nodes.size(), name == "TeT" ? 4U : 8U);
+      volume += cell.volume;
+      const CurrentField current(cell, source.flux);
+      for (const auto &q : quadrature(source.mesh, cell))
+        EXPECT_LT(
+            (current.value(q.position) - Vector(1 / (.08 * .06), 0, 0)).norm(),
+            1e-9);
+    }
+    EXPECT_NEAR(volume, .08 * .06, 1e-14);
+  }
+  const auto rejected = parse_string(prefix + "PARAM,WIREMESH,WEDGE\n" + body);
+  ASSERT_TRUE(std::holds_alternative<Error>(rejected));
+  EXPECT_NE(error_of(rejected).find("WIREMESH"), std::string::npos);
+}
+
+TEST(MagneticMappedBasis,
+     CachedCurrentMatchesFaceBasisIncludingNonzeroDivergence) {
+  for (int kind = 0; kind < 3; ++kind)
+    for (bool warped : {false, true})
+      for (bool reflected : {false, true}) {
+        SCOPED_TRACE(std::format("kind {}, warped {}, reflected {}", kind,
+                                 warped, reflected));
+        auto model = kind == 0 ? box(1) : brick_box(1, kind == 2);
+        for (auto &[id, g] : model.nodes) {
+          (void)id;
+          if (warped)
+            g.position.x() += .2 * g.position.y() * g.position.z();
+          if (reflected)
+            g.position.x() *= -1;
+          g.position += Vector(11, -7, 5);
+        }
+        const auto built = make_mesh(model);
+        ASSERT_TRUE(std::holds_alternative<Mesh>(built)) << error_of(built);
+        const auto &mesh = std::get<Mesh>(built);
+        Eigen::VectorXd flux(mesh.faces.size());
+        for (Eigen::Index i = 0; i < flux.size(); ++i)
+          flux[i] = std::sin(.7 * i + .3);
+        for (const auto &cell : mesh.cells) {
+          const CurrentField current(cell, flux);
+          for (const auto &q : reference_quadrature(cell)) {
+            const auto [x, j] = mapping(cell, q.position);
+            const auto basis = flux_basis(mesh, cell, x);
+            Vector expected = Vector::Zero();
+            for (size_t i = 0; i < basis.size(); ++i)
+              expected += flux[cell.faces[i]] * basis[i];
+            EXPECT_LT((current.value(x) - expected).norm(), 2e-12);
+            EXPECT_LT((current.weighted_reference(q.position, j) -
+                       std::abs(j.determinant()) * expected)
+                          .norm(),
+                      2e-12);
+          }
+        }
+      }
+}
+
+TEST(MagneticWire, HexAndTetSectionsPreserveVolumeCurrentAndFarField) {
+  for (bool rectangular : {false, true}) {
+    auto model = box(1, 2);
+    loop(model, .6, rectangular);
+    for (auto kind : {WireMesh::Hex, WireMesh::Tet}) {
+      SCOPED_TRACE(std::format("rectangular {}, tet {}", rectangular,
+                               kind == WireMesh::Tet));
+      model.options.wire_mesh = kind;
+      const auto prepared = prepare_wires(model);
+      ASSERT_TRUE(std::holds_alternative<std::vector<Source>>(prepared))
+          << error_of(prepared);
+      const auto &source = std::get<std::vector<Source>>(prepared)[0];
+      double volume = 0;
+      Vector moment = Vector::Zero();
+      for (const auto &cell : source.mesh.cells) {
+        EXPECT_EQ(cell.nodes.size(), kind == WireMesh::Tet ? 4U : 8U);
+        volume += cell.volume;
+        double balance = 0;
+        for (size_t i = 0; i < cell.faces.size(); ++i)
+          balance += cell.face_sign[i] * source.flux[cell.faces[i]];
+        EXPECT_NEAR(balance, 0, 1e-11);
+        for (const auto &q : quadrature(source.mesh, cell))
+          moment += .5 * q.weight *
+                    q.position.cross(flux_value(cell, source.flux, q.position));
+      }
+      const double area = rectangular
+                              ? .08 * .06
+                              : 4 * .04 * .04 * std::sin(std::numbers::pi / 4);
+      EXPECT_NEAR(volume, 4 * 1.2 * area, 1e-12);
+      EXPECT_LT((moment - Vector(0, 0, 1.44)).norm() / 1.44, .002);
+      const Vector b = source_biot(source, Vector::Zero());
+      const double exact = mu0 * std::sqrt(2.) / (std::numbers::pi * .6);
+      EXPECT_LT((b - Vector(0, 0, exact)).norm() / exact, .01);
+    }
+  }
+}
+
+TEST(MagneticWarped, TetTransferIsInvariantToLocalVertexOrderAndRigidMotion) {
   auto model = brick_box(2);
   for (auto &[id, g] : model.nodes) {
     (void)id;
-    g.position.z() += .3 * g.position.x() * g.position.y();
+    g.position.z() += .35 * g.position.x() * g.position.y();
   }
-  model.conductivity[1] = 5.8e7;
-  model.wire_properties[1] = {1, true, .1, .1};
-  model.nodes[100000] = {Vector(-1, .07, .13), 0};
-  model.nodes[100001] = {Vector(1, .07, .13), 0};
-  model.wires.push_back({100000, 1, 100000, 100001, 0, Vector::UnitZ()});
-  model.options.wire_layers = 1;
-  model.options.wire_step = .5;
+  loop(model, .6, true);
+  model.options.wire_mesh = WireMesh::Tet;
   const auto mesh = std::get<Mesh>(make_mesh(model));
-  auto prepared = prepare_sources(model, mesh);
+  const auto prepared = prepare_sources(model, mesh);
   ASSERT_TRUE(std::holds_alternative<std::vector<Source>>(prepared))
       << error_of(prepared);
-  EXPECT_LT(std::get<std::vector<Source>>(prepared)[0].transfer_error, 1e-9);
-  auto invalid = model;
-  invalid.nodes[100000].position.x() = -.8;
-  auto rejected = prepare_sources(invalid, mesh);
-  ASSERT_TRUE(std::holds_alternative<Error>(rejected));
-  EXPECT_NE(error_of(rejected).find("terminate"), std::string::npos);
-  invalid = model;
-  invalid.nodes[100000].position.x() = -1.01;
-  rejected = prepare_sources(invalid, mesh);
-  ASSERT_TRUE(std::holds_alternative<Error>(rejected));
-  EXPECT_NE(error_of(rejected).find("outside"), std::string::npos);
-  invalid = model;
-  invalid.materials[1].mur = 2;
-  rejected = prepare_sources(invalid, mesh);
-  ASSERT_TRUE(std::holds_alternative<Error>(rejected));
-  EXPECT_NE(error_of(rejected).find("overlaps"), std::string::npos);
+  const auto &original = std::get<std::vector<Source>>(prepared)[0];
+  auto reordered = original;
+  std::vector<NodeList> cells;
+  for (const auto &c : original.mesh.cells)
+    cells.push_back({c.nodes[2], c.nodes[0], c.nodes[3], c.nodes[1]});
+  const auto built = make_mesh(original.mesh.nodes, cells);
+  ASSERT_TRUE(std::holds_alternative<Mesh>(built)) << error_of(built);
+  reordered.mesh = std::get<Mesh>(built);
+  reordered.flux.resize(reordered.mesh.faces.size());
+  for (size_t f = 0; f < reordered.mesh.faces.size(); ++f) {
+    const auto &face = reordered.mesh.faces[f];
+    auto key = face.nodes;
+    std::sort(key.begin(), key.end());
+    const int index = original.mesh.face_index.at(key);
+    reordered.flux[f] = original.flux[index] *
+                        face.normal.dot(original.mesh.faces[index].normal);
+  }
+  const auto coupled = couple_source(reordered, mesh);
+  ASSERT_TRUE(std::holds_alternative<Eigen::VectorXd>(coupled))
+      << error_of(coupled);
+  EXPECT_LT((std::get<Eigen::VectorXd>(coupled) - original.coupling).norm() /
+                original.coupling.norm(),
+            1e-8);
+  const Matrix rotation =
+      Eigen::AngleAxisd(.37, Vector(.3, -.4, .8).normalized())
+          .toRotationMatrix();
+  for (auto &[id, g] : model.nodes) {
+    (void)id;
+    g.position = rotation * g.position + Vector(3, -2, 4);
+  }
+  for (auto &wire : model.wires)
+    wire.orientation = rotation * *wire.orientation;
+  const auto transformed = std::get<Mesh>(make_mesh(model));
+  const auto moved = prepare_sources(model, transformed);
+  ASSERT_TRUE(std::holds_alternative<std::vector<Source>>(moved))
+      << error_of(moved);
+  ASSERT_EQ(std::get<std::vector<Source>>(moved)[0].mesh.cells.size(),
+            original.mesh.cells.size());
+  const auto &load = std::get<std::vector<Source>>(moved)[0].coupling;
+  EXPECT_LT((load - original.coupling).norm() / original.coupling.norm(), 1e-8);
 }

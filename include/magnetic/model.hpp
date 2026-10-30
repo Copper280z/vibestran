@@ -100,6 +100,7 @@ struct ForceSurface {
   int id{0}, faces{0};
   Vector origin{Vector::Zero()};
 };
+enum class WireMesh { Auto, Hex, Tet };
 struct Options {
   double length_scale{1}, nonlinear_tolerance{1e-8};
   int max_iterations{80}, wire_sides{16}, wire_layers{2};
@@ -107,6 +108,7 @@ struct Options {
   int plane_coordinates{0};
   double depth{1};
   double wire_step{0}; // zero: automatic from section size
+  WireMesh wire_mesh{WireMesh::Auto};
 };
 struct Model {
   std::map<int, Grid> nodes;

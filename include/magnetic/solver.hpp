@@ -49,6 +49,9 @@ conserved_flux(const Mesh &mesh, std::span<const std::pair<int, int>> section,
                double section_area, std::span<const double> resistivity);
 [[nodiscard]] Result<Eigen::VectorXd> couple_source(const Source &source,
                                                     const Mesh &mesh);
+// Clip-based transfer for convex planar-faced source/background cells.
+[[nodiscard]] Result<Eigen::VectorXd>
+couple_polyhedral_source(const Source &source, const Mesh &mesh);
 // Transfer a polyhedral wire source into mapped field cells. forbidden lists
 // field-cell indices occupied by magnetic material or volumetric coils.
 [[nodiscard]] Result<Eigen::VectorXd>

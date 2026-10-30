@@ -272,6 +272,11 @@ std::vector<double> line_face_intersections(const Mesh &m, const Face &face,
 }
 
 namespace {
+double contact_tolerance(const Cell &poly) {
+  return std::max(1e-11 * (poly.maximum - poly.minimum).norm(),
+                  64 * std::numeric_limits<double>::epsilon() *
+                      poly.origin.norm());
+}
 // For multilinear maps, each plane functional is bounded by its values at
 // the parameter-box corners. This detects even small overlaps that quadrature
 // samples can miss, and treats contact separately from positive penetration.
@@ -283,9 +288,7 @@ Result<bool> interior_intersection(const Mesh &mesh, const Cell &poly,
     int depth;
   };
   std::vector<Box> pending{{Vector::Zero(), Vector::Ones(), 0}};
-  const double tolerance = std::max(
-      1e-11 * (poly.maximum - poly.minimum).norm(),
-      64 * std::numeric_limits<double>::epsilon() * poly.origin.norm());
+  const double tolerance = contact_tolerance(poly);
   int boxes = 0;
   while (!pending.empty()) {
     const auto box = pending.back();
@@ -343,6 +346,22 @@ Result<bool> interior_intersection(const Mesh &mesh, const Cell &poly,
 } // namespace
 Result<bool> cell_intersects_interior(const Mesh &mesh, const Cell &poly,
                                       const Cell &other) {
+  const double tolerance = contact_tolerance(poly);
+  if ((poly.maximum.array() <= other.minimum.array() + tolerance).any() ||
+      (other.maximum.array() <= poly.minimum.array() + tolerance).any())
+    return false;
+  // A point strictly inside both volumes proves overlap. This also avoids
+  // spending the subdivision budget on a shared boundary before reaching
+  // the interior of a thin conductor contained in a much larger field cell.
+  Vector center = Vector::Zero();
+  for (const auto &point : poly.points)
+    center += point / static_cast<double>(poly.points.size());
+  if (contains(other, center)) {
+    const auto shape =
+        reference_shape(other, reference_coordinates(other, center));
+    if (*std::min_element(shape.values.begin(), shape.values.end()) > 1e-10)
+      return true;
+  }
   return interior_intersection(mesh, poly, 3, [&](const Vector &u) -> Vector {
     Vector r = 2 * u - Vector::Ones();
     if (other.nodes.size() == 6)
@@ -354,6 +373,21 @@ Result<bool> cell_intersects_interior(const Mesh &mesh, const Cell &poly,
 }
 Result<bool> face_intersects_interior(const Mesh &poly_mesh, const Cell &poly,
                                       const Mesh &mesh, const Face &face) {
+  if (face.flat) {
+    // A terminal tetrahedron may touch the exterior at only an edge/vertex.
+    // Its own face planes cannot necessarily separate that contact from a
+    // large exterior face, but the exterior plane is an exact separating axis.
+    double minimum = std::numeric_limits<double>::infinity(),
+           maximum = -minimum;
+    for (const auto &point : poly.points) {
+      const double distance = face.normal.dot(point - face.center);
+      minimum = std::min(minimum, distance);
+      maximum = std::max(maximum, distance);
+    }
+    const double tolerance = contact_tolerance(poly);
+    if (minimum >= -tolerance || maximum <= tolerance)
+      return false;
+  }
   const Vector p = mesh.nodes[face.nodes[0]], b = mesh.nodes[face.nodes[1]] - p;
   const Vector c = mesh.nodes[face.nodes.back()] - p;
   Vector d = Vector::Zero();

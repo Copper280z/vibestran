@@ -485,6 +485,17 @@ vibestran_exe = executable(
   install      : true,
 )
 
+# Optional, repeatable Release profiling of CWIRE preprocessing and transfer.
+# This is not an external validation dependency or a timed regression test.
+executable(
+  'magnetic_wire_benchmark',
+  'tools/magnetic_wire_benchmark.cpp',
+  dependencies : solver_lib_dep,
+  cpp_args : precise_args,
+  build_by_default : false,
+  install : false,
+)
+
 # ── Tests ────────────────────────────────────────────────────────────────────
 # Google Test
 gtest_dep = dependency('gtest',

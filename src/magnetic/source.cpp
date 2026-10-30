@@ -299,10 +299,11 @@ Result<Transfer> transfer_source(const Source &source, const Mesh &mesh,
     }
   }
   for (const auto &cell : source.mesh.cells) {
+    const CurrentField current(cell, source.flux);
     if (!source.wire && mesh.element_index.contains(cell.id)) {
       const auto &target = mesh.cells[mesh.element_index.at(cell.id)];
       for (const auto &sample : quadrature(source.mesh, cell)) {
-        const Vector j = flux_value(cell, source.flux, sample.position);
+        const Vector j = current.value(sample.position);
         const auto basis = edge_basis(target, sample.position);
         for (size_t e = 0; e < target.edges.size(); ++e)
           coupling[target.edges[e]] += sample.weight * basis[e].dot(j);
@@ -319,7 +320,7 @@ Result<Transfer> transfer_source(const Source &source, const Mesh &mesh,
                cell.affine && target.affine ? (target.nodes.size() == 4 ? 2 : 3)
                                             : order)) {
         volume += sample.weight;
-        const Vector j = flux_value(cell, source.flux, sample.position);
+        const Vector j = current.value(sample.position);
         if (target.nodes.size() == 4) {
           integral += sample.weight * j;
           moment +=
@@ -370,9 +371,16 @@ Result<Transfer> transfer_source(const Source &source, const Mesh &mesh,
 }
 } // namespace
 Result<Eigen::VectorXd> couple_source(const Source &source, const Mesh &mesh) {
-  if (source.wire && std::any_of(mesh.cells.begin(), mesh.cells.end(),
-                                 [](const Cell &c) { return !c.polyhedral; }))
+  if (source.wire &&
+      (std::any_of(mesh.cells.begin(), mesh.cells.end(),
+                   [](const Cell &c) { return !c.polyhedral; }) ||
+       std::any_of(source.mesh.cells.begin(), source.mesh.cells.end(),
+                   [](const Cell &c) { return !c.affine; })))
     return couple_curved_source(source, mesh);
+  return couple_polyhedral_source(source, mesh);
+}
+Result<Eigen::VectorXd> couple_polyhedral_source(const Source &source,
+                                                 const Mesh &mesh) {
   double error = 0, change = 0;
   const bool adaptive =
       source.wire &&
@@ -480,7 +488,8 @@ Result<std::vector<Source>> prepare_sources(const Model &model,
         occupied.contains(mesh.cells[i].id))
       forbidden.push_back(static_cast<int>(i));
   for (auto &wire : std::get<std::vector<Source>>(wires)) {
-    if (curved) {
+    if (curved || std::any_of(wire.mesh.cells.begin(), wire.mesh.cells.end(),
+                              [](const Cell &c) { return !c.affine; })) {
       auto coupling = couple_curved_source(wire, mesh, forbidden);
       if (auto *e = std::get_if<Error>(&coupling))
         return *e;

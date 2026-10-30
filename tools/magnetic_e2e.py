@@ -107,6 +107,23 @@ def main():
             start = end
         assert math.isclose(positive,100,rel_tol=1e-12)
         assert math.isclose(negative,-100,rel_tol=1e-12)
+        # Exercise deck selection through the CLI, and verify the actual source
+        # topology plus the linear energy/linkage identity for each formulation.
+        for scheme, vtk_type in (("AUTO", 12), ("HEX", 12), ("TET", 10)):
+            path = output/f"wire_{scheme.lower()}.bdf"
+            text = deck("loop", 4, 2).replace("BEGIN BULK", f"BEGIN BULK\nPARAM,WIREMESH,{scheme}")
+            path.write_text(text)
+            subprocess.run([str(executable), str(path)], check=True)
+            result = json.loads(path.with_suffix(".mag.json").read_text())
+            case = result["cases"][0]
+            assert case["energy_J"] > 0
+            source = case["sources"][0]
+            assert math.isclose(source["current_A"]*source["linkage_Wb_turn"], 2*case["energy_J"], rel_tol=1e-10)
+            files = list(output.glob(f"wire_{scheme.lower()}_wire*.vtu"))
+            assert len(files) == 1
+            tree = ET.parse(files[0])
+            types = set(map(int, tree.find(".//Cells/DataArray[@Name='types']").text.split()))
+            assert types == {vtk_type}
         path.write_text(deck("loop", 4, 2).replace("CWIRE,", "UNSUPPORTED,"))
         invalid = subprocess.run([str(executable), str(path)], capture_output=True, text=True)
         assert invalid.returncode != 0 and "unsupported MAGSTAT bulk card" in invalid.stdout+invalid.stderr

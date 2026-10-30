@@ -73,6 +73,22 @@ make_mesh(std::vector<Vector> nodes,
                                              const Vector &x);
 [[nodiscard]] Vector flux_value(const Cell &cell, const Eigen::VectorXd &flux,
                                 const Vector &x);
+// Cache the RT0 coefficients for repeated evaluation of one source cell.
+// weighted_reference returns J * j_reference, i.e. physical current times
+// the volume Jacobian, without an inverse coordinate mapping.
+class CurrentField {
+public:
+  CurrentField(const Cell &cell, const Eigen::VectorXd &flux);
+  [[nodiscard]] Vector value(const Vector &x) const;
+  [[nodiscard]] Vector weighted_reference(const Vector &r,
+                                          const Matrix &jacobian) const;
+
+private:
+  const Cell &cell_;
+  Vector offset_{Vector::Zero()}, slope_{Vector::Zero()},
+      affine_offset_{Vector::Zero()};
+  Matrix affine_slope_{Matrix::Zero()};
+};
 [[nodiscard]] std::vector<Sample> quadrature(const Mesh &mesh,
                                              const Cell &cell);
 [[nodiscard]] std::vector<SurfaceSample>
