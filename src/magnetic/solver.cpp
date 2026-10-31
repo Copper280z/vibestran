@@ -1,5 +1,6 @@
 #include "magnetic/solver.hpp"
 #include "core/notices.hpp"
+#include "magnetic/air_gap.hpp"
 #include "solver/solver_backend.hpp"
 #include <algorithm>
 #include <cmath>
@@ -122,9 +123,30 @@ Vector remanence_at(const MaterialData &d, const Vector &x) {
 Response response_at(const MaterialData &d, const Vector &x, const Vector &b) {
   return material_response(d.material, *d.curve, b, remanence_at(d, x));
 }
+// The air-gap element's dense block over its grids, scaled by the depth.
+// It is linear, so it is the same in every tangent.
+struct GapCoupling {
+  std::vector<int> nodes; // inner then outer circle
+  Eigen::MatrixXd stiffness;
+};
+GapCoupling gap_coupling(const Mesh &mesh) {
+  GapCoupling out;
+  if (!mesh.air_gap)
+    return out;
+  out.nodes = mesh.air_gap->inner.nodes;
+  out.nodes.insert(out.nodes.end(), mesh.air_gap->outer.nodes.begin(),
+                   mesh.air_gap->outer.nodes.end());
+  out.stiffness = mesh.depth * air_gap_stiffness(*mesh.air_gap);
+  return out;
+}
+bool on_air_gap(const Mesh &mesh, int face) {
+  return mesh.air_gap && std::find(mesh.air_gap->faces.begin(),
+                                   mesh.air_gap->faces.end(),
+                                   face) != mesh.air_gap->faces.end();
+}
 Assembly assemble(const Materials &materials, const Mesh &mesh,
-                  const Gauge &gauge, const Eigen::VectorXd &a,
-                  const Eigen::VectorXd &load) {
+                  const Gauge &gauge, const GapCoupling &gap,
+                  const Eigen::VectorXd &a, const Eigen::VectorXd &load) {
   Assembly out;
   out.residual = Eigen::VectorXd::Zero(gauge.size);
   std::vector<Triplet> entries;
@@ -166,11 +188,37 @@ Assembly assemble(const Materials &materials, const Mesh &mesh,
       }
     }
   }
+  if (!gap.nodes.empty()) {
+    const auto count = static_cast<Eigen::Index>(gap.nodes.size());
+    Eigen::VectorXd values(count);
+    for (Eigen::Index i = 0; i < count; ++i)
+      values[i] = a[gap.nodes[i]];
+    const Eigen::VectorXd residual = gap.stiffness * values;
+    out.energy += .5 * values.dot(residual);
+    for (Eigen::Index i = 0; i < count; ++i) {
+      const int row = gauge.equations[gap.nodes[i]];
+      if (row < 0)
+        continue;
+      out.residual[row] += residual[i];
+      out.force_scale += residual[i] * residual[i];
+      for (Eigen::Index j = 0; j < count; ++j) {
+        const int col = gauge.equations[gap.nodes[j]];
+        if (col >= 0)
+          entries.emplace_back(row, col, gap.stiffness(i, j));
+      }
+    }
+  }
   for (size_t e = 0; e < mesh.dofs(); ++e)
     if (gauge.equations[e] >= 0)
       out.residual[gauge.equations[e]] -= load[e];
   out.stiffness.resize(gauge.size, gauge.size);
   out.stiffness.setFromTriplets(entries.begin(), entries.end());
+  return out;
+}
+std::string face_grids(const Mesh &mesh, const Face &f) {
+  std::string out;
+  for (int n : f.nodes)
+    out += (out.empty() ? "" : ",") + std::to_string(mesh.node_ids[n]);
   return out;
 }
 Result<Eigen::VectorXd> boundary_potential(const Model &model, const Mesh &mesh,
@@ -183,18 +231,30 @@ Result<Eigen::VectorXd> boundary_potential(const Model &model, const Mesh &mesh,
     auto faces = selected_faces(model, mesh, bc.faces);
     if (auto *e = std::get_if<Error>(&faces))
       return *e;
+    // The air gap is part of the domain, not its exterior.
+    std::vector<bool> gap_face(mesh.faces.size(), false);
+    if (mesh.air_gap)
+      for (int f : mesh.air_gap->faces)
+        gap_face[f] = true;
+    const auto gap_faces = static_cast<size_t>(
+        std::count(gap_face.begin(), gap_face.end(), true));
     const auto count = static_cast<size_t>(
         std::count_if(mesh.faces.begin(), mesh.faces.end(),
-                      [](const Face &f) { return f.cells[1] < 0; }));
+                      [](const Face &f) { return f.cells[1] < 0; })) - gap_faces;
     const auto &selected = std::get<std::vector<std::pair<int, int>>>(faces);
-    if (selected.size() != count)
-      return Error{
-          "MBC FSET must cover the entire magnetic exterior (or use FSET=0)"};
     for (auto [f, sign] : selected) {
       (void)sign;
       if (mesh.faces[f].cells[1] >= 0)
         return Error{"MBC must select exterior faces"};
+      if (gap_face[f])
+        return Error{std::format(
+            "MBC FSET selects face ({}) of element {} on the air gap; the air gap "
+            "is coupled by the air-gap element and takes no boundary condition",
+            face_grids(mesh, mesh.faces[f]), mesh.cells[mesh.faces[f].cells[0]].id)};
     }
+    if (selected.size() != count)
+      return Error{
+          "MBC FSET must cover the entire magnetic exterior (or use FSET=0)"};
   }
   if (mesh.planar) {
     if (std::abs(bc.field.dot(mesh.normal)) > 1e-12 * bc.field.norm())
@@ -219,9 +279,9 @@ struct Equilibrium {
 };
 Result<Equilibrium> equilibrium(const Model &model, const Materials &materials,
                                 const Mesh &mesh, const Gauge &gauge,
-                                Tangent &tangent, Eigen::VectorXd a,
-                                const Eigen::VectorXd &load) {
-  auto state = assemble(materials, mesh, gauge, a, load);
+                                const GapCoupling &gap, Tangent &tangent,
+                                Eigen::VectorXd a, const Eigen::VectorXd &load) {
+  auto state = assemble(materials, mesh, gauge, gap, a, load);
   double load_norm = 0;
   for (size_t e = 0; e < mesh.dofs(); ++e)
     if (gauge.equations[e] >= 0)
@@ -253,7 +313,7 @@ Result<Equilibrium> equilibrium(const Model &model, const Materials &materials,
       for (size_t e = 0; e < mesh.dofs(); ++e)
         if (gauge.equations[e] >= 0)
           candidate[e] += alpha * step[gauge.equations[e]];
-      auto next = assemble(materials, mesh, gauge, candidate, load);
+      auto next = assemble(materials, mesh, gauge, gap, candidate, load);
       if (next.residual.allFinite() &&
           next.residual.norm() <= (1 - 1e-4 * alpha) * norm) {
         a = std::move(candidate);
@@ -288,12 +348,6 @@ std::map<int, int> winding_cells(const Model &model, const Mesh &mesh) {
   for (const auto &c : model.planar_coils)
     for (int id : model.element_sets.at(c.elements))
       out[mesh.element_index.at(id)] = c.id;
-  return out;
-}
-std::string face_grids(const Mesh &mesh, const Face &f) {
-  std::string out;
-  for (int n : f.nodes)
-    out += (out.empty() ? "" : ",") + std::to_string(mesh.node_ids[n]);
   return out;
 }
 // Positive-area overlap of a flat face of b with the flat face fa, when they
@@ -504,6 +558,11 @@ Result<BodySurface> body_surface(const Model &model, const Mesh &mesh,
     for (size_t k = 0; k < cell.faces.size(); ++k) {
       const auto &f = mesh.faces[cell.faces[k]];
       const int other = f.cells[0] == ci ? f.cells[1] : f.cells[0];
+      if (other < 0 && on_air_gap(mesh, cell.faces[k]))
+        return Error{std::format(
+            "MFORCE {}: the surface around body ESET {} reaches the air gap at "
+            "element {}; force surfaces may not touch the air gap",
+            request.id, request.set, cell.id)};
       if (other < 0)
         return Error{std::format(
             "MFORCE {}: body ESET {} is within {} cells of the domain "
@@ -530,6 +589,10 @@ Status explicit_surface(const Mesh &mesh,
   std::map<std::array<int, 2>, std::pair<int, int>> boundary;
   for (auto [fi, sign] : selected) {
     const auto &f = mesh.faces[fi];
+    if (on_air_gap(mesh, fi))
+      return Error{std::format("MFORCE surface face ({}) lies on the air gap; "
+                               "force surfaces may not touch the air gap",
+                               face_grids(mesh, f))};
     if (f.cells[1] < 0)
       return Error{
           "MFORCE surface must lie strictly inside the magnetic domain"};
@@ -668,6 +731,7 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
   if (auto *e = std::get_if<Error>(&gauged))
     return *e;
   const auto &gauge = std::get<Gauge>(gauged);
+  const GapCoupling gap = gap_coupling(mesh);
   auto prepared = prepare_sources(model, mesh);
   if (auto *e = std::get_if<Error>(&prepared))
     return *e;
@@ -697,11 +761,25 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
                                  mesh.depth)
                    : "first-order edge elements, tree gauge");
   solution.add("Field cells", std::to_string(mesh.cells.size()));
+  if (mesh.air_gap) {
+    const auto &g = *mesh.air_gap;
+    // Round-off in the fitted center prints as zero.
+    const auto shown = [&g](double x) {
+      return std::abs(x) < 1e-12 * g.outer.radius ? 0.0 : x;
+    };
+    solution.add("Air gap",
+                 std::format("radius {:.6g} to {:.6g} m about ({:.6g}, {:.6g}, {:.6g}), "
+                             "{} + {} grids, {} harmonics, largest radial deviation "
+                             "{:.1e} of the radius",
+                             g.inner.radius, g.outer.radius, shown(g.center.x()),
+                             shown(g.center.y()), shown(g.center.z()), g.inner.nodes.size(),
+                             g.outer.nodes.size(), g.harmonics, g.deviation));
+  }
   solution.add("Equations",
                std::format("{} ({} degrees of freedom before the gauge and "
                            "boundary conditions)",
                            gauge.size, mesh.dofs()));
-  solution.add("Sources", std::format("{} ({} circuits)", ns, nc));
+  solution.add("Sources", std::format("{} ({} circuit{})", ns, nc, nc == 1 ? "" : "s"));
   solution.add("Subcases", std::to_string(model.subcases.size()));
   solution.add("Newton tolerance",
                std::format("relative residual {:.3g}, at most {} iterations",
@@ -731,14 +809,14 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
       return *e;
     const auto &initial = std::get<Eigen::VectorXd>(imposed);
     auto solved =
-        equilibrium(model, materials, mesh, gauge, tangent, initial, load);
+        equilibrium(model, materials, mesh, gauge, gap, tangent, initial, load);
     if (std::holds_alternative<Error>(solved) && !model.bh_tables.empty()) {
       // Retry with fixed current continuation. Each stage must satisfy the same
       // convergence criterion; a failed stage is never returned as a solution.
       Eigen::VectorXd a = initial;
       int iterations = 0;
       for (int stage = 0; stage <= 8; ++stage) {
-        solved = equilibrium(model, materials, mesh, gauge, tangent, a,
+        solved = equilibrium(model, materials, mesh, gauge, gap, tangent, a,
                              load * (stage / 8.0));
         if (auto *e = std::get_if<Error>(&solved))
           return Error{std::format("Subcase {}, continuation stage {}: {}",
@@ -860,6 +938,12 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
                    .h;
           ++count;
         }
+      }
+      if (count == 0 && mesh.air_gap && in_air_gap(*mesh.air_gap, probe.position)) {
+        // The gap is air: H = B / mu0.
+        b = air_gap_field(*mesh.air_gap, eq.a, probe.position);
+        h = b / mu0;
+        count = 1;
       }
       if (count == 0)
         return Error{"MPROBE lies outside the magnetic domain: " +

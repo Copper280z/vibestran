@@ -301,7 +301,9 @@ check truncation error. Periodic, symmetry, infinite elements and multiply
 connected magnetic domains are not implemented.
 
 `MAGBC=SID` selects MBC. FSET=0 means the whole exterior; an explicit FSET must
-cover the whole exterior. UNIFORM prescribes the tangential trace of
+cover the whole exterior. A planar [air gap](#unmeshed-air-gap) is not
+exterior: FSET=0 leaves it out, and an FSET that selects a gap edge is an
+error. UNIFORM prescribes the tangential trace of
 `A = B cross x / 2`, useful for applied uniform fields and exact patch tests.
 The source perturbation still has zero tangential exterior trace.
 
@@ -313,7 +315,8 @@ coplanar normal to that axis; the plane may be translated or rotated. CTRIA3
 and CQUAD4 can be mixed on conforming edges, using `PMAG2D` and the same MATMAG
 materials. Distorted convex planar quads are supported. The solver uses scalar
 nodal P1/Q1 potentials and `B = grad(A_n) cross n`; there is no vector-potential
-gradient nullspace. All exterior nodes have prescribed A_n, zero by default.
+gradient nullspace. All exterior nodes have prescribed A_n, zero by default,
+except those on an [air gap](#unmeshed-air-gap).
 UNIFORM uses `A_n = (B cross (x-x0)).n`, with x0 the first active mesh node.
 Applied B and remanence must lie in the plane.
 
@@ -369,6 +372,37 @@ build/vibestran /tmp/hex.bdf
 The planar motor demonstration uses the same illustrative steel/PM geometry
 as the 3D example, with signed slot regions and an air torque contour. Its
 synthetic steel and coarse mesh do not constitute engineering validation.
+
+### Unmeshed air gap
+
+A planar model may leave the air gap between a rotor and a stator unmeshed.
+Mesh both parts as usual, with the rotor's outer boundary and the stator's
+inner boundary on concentric circles; the solver finds the gap and couples it
+with an air-gap element (AGE): the exact Laplace field of the air annulus that
+matches the potential on both circles. No card is needed.
+
+- **Detection.** A planar mesh whose parts are not joined by elements must
+  have exactly one gap: a circle of boundary grids on one part and a
+  concentric circle on another, at least four grids each, with no grid
+  between them. Every grid must lie within 1e-6 of the radius of its circle,
+  and the centers must agree to 1e-6 of the radius. Write GRID coordinates in
+  large-field or free-field format when small fields would lose digits.
+  Errors name the grid and deviation, the radii, or the grid inside the
+  annulus that failed. Which part is inside does not matter.
+- **Discretization.** The two circles may have different grid counts and
+  uneven spacing; the element is exact for the piecewise-linear traces it
+  receives, with harmonics up to half the coarser circle's grid count. The
+  error comes from the meshed regions and converges at O(h²) in the field
+  and energy. In a thin gap, matching or similar grid spacing on the two
+  circles keeps the error constant small.
+- **Results.** Probes in the annulus report the analytic gap field (H =
+  B/μ0). The F06 SOLUTION section has an `Air gap` row (radii, center, grid
+  counts, harmonics, worst radial deviation), and the HDF5 results an
+  `air_gap` group. Field blocks contain the meshed cells only.
+- **Limits.** MBC does not apply to gap edges, and MFORCE surfaces may not
+  touch the gap. Rotor torque from the AGE, and rotor motion, will come with
+  the planned `MOTION` card.
+  3D models still need a meshed, connected domain.
 
 Full 3D magnetic shells are a separate physical model: a thin magnetic layer or
 surface-current sheet coupled to the surrounding 3D field. Mechanical shell
@@ -515,6 +549,10 @@ solving. The file has two top-level groups:
   - `circuits/`: `id`, `parallel`, `closed`, and `members` (source ID,
     polarity) with `member_offsets`.
   - `forces/`: `id`, `body`, `cid`. `probes/`: `id`, `cd`, `position_m`.
+  - `air_gap/` (planar models with an unmeshed gap): attributes
+    `inner_radius_m`, `outer_radius_m`, `harmonics`, `radial_deviation`;
+    `center_m`; and `inner_grids`, `outer_grids`, the grid IDs on each
+    circle in increasing angle.
   - `subcase_ids`, and `subcases/<ID>/` per subcase, with attributes `id`,
     `iterations`, `residual`, `energy_J`, `coenergy_J`, `bh_extrapolated`.
     Its `sources/`, `circuits/`, `forces/` and `probes/` groups line up row

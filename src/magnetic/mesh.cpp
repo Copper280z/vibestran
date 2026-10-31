@@ -1,4 +1,5 @@
 #include "magnetic/mesh.hpp"
+#include "magnetic/air_gap.hpp"
 #include <Eigen/LU>
 #include <algorithm>
 #include <cmath>
@@ -278,6 +279,10 @@ Result<Mesh> make_mesh(const Model &model) {
              .second)
       return Error{"Duplicate magnetic element id"};
   }
+  auto gap = find_air_gap(mesh);
+  if (auto *e = std::get_if<Error>(&gap))
+    return *e;
+  mesh.air_gap = std::get<std::optional<AirGap>>(std::move(gap));
   return mesh;
 }
 
@@ -343,9 +348,18 @@ Result<Gauge> make_gauge(const Mesh &mesh) {
   if (mesh.planar) {
     gauge.equations.assign(n, -1);
     gauge.boundary.assign(n, false);
-    for (const auto &f : mesh.faces)
-      if (f.cells[1] < 0)
-        for (int v : f.nodes)
+    // Air-gap faces are coupled by the air-gap element, not prescribed, and
+    // the gap joins the parts it separates.
+    std::vector<bool> gap_face(mesh.faces.size(), false);
+    if (mesh.air_gap) {
+      for (int f : mesh.air_gap->faces)
+        gap_face[f] = true;
+      connected.join(mesh.air_gap->inner.nodes.front(),
+                     mesh.air_gap->outer.nodes.front());
+    }
+    for (size_t f = 0; f < mesh.faces.size(); ++f)
+      if (mesh.faces[f].cells[1] < 0 && !gap_face[f])
+        for (int v : mesh.faces[f].nodes)
           gauge.boundary[v] = true;
     for (const auto &e : mesh.edges)
       connected.join(e[0], e[1]);

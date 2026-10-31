@@ -442,6 +442,21 @@ Status write_hdf5(const std::string &path, const Model &model,
   h5.attribute(magstat.get(), "dimension",
                int64_t{results.mesh.planar ? 2 : 3});
   h5.attribute(magstat.get(), "depth_m", results.mesh.depth);
+  if (const auto &gap = results.mesh.air_gap) {
+    auto group = h5.group(magstat.get(), "air_gap");
+    h5.attribute(group.get(), "inner_radius_m", gap->inner.radius);
+    h5.attribute(group.get(), "outer_radius_m", gap->outer.radius);
+    h5.attribute(group.get(), "harmonics", int64_t{gap->harmonics});
+    h5.attribute(group.get(), "radial_deviation", gap->deviation);
+    h5.vectors(group.get(), "center_m", {gap->center});
+    for (const auto &[name, circle] :
+         {std::pair{"inner_grids", &gap->inner}, std::pair{"outer_grids", &gap->outer}}) {
+      std::vector<int64_t> grids;
+      for (int n : circle->nodes)
+        grids.push_back(results.mesh.node_ids[n]);
+      h5.values(group.get(), name, grids);
+    }
+  }
   {
     auto sources = h5.group(magstat.get(), "sources");
     std::vector<uint8_t> wire, closed;

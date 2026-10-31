@@ -1,6 +1,7 @@
 #pragma once
 #include "magnetic/model.hpp"
 #include <Eigen/SparseCore>
+#include <optional>
 #include <span>
 
 namespace vibestran::magnetic {
@@ -27,6 +28,24 @@ struct Face {
   double area{0};
   bool flat{true};
 };
+// One circle of an air gap: boundary grids on a circle about AirGap::center,
+// in increasing angle.
+struct GapCircle {
+  double radius{0};
+  std::vector<int> nodes;     // mesh node indices
+  std::vector<double> angles; // radians in [angles[0], angles[0] + 2 pi)
+};
+// An unmeshed air annulus of a planar mesh between a circle of boundary
+// grids on one part of the mesh and a concentric circle on another, coupled
+// analytically by the air-gap element (air_gap.hpp).
+struct AirGap {
+  Vector center{Vector::Zero()};
+  Vector u{Vector::UnitX()}, v{Vector::UnitY()}; // in-plane, u x v = normal
+  GapCircle inner, outer;
+  std::vector<int> faces; // boundary faces on either circle
+  double deviation{0};    // largest |distance - radius| / radius of a grid
+  int harmonics{0};
+};
 struct Mesh {
   std::vector<Vector> nodes;
   std::vector<int> node_ids;
@@ -38,6 +57,7 @@ struct Mesh {
   bool planar{false};
   double depth{1};
   Vector normal{Vector::UnitZ()};
+  std::optional<AirGap> air_gap; // planar only
   [[nodiscard]] size_t dofs() const {
     return planar ? nodes.size() : edges.size();
   }
