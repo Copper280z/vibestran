@@ -395,6 +395,17 @@ the consistent material tangent, residual line search and, on failure, an
 eight-increment current continuation retry. Failure to meet the requested
 residual is an error, not a partial result.
 
+The tangent systems go through the structural solver backend (`--backend`).
+One factorization serves the whole run: its symbolic analysis is done once,
+and Newton steps, continuation stages, subcases and the differential
+inductances only refactor values. Each subcase's inductances are a single
+solve with one right-hand side per closed source and circuit. Every
+factorization must be positive definite, so a backend that may fall back to
+LU (`--backend=cuda`, until cuDSS implements the factor interface) is
+refused. The PCG backends work but converge poorly on high-contrast
+reluctivity. `--refine`, `--checkmode`, `--no-quality-checks` and
+`--dump-system` are structural controls and are rejected.
+
 Each 3D current source uses lowest-order
 [Raviart–Thomas face fluxes](https://defelement.org/elements/raviart-thomas.html),
 with contravariant Piola mapping for hexes/wedges. Cell balance,

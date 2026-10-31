@@ -1,4 +1,5 @@
 #include "magnetic/solver.hpp"
+#include "solver/solver_backend.hpp"
 #include <algorithm>
 #include <cmath>
 #include <format>
@@ -3371,4 +3372,178 @@ TEST(MagneticIO, OutputRequestsSelectFieldSourceAndProbeFiles) {
   write("LOAD=1\nMPROBE=SOME\n");
   EXPECT_NE(run()->message.find("ALL or NONE"), std::string::npos);
   std::filesystem::remove_all(directory);
+}
+
+// ── Solver backend use ───────────────────────────────────────────────────────
+
+namespace {
+using vibestran::FactorOptions;
+using vibestran::FactorStats;
+using vibestran::LinearFactor;
+using vibestran::SolverBackend;
+using CsrData = vibestran::SparseMatrixBuilder::CsrData;
+
+// What MAGSTAT asked of its backend.
+struct BackendLog {
+  int factors{0};
+  bool require_spd{false};
+  std::vector<int> nrhs; // per solve() call
+  FactorStats stats;     // of the last factor, when it was destroyed
+};
+
+class RecordingFactor final : public LinearFactor {
+public:
+  RecordingFactor(std::unique_ptr<LinearFactor> inner, BackendLog &log)
+      : inner_(std::move(inner)), log_(log) {}
+  ~RecordingFactor() override { log_.stats = inner_->stats(); }
+  int size() const noexcept override { return inner_->size(); }
+  vibestran::Status refactor(const CsrData &K) override {
+    return inner_->refactor(K);
+  }
+  vibestran::Result<std::vector<double>> solve(std::span<const double> B,
+                                               int nrhs) override {
+    log_.nrhs.push_back(nrhs);
+    return inner_->solve(B, nrhs);
+  }
+  std::string_view method() const noexcept override { return inner_->method(); }
+  FactorStats stats() const noexcept override { return inner_->stats(); }
+
+private:
+  std::unique_ptr<LinearFactor> inner_;
+  BackendLog &log_;
+};
+
+// The CPU direct backend, recording each factor() and solve().
+class RecordingBackend final : public SolverBackend {
+public:
+  std::vector<double> solve(const CsrData &K, const std::vector<double> &F,
+                            const vibestran::FactorRatioCheckPolicy *p) override {
+    return inner_.solve(K, F, p);
+  }
+  std::string_view name() const noexcept override { return "recording"; }
+  vibestran::Result<std::unique_ptr<LinearFactor>>
+  factor(const CsrData &K, const FactorOptions &options) override {
+    ++log.factors;
+    log.require_spd = options.require_spd;
+    auto made = inner_.factor(K, options);
+    if (auto *e = std::get_if<Error>(&made))
+      return *e;
+    return std::unique_ptr<LinearFactor>(std::make_unique<RecordingFactor>(
+        std::get<std::unique_ptr<LinearFactor>>(std::move(made)), log));
+  }
+  BackendLog log;
+
+private:
+  vibestran::EigenSolverBackend inner_;
+};
+
+// Declares an LU fallback, as cuDSS does, so it cannot promise SPD.
+class FallbackBackend final : public SolverBackend {
+public:
+  std::vector<double> solve(const CsrData &K, const std::vector<double> &F,
+                            const vibestran::FactorRatioCheckPolicy *p) override {
+    return inner_.solve(K, F, p);
+  }
+  std::string_view name() const noexcept override { return "lu-fallback"; }
+  bool may_factor_indefinite() const noexcept override { return true; }
+
+private:
+  vibestran::EigenSolverBackend inner_;
+};
+} // namespace
+
+TEST(MagneticBackend, OneAnalysisServesNewtonSubcasesAndInductances) {
+  // Saturating steel: several Newton iterations in each of four subcases,
+  // and four closed planar coils in two closed circuits.
+  auto model = nonlinear_planar(0);
+  nonlinear_loads(model, {4000, 2500});
+  RecordingBackend backend;
+  const auto solved = solve(model, backend);
+  ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+  const auto &result = std::get<Results>(solved);
+  const auto &log = backend.log;
+
+  // One factor for the whole run, always positive definite, one symbolic
+  // analysis: every tangent has the gauge's pattern.
+  EXPECT_EQ(log.factors, 1);
+  EXPECT_TRUE(log.require_spd);
+  EXPECT_EQ(log.stats.symbolic_analyses, 1);
+
+  // A numeric factorization per Newton step plus one of the converged
+  // tangent per subcase for the inductances: nothing is factored twice.
+  int newton = 0;
+  for (const auto &c : result.cases)
+    newton += c.iterations;
+  const int subcases = static_cast<int>(result.cases.size());
+  ASSERT_GE(subcases, 4);
+  EXPECT_GT(newton, 2 * subcases);
+  EXPECT_EQ(log.stats.numeric_factorizations, newton + subcases);
+
+  // Newton solves one right-hand side; each subcase's inductances are one
+  // block solve over the closed sources and circuits (here the two circuits;
+  // the planar coils are open on their own).
+  int block = 0;
+  for (const auto &source : result.sources)
+    block += source.closed ? 1 : 0;
+  for (const auto &circuit : result.circuits)
+    block += circuit.closed ? 1 : 0;
+  ASSERT_EQ(block, 2);
+  EXPECT_EQ(std::count(log.nrhs.begin(), log.nrhs.end(), block), subcases);
+  EXPECT_EQ(std::count(log.nrhs.begin(), log.nrhs.end(), 1), newton);
+  EXPECT_EQ(log.nrhs.size(), static_cast<size_t>(newton + subcases));
+  EXPECT_EQ(log.stats.solves, newton + block * subcases);
+
+  // Each column of the block lands in its own entry: the circuit
+  // inductance is reciprocal and positive definite.
+  for (const auto &c : result.cases) {
+    const auto &L = c.circuit_inductance;
+    EXPECT_GT(L(0, 0), 0);
+    EXPECT_GT(L(1, 1), 0);
+    const double self = std::sqrt(L(0, 0) * L(1, 1));
+    EXPECT_NEAR(L(0, 1), L(1, 0), 1e-12 * self);
+    EXPECT_LT(std::abs(L(0, 1)), self);
+  }
+}
+
+TEST(MagneticBackend, IterativeBackendThroughTheAdapterMatchesDirect) {
+  // Linear model, three subcases: the PCG backend has no reusable
+  // factorization, so every tangent solve is a full PCG solve.
+  auto model = box(4, 1.5);
+  loop(model);
+  for (int i = 0; i < 4; ++i) {
+    model.nodes[200000 + i] = {
+        model.nodes[100000 + i].position + Vector(0, 0, 0.5), 0};
+    model.wires.push_back(
+        {200000 + i, 1, 200000 + i, 200000 + (i + 1) % 4, 0, {}});
+  }
+  model.wire_paths.push_back({200000, 200000});
+  model.currents.push_back({2, 200000, 2});
+  model.combinations[3] = {1, {{1, 1}, {1, 2}}};
+  model.subcases = {{.id = 1, .load = 1}, {.id = 2, .load = 2}, {.id = 3, .load = 3}};
+
+  const auto direct = solve(model);
+  vibestran::EigenPCGSolverBackend pcg(1e-10);
+  const auto iterative = solve(model, pcg);
+  ASSERT_TRUE(std::holds_alternative<Results>(direct)) << error_of(direct);
+  ASSERT_TRUE(std::holds_alternative<Results>(iterative)) << error_of(iterative);
+  const auto &d = std::get<Results>(direct).cases;
+  const auto &p = std::get<Results>(iterative).cases;
+  ASSERT_EQ(d.size(), p.size());
+  for (size_t k = 0; k < d.size(); ++k) {
+    EXPECT_NEAR(p[k].energy, d[k].energy, 1e-8 * std::abs(d[k].energy));
+    EXPECT_LT((p[k].differential_inductance - d[k].differential_inductance).norm(),
+              1e-8 * d[k].differential_inductance.norm());
+    EXPECT_LT((p[k].potential - d[k].potential).norm(), 1e-8 * d[k].potential.norm());
+  }
+}
+
+TEST(MagneticBackend, BackendThatCannotPromiseSpdIsRefused) {
+  auto model = box(3);
+  loop(model);
+  FallbackBackend backend;
+  const auto solved = solve(model, backend);
+  ASSERT_TRUE(std::holds_alternative<Error>(solved));
+  const std::string message = error_of(solved);
+  EXPECT_NE(message.find("lu-fallback"), std::string::npos) << message;
+  EXPECT_NE(message.find("positive definite"), std::string::npos) << message;
 }

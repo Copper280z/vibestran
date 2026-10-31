@@ -1,10 +1,5 @@
 #include "magnetic/solver.hpp"
-#include <Eigen/SparseCholesky>
-#if defined(HAVE_ACCELERATE)
-#include <Eigen/AccelerateSupport>
-#elif defined(EIGEN_CHOLMOD_SUPPORT)
-#include <Eigen/CholmodSupport>
-#endif
+#include "solver/solver_backend.hpp"
 #include <algorithm>
 #include <cmath>
 #include <format>
@@ -16,13 +11,53 @@ namespace vibestran::magnetic {
 namespace {
 using Sparse = Eigen::SparseMatrix<double>;
 using Triplet = Eigen::Triplet<double>;
-#if defined(HAVE_ACCELERATE)
-using Factor = Eigen::AccelerateLLT<Sparse>;
-#elif defined(EIGEN_CHOLMOD_SUPPORT)
-using Factor = Eigen::CholmodSupernodalLLT<Sparse>;
-#else
-using Factor = Eigen::SimplicialLLT<Sparse>;
-#endif
+// The gauged tangent factored by the solver backend. Newton iterations,
+// continuation stages, subcases and inductances all assemble the same
+// pattern, so one factor serves the whole solve and its symbolic analysis is
+// done once. Every factorization must be positive definite: a failure means
+// a gauge, mesh or material error, never a reason to fall back to LDLT.
+class Tangent {
+public:
+  explicit Tangent(SolverBackend &backend) : backend_(backend) {}
+  Status factor(const Sparse &stiffness) {
+    const Eigen::SparseMatrix<double, Eigen::RowMajor> lower =
+        stiffness.triangularView<Eigen::Lower>();
+    SparseMatrixBuilder::CsrData csr;
+    csr.n = static_cast<int>(lower.rows());
+    csr.nnz = static_cast<int>(lower.nonZeros());
+    csr.row_ptr.assign(lower.outerIndexPtr(), lower.outerIndexPtr() + csr.n + 1);
+    csr.col_ind.assign(lower.innerIndexPtr(), lower.innerIndexPtr() + csr.nnz);
+    csr.values.assign(lower.valuePtr(), lower.valuePtr() + csr.nnz);
+    csr.symmetry = SymmetryStorage::Lower;
+    if (factor_)
+      return factor_->refactor(csr);
+    FactorOptions options;
+    options.require_spd = true;
+    auto made = backend_.factor(csr, options);
+    if (auto *e = std::get_if<Error>(&made))
+      return *e;
+    factor_ = std::get<std::unique_ptr<LinearFactor>>(std::move(made));
+    return {};
+  }
+  // Solves for every column of rhs with the last factorization.
+  Result<Eigen::MatrixXd> solve(const Eigen::MatrixXd &rhs) {
+    auto x = factor_->solve({rhs.data(), static_cast<size_t>(rhs.size())},
+                            static_cast<int>(rhs.cols()));
+    if (auto *e = std::get_if<Error>(&x))
+      return *e;
+    const auto &values = std::get<std::vector<double>>(x);
+    Eigen::MatrixXd out =
+        Eigen::Map<const Eigen::MatrixXd>(values.data(), rhs.rows(), rhs.cols());
+    // Checked here too: this file keeps IEEE semantics, the backend may not.
+    if (!out.allFinite())
+      return Error{"Magnetic linear solve produced a nonfinite solution"};
+    return out;
+  }
+
+private:
+  SolverBackend &backend_;
+  std::unique_ptr<LinearFactor> factor_;
+};
 struct Assembly {
   Sparse stiffness;
   Eigen::VectorXd residual;
@@ -170,7 +205,8 @@ struct Equilibrium {
 };
 Result<Equilibrium> equilibrium(const Model &model, const Materials &materials,
                                 const Mesh &mesh, const Gauge &gauge,
-                                Eigen::VectorXd a, const Eigen::VectorXd &load) {
+                                Tangent &tangent, Eigen::VectorXd a,
+                                const Eigen::VectorXd &load) {
   auto state = assemble(materials, mesh, gauge, a, load);
   double load_norm = 0;
   for (size_t e = 0; e < mesh.dofs(); ++e)
@@ -188,18 +224,14 @@ Result<Equilibrium> equilibrium(const Model &model, const Materials &materials,
                          norm / reference};
     if (iteration == model.options.max_iterations)
       break;
-    Factor factor;
-#if defined(HAVE_ACCELERATE)
-    factor.setOrder(SparseOrderMetis);
-#endif
-    factor.compute(state.stiffness);
-    if (factor.info() != Eigen::Success)
-      return Error{"Magnetic tangent is not positive definite; check mesh, "
-                   "gauge and material data"};
-    const Eigen::VectorXd rhs = -state.residual;
-    const Eigen::VectorXd step = factor.solve(rhs);
-    if (factor.info() != Eigen::Success || !step.allFinite())
-      return Error{"Magnetic linear solve failed"};
+    if (auto e = tangent.factor(state.stiffness))
+      return Error{std::format("Magnetic tangent factorization failed ({}); "
+                               "check mesh, gauge and material data",
+                               e->message)};
+    auto solved = tangent.solve(-state.residual);
+    if (auto *e = std::get_if<Error>(&solved))
+      return Error{std::format("Magnetic linear solve failed ({})", e->message)};
+    const Eigen::VectorXd step = std::get<Eigen::MatrixXd>(std::move(solved));
     bool accepted = false;
     double alpha = 1;
     for (int trial = 0; trial < 30; ++trial) {
@@ -604,6 +636,11 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
 } // namespace
 
 Result<Results> solve(const Model &model) {
+  EigenSolverBackend backend;
+  return solve(model, backend);
+}
+
+Result<Results> solve(const Model &model, SolverBackend &backend) {
   if (auto e = validate(model))
     return *e;
   auto built = make_mesh(model);
@@ -638,6 +675,7 @@ Result<Results> solve(const Model &model) {
     circuit_coupling.push_back(g / c.parallel);
   }
   SpatialIndex index(mesh);
+  Tangent tangent(backend);
   for (const auto &subcase : model.subcases) {
     auto terminal = circuit_currents(model, circuits, subcase.load);
     if (auto *e = std::get_if<Error>(&terminal))
@@ -654,14 +692,15 @@ Result<Results> solve(const Model &model) {
     if (auto *e = std::get_if<Error>(&imposed))
       return *e;
     const auto &initial = std::get<Eigen::VectorXd>(imposed);
-    auto solved = equilibrium(model, materials, mesh, gauge, initial, load);
+    auto solved =
+        equilibrium(model, materials, mesh, gauge, tangent, initial, load);
     if (std::holds_alternative<Error>(solved) && !model.bh_tables.empty()) {
       // Retry with fixed current continuation. Each stage must satisfy the same
       // convergence criterion; a failed stage is never returned as a solution.
       Eigen::VectorXd a = initial;
       int iterations = 0;
       for (int stage = 0; stage <= 8; ++stage) {
-        solved = equilibrium(model, materials, mesh, gauge, a,
+        solved = equilibrium(model, materials, mesh, gauge, tangent, a,
                              load * (stage / 8.0));
         if (auto *e = std::get_if<Error>(&solved))
           return Error{std::format("Subcase {}, continuation stage {}: {}",
@@ -704,50 +743,51 @@ Result<Results> solve(const Model &model) {
         Eigen::MatrixXd::Constant(ns, ns, unavailable);
     output.circuit_inductance = Eigen::MatrixXd::Constant(nc, nc, unavailable);
     if (gauge.size > 0) {
-      std::optional<Factor> factor;
-      auto inductances = [&](auto &&coupling, auto &&closed, int n,
-                             Eigen::MatrixXd &out) -> Status {
-        std::vector<Eigen::VectorXd> reduced(n), response(n);
-        for (int j = 0; j < n; ++j) {
-          if (!closed(j))
-            continue;
-          if (!factor) {
-            factor.emplace();
-#if defined(HAVE_ACCELERATE)
-            factor->setOrder(SparseOrderMetis);
-#endif
-            factor->compute(eq.assembly.stiffness);
-            if (factor->info() != Eigen::Success)
-              return Error{"Differential inductance factorization failed"};
-          }
-          reduced[j] = Eigen::VectorXd::Zero(gauge.size);
+      // Reduced couplings of the closed sources, then of the closed circuits,
+      // solved together with one factorization of the converged tangent.
+      std::vector<int> closed_sources, closed_circuits;
+      std::vector<const Eigen::VectorXd *> couplings;
+      for (int i = 0; i < ns; ++i)
+        if (result.sources[i].closed) {
+          closed_sources.push_back(i);
+          couplings.push_back(&result.sources[i].coupling);
+        }
+      for (int c = 0; c < nc; ++c)
+        if (circuits[c].closed) {
+          closed_circuits.push_back(c);
+          couplings.push_back(&circuit_coupling[c]);
+        }
+      if (!couplings.empty()) {
+        Eigen::MatrixXd reduced = Eigen::MatrixXd::Zero(
+            gauge.size, static_cast<Eigen::Index>(couplings.size()));
+        for (size_t k = 0; k < couplings.size(); ++k)
           for (size_t e = 0; e < mesh.dofs(); ++e)
             if (gauge.equations[e] >= 0)
-              reduced[j][gauge.equations[e]] = coupling(j)[e];
-          response[j] = factor->solve(reduced[j]);
-          if (factor->info() != Eigen::Success || !response[j].allFinite())
-            return Error{"Differential inductance solve failed"};
-        }
-        for (int i = 0; i < n; ++i)
-          for (int j = 0; j < n; ++j)
-            if (closed(i) && closed(j))
-              out(i, j) = reduced[i].dot(response[j]);
-        return {};
-      };
-      if (auto e = inductances(
-              [&](int i) -> const Eigen::VectorXd & {
-                return result.sources[i].coupling;
-              },
-              [&](int i) { return result.sources[i].closed; }, ns,
-              output.differential_inductance))
-        return *e;
-      if (auto e = inductances(
-              [&](int c) -> const Eigen::VectorXd & {
-                return circuit_coupling[c];
-              },
-              [&](int c) { return circuits[c].closed; }, nc,
-              output.circuit_inductance))
-        return *e;
+              reduced(gauge.equations[e], static_cast<Eigen::Index>(k)) =
+                  (*couplings[k])[e];
+        if (auto e = tangent.factor(eq.assembly.stiffness))
+          return Error{std::format(
+              "Differential inductance factorization failed ({})", e->message)};
+        auto solved = tangent.solve(reduced);
+        if (auto *e = std::get_if<Error>(&solved))
+          return Error{std::format("Differential inductance solve failed ({})",
+                                   e->message)};
+        const Eigen::MatrixXd linkage =
+            reduced.transpose() * std::get<Eigen::MatrixXd>(solved);
+        const auto first_circuit =
+            static_cast<Eigen::Index>(closed_sources.size());
+        for (size_t i = 0; i < closed_sources.size(); ++i)
+          for (size_t j = 0; j < closed_sources.size(); ++j)
+            output.differential_inductance(closed_sources[i],
+                                           closed_sources[j]) =
+                linkage(static_cast<Eigen::Index>(i),
+                        static_cast<Eigen::Index>(j));
+        for (size_t c = 0; c < closed_circuits.size(); ++c)
+          for (size_t d = 0; d < closed_circuits.size(); ++d)
+            output.circuit_inductance(closed_circuits[c], closed_circuits[d]) =
+                linkage(first_circuit + static_cast<Eigen::Index>(c),
+                        first_circuit + static_cast<Eigen::Index>(d));
+      }
     } else {
       for (int i = 0; i < ns; ++i)
         for (int j = 0; j < ns; ++j)

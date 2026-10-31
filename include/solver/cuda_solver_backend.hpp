@@ -58,6 +58,9 @@ public:
 
     [[nodiscard]] std::string_view name() const noexcept override;
 
+    /// solve() falls back to LU when Cholesky fails.
+    [[nodiscard]] bool may_factor_indefinite() const noexcept override { return true; }
+
     // ── Diagnostics (valid after each solve()) ─────────────────────────────
 
     /// Returns true if the most recent solve used sparse Cholesky (false = LU fallback).

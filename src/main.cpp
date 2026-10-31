@@ -111,6 +111,69 @@ static void configure_eigen_threads() {
   }
 }
 
+/// The solver backend for --backend, or nullptr (with the reason logged) when
+/// it is unavailable in this build or on this machine.
+static std::unique_ptr<vibestran::SolverBackend>
+make_backend(BackendChoice backend_choice,
+             [[maybe_unused]] CudaPrecisionChoice cuda_precision) {
+  switch (backend_choice) {
+  case BackendChoice::CpuPCG:
+    return std::make_unique<vibestran::EigenPCGSolverBackend>();
+  case BackendChoice::Cuda: {
+#ifdef HAVE_CUDA
+    const auto precision = cuda_precision == CudaPrecisionChoice::Float32
+                               ? vibestran::CudaSolverPrecision::Float32
+                               : vibestran::CudaSolverPrecision::Float64;
+    auto cu = vibestran::CudaSolverBackend::try_create(precision);
+    if (cu.has_value())
+      return std::make_unique<vibestran::CudaSolverBackend>(std::move(*cu));
+    spdlog::error("CUDA backend requested but no CUDA device found");
+#else
+    spdlog::error("CUDA backend was not compiled into this build");
+#endif
+    return nullptr;
+  }
+  case BackendChoice::CudaPCG: {
+#ifdef HAVE_CUDA
+    auto cu = vibestran::CudaPCGSolverBackend::try_create();
+    if (cu.has_value())
+      return std::make_unique<vibestran::CudaPCGSolverBackend>(std::move(*cu));
+    spdlog::error("CUDA PCG backend requested but no CUDA device found");
+#else
+    spdlog::error("CUDA PCG backend was not compiled into this build");
+#endif
+    return nullptr;
+  }
+  case BackendChoice::CudaPCGMixed: {
+#ifdef HAVE_CUDA
+    auto cu = vibestran::CudaMixedPCGSolverBackend::try_create();
+    if (cu.has_value())
+      return std::make_unique<vibestran::CudaMixedPCGSolverBackend>(
+          std::move(*cu));
+    spdlog::error("CUDA mixed PCG backend requested but no CUDA device found");
+#else
+    spdlog::error("CUDA mixed PCG backend was not compiled into this build");
+#endif
+    return nullptr;
+  }
+  case BackendChoice::Vulkan: {
+#ifdef HAVE_VULKAN
+    auto vk = vibestran::VulkanSolverBackend::try_create();
+    if (vk.has_value())
+      return std::make_unique<vibestran::VulkanSolverBackend>(std::move(*vk));
+    spdlog::error("Vulkan backend requested but Vulkan is unavailable");
+#else
+    spdlog::error("Vulkan backend was not compiled into this build");
+#endif
+    return nullptr;
+  }
+  case BackendChoice::Auto:
+  case BackendChoice::Cpu:
+    break;
+  }
+  return std::make_unique<vibestran::EigenSolverBackend>();
+}
+
 static void print_usage() {
   spdlog::error(
       "Usage: vibestran "
@@ -270,14 +333,13 @@ int main(int argc, const char *argv[]) {
                    [](unsigned char c) { return std::tolower(c); });
     if (ext != ".inp") {
       auto magnetic = vibestran::magnetic::is_magnetic_deck(bdf_path);
-      if (auto* error = std::get_if<vibestran::magnetic::Error>(&magnetic)) {
+      if (auto* error = std::get_if<vibestran::Error>(&magnetic)) {
         spdlog::error("{}", error->message);
         return 1;
       }
       if (std::get<bool>(magnetic)) {
-        if ((backend_choice != BackendChoice::Auto && backend_choice != BackendChoice::Cpu) ||
-            force_refine || force_checkmode_lenient || skip_quality_checks || !dump_prefix.empty()) {
-          spdlog::error("SOL MAGSTAT supports the CPU direct solver and its mandatory magnetic checks; structural solver overrides are unavailable");
+        if (force_refine || force_checkmode_lenient || skip_quality_checks || !dump_prefix.empty()) {
+          spdlog::error("SOL MAGSTAT keeps its mandatory magnetic checks; --refine, --checkmode=lenient, --no-quality-checks and --dump-system are unavailable");
           return 1;
         }
         if (!vibestran::magnetic::output_available()) {
@@ -285,15 +347,19 @@ int main(int argc, const char *argv[]) {
           return 1;
         }
         auto parsed = vibestran::magnetic::parse_file(bdf_path);
-        if (auto* error = std::get_if<vibestran::magnetic::Error>(&parsed)) {
+        if (auto* error = std::get_if<vibestran::Error>(&parsed)) {
           spdlog::error("{}", error->message);
           return 1;
         }
         const auto& magnetic_model = std::get<vibestran::magnetic::Model>(parsed);
         spdlog::info("Magnetostatics: {} elements, {} winding regions, {} wire segments",
                      magnetic_model.elements.size(), magnetic_model.coils.size()+magnetic_model.planar_coils.size(), magnetic_model.wires.size());
-        auto solved = vibestran::magnetic::solve(magnetic_model);
-        if (auto* error = std::get_if<vibestran::magnetic::Error>(&solved)) {
+        const auto backend = make_backend(backend_choice, cuda_precision);
+        if (!backend)
+          return 1;
+        spdlog::info("Solver backend: {}", backend->name());
+        auto solved = vibestran::magnetic::solve(magnetic_model, *backend);
+        if (auto* error = std::get_if<vibestran::Error>(&solved)) {
           spdlog::error("{}", error->message);
           return 1;
         }
@@ -333,75 +399,10 @@ int main(int argc, const char *argv[]) {
             std::chrono::duration<double, std::milli>(tq1 - tq0).count());
     }
 
-    // ── Backend selection ─────────────────────────────────────────────────
-    std::unique_ptr<vibestran::SolverBackend> backend;
 
-    if (backend_choice == BackendChoice::CpuPCG) {
-      backend = std::make_unique<vibestran::EigenPCGSolverBackend>();
-    } else if (backend_choice == BackendChoice::Cuda) {
-#ifdef HAVE_CUDA
-      const auto precision = cuda_precision == CudaPrecisionChoice::Float32
-                                 ? vibestran::CudaSolverPrecision::Float32
-                                 : vibestran::CudaSolverPrecision::Float64;
-      auto cu = vibestran::CudaSolverBackend::try_create(precision);
-      if (cu.has_value()) {
-        backend =
-            std::make_unique<vibestran::CudaSolverBackend>(std::move(*cu));
-      } else {
-        spdlog::error("CUDA backend requested but no CUDA device found");
-        return 1;
-      }
-#else
-      spdlog::error("CUDA backend was not compiled into this build");
-      return 1;
-#endif
-    } else if (backend_choice == BackendChoice::CudaPCG) {
-#ifdef HAVE_CUDA
-      auto cu = vibestran::CudaPCGSolverBackend::try_create();
-      if (cu.has_value()) {
-        backend =
-            std::make_unique<vibestran::CudaPCGSolverBackend>(std::move(*cu));
-      } else {
-        spdlog::error("CUDA PCG backend requested but no CUDA device found");
-        return 1;
-      }
-#else
-      spdlog::error("CUDA PCG backend was not compiled into this build");
-      return 1;
-#endif
-    } else if (backend_choice == BackendChoice::CudaPCGMixed) {
-#ifdef HAVE_CUDA
-      auto cu = vibestran::CudaMixedPCGSolverBackend::try_create();
-      if (cu.has_value()) {
-        backend = std::make_unique<vibestran::CudaMixedPCGSolverBackend>(
-            std::move(*cu));
-      } else {
-        spdlog::error(
-            "CUDA mixed PCG backend requested but no CUDA device found");
-        return 1;
-      }
-#else
-      spdlog::error("CUDA mixed PCG backend was not compiled into this build");
-      return 1;
-#endif
-    } else if (backend_choice == BackendChoice::Vulkan) {
-#ifdef HAVE_VULKAN
-      auto vk = vibestran::VulkanSolverBackend::try_create();
-      if (vk.has_value()) {
-        backend =
-            std::make_unique<vibestran::VulkanSolverBackend>(std::move(*vk));
-      } else {
-        spdlog::error("Vulkan backend requested but Vulkan is unavailable");
-        return 1;
-      }
-#else
-      spdlog::error("Vulkan backend was not compiled into this build");
-      return 1;
-#endif
-    }
-    // BackendChoice::Auto and BackendChoice::Cpu both default to Eigen CPU.
+    auto backend = make_backend(backend_choice, cuda_precision);
     if (!backend)
-      backend = std::make_unique<vibestran::EigenSolverBackend>();
+      return 1;
 
     // Iterative refinement of direct solves is opt-in (--refine or
     // PARAM,REFINE,YES); a single backward-stable solve is the default, as

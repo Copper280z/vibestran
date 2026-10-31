@@ -71,15 +71,17 @@ protected:
         << read(directory_ / "generator.log");
     return read(deck);
   }
-  // Writes the deck, runs the solver and returns the result file. The log is
-  // kept in `log` so a failing case can show it.
+  // Writes the deck, runs the solver with extra command-line options and
+  // returns the result file. The log is kept in `log` so a failing case can
+  // show it.
   fs::path solve(const std::string &name, const std::string &text,
-                 bool expect_success = true) {
+                 bool expect_success = true, const std::string &options = "") {
     const auto deck = directory_ / (name + ".bdf");
     std::ofstream(deck) << text;
     const auto log_path = directory_ / (name + ".log");
-    const auto command = quoted(std::getenv("VIBESTRAN")) + " " +
-                         quoted(deck) + " > " + quoted(log_path) + " 2>&1";
+    const auto command = quoted(std::getenv("VIBESTRAN")) + " " + options +
+                         (options.empty() ? "" : " ") + quoted(deck) + " > " +
+                         quoted(log_path) + " 2>&1";
     const int status = std::system(command.c_str());
     log = read(log_path);
     if (expect_success)
@@ -231,6 +233,27 @@ TEST_F(MagneticCli, NonlinearSteelMatchesTheIntegratedBHCurve) {
     expect_rows(h5_table(file, "/VTKHDF/SUBCASE_1/CellData/H_A_per_m"), h,
                 1e-9, 1e-11);
   }
+}
+
+TEST_F(MagneticCli, BackendOptionSelectsTheMagneticSolver) {
+  // A nonlinear uniform field needs several Newton steps. The PCG backend
+  // solves each one through the generic factor adapter and must reach the
+  // same energy as the default direct solver.
+  auto text = generate("magnetic_examples.py", "uniform --n 3 --extent 2");
+  text = replace_all(text, "MATMAG,1,1",
+                     "MATMAG,1,,1\nTABLEBH,1\n,0,0,.1,100,.2,2000,ENDT");
+  const auto direct = solve("direct", text);
+  // The direct backend's name depends on the platform (Accelerate, CHOLMOD).
+  EXPECT_NE(log.find("Solver backend: "), std::string::npos) << log;
+  EXPECT_EQ(log.find("PCG"), std::string::npos) << log;
+  const double energy = h5_attribute(direct, "/MAGSTAT/subcases/1", "energy_J");
+  const auto iterative = solve("pcg", text, true, "--backend=cpu-pcg");
+  EXPECT_NE(log.find("Solver backend: Eigen PCG"), std::string::npos) << log;
+  EXPECT_NEAR(h5_attribute(iterative, "/MAGSTAT/subcases/1", "energy_J"),
+              energy, 1e-9 * energy);
+  // Structural solver controls stay unavailable.
+  solve("refine", text, false, "--refine");
+  EXPECT_NE(log.find("--refine"), std::string::npos) << log;
 }
 
 TEST_F(MagneticCli, PlanarWindingCircuitLinkageAndAmpereTurns) {

@@ -1,6 +1,10 @@
 #pragma once
 #include "magnetic/mesh.hpp"
 
+namespace vibestran {
+class SolverBackend;
+}
+
 namespace vibestran::magnetic {
 struct Source {
   int id{0};
@@ -89,7 +93,11 @@ circuit_currents(const Model &model,
 // Current per turn in each source: polarity * I_circuit / parallel.
 [[nodiscard]] Result<std::vector<double>>
 source_currents(const Model &model, std::span<const Source> sources, int set);
+// Solves with the CPU direct backend.
 [[nodiscard]] Result<Results> solve(const Model &model);
+// Solves every tangent system (Newton steps, differential inductances) with
+// backend, requiring positive definite factorizations.
+[[nodiscard]] Result<Results> solve(const Model &model, SolverBackend &backend);
 // False when the build has no HDF5, which MAGSTAT results require.
 [[nodiscard]] bool output_available();
 // Writes the F06 report and name.mag.vtkhdf: VTKHDF fields that ParaView

@@ -9,6 +9,8 @@
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
+#include <exception>
+#include <type_traits>
 #ifdef HAVE_ACCELERATE
 #include <Eigen/AccelerateSupport>
 #endif
@@ -22,9 +24,50 @@ namespace vibestran {
 
 namespace {
 
+using Clock = std::chrono::steady_clock;
+using Ms = std::chrono::duration<double, std::milli>;
+using ESM = Eigen::SparseMatrix<double>;
+using ESMR = Eigen::SparseMatrix<double, Eigen::RowMajor>;
+using CsrData = SparseMatrixBuilder::CsrData;
+
+/// Shape errors shared by every factor() implementation.
+Status check_matrix(const CsrData &K) {
+  if (K.n == 0)
+    return Error{"Matrix is empty — no free DOFs"};
+  if (K.row_ptr.size() != static_cast<std::size_t>(K.n) + 1 ||
+      K.col_ind.size() != static_cast<std::size_t>(K.nnz) ||
+      K.values.size() != static_cast<std::size_t>(K.nnz))
+    return Error{std::format("Malformed CSR matrix: n={}, nnz={}, row_ptr {}, "
+                             "col_ind {}, values {}",
+                             K.n, K.nnz, K.row_ptr.size(), K.col_ind.size(),
+                             K.values.size())};
+  return std::nullopt;
+}
+
+Status check_rhs(int n, std::span<const double> B, int nrhs) {
+  if (nrhs < 1 || B.size() != static_cast<std::size_t>(n) * static_cast<std::size_t>(nrhs))
+    return Error{std::format("Right-hand side has {} values; expected {} x {}",
+                             B.size(), n, nrhs)};
+  return std::nullopt;
+}
+
+/// Lower triangle of K in compressed column-major storage, the input of every
+/// direct factorization below. A full mirrored matrix is reduced to its lower
+/// triangle so the factorization sees symmetric storage either way.
+ESM lower_csc(const CsrData &K) {
+  const Eigen::Map<const ESMR> K_row(K.n, K.n, K.nnz, K.row_ptr.data(),
+                                     K.col_ind.data(), K.values.data());
+  ESM lower;
+  if (K.stores_lower_triangle_only())
+    lower = K_row;
+  else
+    lower = K_row.triangularView<Eigen::Lower>();
+  lower.makeCompressed();
+  return lower;
+}
+
 #if !defined(HAVE_ACCELERATE)
-std::vector<double>
-extract_csr_diagonal(const SparseMatrixBuilder::CsrData &csr) {
+std::vector<double> extract_csr_diagonal(const CsrData &csr) {
   std::vector<double> diag(static_cast<std::size_t>(csr.n), 0.0);
   for (int row = 0; row < csr.n; ++row) {
     for (int j = csr.row_ptr[row]; j < csr.row_ptr[row + 1]; ++j) {
@@ -43,66 +86,38 @@ std::vector<double> copy_diagonal(const DiagonalExpr &diag_expr) {
   return std::vector<double>(dense.data(), dense.data() + dense.size());
 }
 
-[[maybe_unused]] void
-report_factor_ratio_result(const FactorRatioCheckPolicy &policy,
+/// An error for a non-positive factor diagonal or a fatal MAXRATIO breach; a
+/// non-fatal breach is a warning.
+Status factor_ratio_status(const FactorRatioCheckPolicy &policy,
                            const FactorRatioCheckResult &result,
                            std::string_view backend_label) {
   if (result.status == FactorRatioCheckStatus::Ok)
-    return;
+    return std::nullopt;
 
   const std::string matrix_name =
       policy.matrix_name.empty() ? "matrix" : policy.matrix_name;
   if (result.status == FactorRatioCheckStatus::NonPositiveFactorDiagonal) {
-    throw SolverError(std::format(
+    return Error{std::format(
         "{} {} has non-positive or near-zero factor diagonal at row {} "
         "(matrix diag {:.3e}, factor diag {:.3e}, backend {})",
         policy.context, matrix_name, result.row_1based, result.matrix_diag,
-        result.factor_diag, backend_label));
+        result.factor_diag, backend_label)};
   }
 
-  const std::string message = std::format(
+  std::string message = std::format(
       "{} {} diagonal / factor diagonal ratio {:.3e} exceeds "
       "MAXRATIO={:.3e} at row {} (matrix diag {:.3e}, factor diag {:.3e}, "
       "backend {})",
       policy.context, matrix_name, result.max_ratio, policy.maxratio,
       result.row_1based, result.matrix_diag, result.factor_diag, backend_label);
   if (policy.fatal)
-    throw SolverError(message);
+    return Error{std::move(message)};
   spdlog::warn("{}", message);
+  return std::nullopt;
 }
 #endif
 
-/// Refines a direct solution with its own factorization (one triangular
-/// solve per correction) and compensated residuals, when refinement is
-/// enabled; otherwise returns it unchanged with no report.
-template <class Factor>
-std::vector<double> refine_direct(const SparseMatrixBuilder::CsrData &K,
-                                  const std::vector<double> &F, const Eigen::VectorXd &u0,
-                                  const Factor &factor,
-                                  std::optional<RefinementReport> &report, bool refine) {
-  const auto n = static_cast<Eigen::Index>(u0.size());
-  std::vector<double> u(u0.data(), u0.data() + n);
-  report.reset();
-  if (!refine)
-    return u;
-  const auto correction = [&](const std::vector<double> &r) {
-    const Eigen::Map<const Eigen::VectorXd> rhs(r.data(), n);
-    const Eigen::VectorXd d = factor.solve(rhs);
-    return std::vector<double>(d.data(), d.data() + n);
-  };
-  report = refine_solution(K, F, u, correction);
-  spdlog::debug("[cpu-direct] iterative refinement: {} correction(s), estimated relative "
-                "error {:.2e} -> {:.2e}, backward error {:.2e}{}",
-                report->corrections, report->initial_error, report->estimated_error,
-                report->backward_error, report->converged ? "" : " (not converged)");
-  return u;
-}
-
-} // namespace
-
 #if defined(HAVE_ACCELERATE)
-namespace {
-
 struct AccelerateOrderConfig {
   SparseOrder_t order;
   const char *label;
@@ -125,16 +140,305 @@ AccelerateOrderConfig accelerate_order_config() {
   return {SparseOrderMetis, "metis"};
 }
 
-} // namespace
+using DirectLDLT = Eigen::AccelerateLDLT<ESM>;
+constexpr const char *kLdltLabel = "accelerate-ldlt";
+#else
+using DirectLDLT = Eigen::SimplicialLDLT<ESM>;
+constexpr const char *kLdltLabel = "simplicial-ldlt";
 #endif
 
-std::vector<double>
-EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
-                          const std::vector<double> &F,
-                          const FactorRatioCheckPolicy *factor_ratio_policy) {
-  using Clock = std::chrono::steady_clock;
-  using Ms = std::chrono::duration<double, std::milli>;
+/// Eigen direct factorization with symbolic reuse. Primary is the Cholesky
+/// tried first; without require_spd a failure falls back to LDLT, which
+/// handles near-singular and mildly indefinite systems.
+template <class Primary> class EigenDirectFactor final : public LinearFactor {
+public:
+  EigenDirectFactor(const FactorOptions &options, const char *primary_label)
+      : require_spd_(options.require_spd), primary_label_(primary_label),
+        label_(primary_label) {
+    if (options.factor_ratio_policy != nullptr)
+      policy_ = *options.factor_ratio_policy;
+#if defined(HAVE_ACCELERATE)
+    const auto order = accelerate_order_config();
+    order_ = order.order;
+    order_label_ = order.label;
+    llt_.setOrder(order_);
+#endif
+  }
 
+  [[nodiscard]] int size() const noexcept override { return n_; }
+  [[nodiscard]] std::string_view method() const noexcept override { return label_; }
+  [[nodiscard]] FactorStats stats() const noexcept override { return stats_; }
+
+  [[nodiscard]] Status refactor(const CsrData &K) override {
+    ready_ = false;
+    if (auto e = check_matrix(K))
+      return e;
+    if (n_ != 0 && K.n != n_)
+      return Error{std::format("refactor() of a {}-equation factor with a "
+                               "{}-equation matrix",
+                               n_, K.n)};
+    const bool analyze = !same_pattern(K);
+    if (analyze) {
+      n_ = K.n;
+      lower_only_ = K.stores_lower_triangle_only();
+      row_ptr_ = K.row_ptr;
+      col_ind_ = K.col_ind;
+      llt_analyzed_ = false;
+      ldlt_analyzed_ = false;
+    }
+
+    const auto t_convert = Clock::now();
+    const ESM A = lower_csc(K);
+    const auto t_factor = Clock::now();
+    if (!llt_analyzed_) {
+      llt_.analyzePattern(A);
+      ++stats_.symbolic_analyses;
+      llt_analyzed_ = llt_.info() == Eigen::Success;
+    }
+    bool factored = false;
+    if (llt_analyzed_) {
+      llt_.factorize(A);
+      ++stats_.numeric_factorizations;
+      factored = llt_.info() == Eigen::Success;
+    }
+    use_ldlt_ = false;
+    label_ = primary_label_;
+    if (!factored) {
+      if (require_spd_)
+        return Error{std::format("{} factorization failed: the matrix is not "
+                                 "numerically positive definite",
+                                 primary_label_)};
+      if (auto e = factor_ldlt(A))
+        return e;
+    }
+    const auto t_done = Clock::now();
+    if (auto e = check_factor_ratio(K))
+      return e;
+    spdlog::debug("[cpu-direct] backend={}, {}storage={}, n={}, nnz(lower)={}, "
+                  "symbolic analysis {}, convert CSR->Eigen: {:.3f} ms, "
+                  "factorization: {:.3f} ms",
+                  label_, order_text(), lower_only_ ? "lower" : "full", n_,
+                  A.nonZeros(), analyze ? "new" : "reused",
+                  Ms(t_factor - t_convert).count(), Ms(t_done - t_factor).count());
+    ready_ = true;
+    return std::nullopt;
+  }
+
+  [[nodiscard]] Result<std::vector<double>> solve(std::span<const double> B,
+                                                  int nrhs) override {
+    if (!ready_)
+      return Error{"solve() with a factor whose last factorization failed"};
+    if (auto e = check_rhs(n_, B, nrhs))
+      return *e;
+    const auto t_solve = Clock::now();
+    const Eigen::Map<const Eigen::MatrixXd> rhs(B.data(), n_, nrhs);
+    Eigen::MatrixXd X;
+    bool solved = false;
+    if (use_ldlt_) {
+      X = ldlt_->solve(rhs);
+      solved = ldlt_->info() == Eigen::Success;
+    } else {
+      X = llt_.solve(rhs);
+      solved = llt_.info() == Eigen::Success;
+    }
+    if (!solved)
+      return Error{std::format("Back-substitution failed ({})", label_)};
+    if (!X.allFinite())
+      return Error{std::format("{} solve produced a nonfinite solution", label_)};
+    stats_.solves += nrhs;
+    spdlog::debug("[cpu-direct] backend={}, {} right-hand side(s), solve: {:.3f} ms",
+                  label_, nrhs, Ms(Clock::now() - t_solve).count());
+    return std::vector<double>(X.data(), X.data() + X.size());
+  }
+
+private:
+  [[nodiscard]] bool same_pattern(const CsrData &K) const {
+    return n_ == K.n && lower_only_ == K.stores_lower_triangle_only() &&
+           row_ptr_ == K.row_ptr && col_ind_ == K.col_ind;
+  }
+
+  [[nodiscard]] Status factor_ldlt(const ESM &A) {
+    if (!ldlt_) {
+      ldlt_.emplace();
+#if defined(HAVE_ACCELERATE)
+      ldlt_->setOrder(order_);
+#endif
+    }
+    if (!ldlt_analyzed_) {
+      ldlt_->analyzePattern(A);
+      ++stats_.symbolic_analyses;
+      ldlt_analyzed_ = ldlt_->info() == Eigen::Success;
+    }
+    if (ldlt_analyzed_) {
+      ldlt_->factorize(A);
+      ++stats_.numeric_factorizations;
+    }
+    if (!ldlt_analyzed_ || ldlt_->info() != Eigen::Success)
+      return Error{std::format("Matrix factorization failed ({} and {} fallback) "
+                               "— check boundary conditions (SPCs)",
+                               primary_label_, kLdltLabel)};
+    use_ldlt_ = true;
+    label_ = kLdltLabel;
+    return std::nullopt;
+  }
+
+  /// MAXRATIO where the factor diagonal is available (Simplicial LLT/LDLT).
+  [[nodiscard]] Status check_factor_ratio([[maybe_unused]] const CsrData &K) const {
+    if (!policy_)
+      return std::nullopt;
+#if !defined(HAVE_ACCELERATE)
+    if (use_ldlt_)
+      return factor_ratio_status(
+          *policy_,
+          evaluate_factor_ratio_check(extract_csr_diagonal(K),
+                                      copy_diagonal(ldlt_->vectorD()),
+                                      policy_->maxratio),
+          label_);
+    if constexpr (std::is_same_v<Primary, Eigen::SimplicialLLT<ESM>>)
+      return factor_ratio_status(
+          *policy_,
+          evaluate_factor_ratio_check(extract_csr_diagonal(K),
+                                      copy_diagonal(llt_.matrixL().diagonal()),
+                                      policy_->maxratio),
+          label_);
+#endif
+    spdlog::debug("[cpu-direct] skipping MAXRATIO check for {} because factor "
+                  "diagonal is unavailable",
+                  label_);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] std::string order_text() const {
+#if defined(HAVE_ACCELERATE)
+    return std::format("order={}, ", order_label_);
+#else
+    return {};
+#endif
+  }
+
+  bool require_spd_;
+  std::optional<FactorRatioCheckPolicy> policy_;
+  const char *primary_label_;
+  const char *label_;
+#if defined(HAVE_ACCELERATE)
+  SparseOrder_t order_{SparseOrderMetis};
+  const char *order_label_{"metis"};
+#endif
+  int n_{0};
+  bool lower_only_{false};
+  std::vector<int> row_ptr_, col_ind_;
+  Primary llt_;
+  std::optional<DirectLDLT> ldlt_;
+  bool llt_analyzed_{false}, ldlt_analyzed_{false};
+  bool use_ldlt_{false}, ready_{false};
+  FactorStats stats_;
+};
+
+template <class Primary>
+Result<std::unique_ptr<LinearFactor>> make_direct_factor(const CsrData &K,
+                                                         const FactorOptions &options,
+                                                         const char *label) {
+  auto factor = std::make_unique<EigenDirectFactor<Primary>>(options, label);
+  if (auto e = factor->refactor(K))
+    return *e;
+  return std::unique_ptr<LinearFactor>(std::move(factor));
+}
+
+/// SolverBackend::factor() for backends without a reusable factorization:
+/// each right-hand side is a full solve(K, b).
+class AdaptedFactor final : public LinearFactor {
+public:
+  AdaptedFactor(SolverBackend &backend, const CsrData &K, const FactorOptions &options)
+      : backend_(backend), K_(K) {
+    if (options.factor_ratio_policy != nullptr)
+      policy_ = *options.factor_ratio_policy;
+  }
+
+  [[nodiscard]] int size() const noexcept override { return K_.n; }
+  [[nodiscard]] std::string_view method() const noexcept override { return backend_.name(); }
+  [[nodiscard]] FactorStats stats() const noexcept override { return stats_; }
+
+  [[nodiscard]] Status refactor(const CsrData &K) override {
+    if (auto e = check_matrix(K))
+      return e;
+    if (K.n != K_.n)
+      return Error{std::format("refactor() of a {}-equation factor with a "
+                               "{}-equation matrix",
+                               K_.n, K.n)};
+    K_ = K;
+    return std::nullopt;
+  }
+
+  [[nodiscard]] Result<std::vector<double>> solve(std::span<const double> B,
+                                                  int nrhs) override {
+    if (auto e = check_rhs(K_.n, B, nrhs))
+      return *e;
+    const auto n = static_cast<std::size_t>(K_.n);
+    std::vector<double> X;
+    X.reserve(B.size());
+    for (int k = 0; k < nrhs; ++k) {
+      const auto column = B.subspan(static_cast<std::size_t>(k) * n, n);
+      std::vector<double> x;
+      // Transitional boundary: backend internals still throw, and this is
+      // where those failures become error values (MAGNETICS_ROADMAP.md, S11).
+      try {
+        x = backend_.solve(K_, std::vector<double>(column.begin(), column.end()),
+                           policy_ ? &*policy_ : nullptr);
+      } catch (const std::exception &e) {
+        return Error{std::format("{}: {}", backend_.name(), e.what())};
+      }
+      ++stats_.symbolic_analyses;
+      ++stats_.numeric_factorizations;
+      ++stats_.solves;
+      if (!Eigen::Map<const Eigen::VectorXd>(x.data(), K_.n).allFinite())
+        return Error{std::format("{} produced a nonfinite solution", backend_.name())};
+      X.insert(X.end(), x.begin(), x.end());
+    }
+    return X;
+  }
+
+private:
+  SolverBackend &backend_;
+  CsrData K_;
+  std::optional<FactorRatioCheckPolicy> policy_;
+  FactorStats stats_;
+};
+
+} // namespace
+
+Result<std::unique_ptr<LinearFactor>>
+SolverBackend::factor(const CsrData &K, const FactorOptions &options) {
+  if (options.require_spd && may_factor_indefinite())
+    return Error{std::format("{} may fall back to an indefinite factorization, "
+                             "so it cannot provide the positive definite "
+                             "factorization required here",
+                             name())};
+  if (auto e = check_matrix(K))
+    return *e;
+  return std::unique_ptr<LinearFactor>(std::make_unique<AdaptedFactor>(*this, K, options));
+}
+
+Result<std::unique_ptr<LinearFactor>>
+EigenSolverBackend::factor(const CsrData &K, const FactorOptions &options) {
+  // Priority: Apple Accelerate (macOS) > SuiteSparse CHOLMOD (Linux) >
+  // SimplicialLLT.
+#if defined(HAVE_ACCELERATE)
+  return make_direct_factor<Eigen::AccelerateLLT<ESM>>(K, options, "accelerate-llt");
+#elif defined(EIGEN_CHOLMOD_SUPPORT)
+  // CholmodDecomposition may choose a simplicial LDL^T, which accepts
+  // indefinite matrices, so require_spd uses the supernodal LL^T.
+  if (options.require_spd)
+    return make_direct_factor<Eigen::CholmodSupernodalLLT<ESM>>(K, options,
+                                                                "cholmod-llt");
+  return make_direct_factor<Eigen::CholmodDecomposition<ESM>>(K, options, "cholmod");
+#else
+  return make_direct_factor<Eigen::SimplicialLLT<ESM>>(K, options, "simplicial-llt");
+#endif
+}
+
+std::vector<double>
+EigenSolverBackend::solve(const CsrData &K_csr, const std::vector<double> &F,
+                          const FactorRatioCheckPolicy *factor_ratio_policy) {
   const int n = K_csr.n;
   if (n == 0)
     throw SolverError("Stiffness matrix is empty — no free DOFs");
@@ -142,232 +446,32 @@ EigenSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr,
     throw SolverError(
         std::format("Force vector size {} != matrix size {}", F.size(), n));
 
-  // Map CsrData arrays directly into an Eigen RowMajor sparse matrix.
-  // No copies: Eigen::Map references the existing vectors in-place.
-  using ESMR = Eigen::SparseMatrix<double, Eigen::RowMajor>;
-  Eigen::Map<const ESMR> K_row(
-      n, n, K_csr.nnz,
-      K_csr.row_ptr.data(),
-      K_csr.col_ind.data(),
-      K_csr.values.data());
+  FactorOptions options;
+  options.factor_ratio_policy = factor_ratio_policy;
+  auto factored = factor(K_csr, options);
+  if (auto *e = std::get_if<Error>(&factored))
+    throw SolverError(e->message);
+  LinearFactor &factor = *std::get<std::unique_ptr<LinearFactor>>(factored);
+  const auto solve_one = [&factor](std::span<const double> b) {
+    auto x = factor.solve(b);
+    if (auto *e = std::get_if<Error>(&x))
+      throw SolverError(e->message);
+    return std::get<std::vector<double>>(std::move(x));
+  };
 
-  const bool lower_only = K_csr.stores_lower_triangle_only();
-
-  // Convert to a compressed column-major matrix, then factorize only the lower
-  // triangle. This keeps the direct path aligned with symmetric storage even
-  // when a caller passed a full mirrored matrix.
-  using ESM = Eigen::SparseMatrix<double>;
-  const auto t_convert_begin = Clock::now();
-  ESM K_input(K_row);
-  K_input.makeCompressed();
-  const auto t_convert_end = Clock::now();
-  const int input_nnz = static_cast<int>(K_input.nonZeros());
-
-  const auto t_lower_begin = Clock::now();
-  ESM K;
-  if (lower_only) {
-    K = std::move(K_input);
-  } else {
-    K = ESM(K_input.template triangularView<Eigen::Lower>());
-    K.makeCompressed();
-  }
-  const auto t_lower_end = Clock::now();
-#if !defined(HAVE_ACCELERATE)
-  const std::vector<double> matrix_diag = extract_csr_diagonal(K_csr);
-#endif
-
-  // Map force vector
-  Eigen::Map<const Eigen::VectorXd> F_eigen(F.data(), n);
-
-  // Factorize and solve.
-  // Priority: Apple Accelerate (macOS) > SuiteSparse CHOLMOD (Linux) > SimplicialLLT.
-  // Each tier falls back to LDLT for near-singular / mildly indefinite systems.
-#if defined(HAVE_ACCELERATE)
-  const auto order_cfg = accelerate_order_config();
-  const char *backend_label = "accelerate-llt";
-  Eigen::AccelerateLLT<ESM> solver;
-  solver.setOrder(order_cfg.order);
-  const auto t_compute_begin = Clock::now();
-  solver.compute(K);
-  const auto t_compute_end = Clock::now();
-  if (solver.info() != Eigen::Success) {
-    backend_label = "accelerate-ldlt";
-    Eigen::AccelerateLDLT<ESM> ldlt;
-    ldlt.setOrder(order_cfg.order);
-    const auto t_fallback_compute_begin = Clock::now();
-    ldlt.compute(K);
-    const auto t_fallback_compute_end = Clock::now();
-    if (ldlt.info() != Eigen::Success)
-      throw SolverError(
-          "Stiffness matrix factorization failed (Accelerate + LDLT fallback) — "
-          "check boundary conditions (SPCs)");
-    if (factor_ratio_policy != nullptr) {
-      spdlog::debug(
-          "[cpu-direct] skipping MAXRATIO check for {} because factor diagonal "
-          "is unavailable",
-          backend_label);
-    }
-    const auto t_fallback_solve_begin = Clock::now();
-    Eigen::VectorXd u = ldlt.solve(F_eigen);
-    const auto t_fallback_solve_end = Clock::now();
-    if (ldlt.info() != Eigen::Success)
-      throw SolverError("Back-substitution failed (Accelerate LDLT fallback)");
-    spdlog::debug(
-        "[cpu-direct] backend={}, order={}, storage={}, n={}, nnz(input)={}, nnz(lower)={}, "
-        "convert CSR->Eigen: {:.3f} ms, build lower: {:.3f} ms, failed LLT attempt: {:.3f} ms, "
-        "fallback factorization: {:.3f} ms, fallback solve: {:.3f} ms",
-        backend_label, order_cfg.label, lower_only ? "lower" : "full", n, input_nnz, K.nonZeros(),
-        Ms(t_convert_end - t_convert_begin).count(),
-        Ms(t_lower_end - t_lower_begin).count(),
-        Ms(t_compute_end - t_compute_begin).count(),
-        Ms(t_fallback_compute_end - t_fallback_compute_begin).count(),
-        Ms(t_fallback_solve_end - t_fallback_solve_begin).count());
-    return refine_direct(K_csr, F, u, ldlt, last_refinement_, refine_);
-  }
-  if (factor_ratio_policy != nullptr) {
-    spdlog::debug(
-        "[cpu-direct] skipping MAXRATIO check for {} because factor diagonal "
-        "is unavailable",
-        backend_label);
-  }
-  const auto t_solve_begin = Clock::now();
-  Eigen::VectorXd u = solver.solve(F_eigen);
-  const auto t_solve_end = Clock::now();
-  if (solver.info() != Eigen::Success)
-    throw SolverError("Back-substitution failed (Accelerate)");
-  spdlog::debug(
-      "[cpu-direct] backend={}, order={}, storage={}, n={}, nnz(input)={}, nnz(lower)={}, "
-      "convert CSR->Eigen: {:.3f} ms, build lower: {:.3f} ms, factorization: {:.3f} ms, solve: {:.3f} ms",
-      backend_label, order_cfg.label, lower_only ? "lower" : "full", n, input_nnz, K.nonZeros(),
-      Ms(t_convert_end - t_convert_begin).count(),
-      Ms(t_lower_end - t_lower_begin).count(),
-      Ms(t_compute_end - t_compute_begin).count(),
-      Ms(t_solve_end - t_solve_begin).count());
-#elif defined(EIGEN_CHOLMOD_SUPPORT)
-  const char *backend_label = "cholmod";
-  Eigen::CholmodDecomposition<ESM> solver;
-  const auto t_compute_begin = Clock::now();
-  solver.compute(K);
-  const auto t_compute_end = Clock::now();
-  if (solver.info() != Eigen::Success) {
-    // Cholesky failed (matrix not numerically PD) — fall back to LDLT which
-    // handles near-singular and mildly indefinite systems.
-    backend_label = "simplicial-ldlt";
-    Eigen::SimplicialLDLT<ESM> ldlt;
-    const auto t_fallback_compute_begin = Clock::now();
-    ldlt.compute(K);
-    const auto t_fallback_compute_end = Clock::now();
-    if (ldlt.info() != Eigen::Success)
-      throw SolverError(
-          "Stiffness matrix factorization failed (CHOLMOD + LDLT fallback) — "
-          "check boundary conditions (SPCs)");
-    if (factor_ratio_policy != nullptr) {
-      report_factor_ratio_result(
-          *factor_ratio_policy,
-          evaluate_factor_ratio_check(matrix_diag, copy_diagonal(ldlt.vectorD()),
-                                      factor_ratio_policy->maxratio),
-          backend_label);
-    }
-    const auto t_fallback_solve_begin = Clock::now();
-    Eigen::VectorXd u = ldlt.solve(F_eigen);
-    const auto t_fallback_solve_end = Clock::now();
-    if (ldlt.info() != Eigen::Success)
-      throw SolverError("Back-substitution failed (LDLT fallback)");
-    spdlog::debug(
-        "[cpu-direct] backend={}, storage={}, n={}, nnz(input)={}, nnz(lower)={}, "
-        "convert CSR->Eigen: {:.3f} ms, build lower: {:.3f} ms, failed CHOLMOD attempt: {:.3f} ms, "
-        "fallback factorization: {:.3f} ms, fallback solve: {:.3f} ms",
-        backend_label, lower_only ? "lower" : "full", n, input_nnz, K.nonZeros(),
-        Ms(t_convert_end - t_convert_begin).count(),
-        Ms(t_lower_end - t_lower_begin).count(),
-        Ms(t_compute_end - t_compute_begin).count(),
-        Ms(t_fallback_compute_end - t_fallback_compute_begin).count(),
-        Ms(t_fallback_solve_end - t_fallback_solve_begin).count());
-    return refine_direct(K_csr, F, u, ldlt, last_refinement_, refine_);
-  }
-  if (factor_ratio_policy != nullptr) {
-    spdlog::debug(
-        "[cpu-direct] skipping MAXRATIO check for {} because factor diagonal "
-        "is unavailable",
-        backend_label);
-  }
-  const auto t_solve_begin = Clock::now();
-  Eigen::VectorXd u = solver.solve(F_eigen);
-  const auto t_solve_end = Clock::now();
-  if (solver.info() != Eigen::Success)
-    throw SolverError("Back-substitution failed (CHOLMOD)");
-  spdlog::debug(
-      "[cpu-direct] backend={}, storage={}, n={}, nnz(input)={}, nnz(lower)={}, "
-      "convert CSR->Eigen: {:.3f} ms, build lower: {:.3f} ms, factorization: {:.3f} ms, solve: {:.3f} ms",
-      backend_label, lower_only ? "lower" : "full", n, input_nnz, K.nonZeros(),
-      Ms(t_convert_end - t_convert_begin).count(),
-      Ms(t_lower_end - t_lower_begin).count(),
-      Ms(t_compute_end - t_compute_begin).count(),
-      Ms(t_solve_end - t_solve_begin).count());
-#else
-  const char *backend_label = "simplicial-llt";
-  Eigen::SimplicialLLT<ESM> solver;
-  const auto t_compute_begin = Clock::now();
-  solver.compute(K);
-  const auto t_compute_end = Clock::now();
-  if (solver.info() != Eigen::Success) {
-    // Fall back to LDLT which is more robust for near-singular systems
-    backend_label = "simplicial-ldlt";
-    Eigen::SimplicialLDLT<ESM> ldlt;
-    const auto t_fallback_compute_begin = Clock::now();
-    ldlt.compute(K);
-    const auto t_fallback_compute_end = Clock::now();
-    if (ldlt.info() != Eigen::Success)
-      throw SolverError(
-          "Stiffness matrix factorization failed — check boundary conditions");
-    if (factor_ratio_policy != nullptr) {
-      report_factor_ratio_result(
-          *factor_ratio_policy,
-          evaluate_factor_ratio_check(matrix_diag, copy_diagonal(ldlt.vectorD()),
-                                      factor_ratio_policy->maxratio),
-          backend_label);
-    }
-    const auto t_fallback_solve_begin = Clock::now();
-    Eigen::VectorXd u = ldlt.solve(F_eigen);
-    const auto t_fallback_solve_end = Clock::now();
-    if (ldlt.info() != Eigen::Success)
-      throw SolverError("Back-substitution failed");
-    spdlog::debug(
-        "[cpu-direct] backend={}, storage={}, n={}, nnz(input)={}, nnz(lower)={}, "
-        "convert CSR->Eigen: {:.3f} ms, build lower: {:.3f} ms, failed LLT attempt: {:.3f} ms, "
-        "fallback factorization: {:.3f} ms, fallback solve: {:.3f} ms",
-        backend_label, lower_only ? "lower" : "full", n, input_nnz, K.nonZeros(),
-        Ms(t_convert_end - t_convert_begin).count(),
-        Ms(t_lower_end - t_lower_begin).count(),
-        Ms(t_compute_end - t_compute_begin).count(),
-        Ms(t_fallback_compute_end - t_fallback_compute_begin).count(),
-        Ms(t_fallback_solve_end - t_fallback_solve_begin).count());
-    return refine_direct(K_csr, F, u, ldlt, last_refinement_, refine_);
-  }
-  if (factor_ratio_policy != nullptr) {
-    report_factor_ratio_result(
-        *factor_ratio_policy,
-        evaluate_factor_ratio_check(matrix_diag,
-                                    copy_diagonal(solver.matrixL().diagonal()),
-                                    factor_ratio_policy->maxratio),
-        backend_label);
-  }
-  const auto t_solve_begin = Clock::now();
-  Eigen::VectorXd u = solver.solve(F_eigen);
-  const auto t_solve_end = Clock::now();
-  if (solver.info() != Eigen::Success)
-    throw SolverError("Back-substitution failed");
-  spdlog::debug(
-      "[cpu-direct] backend={}, storage={}, n={}, nnz(input)={}, nnz(lower)={}, "
-      "convert CSR->Eigen: {:.3f} ms, build lower: {:.3f} ms, factorization: {:.3f} ms, solve: {:.3f} ms",
-      backend_label, lower_only ? "lower" : "full", n, input_nnz, K.nonZeros(),
-      Ms(t_convert_end - t_convert_begin).count(),
-      Ms(t_lower_end - t_lower_begin).count(),
-      Ms(t_compute_end - t_compute_begin).count(),
-      Ms(t_solve_end - t_solve_begin).count());
-#endif
-
-  return refine_direct(K_csr, F, u, solver, last_refinement_, refine_);
+  std::vector<double> u = solve_one(F);
+  last_refinement_.reset();
+  if (!refine_)
+    return u;
+  // Refine with the same factorization (one triangular solve per correction)
+  // and compensated residuals.
+  last_refinement_ = refine_solution(K_csr, F, u, solve_one);
+  spdlog::debug("[cpu-direct] iterative refinement: {} correction(s), estimated relative "
+                "error {:.2e} -> {:.2e}, backward error {:.2e}{}",
+                last_refinement_->corrections, last_refinement_->initial_error,
+                last_refinement_->estimated_error, last_refinement_->backward_error,
+                last_refinement_->converged ? "" : " (not converged)");
+  return u;
 }
 
 
@@ -375,8 +479,6 @@ std::vector<double>
 EigenPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K_csr,
                               const std::vector<double>& F,
                               const FactorRatioCheckPolicy*) {
-  using Clock = std::chrono::steady_clock;
-  using Ms = std::chrono::duration<double, std::milli>;
 
   const int n = K_csr.n;
   if (n == 0)
@@ -387,8 +489,6 @@ EigenPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K_csr,
 
   const bool lower_only = K_csr.stores_lower_triangle_only();
 
-  using ESMR = Eigen::SparseMatrix<double, Eigen::RowMajor>;
-  using ESM = Eigen::SparseMatrix<double>;
   Eigen::Map<const ESMR> K_row(
       n, n, K_csr.nnz,
       K_csr.row_ptr.data(),

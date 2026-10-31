@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/result.hpp"
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <array>
@@ -15,11 +16,10 @@ namespace vibestran::magnetic {
 using Vector = Eigen::Vector3d;
 using Matrix = Eigen::Matrix3d;
 inline constexpr double mu0 = 1.2566370614359172954e-6;
-struct Error {
-  std::string message;
-};
-template <class T> using Result = std::variant<T, Error>;
-using Status = std::optional<Error>;
+// The magnetic API reports failures with the core error values.
+using vibestran::Error;
+using vibestran::Result;
+using vibestran::Status;
 
 // MATMAG: constitutive data only. A table and MUR are mutually exclusive;
 // br is the remanence magnitude, directed by the referencing Property.

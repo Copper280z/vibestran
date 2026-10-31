@@ -8,9 +8,12 @@
 //   - VulkanSolverBackend (compute shader Cholesky)
 // without touching the FE assembly code.
 
+#include "core/result.hpp"
 #include "core/sparse_matrix.hpp"
 #include "solver/iterative_refinement.hpp"
+#include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 #include <string_view>
 
@@ -18,12 +21,72 @@ namespace vibestran {
 
 struct FactorRatioCheckPolicy;
 
+/// Options for SolverBackend::factor().
+struct FactorOptions {
+    /// Report a matrix that is not numerically positive definite as an error
+    /// instead of falling back to an indefinite (LDLT or LU) factorization.
+    bool require_spd{false};
+    /// PARAM,MAXRATIO check of the factor diagonal, applied where the backend
+    /// can inspect it. Copied by factor(); it need not outlive the call.
+    const FactorRatioCheckPolicy* factor_ratio_policy{nullptr};
+};
+
+/// Work done by a LinearFactor since it was created.
+struct FactorStats {
+    int symbolic_analyses{0};
+    int numeric_factorizations{0};
+    int solves{0}; ///< right-hand sides solved
+};
+
+/// A factorization of a symmetric matrix K, from SolverBackend::factor().
+/// It solves any number of right-hand sides and can be refactored with new
+/// values. The symbolic analysis (ordering and symbolic factor) is reused
+/// while the sparsity pattern is unchanged.
+class LinearFactor {
+public:
+    virtual ~LinearFactor() = default;
+
+    /// Number of equations.
+    [[nodiscard]] virtual int size() const noexcept = 0;
+
+    /// Replace the factorization with that of K, which must have the same
+    /// size. The symbolic analysis is kept when K has the pattern of the
+    /// matrix last factored and is redone otherwise. On error the factor
+    /// cannot solve until a refactor() succeeds.
+    [[nodiscard]] virtual Status refactor(const SparseMatrixBuilder::CsrData& K) = 0;
+
+    /// Solve K X = B for nrhs right-hand sides stored column by column in B
+    /// (size() * nrhs values). Returns X in the same layout. A nonfinite
+    /// solution is an error.
+    [[nodiscard]] virtual Result<std::vector<double>> solve(std::span<const double> B,
+                                                            int nrhs = 1) = 0;
+
+    /// The factorization in use, e.g. "accelerate-llt" or "simplicial-ldlt".
+    [[nodiscard]] virtual std::string_view method() const noexcept = 0;
+
+    [[nodiscard]] virtual FactorStats stats() const noexcept = 0;
+};
+
 /// Abstract interface for linear system solvers: K * u = F
 class SolverBackend {
 public:
     virtual ~SolverBackend() = default;
 
-    /// Solve K*u = F.
+    /// Factor K for repeated solves. The default adapts solve(): it keeps a
+    /// copy of K and calls solve(K, b) for each right-hand side, converting
+    /// exceptions to errors, so it works with every backend but reuses no
+    /// work. Backends with a reusable factorization override it. The factor
+    /// may refer to this backend, which must outlive it.
+    [[nodiscard]] virtual Result<std::unique_ptr<LinearFactor>> factor(
+        const SparseMatrixBuilder::CsrData& K, const FactorOptions& options = {});
+
+    /// True when solve() may fall back to an indefinite factorization (such
+    /// as LU) instead of failing. The default factor() then refuses
+    /// FactorOptions::require_spd, because it cannot prevent the fallback.
+    [[nodiscard]] virtual bool may_factor_indefinite() const noexcept { return false; }
+
+    /// Solve K*u = F. Throws SolverError on failure; factor() reports the
+    /// same failures as error values.
     /// K is provided as CSR data (from SparseMatrixBuilder::build_csr()).
     /// factor_ratio_policy applies PARAM,MAXRATIO to backends that can inspect
     /// the diagonal of the actual factorization; unsupported backends ignore it.
@@ -74,6 +137,12 @@ public:
 /// cond(K) eps approaches 1.
 class EigenSolverBackend final : public SolverBackend {
 public:
+    /// Analyzes the pattern once and reuses it in refactor(). Without
+    /// require_spd, a matrix that is not positive definite falls back to
+    /// LDLT, as solve() does.
+    [[nodiscard]] Result<std::unique_ptr<LinearFactor>> factor(
+        const SparseMatrixBuilder::CsrData& K, const FactorOptions& options = {}) override;
+
     void set_refinement(bool enabled) noexcept override { refine_ = enabled; }
 
     [[nodiscard]] std::optional<RefinementReport> last_refinement() const noexcept override {
