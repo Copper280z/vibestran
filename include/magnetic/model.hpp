@@ -108,16 +108,28 @@ struct Combination {
   std::vector<std::pair<double, int>> terms;
 };
 // Case-control output requests. BFIELD writes all, no, or one ESET's cells
-// to the subcase VTU; MPROBE controls the subcase's probe CSV rows.
+// to the subcase's VTKHDF block; MPROBE controls the subcase's probe rows.
 struct FieldOutput {
   bool enabled{true};
-  int set{0}; // 0: every cell
+  int set{0};   // 0: every cell
+  int every{1}; // BFIELD(EVERY=n): every n-th MOTION position, from the first
 };
 struct Subcase {
   int id{1}, load{0}, boundary{0};
+  int motion{0}; // MOTION ID; 0 for a single static solve
   std::string label;
   FieldOutput field;
   bool probes{true};
+  bool steps{false}; // MSTEP = ALL: per-position tables for a MOTION subcase
+};
+// MOTION: rigid rotation of the cells of ESET set about the z axis of
+// coordinates, through its origin, to the positions start + k * step degrees
+// (k = 0 .. count - 1) relative to the mesh as given. Positive angles turn
+// the cells counterclockwise looking down the z axis.
+struct Motion {
+  int id{0}, set{0}, coordinates{0}, count{1};
+  double start{0}, step{0}; // degrees
+  [[nodiscard]] double position(int k) const { return start + k * step; }
 };
 struct Boundary {
   int faces{0};
@@ -184,6 +196,7 @@ struct Model {
   // into ordinary air properties, and kept here only to be reported.
   std::map<int, AirGapProperty> air_gaps;
   std::map<int, std::string> meshed_air_gaps; // PID -> what selected MESH
+  std::map<int, Motion> motions;
   Options options;
 };
 

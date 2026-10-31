@@ -74,6 +74,7 @@ in the deck, overriding the cards ([Air gap](#air-gap-pairgap)).
 | `MAG2D` | `CID,DEPTH` (one card activates planar mode; CID=0 uses basic z) |
 | `PMAG2D` | `PID,MID,CID,AXIS` (planar magnetic property; orientation as PMAG) |
 | `PAIRGAP` | `PID,METHOD,NHARM` (planar air-gap property; METHOD `AGE` or `MESH`; see [Air gap](#air-gap-pairgap)) |
+| `MOTION` | `ID,ESET,CID,ROTATE,START,STEP,COUNT` (planar rotation of ESET through the air gap, degrees; see [Motion](#motion-motion)) |
 | `COIL2D` | `ID,ESET,SIGNED_TURNS` (one planar winding region; ID unique) |
 | `PSOLID` | `PID,MID,CORDM` (CORDM orients remanence along its axis 1) |
 | `PMAG` | `PID,MID,CID,AXIS` (3D magnetic property with a signed orientation axis) |
@@ -93,8 +94,9 @@ in the deck, overriding the cards ([Air gap](#air-gap-pairgap)).
 | `MPROBE` | `ID,CP,X1,X2,X3,CD` (GRID layout; field also reported in CD axes) |
 | `MFORCE` | `ID,FACES,FSET,CID` or `ID,BODY,ESET,CID,LAYER` (torque about CID origin) |
 
-Case control accepts `LOAD`, `MAGBC`, `BFIELD`, `MPROBE`, `MSOURCE`, `LABEL`,
-`TITLE`, `SUBTITLE` and `SUBCASE`. Global LOAD/MAGBC settings are inherited by
+Case control accepts `LOAD`, `MAGBC`, `BFIELD`, `MPROBE`, `MSOURCE`, `MOTION`,
+`MSTEP`, `LABEL`, `TITLE`, `SUBTITLE` and `SUBCASE`; `BFIELD` takes the
+describer `(EVERY=n)` for MOTION subcases. Global settings are inherited by
 subcases. Unexcited subcases can
 solve permanent magnets alone. Nested LOAD combinations are additive; cycles
 and undefined sets fail. Positive source current follows the source's stated
@@ -441,16 +443,39 @@ planar mesh must be one connected domain, through its elements and the AGE.
 A rotor and stator with no elements between them are rejected, with a hint
 to mesh the gap and give it a PAIRGAP property.
 
+**How the AGE works.** The potential on each circle is the piecewise-linear
+trace of its grids' nodal values. Closed-form transforms of the hat
+functions give the trace's Fourier coefficients exactly: α on the inner
+circle and β on the outer. Uneven spacing is allowed. Inside the annulus the
+field solves Laplace's equation with those traces. Its energy per unit depth
+separates by harmonic, with ρ = r₁/r₂ < 1:
+
+- **Mean term:** W₀ = π (α₀ − β₀)² / (μ₀ ln(r₂/r₁)).
+- **Harmonic n ≥ 1:**
+  W_n = πn / (2μ₀ (1 − ρ²ⁿ)) · [(1 + ρ²ⁿ)(α_c² + α_s² + β_c² + β_s²) − 4ρⁿ (α_c β_c + α_s β_s)],
+  where c and s are the harmonic's cosine and sine coefficients.
+
+The first bracket is each circle's self energy. It depends only on each
+circle's amplitude in that harmonic, √(α_c² + α_s²), not its phase. The
+second is the inner-to-outer coupling, which depends on the two circles'
+relative phase. Summed to NHARM and mapped back through the transforms,
+these terms form a dense, symmetric stiffness block on the circle grids. It
+is linear, so it adds the same term to every Newton tangent. The energy is
+exact for the gap given the traces, so discretization error stays in the
+meshed regions. The torque on the inner part is −dW/dδ for a rigid turn δ of
+its trace, which acts only on the coupling term (see Results below).
+
 **What each method guarantees.** These hold for every deck, and the test
-suite (`tests/unit/test_air_gap.cpp`) checks each on a magnet rotor in a
-saturating stator with a winding:
+suite (`tests/unit/test_air_gap.cpp`, `tests/unit/test_motion.cpp`) checks
+each on a magnet rotor in a saturating stator with a winding:
 
 | Comparison | Result |
 |---|---|
 | `PAIRGAP,PID,MESH`, `PARAM,AIRGAP,MESH`, and the deck with PAIRGAP replaced by MATMAG + PMAG2D air | The same equations. Every result (potentials, energies, B, H, probes, linkage, inductance, force, torque, Newton iterations) is bitwise identical with a deterministic linear solver. The default multithreaded sparse factorization varies in its last bits from run to run on any deck, so with it the three agree to round-off (measured 6e-16 in energy). |
 | AGE against MESH on the same gap mesh | Two discretizations of the same gap, not identical. Both converge to one solution, and their difference falls at O(h²) in energy, linkage and inductance. |
 | AGE against an analytic magnetized rotor | O(h²) in the gap field and in the magnet. The AGE adds no error of its own for the piecewise-linear traces it receives; the meshed parts set the error. |
-| MOTION at angle φ (planned) against a static solve of the rotor rotated by φ | The same to round-off. |
+| AGE torque against Maxwell stress on the same gap solved as MESH | Two discretizations of one torque; with a well-formed meshed gap they agree to 7e-4 at 48 divisions and converge faster than O(h²) (see the torque cross-check under [Motion](#motion-motion)). |
+| MOTION at angle φ against the static deck rotated by φ | The same model, solved from a different Newton start: round-off with linear materials, Newton's tolerance with B–H curves. See [Motion](#motion-motion). |
 
 Measured convergence, for a 20 mm rotor in a 1 mm gap with a 40 mm stator:
 
@@ -475,6 +500,13 @@ the two is the discretization error of the gap, and it shrinks as the
 circles are refined. A meshed gap needs several element layers to be
 accurate (see MFORCE below); the AGE does not, so a deck meant for the AGE
 can carry a single layer and be refined in the gap only for the cross-check.
+To cross-check torque, give the MESH run an `MFORCE BODY` on the rotor whose
+surface runs between two rings of quads in the middle of the gap (four gap
+layers and `LAYER=2`, for example). Maxwell stress on a surface against a
+band of distorted triangles is poor: with two gap layers, the second a band
+of triangles between different grid counts, it was 52% off the AGE torque at
+48 divisions and converged only at first order, while four layers agreed to
+7e-4.
 In a thin gap, give the two circles similar grid spacing: the energy depends
 on the difference between the two traces, amplified by about radius / gap.
 
@@ -495,15 +527,212 @@ $ PARAM,AIRGAP,MESH  $ uncomment to solve the same band as meshed air
 including probes between the rotor's outermost element edges and its circle.
 The F06 SOLUTION section has an `Air gap` row: the PAIRGAP ID, the number of
 gap elements replaced, the radii, center, grid counts, harmonics and worst
-radial deviation. The HDF5 results have an `air_gap` group. Under the AGE the
-VTKHDF field blocks contain the field cells only; the gap elements are not in
-them. Under MESH the gap elements are ordinary field cells.
+radial deviation. The HDF5 results have an `air_gap` group.
+
+Each subcase reports the **air-gap torque**: the torque on the part inside
+the gap about the plane normal through the gap's center, N m including
+DEPTH (`Air-gap torque on the part inside the gap` in the F06,
+`air_gap_torque_Nm` in the HDF5 subcase). The part outside takes the
+opposite torque. It is the derivative of the gap energy with respect to a
+rigid turn of the inner part, closed-form in the harmonics, and equals the
+Maxwell stress torque on any circle in the annulus.
+
+A `BFIELD=ALL` VTKHDF block draws the gap elements after the field cells,
+with the AGE's own field: B at each element's centroid, H = B/μ0, and A at
+its grids from the harmonic series. On the circles that series is the
+truncated harmonics of the nodal trace, so it differs slightly from the
+neighbouring cells' nodal values. An ESET block holds field cells only.
+Under MESH the gap elements are ordinary field cells.
 
 **Limits.** MBC does not apply to the AGE's circles, and MFORCE surfaces may
-not touch them, so rotor torque is not yet available with the AGE (use MESH
-for torque until MOTION reports it). The planned `MOTION` card will rotate
-the rotor through the AGE and report its torque. 3D models mesh their air
-gap with ordinary air elements; PAIRGAP is planar only.
+not touch them; the AGE gives the rotor torque instead. A model has one AGE
+gap. 3D models mesh their air gap with ordinary air elements; PAIRGAP is
+planar only.
+
+### Motion (MOTION)
+
+A planar model with an AGE air gap can turn its rotor through a sweep of
+positions in one run. Name the moving elements with an ESET, describe the
+sweep with `MOTION`, and set `MOTION = ID` in a subcase:
+
+```text
+MOTION,ID,ESET,CID,TYPE,START,STEP,COUNT
+,SPEED
+```
+
+| Field | Meaning |
+|---|---|
+| `ID` | Referenced by the case control `MOTION = ID`. |
+| `ESET` | The moving elements: the rotor, or the stator of an outer-rotor machine. `ESET,SID,PROP,PID...` suits meshes exported by physical group. It may not hold air-gap elements. |
+| `CID` | The axis is the z axis of CID through its origin; 0 is basic z through the basic origin. It must be parallel to the MAG2D plane normal, in either direction. |
+| `TYPE` | `ROTATE`. `TRANSLATE` is reserved for linear motion along the CID x axis and is an error for now (see below). |
+| `START`, `STEP`, `COUNT` | Positions `START + k*STEP` degrees for k = 0 … COUNT−1, relative to the mesh as given. Positive angles turn counterclockwise looking down the CID z axis. COUNT ≥ 1 (blank is 1); STEP must be nonzero when COUNT > 1. |
+| `SPEED` | Reserved for the rotor speed (rpm), which will scale back-EMF. It must be blank for now (see below). |
+
+**Reserved fields.** `TRANSLATE` and `SPEED` are part of the card so decks
+keep one layout as the features arrive, but each is an error until it can
+take effect. A field that is accepted but changes nothing would leave a deck
+that reads as solved but was not. `TRANSLATE` needs a different air-gap
+element: the AGE is the exact field of an annulus, and a gap that slides in
+a straight line needs the field of a periodic strip. `SPEED` is used only for
+back-EMF, the rate of change of linkage, which is
+EMF = (dλ/dφ)·ω. That needs phase currents that follow the rotor, which
+arrive with `DRIVE`. A sweep at fixed current has no speed: every position
+is a static solve.
+
+**What moves.** Every grid of a moving element turns rigidly about the axis.
+Everything defined on the moving elements turns with them: magnetization
+(each moving magnet's PMAG2D frame, rectangular or cylindrical, turns with
+the magnet), COIL2D regions and MFORCE surfaces. Probes stay where they are
+in space, so a gap probe sees the rotor go by. The stator, the exterior
+boundary and MBC stay fixed. The gap elements are not moved: they only mark
+the region, and the AGE does not use their shape, so they may shear or fold.
+
+**What is checked.** Each failure is an error naming the MOTION and the
+grid, element, circle or distance involved:
+
+1. The model is MAG2D and has a PAIRGAP solved by the AGE. Under
+   `PARAM,AIRGAP,MESH` or `METHOD=MESH` the gap is meshed air, which cannot
+   slide, and MOTION is an error that says so.
+2. No grid belongs to both a moving and a fixed element: the moving and
+   fixed parts meet only across the air gap.
+3. The moving elements border exactly one of the gap's circles (the inner
+   one for a rotor, the outer one for an outer rotor), and the fixed
+   elements the other.
+4. The axis passes through the gap's center, to 1e-6 of the outer radius,
+   and is parallel to the plane normal.
+
+**How a position is solved.** Each position is a static model: the deck
+the analyst would write by hand for that angle. For position φ the solver
+copies the model and makes two changes:
+- it turns every grid of the moving elements by φ about the axis;
+- it turns each moving magnet's PMAG2D frame by φ, as a new coordinate
+  system.
+
+If fixed elements also use the magnetized property, the moving elements get
+a new PID with the turned frame, and the fixed ones keep the original. The
+new coordinate systems and PIDs exist only inside the solver: results report
+the deck's own IDs. The turned model is then solved by the same code as a
+static subcase. Sources, probes, MFORCE surfaces and the AGE need no
+motion-specific path.
+
+**How the air-gap element sees the rotation.** Only through the moving
+circle. Turning that circle's grids by φ adds φ to each grid's angle. The
+hat-function transform of the trace then turns each harmonic's (cos, sin)
+pair by nφ. In the harmonic energy W_n (under "How the AGE works" in
+[Air gap](#air-gap-pairgap)), the self terms depend only on each circle's
+amplitude, which a rotation does not change, so only the inner-to-outer
+coupling term changes. Solving the turned deck is
+therefore the same as holding the mesh still and rotating each harmonic's
+coupling by nφ. Building the turned model makes this hold by construction,
+with no second implementation of the AGE to keep consistent. Every position
+has the same elements and connectivity, so the same sparsity pattern. The
+tangent keeps the pattern and only refactors at a new position, so the
+factorization's symbolic analysis runs once per run (the F06
+`Tangent reuse` row counts it).
+
+**Where Newton starts, and what it means for the result.** Each position
+starts Newton from the previous position's potential. Neighbouring
+positions have nearby solutions, so a saturated sweep needs fewer
+iterations. The start is the only difference between a MOTION position and
+the same deck turned by hand, which starts from zero. It sets how closely
+the two agree:
+- **Linear materials:** the tangent is the system matrix, so Newton's first
+  step solves it exactly from any start. They agree to round-off.
+- **B–H curves:** Newton stops once the relative residual is below `MAGTOL`.
+  Two starts stop at two points, both within that tolerance of the
+  solution. They agree to Newton's tolerance, not to round-off, and a
+  smaller `MAGTOL` brings them closer.
+
+A position that does not converge from the previous solution is retried
+from zero, then by current continuation, as a static subcase is.
+
+**Torque.** At each position the AGE gives the torque on the moving part
+about the MOTION axis, positive in the direction of positive positions:
+the air-gap torque above, with its sign taken for the moving side and the
+axis direction. It is exactly the derivative of the solved model's coenergy
+with respect to the position at fixed current.
+
+| Case control | Values | Default | Meaning |
+|---|---|---|---|
+| `MOTION` | ID | none | The subcase solves every position of MOTION ID, with its LOAD and MAGBC at each. |
+| `MSTEP` | `ALL` / `NONE` | `NONE` | Per-position tables in the F06 and HDF5. Summaries are always written. |
+| `BFIELD(EVERY=n)` | `ALL` / `NONE` / ESET | every position | Field output at every n-th position, from the first. |
+
+All three may be global or set per subcase, like the other requests;
+`MSTEP` and `EVERY` affect only MOTION subcases.
+
+**What MOTION guarantees.** Take the MOTION and PAIRGAP cards out and the
+deck still runs: a static deck rotated by hand to any position, with the
+gap as meshed air or with PAIRGAP restored, is the analyst's check on what
+MOTION did. The test suite checks each of these:
+
+| Comparison | Result |
+|---|---|
+| MOTION at angle φ against the static deck with the rotor grids and magnet frame turned by φ and no MOTION card | The same model. The only difference is Newton's start (the previous position against zero), so they agree to round-off with linear materials (measured 1e-13 in energy, coenergy, linkage, inductance, torque and probes) and to Newton's tolerance with B–H curves (measured at most 2e-8 relative in differential inductance, 4e-10 in energy and 3e-9 in torque, with a 1e-8 relative residual). |
+| Torque against the coenergy | The torque is the derivative of the coenergy at fixed current: a central difference over ±0.05° agrees to 1.3e-7 with linear iron (the difference's own truncation) and 3.5e-6 with saturated iron (Newton's tolerance in the coenergy). |
+| A magnet rotor (Br 1 T, μr 1) in a uniform 0.3 T field held by MBC, over a full turn | The analytic torque m × B0 at every position, to 7.9e-4 of its amplitude at 48 rotor divisions and 2.0e-4 at 96: O(h²). |
+| AGE torque against Maxwell stress (`PARAM,AIRGAP,MESH` and MFORCE BODY on the rotor, four gap layers, `LAYER=2`) | 7.4e-4, 1.4e-4 and 1.1e-5 apart at 48, 96 and 192 rotor divisions with a wound iron stator. |
+| A round, unmagnetized iron rotor in a wound stator | Every position the same to round-off and zero torque, between mesh pitches too: the rotor polygon's shape is above the gap's harmonics. |
+| A magnet rotor in a two-slot stator without current | Cogging torque and energy repeat every 180° and the winding's linkage reverses, to round-off: the magnet frame turns with the rotor. |
+
+```text
+SUBCASE 1
+  LABEL = COGGING
+  MOTION = 1
+  MSTEP = ALL
+SUBCASE 2
+  LABEL = 5 A
+  LOAD = 7
+  MOTION = 1
+  BFIELD(EVERY=4) = ALL
+BEGIN BULK
+MAG2D,0,0.05
+PAIRGAP,9                           $ the meshed gap band, PID 9
+ESET,20,PROP,2,3                    $ rotor iron and magnets
+MOTION,1,20,0,ROTATE,0.,.5,121      $ 0 to 60 degrees in 0.5 degree steps
+...
+```
+
+**Results.** The F06 SOLUTION section gains a `Motion` row (the moving
+ESET's elements and grids, the axis, which circle turns and the positions)
+and, per MOTION subcase, the positions, total Newton iterations, their range
+per position and the largest residual. The subcase block gives the torque's
+mean, peak-to-peak and ripple (peak-to-peak as a percentage of the mean's
+magnitude), and the cogging peak-to-peak when no source carries current at
+any position. With `MSTEP = ALL` it adds a table of position, torque,
+energy, coenergy, Newton iterations, residual and each closed circuit's
+linkage. The HDF5 subcase group holds the same summary (see
+[Results](#results-and-angle-sweeps)), and with `MSTEP = ALL` every
+per-position value.
+
+In `name.mag.vtkhdf`, MOTION fields make the collection a time series whose
+time is the position in degrees, which ParaView animates with its time
+controls: the moving points turn, and the gap elements show the AGE field
+in the fixed frame.
+
+**The time axis.** A VTKHDF file has one time axis. VTK's reader takes the
+time values from one block, and every block must have its own `Steps` group
+with the same number of steps. A block without one breaks the axis. So every
+subcase's block uses one shared axis: every position written by any
+subcase, in increasing order. At each time, a block shows its state at the
+largest of its own written positions at or before that time, or its first
+position before any of them. In effect, a block holds its last state
+between its own positions. Some consequences:
+- A static subcase, and each source block, show their one state at every
+  time.
+- Two subcases on one MOTION share their times exactly.
+- Subcases on different sweeps each change only at their own positions.
+- A position that `BFIELD(EVERY=n)` skips is not on the axis unless another
+  subcase writes it.
+
+A held state is not copied. The topology is written once, and each time
+step's offsets point at the state it shows.
+
+**Limits.** One moving part (one AGE gap); rotation only; planar only.
+Currents are fixed by LOAD at every position: phase currents that follow the
+rotor (`DRIVE`) and back-EMF are planned. A probe in the moving part stays in
+space while the rotor's cells pass under it.
 
 Full 3D magnetic shells are a separate physical model: a thin magnetic layer or
 surface-current sheet coupled to the surrounding 3D field. Mechanical shell
@@ -656,7 +885,8 @@ solving. The file has two top-level groups:
     `center_m`; and `inner_grids`, `outer_grids`, the grid IDs on each
     circle in increasing angle.
   - `subcase_ids`, and `subcases/<ID>/` per subcase, with attributes `id`,
-    `iterations`, `residual`, `energy_J`, `coenergy_J`, `bh_extrapolated`.
+    `iterations`, `residual`, `energy_J`, `coenergy_J`, `bh_extrapolated`,
+    and `air_gap_torque_Nm` with an AGE gap.
     Its `sources/`, `circuits/`, `forces/` and `probes/` groups line up row
     for row with the definition tables:
     - `sources/current_A`, `linkage_Wb_turn`, `differential_inductance_H`
@@ -673,6 +903,17 @@ solving. The file has two top-level groups:
       different materials; place probes within the intended material when a
       one-sided value is needed.
 
+  - A MOTION subcase's group has instead the attributes `id`, `iterations`
+    (the total), `residual` (the largest), `bh_extrapolated` (at any
+    position), `motion`, `positions`, `start_deg`, `step_deg`,
+    `torque_mean_Nm`, `torque_peak_to_peak_Nm`, `torque_ripple_percent` (NaN
+    for a zero mean) and `current_free`. With `MSTEP = ALL` it also has the
+    datasets `positions_deg`, `iterations`, `residual`, `energy_J`,
+    `coenergy_J`, `bh_extrapolated` and `motion/torque_Nm`, one row per
+    position, and the `sources/`, `circuits/`, `forces/` and `probes/`
+    tables above with a leading position axis (e.g. `forces/torque_Nm` is
+    [positions, surfaces, 3]).
+
 Vectors are rows of length 3. Unavailable linkage and inductance entries are
 NaN. Groups keep creation order, so subcases appear in deck order. `h5py`
 reads everything, e.g.
@@ -680,7 +921,9 @@ reads everything, e.g.
 
 Output requests select what is written. `BFIELD=ALL` (default), `NONE` or an
 ESET ID writes the subcase field block for every cell, none, or only that set
-(points are compacted to the set's cells). A selected ESET must reference
+(points are compacted to the set's cells). `BFIELD(EVERY=n)` writes a MOTION
+subcase's fields at every n-th position; with MOTION fields the VTKHDF
+collection is a time series in degrees ([Motion](#motion-motion)). A selected ESET must reference
 existing field elements; CWIRE IDs are not field elements. `MPROBE=ALL|NONE`
 keeps or drops the subcase's `probes` group. Both may be global or set per
 subcase; a subcase value overrides the global one. `MSOURCE=ALL|NONE` is
@@ -691,8 +934,10 @@ No magnetic OP2 tables are emitted. `coenergy_J` is the source Legendre
 transform `sum(I*lambda)-W`, retaining PM energy constants; it is not generally
 `W` when permanent magnets or imposed exterior fields are present.
 
-Supply a valid mesh and rotated PM directions for each angle. The sweep runner
-does not remesh or silently rotate selected material regions:
+A planar model with an AGE air gap sweeps its rotor in one run with
+[MOTION](#motion-motion). For other models, supply a valid mesh and rotated
+PM directions for each angle; the sweep runner does not remesh or silently
+rotate selected material regions:
 
 ```json
 {"cases": [
@@ -758,9 +1003,15 @@ energies and fields, VTK cell types, planar nodal potentials, nonlinear BH
 energy and H, circuit linkage and inductance identities, exported ampere-turn
 integrals and wire-mesh schemes. It needs no third-party Python packages.
 
+The air-gap and motion tests (`tests/unit/test_air_gap.cpp`,
+`tests/unit/test_motion.cpp`) check the guarantee tables under
+[Air gap](#air-gap-pairgap) and [Motion](#motion-motion) on generated rotor
+and stator decks, parsed as a user's deck would be.
+
 The optional `magnetic_vtkhdf` test (`tools/magnetic_vtkhdf_check.py`) loads
 every block through VTK's own `vtkHDFReader`, as ParaView does, and checks it
-against the raw datasets; it also runs the prepared-deck sweep. It needs the
+against the raw datasets, at every time step of a MOTION time series; it also
+runs the prepared-deck sweep. It needs the
 packages in `tools/requirements-magnetic.txt`, which it takes from the
 repository `.venv` when the current interpreter lacks them, and is reported as
 skipped without them:

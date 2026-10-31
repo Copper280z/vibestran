@@ -33,7 +33,7 @@ except ImportError as missing:
     sys.exit(77)
 
 from magnetic_examples import deck
-from magnetic_planar_examples import planar_deck
+from magnetic_planar_examples import machine_deck, planar_deck
 from magnetic_sweep import run
 
 
@@ -48,11 +48,13 @@ def vtk_array(data, name):
     return np.array([array.GetTuple(i) for i in range(array.GetNumberOfTuples())])
 
 
-def check_paraview(result):
-    """Read the fields as ParaView does. Every block must load with the raw
-    datasets' cell and point counts, cell types and cell and point fields."""
+def read_step(filename, step):
+    """The collection at one step, from a fresh reader as ParaView loads it."""
     reader = vtk.vtkHDFReader()
-    reader.SetFileName(result.filename)
+    reader.SetFileName(filename)
+    reader.UpdateInformation()
+    if step is not None:
+        reader.SetStep(step)
     reader.Update()
     collection = reader.GetOutputDataObject(0)
     assert collection.IsA("vtkPartitionedDataSetCollection")
@@ -60,17 +62,40 @@ def check_paraview(result):
     for i in range(collection.GetNumberOfPartitionedDataSets()):
         name = collection.GetMetaData(i).Get(vtk.vtkCompositeDataSet.NAME())
         blocks[name] = collection.GetPartition(i, 0)
+    return reader, collection, blocks
+
+
+def check_paraview(result):
+    """Read the fields as ParaView does. Every block must load with the raw
+    datasets' cell and point counts, cell types and cell and point fields.
+    A time series must report its step values, and at each step every block
+    must hold the raw data its step offsets select."""
+    reader, collection, blocks = read_step(result.filename, None)
     assert sorted(blocks) == sorted(k for k in result["VTKHDF"] if k != "Assembly")
-    for name, grid in blocks.items():
-        raw = result["VTKHDF"][name]
-        assert grid.GetNumberOfCells() == raw["NumberOfCells"][0]
-        assert grid.GetNumberOfPoints() == raw["NumberOfPoints"][0]
-        types = [grid.GetCellType(i) for i in range(grid.GetNumberOfCells())]
-        assert np.array_equal(types, raw["Types"][()])
-        for group, data in (("CellData", grid.GetCellData()), ("PointData", grid.GetPointData())):
-            for field in raw.get(group, {}):
-                values = vtk_array(data, field).reshape(raw[group][field].shape)
-                assert np.array_equal(values, raw[group][field][()]), (name, field)
+    times = reader.GetOutputInformation(0).Get(vtk.vtkStreamingDemandDrivenPipeline.TIME_STEPS())
+    steps = [None] if times is None else range(len(times))
+    for step in steps:
+        _, _, blocks = read_step(result.filename, step)
+        for name, grid in blocks.items():
+            raw = result["VTKHDF"][name]
+            if step is not None:
+                assert np.array_equal(raw["Steps/Values"][()], times), name
+            points, cells = raw["NumberOfPoints"][0], raw["NumberOfCells"][0]
+            assert grid.GetNumberOfCells() == cells
+            assert grid.GetNumberOfPoints() == points
+            types = [grid.GetCellType(i) for i in range(grid.GetNumberOfCells())]
+            assert np.array_equal(types, raw["Types"][()])
+            first = raw["Steps/PointOffsets"][step] if step is not None else 0
+            coordinates = np.array([grid.GetPoint(i) for i in range(points)])
+            assert np.array_equal(coordinates, raw["Points"][first:first + points]), (name, step)
+            for group, data, size in (("CellData", grid.GetCellData(), cells),
+                                      ("PointData", grid.GetPointData(), points)):
+                for field in raw.get(group, {}):
+                    offsets = f"Steps/{group}Offsets/{field}"
+                    first = raw[offsets][step] if step is not None else 0
+                    expected = raw[group][field][first:first + size]
+                    values = vtk_array(data, field).reshape(expected.shape)
+                    assert np.array_equal(values, expected), (name, field, step)
     # The assembly groups blocks into fields and sources.
     assembly = collection.GetDataAssembly()
     nodes = {assembly.GetNodeName(n): assembly.GetDataSetIndices(n)
@@ -92,11 +117,17 @@ def main():
             "planar_mixed": planar_deck("uniform", 4, "mixed", .02),
             "winding": planar_deck("winding", 12, "mixed", .02),
             "wire_tet": deck("loop", 4, 2).replace("BEGIN BULK", "BEGIN BULK\nPARAM,WIREMESH,TET"),
+            # Two sweeps and a static subcase: one time axis of every written
+            # position, each block holding its own states.
+            "motion": machine_deck(["SUBCASE 1", "LOAD=1", "MOTION=1", "BFIELD(EVERY=2)=ALL",
+                                    "SUBCASE 2", "LOAD=1", "SUBCASE 3", "LOAD=1", "MOTION=2"],
+                                   "MOTION,1,20,0,ROTATE,0.,10.,4\nMOTION,2,20,0,ROTATE,5.,20.,2"),
         }
         expected = {
             "uniform_tet": {"SUBCASE_1"}, "uniform_hex": {"SUBCASE_1"},
             "uniform_wedge": {"SUBCASE_1"}, "planar_mixed": {"SUBCASE_1"},
             "winding": {"SUBCASE_1", "COIL_11", "COIL_12"},
+            "motion": {"SUBCASE_1", "SUBCASE_2", "SUBCASE_3", "COIL_11", "COIL_12"},
         }
         for name, text in cases.items():
             with solve(executable, output/f"{name}.bdf", text) as result:
@@ -105,6 +136,11 @@ def main():
                     assert blocks == expected[name], (name, blocks)
                 else:
                     assert len([b for b in blocks if b.startswith("WIRE_")]) == 1, blocks
+                if name == "motion":
+                    reader, _, _ = read_step(result.filename, None)
+                    times = reader.GetOutputInformation(0).Get(
+                        vtk.vtkStreamingDemandDrivenPipeline.TIME_STEPS())
+                    assert list(times) == [0, 5, 20, 25], times
         # Fixed-current virtual work from the prepared-deck sweep: zero torque
         # for a uniform field, blank at the endpoints.
         manifest = output/"sweep.json"

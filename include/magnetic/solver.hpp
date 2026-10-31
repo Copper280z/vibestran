@@ -1,6 +1,8 @@
 #pragma once
 #include "io/f06_header.hpp"
 #include "magnetic/mesh.hpp"
+#include <limits>
+#include <optional>
 
 namespace vibestran {
 class SolverBackend;
@@ -45,6 +47,7 @@ struct ForceResult {
   // BODY requests: one entry per connected piece of the enclosed region.
   std::vector<ForceComponent> components;
 };
+// One solved state: a static subcase, or one position of a MOTION subcase.
 struct CaseResults {
   int id{0}, iterations{0};
   double residual{0}, energy{0}, coenergy{0};
@@ -57,6 +60,19 @@ struct CaseResults {
   Eigen::MatrixXd circuit_inductance; // circuit order of Results::circuits
   std::vector<Vector> probe_b, probe_h;
   std::vector<ForceResult> forces;
+  // With an air-gap element: the torque on the part inside the gap about the
+  // gap's plane normal u x v (N m); NaN without one.
+  double gap_torque{std::numeric_limits<double>::quiet_NaN()};
+  // A MOTION subcase keeps one state per position in steps, in order; its
+  // own fields then hold only the total Newton iterations, the largest
+  // residual and whether any position extrapolated a B-H curve.
+  std::vector<CaseResults> steps;
+  // In a step: the position (degrees) and the torque on the moving part
+  // about the MOTION axis (N m). Only positions that BFIELD writes keep
+  // their potential, b and h, with the grid positions and the air gap there.
+  double position{0}, torque{std::numeric_limits<double>::quiet_NaN()};
+  std::vector<Vector> nodes;
+  std::optional<AirGap> air_gap;
 };
 struct Results {
   Mesh mesh;

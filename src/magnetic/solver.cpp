@@ -1,12 +1,14 @@
 #include "magnetic/solver.hpp"
 #include "core/notices.hpp"
 #include "magnetic/air_gap.hpp"
+#include "magnetic/motion.hpp"
 #include "solver/solver_backend.hpp"
 #include <algorithm>
 #include <cmath>
 #include <format>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <set>
 
 namespace vibestran::magnetic {
@@ -32,8 +34,14 @@ public:
     csr.values.assign(lower.valuePtr(), lower.valuePtr() + csr.nnz);
     csr.symmetry = SymmetryStorage::Lower;
     ++factorizations_;
-    if (factor_)
+    // MOTION positions keep the pattern: the same cells, and the air gap's
+    // dense block on the same grids. A different pattern needs a new
+    // analysis.
+    if (factor_ && csr.row_ptr == row_ptr_ && csr.col_ind == col_ind_)
       return factor_->refactor(csr);
+    factor_.reset();
+    row_ptr_ = csr.row_ptr;
+    col_ind_ = csr.col_ind;
     ++analyses_;
     FactorOptions options;
     options.require_spd = true;
@@ -71,6 +79,7 @@ public:
 private:
   SolverBackend &backend_;
   std::unique_ptr<LinearFactor> factor_;
+  std::vector<int> row_ptr_, col_ind_; // pattern of factor_
   int analyses_{0}, factorizations_{0}, right_hand_sides_{0};
 };
 struct Assembly {
@@ -710,6 +719,230 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
   }
   return results;
 }
+
+// What solving a model needs from its geometry: built once for the model as
+// given, and again for each MOTION position's moved model.
+struct Setup {
+  Mesh mesh;
+  Materials materials;
+  Gauge gauge;
+  GapCoupling gap;
+  std::vector<Source> sources;
+  std::vector<CircuitDefinition> circuits;
+  // Circuit coupling g_c = sum P_i c_i / a_c, so circuit linkage is g_c . A
+  // and circuit inductance needs one tangent solve per closed circuit.
+  std::vector<Eigen::VectorXd> circuit_coupling;
+  std::optional<SpatialIndex> index;
+};
+Result<Setup> prepare(const Model &model) {
+  Setup s;
+  auto built = make_mesh(model);
+  if (auto *e = std::get_if<Error>(&built))
+    return *e;
+  s.mesh = std::get<Mesh>(std::move(built));
+  s.materials = resolve_materials(model);
+  auto gauged = make_gauge(s.mesh);
+  if (auto *e = std::get_if<Error>(&gauged))
+    return *e;
+  s.gauge = std::get<Gauge>(std::move(gauged));
+  s.gap = gap_coupling(s.mesh);
+  auto prepared = prepare_sources(model, s.mesh);
+  if (auto *e = std::get_if<Error>(&prepared))
+    return *e;
+  s.sources = std::get<std::vector<Source>>(std::move(prepared));
+  auto resolved = resolve_circuits(model, s.sources);
+  if (auto *e = std::get_if<Error>(&resolved))
+    return *e;
+  s.circuits = std::get<std::vector<CircuitDefinition>>(std::move(resolved));
+  for (const auto &c : s.circuits) {
+    Eigen::VectorXd g = Eigen::VectorXd::Zero(s.mesh.dofs());
+    for (auto [i, polarity] : c.members)
+      g += polarity * s.sources[i].coupling;
+    s.circuit_coupling.push_back(g / c.parallel);
+  }
+  s.index.emplace(s.mesh);
+  return s;
+}
+// One equilibrium of subcase's load on setup and the results that follow
+// from it. warm, when given, is a nearby solution to start Newton from (the
+// previous MOTION position); continued reports current continuation.
+Result<CaseResults> solve_state(const Model &model, const Setup &setup,
+                                const Subcase &subcase, Tangent &tangent,
+                                const Eigen::VectorXd *warm, bool &continued) {
+  const auto &mesh = setup.mesh;
+  const auto &gauge = setup.gauge;
+  const auto &circuits = setup.circuits;
+  const auto &sources = setup.sources;
+  const int ns = static_cast<int>(sources.size()),
+            nc = static_cast<int>(circuits.size());
+  continued = false;
+  auto terminal = circuit_currents(model, circuits, subcase.load);
+  if (auto *e = std::get_if<Error>(&terminal))
+    return *e;
+  const auto &circuit_amps = std::get<std::vector<double>>(terminal);
+  std::vector<double> amps(ns, 0);
+  for (int c = 0; c < nc; ++c)
+    for (auto [i, polarity] : circuits[c].members)
+      amps[i] = polarity * circuit_amps[c] / circuits[c].parallel;
+  Eigen::VectorXd load = Eigen::VectorXd::Zero(mesh.dofs());
+  for (size_t i = 0; i < amps.size(); ++i)
+    load += amps[i] * sources[i].coupling;
+  auto imposed = boundary_potential(model, mesh, subcase);
+  if (auto *e = std::get_if<Error>(&imposed))
+    return *e;
+  const auto &initial = std::get<Eigen::VectorXd>(imposed);
+  Result<Equilibrium> solved = Error{""};
+  if (warm) {
+    // Free values from the warm start; prescribed ones as imposed here.
+    Eigen::VectorXd start = initial;
+    for (size_t e = 0; e < mesh.dofs(); ++e)
+      if (gauge.equations[e] >= 0)
+        start[e] = (*warm)[e];
+    solved = equilibrium(model, setup.materials, mesh, gauge, setup.gap, tangent,
+                         start, load);
+  }
+  if (!warm || std::holds_alternative<Error>(solved))
+    solved = equilibrium(model, setup.materials, mesh, gauge, setup.gap, tangent,
+                         initial, load);
+  if (std::holds_alternative<Error>(solved) && !model.bh_tables.empty()) {
+    // Retry with fixed current continuation. Each stage must satisfy the same
+    // convergence criterion; a failed stage is never returned as a solution.
+    Eigen::VectorXd a = initial;
+    int iterations = 0;
+    for (int stage = 0; stage <= 8; ++stage) {
+      solved = equilibrium(model, setup.materials, mesh, gauge, setup.gap,
+                           tangent, a, load * (stage / 8.0));
+      if (auto *e = std::get_if<Error>(&solved))
+        return Error{std::format("continuation stage {}: {}", stage, e->message)};
+      const auto &eq = std::get<Equilibrium>(solved);
+      iterations += eq.iterations;
+      a = eq.a;
+    }
+    std::get<Equilibrium>(solved).iterations = iterations;
+    continued = true;
+  }
+  if (auto *e = std::get_if<Error>(&solved))
+    return *e;
+  auto eq = std::get<Equilibrium>(std::move(solved));
+  CaseResults output;
+  output.id = subcase.id;
+  output.iterations = eq.iterations;
+  output.residual = eq.residual;
+  output.energy = eq.assembly.energy;
+  output.extrapolated = eq.assembly.extrapolated;
+  output.potential = eq.a;
+  output.b = eq.assembly.b;
+  output.h = eq.assembly.h;
+  output.coenergy = -output.energy;
+  constexpr double unavailable = std::numeric_limits<double>::quiet_NaN();
+  for (int i = 0; i < ns; ++i) {
+    const auto &source = sources[i];
+    const double linkage = source.coupling.dot(eq.a);
+    output.coenergy += amps[i] * linkage;
+    output.sources.push_back({source.id, source.wire, source.closed, amps[i],
+                              source.closed ? linkage : unavailable});
+  }
+  for (int c = 0; c < nc; ++c)
+    output.circuits.push_back({circuits[c].id, circuit_amps[c],
+                               circuits[c].closed
+                                   ? setup.circuit_coupling[c].dot(eq.a)
+                                   : unavailable});
+  // Differential inductances g_i^T K^-1 g_j, from the converged tangent,
+  // among closed sources and among closed circuits; others are unavailable.
+  output.differential_inductance =
+      Eigen::MatrixXd::Constant(ns, ns, unavailable);
+  output.circuit_inductance = Eigen::MatrixXd::Constant(nc, nc, unavailable);
+  if (gauge.size > 0) {
+    // Reduced couplings of the closed sources, then of the closed circuits,
+    // solved together with one factorization of the converged tangent.
+    std::vector<int> closed_sources, closed_circuits;
+    std::vector<const Eigen::VectorXd *> couplings;
+    for (int i = 0; i < ns; ++i)
+      if (sources[i].closed) {
+        closed_sources.push_back(i);
+        couplings.push_back(&sources[i].coupling);
+      }
+    for (int c = 0; c < nc; ++c)
+      if (circuits[c].closed) {
+        closed_circuits.push_back(c);
+        couplings.push_back(&setup.circuit_coupling[c]);
+      }
+    if (!couplings.empty()) {
+      Eigen::MatrixXd reduced = Eigen::MatrixXd::Zero(
+          gauge.size, static_cast<Eigen::Index>(couplings.size()));
+      for (size_t k = 0; k < couplings.size(); ++k)
+        for (size_t e = 0; e < mesh.dofs(); ++e)
+          if (gauge.equations[e] >= 0)
+            reduced(gauge.equations[e], static_cast<Eigen::Index>(k)) =
+                (*couplings[k])[e];
+      if (auto e = tangent.factor(eq.assembly.stiffness))
+        return Error{std::format(
+            "Differential inductance factorization failed ({})", e->message)};
+      auto responses = tangent.solve(reduced);
+      if (auto *e = std::get_if<Error>(&responses))
+        return Error{std::format("Differential inductance solve failed ({})",
+                                 e->message)};
+      const Eigen::MatrixXd linkage =
+          reduced.transpose() * std::get<Eigen::MatrixXd>(responses);
+      const auto first_circuit =
+          static_cast<Eigen::Index>(closed_sources.size());
+      for (size_t i = 0; i < closed_sources.size(); ++i)
+        for (size_t j = 0; j < closed_sources.size(); ++j)
+          output.differential_inductance(closed_sources[i], closed_sources[j]) =
+              linkage(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j));
+      for (size_t c = 0; c < closed_circuits.size(); ++c)
+        for (size_t d = 0; d < closed_circuits.size(); ++d)
+          output.circuit_inductance(closed_circuits[c], closed_circuits[d]) =
+              linkage(first_circuit + static_cast<Eigen::Index>(c),
+                      first_circuit + static_cast<Eigen::Index>(d));
+    }
+  } else {
+    for (int i = 0; i < ns; ++i)
+      for (int j = 0; j < ns; ++j)
+        if (sources[i].closed && sources[j].closed)
+          output.differential_inductance(i, j) = 0;
+    for (int c = 0; c < nc; ++c)
+      for (int d = 0; d < nc; ++d)
+        if (circuits[c].closed && circuits[d].closed)
+          output.circuit_inductance(c, d) = 0;
+  }
+  for (const auto &probe : model.probes) {
+    Vector b = Vector::Zero(), h = Vector::Zero();
+    int count = 0;
+    for (int ci : setup.index->query(probe.position, probe.position)) {
+      const auto &cell = mesh.cells[ci];
+      if (contains(cell, probe.position)) {
+        const Vector field = field_at(cell, eq.a, probe.position);
+        b += field;
+        h += response_at(setup.materials.at(cell.property), probe.position, field)
+                 .h;
+        ++count;
+      }
+    }
+    if (count == 0 && mesh.air_gap && in_air_gap(*mesh.air_gap, probe.position)) {
+      // The gap is air: H = B / mu0.
+      b = air_gap_field(*mesh.air_gap, eq.a, probe.position);
+      h = b / mu0;
+      count = 1;
+    }
+    if (count == 0)
+      return Error{"MPROBE lies outside the magnetic domain: " +
+                   std::to_string(probe.id)};
+    output.probe_b.push_back(b / count);
+    output.probe_h.push_back(h / count);
+  }
+  auto force = forces(model, mesh, sources, eq.a);
+  if (auto *e = std::get_if<Error>(&force))
+    return *e;
+  output.forces = std::get<std::vector<ForceResult>>(std::move(force));
+  if (mesh.air_gap)
+    output.gap_torque = mesh.depth * air_gap_torque(*mesh.air_gap, eq.a);
+  return output;
+}
+std::string iterations_text(int iterations) {
+  return std::format("{} Newton {}", iterations,
+                     iterations == 1 ? "iteration" : "iterations");
+}
 } // namespace
 
 Result<Results> solve(const Model &model) {
@@ -720,38 +953,14 @@ Result<Results> solve(const Model &model) {
 Result<Results> solve(const Model &model, SolverBackend &backend) {
   if (auto e = validate(model))
     return *e;
-  auto built = make_mesh(model);
-  if (auto *e = std::get_if<Error>(&built))
-    return *e;
-  Results result;
-  result.mesh = std::get<Mesh>(std::move(built));
-  const auto &mesh = result.mesh;
-  const Materials materials = resolve_materials(model);
-  auto gauged = make_gauge(mesh);
-  if (auto *e = std::get_if<Error>(&gauged))
-    return *e;
-  const auto &gauge = std::get<Gauge>(gauged);
-  const GapCoupling gap = gap_coupling(mesh);
-  auto prepared = prepare_sources(model, mesh);
+  auto prepared = prepare(model);
   if (auto *e = std::get_if<Error>(&prepared))
     return *e;
-  result.sources = std::get<std::vector<Source>>(std::move(prepared));
-  auto resolved = resolve_circuits(model, result.sources);
-  if (auto *e = std::get_if<Error>(&resolved))
-    return *e;
-  result.circuits = std::get<std::vector<CircuitDefinition>>(std::move(resolved));
-  const auto &circuits = result.circuits;
-  const int ns = static_cast<int>(result.sources.size()),
-            nc = static_cast<int>(circuits.size());
-  // Circuit coupling g_c = sum P_i c_i / a_c, so circuit linkage is g_c . A
-  // and circuit inductance needs one tangent solve per closed circuit.
-  std::vector<Eigen::VectorXd> circuit_coupling;
-  for (const auto &c : circuits) {
-    Eigen::VectorXd g = Eigen::VectorXd::Zero(mesh.dofs());
-    for (auto [i, polarity] : c.members)
-      g += polarity * result.sources[i].coupling;
-    circuit_coupling.push_back(g / c.parallel);
-  }
+  const auto &base = std::get<Setup>(prepared);
+  const auto &mesh = base.mesh;
+  const int ns = static_cast<int>(base.sources.size()),
+            nc = static_cast<int>(base.circuits.size());
+  Results result;
   auto &solution = result.summary.solution;
   solution.add("Solution", "SOL MAGSTAT magnetostatics, SI units");
   solution.add("Formulation",
@@ -782,10 +991,35 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
                  std::format("PAIRGAP {} solved as meshed air (relative "
                              "permeability 1) by {}",
                              pid, reason));
+  // The moving part of each MOTION a subcase uses, checked on the mesh as
+  // given.
+  std::map<int, MovingPart> parts;
+  for (const auto &subcase : model.subcases) {
+    if (!subcase.motion || parts.contains(subcase.motion))
+      continue;
+    const auto &motion = model.motions.at(subcase.motion);
+    auto part = moving_part(model, mesh, motion);
+    if (auto *e = std::get_if<Error>(&part))
+      return *e;
+    const auto &moving = std::get<MovingPart>(part);
+    const auto axis = motion_axis(model, motion);
+    solution.add(
+        "Motion",
+        std::format("MOTION {} turns ESET {} ({} elements, {} grids) about the z "
+                    "axis of CID {} through ({:.6g}, {:.6g}, {:.6g}), moving the "
+                    "{} circle of PAIRGAP {}: {} {} from {:.6g} to {:.6g} degrees",
+                    motion.id, motion.set, moving.elements.size(),
+                    moving.grids.size(), motion.coordinates, axis.origin.x(),
+                    axis.origin.y(), axis.origin.z(),
+                    moving.inner ? "inner" : "outer", mesh.air_gap->property,
+                    motion.count, motion.count == 1 ? "position" : "positions",
+                    motion.position(0), motion.position(motion.count - 1)));
+    parts.emplace(subcase.motion, moving);
+  }
   solution.add("Equations",
                std::format("{} ({} degrees of freedom before the gauge and "
                            "boundary conditions)",
-                           gauge.size, mesh.dofs()));
+                           base.gauge.size, mesh.dofs()));
   solution.add("Sources", std::format("{} ({} circuit{})", ns, nc, nc == 1 ? "" : "s"));
   solution.add("Subcases", std::to_string(model.subcases.size()));
   solution.add("Newton tolerance",
@@ -795,179 +1029,112 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
   result.summary.solver = solver_section(backend);
   result.summary.solver.set("Indefinite fallback",
                             "none, positive definite required");
-  SpatialIndex index(mesh);
   Tangent tangent(backend);
   for (const auto &subcase : model.subcases) {
     Notices notices;
-    bool continued = false;
-    auto terminal = circuit_currents(model, circuits, subcase.load);
-    if (auto *e = std::get_if<Error>(&terminal))
-      return *e;
-    const auto &circuit_amps = std::get<std::vector<double>>(terminal);
-    std::vector<double> amps(ns, 0);
-    for (int c = 0; c < nc; ++c)
-      for (auto [i, polarity] : circuits[c].members)
-        amps[i] = polarity * circuit_amps[c] / circuits[c].parallel;
-    Eigen::VectorXd load = Eigen::VectorXd::Zero(mesh.dofs());
-    for (size_t i = 0; i < amps.size(); ++i)
-      load += amps[i] * result.sources[i].coupling;
-    auto imposed = boundary_potential(model, mesh, subcase);
-    if (auto *e = std::get_if<Error>(&imposed))
-      return *e;
-    const auto &initial = std::get<Eigen::VectorXd>(imposed);
-    auto solved =
-        equilibrium(model, materials, mesh, gauge, gap, tangent, initial, load);
-    if (std::holds_alternative<Error>(solved) && !model.bh_tables.empty()) {
-      // Retry with fixed current continuation. Each stage must satisfy the same
-      // convergence criterion; a failed stage is never returned as a solution.
-      Eigen::VectorXd a = initial;
-      int iterations = 0;
-      for (int stage = 0; stage <= 8; ++stage) {
-        solved = equilibrium(model, materials, mesh, gauge, gap, tangent, a,
-                             load * (stage / 8.0));
-        if (auto *e = std::get_if<Error>(&solved))
-          return Error{std::format("Subcase {}, continuation stage {}: {}",
-                                   subcase.id, stage, e->message)};
-        const auto &eq = std::get<Equilibrium>(solved);
-        iterations += eq.iterations;
-        a = eq.a;
-      }
-      std::get<Equilibrium>(solved).iterations = iterations;
-      continued = true;
-      notices.add("Newton did not converge at full current; solved by current "
-                  "continuation in 8 stages");
-    }
-    if (auto *e = std::get_if<Error>(&solved))
-      return Error{std::format("Subcase {}: {}", subcase.id, e->message)};
-    auto eq = std::get<Equilibrium>(std::move(solved));
-    CaseResults output;
-    output.id = subcase.id;
-    output.iterations = eq.iterations;
-    output.residual = eq.residual;
-    output.energy = eq.assembly.energy;
-    output.extrapolated = eq.assembly.extrapolated;
-    if (output.extrapolated)
-      notices.add("The B-H curve was exceeded; its vacuum-slope extrapolation "
-                  "was used");
-    solution.add(std::format("Subcase {}", subcase.id),
-                 std::format("{} Newton {}{}, relative residual {:.3e}",
-                             eq.iterations,
-                             eq.iterations == 1 ? "iteration" : "iterations",
-                             continued ? " with current continuation" : "",
-                             eq.residual));
-    output.potential = eq.a;
-    output.b = eq.assembly.b;
-    output.h = eq.assembly.h;
-    output.coenergy = -output.energy;
-    constexpr double unavailable = std::numeric_limits<double>::quiet_NaN();
-    for (int i = 0; i < ns; ++i) {
-      const auto &source = result.sources[i];
-      const double linkage = source.coupling.dot(eq.a);
-      output.coenergy += amps[i] * linkage;
-      output.sources.push_back({source.id, source.wire, source.closed, amps[i],
-                                source.closed ? linkage : unavailable});
-    }
-    for (int c = 0; c < nc; ++c)
-      output.circuits.push_back({circuits[c].id, circuit_amps[c],
-                                 circuits[c].closed
-                                     ? circuit_coupling[c].dot(eq.a)
-                                     : unavailable});
-    // Differential inductances g_i^T K^-1 g_j, from the converged tangent,
-    // among closed sources and among closed circuits; others are unavailable.
-    output.differential_inductance =
-        Eigen::MatrixXd::Constant(ns, ns, unavailable);
-    output.circuit_inductance = Eigen::MatrixXd::Constant(nc, nc, unavailable);
-    if (gauge.size > 0) {
-      // Reduced couplings of the closed sources, then of the closed circuits,
-      // solved together with one factorization of the converged tangent.
-      std::vector<int> closed_sources, closed_circuits;
-      std::vector<const Eigen::VectorXd *> couplings;
-      for (int i = 0; i < ns; ++i)
-        if (result.sources[i].closed) {
-          closed_sources.push_back(i);
-          couplings.push_back(&result.sources[i].coupling);
-        }
-      for (int c = 0; c < nc; ++c)
-        if (circuits[c].closed) {
-          closed_circuits.push_back(c);
-          couplings.push_back(&circuit_coupling[c]);
-        }
-      if (!couplings.empty()) {
-        Eigen::MatrixXd reduced = Eigen::MatrixXd::Zero(
-            gauge.size, static_cast<Eigen::Index>(couplings.size()));
-        for (size_t k = 0; k < couplings.size(); ++k)
-          for (size_t e = 0; e < mesh.dofs(); ++e)
-            if (gauge.equations[e] >= 0)
-              reduced(gauge.equations[e], static_cast<Eigen::Index>(k)) =
-                  (*couplings[k])[e];
-        if (auto e = tangent.factor(eq.assembly.stiffness))
-          return Error{std::format(
-              "Differential inductance factorization failed ({})", e->message)};
-        auto responses = tangent.solve(reduced);
-        if (auto *e = std::get_if<Error>(&responses))
-          return Error{std::format("Differential inductance solve failed ({})",
-                                   e->message)};
-        const Eigen::MatrixXd linkage =
-            reduced.transpose() * std::get<Eigen::MatrixXd>(responses);
-        const auto first_circuit =
-            static_cast<Eigen::Index>(closed_sources.size());
-        for (size_t i = 0; i < closed_sources.size(); ++i)
-          for (size_t j = 0; j < closed_sources.size(); ++j)
-            output.differential_inductance(closed_sources[i],
-                                           closed_sources[j]) =
-                linkage(static_cast<Eigen::Index>(i),
-                        static_cast<Eigen::Index>(j));
-        for (size_t c = 0; c < closed_circuits.size(); ++c)
-          for (size_t d = 0; d < closed_circuits.size(); ++d)
-            output.circuit_inductance(closed_circuits[c], closed_circuits[d]) =
-                linkage(first_circuit + static_cast<Eigen::Index>(c),
-                        first_circuit + static_cast<Eigen::Index>(d));
-      }
-    } else {
-      for (int i = 0; i < ns; ++i)
-        for (int j = 0; j < ns; ++j)
-          if (result.sources[i].closed && result.sources[j].closed)
-            output.differential_inductance(i, j) = 0;
-      for (int c = 0; c < nc; ++c)
-        for (int d = 0; d < nc; ++d)
-          if (circuits[c].closed && circuits[d].closed)
-            output.circuit_inductance(c, d) = 0;
-    }
-    for (const auto &probe : model.probes) {
-      Vector b = Vector::Zero(), h = Vector::Zero();
-      int count = 0;
-      for (int ci : index.query(probe.position, probe.position)) {
-        const auto &cell = mesh.cells[ci];
-        if (contains(cell, probe.position)) {
-          const Vector field = field_at(cell, eq.a, probe.position);
-          b += field;
-          h += response_at(materials.at(cell.property), probe.position, field)
-                   .h;
-          ++count;
-        }
-      }
-      if (count == 0 && mesh.air_gap && in_air_gap(*mesh.air_gap, probe.position)) {
-        // The gap is air: H = B / mu0.
-        b = air_gap_field(*mesh.air_gap, eq.a, probe.position);
-        h = b / mu0;
-        count = 1;
-      }
-      if (count == 0)
-        return Error{"MPROBE lies outside the magnetic domain: " +
-                     std::to_string(probe.id)};
-      output.probe_b.push_back(b / count);
-      output.probe_h.push_back(h / count);
-    }
-    auto force = forces(model, mesh, result.sources, eq.a);
-    if (auto *e = std::get_if<Error>(&force))
-      return *e;
-    output.forces = std::get<std::vector<ForceResult>>(std::move(force));
-    result.cases.push_back(std::move(output));
     const std::string context = std::format("Subcase {}", subcase.id);
+    if (!subcase.motion) {
+      bool continued = false;
+      auto state = solve_state(model, base, subcase, tangent, nullptr, continued);
+      if (auto *e = std::get_if<Error>(&state))
+        return Error{std::format("{}: {}", context, e->message)};
+      auto output = std::get<CaseResults>(std::move(state));
+      if (continued)
+        notices.add("Newton did not converge at full current; solved by "
+                    "current continuation in 8 stages");
+      if (output.extrapolated)
+        notices.add("The B-H curve was exceeded; its vacuum-slope "
+                    "extrapolation was used");
+      solution.add(context,
+                   std::format("{}{}, relative residual {:.3e}",
+                               iterations_text(output.iterations),
+                               continued ? " with current continuation" : "",
+                               output.residual));
+      result.cases.push_back(std::move(output));
+    } else {
+      // Each position is the static model moved to it, solved from the
+      // previous position's potential.
+      const auto &motion = model.motions.at(subcase.motion);
+      const auto &part = parts.at(subcase.motion);
+      CaseResults output;
+      output.id = subcase.id;
+      output.residual = 0;
+      Eigen::VectorXd previous;
+      int continued_at = 0, fewest = std::numeric_limits<int>::max(), most = 0;
+      std::optional<double> first_continued, first_extrapolated;
+      for (int k = 0; k < motion.count; ++k) {
+        const double angle = motion.position(k);
+        const Model moved = moved_model(model, motion, part, angle);
+        std::optional<Setup> own;
+        if (angle != 0) {
+          auto built = prepare(moved);
+          if (auto *e = std::get_if<Error>(&built))
+            return Error{std::format("{}, MOTION {} at {:.6g} degrees: {}", context,
+                                     motion.id, angle, e->message)};
+          own = std::get<Setup>(std::move(built));
+        }
+        const Setup &setup = own ? *own : base;
+        bool continued = false;
+        auto state = solve_state(moved, setup, subcase, tangent,
+                                 k ? &previous : nullptr, continued);
+        if (auto *e = std::get_if<Error>(&state))
+          return Error{std::format("{}, MOTION {} at {:.6g} degrees: {}", context,
+                                   motion.id, angle, e->message)};
+        auto step = std::get<CaseResults>(std::move(state));
+        step.position = angle;
+        step.torque = part.sign * (part.inner ? 1 : -1) * step.gap_torque;
+        if (continued) {
+          ++continued_at;
+          first_continued = first_continued.value_or(angle);
+        }
+        if (step.extrapolated)
+          first_extrapolated = first_extrapolated.value_or(angle);
+        output.iterations += step.iterations;
+        output.residual = std::max(output.residual, step.residual);
+        output.extrapolated |= step.extrapolated;
+        fewest = std::min(fewest, step.iterations);
+        most = std::max(most, step.iterations);
+        previous = step.potential;
+        // Fields are kept for the positions BFIELD writes, with the grids
+        // and the air gap where they were.
+        if (subcase.field.enabled && k % subcase.field.every == 0) {
+          step.nodes = setup.mesh.nodes;
+          step.air_gap = setup.mesh.air_gap;
+        } else {
+          step.potential.resize(0);
+          step.b.clear();
+          step.h.clear();
+        }
+        output.steps.push_back(std::move(step));
+      }
+      if (continued_at)
+        notices.add(std::format("Newton did not converge at full current at {} "
+                                "of {} positions (the first at {:.6g} degrees); "
+                                "they were solved by current continuation in 8 "
+                                "stages",
+                                continued_at, motion.count, *first_continued));
+      if (first_extrapolated)
+        notices.add(std::format("The B-H curve was exceeded (first at {:.6g} "
+                                "degrees); its vacuum-slope extrapolation was "
+                                "used",
+                                *first_extrapolated));
+      solution.add(context,
+                   std::format("MOTION {}: {} {}, {} ({} to {} per position), "
+                               "largest relative residual {:.3e}",
+                               motion.id, motion.count,
+                               motion.count == 1 ? "position" : "positions",
+                               iterations_text(output.iterations), fewest, most,
+                               output.residual));
+      result.cases.push_back(std::move(output));
+    }
     collect_notices(result.summary, backend.notices().take(), context);
     collect_notices(result.summary, notices.take(), context);
   }
   result.summary.solver.add("Tangent reuse", tangent.usage());
+  auto &owned = std::get<Setup>(prepared);
+  result.mesh = std::move(owned.mesh);
+  result.sources = std::move(owned.sources);
+  result.circuits = std::move(owned.circuits);
   return result;
 }
 } // namespace vibestran::magnetic

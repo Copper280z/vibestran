@@ -381,8 +381,14 @@ int main(int argc, const char *argv[]) {
           return 1;
         }
         for (const auto& result : results.cases)
-          spdlog::info("Magnetic subcase {}: residual {:.3e}, energy {:.8e} J{}", result.id,
-                       result.residual, result.energy, result.extrapolated ? " (BH extrapolated)" : "");
+          if (result.steps.empty())
+            spdlog::info("Magnetic subcase {}: residual {:.3e}, energy {:.8e} J{}", result.id,
+                         result.residual, result.energy,
+                         result.extrapolated ? " (BH extrapolated)" : "");
+          else
+            spdlog::info("Magnetic subcase {}: {} MOTION positions, largest residual {:.3e}{}",
+                         result.id, result.steps.size(), result.residual,
+                         result.extrapolated ? " (BH extrapolated)" : "");
         spdlog::info("Wrote magnetic F06 and VTKHDF results: {}", f06_path.string());
         return 0;
       }

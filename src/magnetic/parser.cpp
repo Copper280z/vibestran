@@ -352,22 +352,51 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
           return *r.error;
         in_case = true;
       } else {
-        auto equals = text.find('=');
+        // A describer in parentheses, as in BFIELD(EVERY=2) = ALL, holds its
+        // own '='.
+        const auto open = text.find('('), first = text.find('=');
+        const bool described = open < first;
+        const auto close = described ? text.find(')', open) : std::string::npos;
+        if (described && close == std::string::npos)
+          return Error{lines[i].location + ": unclosed describer parenthesis"};
+        auto equals = text.find('=', described ? close : 0);
         if (equals == std::string::npos)
           return Error{lines[i].location +
                        ": unsupported executive/case control"};
-        auto key = trim(text.substr(0, equals)),
+        auto key = trim(text.substr(0, described ? open : equals)),
              value = trim(text.substr(equals + 1));
+        const auto describer =
+            described ? trim(text.substr(open + 1, close - open - 1)) : "";
+        if (described && (key != "BFIELD" || !trim(text.substr(close + 1, equals - close - 1)).empty()))
+          return Error{lines[i].location + ": " + key +
+                       (key == "BFIELD" ? " describer must be (EVERY=n)"
+                                        : " takes no describer")};
         auto &sc = in_case ? current : global;
         Reader r{{key, value}, lines[i].location, {}};
         if (key == "LOAD")
           sc.load = r.integer(1);
         else if (key == "MAGBC")
           sc.boundary = r.integer(1);
-        else if (key == "BFIELD") {
-          sc.field = {value != "NONE", 0};
+        else if (key == "MOTION")
+          sc.motion = r.integer(1);
+        else if (key == "MSTEP") {
+          if (value != "ALL" && value != "NONE")
+            return Error{lines[i].location + ": MSTEP must be ALL or NONE"};
+          sc.steps = value == "ALL";
+        } else if (key == "BFIELD") {
+          sc.field = {value != "NONE", 0, 1};
           if (value != "ALL" && value != "NONE")
             sc.field.set = r.integer(1);
+          if (described) {
+            const auto split = describer.find('=');
+            Reader every{{"", split == std::string::npos ? "" : trim(describer.substr(split + 1))},
+                         lines[i].location, {}};
+            sc.field.every = every.integer(1);
+            if (split == std::string::npos || trim(describer.substr(0, split)) != "EVERY" ||
+                every.error || sc.field.every < 1)
+              return Error{lines[i].location +
+                           ": BFIELD describer must be (EVERY=n) with n >= 1"};
+          }
         } else if (key == "MPROBE" || key == "MSOURCE") {
           if (value != "ALL" && value != "NONE")
             return Error{lines[i].location + ": " + key +
@@ -458,6 +487,25 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
         return Error{r.where + ": PAIRGAP NHARM must not be negative (blank for the default)"};
       r.last(3);
       insert_unique(m.air_gaps, id, gap, r);
+    } else if (key == "MOTION") {
+      Motion motion;
+      motion.id = r.integer(1);
+      motion.set = r.integer(2);
+      motion.coordinates = r.integer(3);
+      const auto type = upper(r.get(4));
+      if (type == "TRANSLATE")
+        return Error{r.where + ": MOTION TRANSLATE is not supported yet; it needs "
+                               "the linear air-gap element. Use ROTATE"};
+      if (type != "ROTATE")
+        return Error{r.where + ": MOTION TYPE must be ROTATE"};
+      motion.start = r.real(5);
+      motion.step = r.real(6);
+      motion.count = r.integer(7, 1);
+      if (!r.get(9).empty())
+        return Error{r.where + ": MOTION SPEED is not supported yet; it scales "
+                               "back-EMF, which arrives with DRIVE"};
+      r.last(7);
+      insert_unique(m.motions, motion.id, motion, r);
     } else if (key == "MAG2D") {
       if (m.options.planar)
         r.error = Error{r.where + ": duplicate MAG2D"};
@@ -1093,10 +1141,55 @@ Status validate(const Model &m) {
                                    "element {}",
                                    force.id, id)};
   }
+  for (const auto &[id, motion] : m.motions) {
+    if (!m.options.planar)
+      return Error{std::format("MOTION {} requires MAG2D; 3D motion is not "
+                               "supported",
+                               id)};
+    if (!m.element_sets.contains(motion.set))
+      return Error{std::format("MOTION {} references undefined ESET {}", id,
+                               motion.set)};
+    for (int element : m.element_sets.at(motion.set))
+      if (!element_ids.contains(element))
+        return Error{std::format("MOTION {} ESET {} references undefined "
+                                 "element {}",
+                                 id, motion.set, element)};
+    if (auto e = gap_member(motion.set, std::format("MOTION {}", id)))
+      return e;
+    if (motion.coordinates && !m.coordinates.contains(motion.coordinates))
+      return Error{std::format("MOTION {} references undefined coordinates {}",
+                               id, motion.coordinates)};
+    if (motion.count < 1 || (motion.count > 1 && motion.step == 0))
+      return Error{std::format("MOTION {} requires COUNT >= 1, and a nonzero "
+                               "STEP when COUNT > 1",
+                               id)};
+    const Vector axis =
+        motion.coordinates
+            ? Vector(coordinate_axes(m.coordinates.at(motion.coordinates)).col(2))
+            : Vector(Vector::UnitZ());
+    if (axis.cross(plane_normal).norm() > 1e-9)
+      return Error{std::format("MOTION {}: the z axis of CID {} must be parallel "
+                               "to the MAG2D plane normal, the axis of rotation",
+                               id, motion.coordinates)};
+    if (m.air_gaps.empty() && !m.meshed_air_gaps.empty())
+      return Error{std::format(
+          "MOTION {} needs the air-gap element between the moving and fixed "
+          "parts, but PAIRGAP {} is solved as meshed air by {}; meshed air "
+          "cannot slide. To check one position, solve the static deck with the "
+          "moving grids rotated to it",
+          id, m.meshed_air_gaps.begin()->first, m.meshed_air_gaps.begin()->second)};
+    if (m.air_gaps.empty())
+      return Error{std::format("MOTION {} needs a PAIRGAP air gap between the "
+                               "moving and fixed parts",
+                               id)};
+  }
   ids.clear();
   for (const auto &sc : m.subcases) {
     if (sc.id <= 0 || !ids.insert(sc.id).second)
       return Error{"Subcase ids must be unique and positive"};
+    if (sc.motion && !m.motions.contains(sc.motion))
+      return Error{std::format("Subcase {} references undefined MOTION {}",
+                               sc.id, sc.motion)};
     if (sc.boundary && !m.boundaries.contains(sc.boundary))
       return Error{"Subcase references undefined MBC"};
     if (sc.field.set && !m.element_sets.contains(sc.field.set))

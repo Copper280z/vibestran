@@ -84,6 +84,59 @@ def planar_deck(kind="winding", n=12, element="quad", depth=.02, angle=0., curre
     return "\n".join(lines+["ENDDATA",""])
 
 
+def machine_deck(case_control, bulk="", rotor_div=24, stator_div=36):
+    """A two-pole magnet rotor (PID 3, ESET 20) in a wound iron stator (PID 2)
+    with the meshed air gap between them as PAIRGAP 9. case_control and bulk
+    are added as given, e.g. MOTION subcases and MOTION cards."""
+    r1, r2, outer = .02, .021, .04
+    lines = ["SOL MAGSTAT", "CEND", *case_control, "BEGIN BULK", "MAG2D,0,.05",
+             "MATMAG,1,1", "PMAG2D,1,1", "MATMAG,2,500.", "PMAG2D,2,2",
+             "CORD2R,30,,0,0,0,0,0,1,1,0,0", "MATMAG,3,1.05,,1.2", "PMAG2D,3,3,30,1",
+             "PAIRGAP,9", "ESET,20,PROP,3", *bulk.splitlines()]
+    grids, cells = [], []
+    def ring(r, n):
+        first = len(grids) + 1
+        grids.extend((r*math.cos(2*math.pi*k/n), r*math.sin(2*math.pi*k/n)) for k in range(n))
+        return list(range(first, first + n))
+    grids.append((0., 0.))
+    previous = ring(r1/4, rotor_div)
+    cells += [(3, [1, previous[k], previous[(k+1) % rotor_div]]) for k in range(rotor_div)]
+    for j in range(2, 5):
+        current = ring(r1*j/4, rotor_div)
+        cells += [(3, [previous[k], previous[(k+1) % rotor_div], current[(k+1) % rotor_div],
+                       current[k]]) for k in range(rotor_div)]
+        previous = current
+    stator = ring(r2, stator_div)
+    # Triangles between the rotor's and the stator's divisions.
+    i = j = 0
+    while i < rotor_div or j < stator_div:
+        if j == stator_div or (i < rotor_div and (i+1)/rotor_div < (j+1)/stator_div):
+            cells.append((9, [previous[i], previous[(i+1) % rotor_div], stator[j % stator_div]]))
+            i += 1
+        else:
+            cells.append((9, [previous[i % rotor_div], stator[(j+1) % stator_div], stator[j]]))
+            j += 1
+    previous, slots = stator, {1: [], 2: []}
+    for j in range(1, 7):
+        current = ring(r2 + (outer - r2)*j/6, stator_div)
+        for k in range(stator_div):
+            t, r = 2*math.pi*(k+.5)/stator_div, r2 + (outer - r2)*(j-.5)/6
+            slot = (1 if math.cos(t) > 0 else 2) if .026 < r < .034 and abs(math.sin(t)) < .3 else 0
+            cells.append((1 if slot else 2, [previous[k], previous[(k+1) % stator_div],
+                                             current[(k+1) % stator_div], current[k]]))
+            if slot:
+                slots[slot].append(len(cells))
+        previous = current
+    lines += [f"GRID,{i},,{x:.16g},{y:.16g},0" for i, (x, y) in enumerate(grids, 1)]
+    lines += [f"{'CTRIA3' if len(c) == 3 else 'CQUAD4'},{e},{p}," + ",".join(map(str, c))
+              for e, (p, c) in enumerate(cells, 1)]
+    for slot, ids in slots.items():
+        lines += [f"ESET,{slot},{e}" for e in ids]
+    lines += ["COIL2D,11,1,40", "COIL2D,12,2,-40", "CIRCUIT,1,,11,1,12,1", "ICIRC,1,1,5.",
+              "MPROBE,1,0,.0205,.001,0"]
+    return "\n".join(lines + ["ENDDATA", ""])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("kind",choices=["uniform","winding","motor"])

@@ -31,4 +31,15 @@ inline constexpr double kAirGapTolerance = 1e-6;
 // B at x in the annulus from the nodal potential a of the planar mesh.
 [[nodiscard]] Vector air_gap_field(const AirGap &gap, const Eigen::VectorXd &a,
                                    const Vector &x);
+// The potential A at x in the annulus, the series the element solves: on
+// the circles it is the harmonics of the nodal trace, not the trace itself.
+[[nodiscard]] double air_gap_potential(const AirGap &gap,
+                                       const Eigen::VectorXd &a, const Vector &x);
+
+// Torque per unit depth on the part inside the gap, about the plane normal
+// u x v: -dW/d(delta) for a rigid rotation delta of the inner part with its
+// nodal potentials held, i.e. of the inner circle's harmonics. The part
+// outside the gap takes the opposite torque. It equals the Maxwell stress
+// torque on any circle in the annulus.
+[[nodiscard]] double air_gap_torque(const AirGap &gap, const Eigen::VectorXd &a);
 } // namespace vibestran::magnetic

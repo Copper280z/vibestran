@@ -1,9 +1,12 @@
 #include "magnetic/solver.hpp"
+#include "magnetic/air_gap.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
+#include <limits>
+#include <map>
 #include <numeric>
 #include <utility>
 #ifdef VIBESTRAN_HAS_HDF5
@@ -12,6 +15,73 @@
 
 namespace vibestran::magnetic {
 namespace {
+// Torque on the moving part over a MOTION subcase's positions.
+struct TorqueSummary {
+  double mean{0}, peak_to_peak{0};
+  double ripple{std::numeric_limits<double>::quiet_NaN()}; // percent of |mean|
+  bool current_free{true}; // no current at any position: cogging
+};
+TorqueSummary torque_summary(const CaseResults &c) {
+  TorqueSummary out;
+  double low = std::numeric_limits<double>::infinity(), high = -low;
+  for (const auto &step : c.steps) {
+    out.mean += step.torque / static_cast<double>(c.steps.size());
+    low = std::min(low, step.torque);
+    high = std::max(high, step.torque);
+    for (const auto &s : step.sources)
+      out.current_free &= s.current == 0;
+  }
+  out.peak_to_peak = high - low;
+  if (out.mean != 0)
+    out.ripple = 100 * out.peak_to_peak / std::abs(out.mean);
+  return out;
+}
+void write_motion_f06(std::ostream &f06, const Model &model,
+                      const Subcase &subcase, const CaseResults &c) {
+  const auto &motion = model.motions.at(subcase.motion);
+  const auto summary = torque_summary(c);
+  f06 << "\nSUBCASE " << c.id << "\nMOTION " << motion.id << ": "
+      << c.steps.size() << (c.steps.size() == 1 ? " position" : " positions")
+      << " from " << c.steps.front().position << " to "
+      << c.steps.back().position << " degrees about the z axis of CID "
+      << motion.coordinates << "\nNewton iterations: " << c.iterations
+      << "  largest relative residual: " << c.residual << '\n';
+  if (c.extrapolated)
+    f06 << "BH curve exceeded: vacuum-slope extrapolation used.\n";
+  f06 << "Torque on ESET " << motion.set
+      << " about the MOTION axis (Nm): mean " << summary.mean
+      << "  peak-to-peak " << summary.peak_to_peak << "  ripple ";
+  if (std::isfinite(summary.ripple))
+    f06 << summary.ripple << " %\n";
+  else
+    f06 << "undefined (zero mean)\n";
+  if (summary.current_free)
+    f06 << "No current at any position: cogging torque peak-to-peak (Nm) "
+        << summary.peak_to_peak << '\n';
+  if (!subcase.steps)
+    return;
+  // MSTEP = ALL: one row per position, with every closed circuit's linkage.
+  f06 << "\n  STEP   POSITION(deg)          TORQUE(Nm)           ENERGY(J)"
+         "         COENERGY(J)  ITERATIONS     RESIDUAL";
+  const auto &first = c.steps.front();
+  for (const auto &circuit : first.circuits)
+    if (std::isfinite(circuit.linkage))
+      f06 << "  LINKAGE " << std::setw(6) << circuit.id << "(Wb-turn)";
+  f06 << '\n';
+  for (size_t k = 0; k < c.steps.size(); ++k) {
+    const auto &step = c.steps[k];
+    f06 << std::setw(6) << k + 1 << std::setw(16) << step.position
+        << std::setw(20) << step.torque << std::setw(20) << step.energy
+        << std::setw(20) << step.coenergy << std::setw(12) << step.iterations
+        << std::setw(13) << std::setprecision(4) << step.residual
+        << std::setprecision(12);
+    for (const auto &circuit : step.circuits)
+      if (std::isfinite(circuit.linkage))
+        f06 << std::setw(25) << circuit.linkage;
+    f06 << '\n';
+  }
+}
+
 void write_f06(std::ostream &f06, const Model &model, const Results &results,
                const F06RunInfo *run) {
   write_f06_header(f06,
@@ -32,12 +102,21 @@ void write_f06(std::ostream &f06, const Model &model, const Results &results,
       f06 << ' ' << (polarity > 0 ? '+' : '-') << results.sources[source].id;
     f06 << '\n';
   }
-  for (const auto &c : results.cases) {
+  for (size_t ci = 0; ci < results.cases.size(); ++ci) {
+    const auto &c = results.cases[ci];
+    if (!c.steps.empty()) {
+      write_motion_f06(f06, model, model.subcases[ci], c);
+      continue;
+    }
     f06 << "\nSUBCASE " << c.id << "\nNewton iterations: " << c.iterations
         << "  relative residual: " << c.residual << "\nEnergy (J): " << c.energy
         << "  source Legendre transform (J): " << c.coenergy << '\n';
     if (c.extrapolated)
       f06 << "BH curve exceeded: vacuum-slope extrapolation used.\n";
+    if (std::isfinite(c.gap_torque))
+      f06 << "Air-gap torque on the part inside the gap, about the plane "
+             "normal (Nm): "
+          << c.gap_torque << '\n';
     for (const auto &s : c.sources) {
       f06 << (s.wire ? "WIRE PATH " : "COIL ") << s.id << " I(A)=" << s.current;
       if (s.closed)
@@ -215,6 +294,12 @@ public:
               const std::vector<T> &data) {
     dataset(parent, name, data.data(), {data.size()});
   }
+  // Row-major data of the given shape.
+  template <class T>
+  void array(hid_t parent, const std::string &name, const std::vector<T> &data,
+             std::vector<hsize_t> dims) {
+    dataset(parent, name, data.data(), std::move(dims));
+  }
   // Row i holds the vector of item i.
   void vectors(hid_t parent, const std::string &name,
                const std::vector<Vector> &data) {
@@ -323,73 +408,282 @@ std::vector<int64_t> ids(const auto &items) {
   return out;
 }
 
-// One UnstructuredGrid block of the VTKHDF collection: the selected cells
-// with their own compacted points, element IDs and per-cell vector fields.
-// The planar potential, when given, is written as point data.
-void write_grid(Hdf5File &h5, hid_t vtkhdf, const std::string &name,
-                int64_t index, const Mesh &mesh, std::vector<int> cells,
-                const std::vector<std::pair<std::string,
-                                            const std::vector<Vector> *>>
-                    &fields,
-                const Eigen::VectorXd *potential = nullptr) {
+// The cells of one UnstructuredGrid block of the VTKHDF collection and the
+// points they use: the selected mesh cells with their own compacted points,
+// then any air-gap elements, drawn with the deck's grids where the deck puts
+// them (the air-gap element does not use them, and under MOTION they stay
+// in the fixed frame).
+struct BlockTopology {
+  std::vector<int> cells, nodes; // mesh cells, and the mesh node of each point
+  std::vector<int> gap_grids;    // grid ID of each gap point, after the nodes
+  std::vector<Vector> gap_centroids;
+  std::vector<int64_t> connectivity, offsets{0}, element_ids;
+  std::vector<uint8_t> types;
+};
+BlockTopology block_topology(const Mesh &mesh, std::vector<int> cells,
+                             const Model *model = nullptr,
+                             const AirGap *gap = nullptr) {
+  BlockTopology t;
   if (cells.empty()) {
     cells.resize(mesh.cells.size());
     std::iota(cells.begin(), cells.end(), 0);
   }
-  std::vector<int> point(mesh.nodes.size(), -1), points;
-  for (int c : cells)
-    for (int n : mesh.cells[c].nodes)
-      if (point[n] < 0) {
-        point[n] = static_cast<int>(points.size());
-        points.push_back(n);
-      }
-  std::vector<Vector> coordinates;
-  for (int n : points)
-    coordinates.push_back(mesh.nodes[n]);
-  std::vector<int64_t> connectivity, offsets{0}, element_ids;
-  std::vector<uint8_t> types;
+  std::vector<int> point(mesh.nodes.size(), -1);
   for (int c : cells) {
     const auto &cell = mesh.cells[c];
-    for (int n : cell.nodes)
-      connectivity.push_back(point[n]);
-    offsets.push_back(static_cast<int64_t>(connectivity.size()));
+    for (int n : cell.nodes) {
+      if (point[n] < 0) {
+        point[n] = static_cast<int>(t.nodes.size());
+        t.nodes.push_back(n);
+      }
+      t.connectivity.push_back(point[n]);
+    }
+    t.offsets.push_back(static_cast<int64_t>(t.connectivity.size()));
     const size_t nodes = cell.nodes.size();
     // VTK triangle, quad, tetra, wedge and hexahedron.
-    types.push_back(mesh.planar ? (nodes == 3 ? 5 : 9)
-                                : (nodes == 4   ? 10
-                                   : nodes == 6 ? 13
-                                                : 12));
-    element_ids.push_back(cell.id);
+    t.types.push_back(mesh.planar ? (nodes == 3 ? 5 : 9)
+                                  : (nodes == 4   ? 10
+                                     : nodes == 6 ? 13
+                                                  : 12));
+    t.element_ids.push_back(cell.id);
   }
+  t.cells = std::move(cells);
+  if (!gap)
+    return t;
+  std::map<int, int64_t> grid_point;
+  for (const auto &e : model->elements) {
+    if (e.property != gap->property)
+      continue;
+    Vector centroid = Vector::Zero();
+    for (int id : e.nodes) {
+      auto [it, added] = grid_point.emplace(
+          id, static_cast<int64_t>(t.nodes.size() + t.gap_grids.size()));
+      if (added)
+        t.gap_grids.push_back(id);
+      t.connectivity.push_back(it->second);
+      centroid += model->nodes.at(id).position / static_cast<double>(e.nodes.size());
+    }
+    t.offsets.push_back(static_cast<int64_t>(t.connectivity.size()));
+    t.types.push_back(e.nodes.size() == 3 ? 5 : 9);
+    t.element_ids.push_back(e.id);
+    t.gap_centroids.push_back(centroid);
+  }
+  return t;
+}
+// One state of a block: its points and its per-cell and per-point fields.
+struct BlockState {
+  std::vector<Vector> points;
+  std::vector<std::pair<std::string, std::vector<Vector>>> fields;
+  std::vector<double> potential; // empty for none
+};
+// A subcase state: B and H on the cells, the planar potential at the
+// points, and on the gap cells the air-gap element's own field (B at each
+// centroid, H = B / mu0, A at each point) from the potential of that state.
+BlockState field_state(const BlockTopology &t, const Model &model,
+                       const Mesh &mesh, const std::vector<Vector> &nodes,
+                       const CaseResults &state, const AirGap *gap) {
+  BlockState out;
+  for (int n : t.nodes)
+    out.points.push_back(nodes[n]);
+  std::vector<Vector> b, h;
+  for (int c : t.cells) {
+    b.push_back(state.b[c]);
+    h.push_back(state.h[c]);
+  }
+  for (const auto &x : t.gap_centroids) {
+    b.push_back(air_gap_field(*gap, state.potential, x));
+    h.push_back(b.back() / mu0);
+  }
+  out.fields = {{"B_T", std::move(b)}, {"H_A_per_m", std::move(h)}};
+  if (mesh.planar &&
+      state.potential.size() == static_cast<Eigen::Index>(mesh.nodes.size())) {
+    for (int n : t.nodes)
+      out.potential.push_back(state.potential[n]);
+    for (int id : t.gap_grids)
+      out.potential.push_back(
+          air_gap_potential(*gap, state.potential, model.nodes.at(id).position));
+  }
+  for (int id : t.gap_grids)
+    out.points.push_back(model.nodes.at(id).position);
+  return out;
+}
+// Writes a block. Without times it is a single state. With times (degrees)
+// it is a VTKHDF time series: the topology is written once and time j shows
+// state state_at[j], so a block with fewer states, or a static one, repeats
+// them without copies.
+void write_block(Hdf5File &h5, hid_t vtkhdf, const std::string &name,
+                 int64_t index, const BlockTopology &t,
+                 const std::vector<BlockState> &states,
+                 const std::vector<double> &times,
+                 const std::vector<int64_t> &state_at) {
+  const auto points = static_cast<int64_t>(states.front().points.size()),
+             cells = static_cast<int64_t>(t.types.size());
   auto block = h5.group(vtkhdf, name);
   h5.attribute(block.get(), "Version", std::vector<int64_t>{2, 5});
   h5.attribute(block.get(), "Type", std::string("UnstructuredGrid"));
   h5.attribute(block.get(), "Index", index);
-  h5.values(block.get(), "NumberOfPoints",
-            std::vector<int64_t>{static_cast<int64_t>(points.size())});
-  h5.values(block.get(), "NumberOfCells",
-            std::vector<int64_t>{static_cast<int64_t>(cells.size())});
+  h5.values(block.get(), "NumberOfPoints", std::vector<int64_t>{points});
+  h5.values(block.get(), "NumberOfCells", std::vector<int64_t>{cells});
   h5.values(block.get(), "NumberOfConnectivityIds",
-            std::vector<int64_t>{static_cast<int64_t>(connectivity.size())});
+            std::vector<int64_t>{static_cast<int64_t>(t.connectivity.size())});
+  std::vector<Vector> coordinates;
+  for (const auto &state : states)
+    coordinates.insert(coordinates.end(), state.points.begin(), state.points.end());
   h5.vectors(block.get(), "Points", coordinates);
-  h5.values(block.get(), "Connectivity", connectivity);
-  h5.values(block.get(), "Offsets", offsets);
-  h5.values(block.get(), "Types", types);
+  h5.values(block.get(), "Connectivity", t.connectivity);
+  h5.values(block.get(), "Offsets", t.offsets);
+  h5.values(block.get(), "Types", t.types);
   auto cell_data = h5.group(block.get(), "CellData");
-  h5.values(cell_data.get(), "element_id", element_ids);
-  for (const auto &[field, values] : fields) {
-    std::vector<Vector> selected;
-    for (int c : cells)
-      selected.push_back((*values)[c]);
-    h5.vectors(cell_data.get(), field, selected);
+  h5.values(cell_data.get(), "element_id", t.element_ids);
+  for (size_t f = 0; f < states.front().fields.size(); ++f) {
+    std::vector<Vector> values;
+    for (const auto &state : states)
+      values.insert(values.end(), state.fields[f].second.begin(),
+                    state.fields[f].second.end());
+    h5.vectors(cell_data.get(), states.front().fields[f].first, values);
   }
-  if (potential && mesh.planar &&
-      potential->size() == static_cast<Eigen::Index>(mesh.nodes.size())) {
+  const bool potential = !states.front().potential.empty();
+  if (potential) {
     auto point_data = h5.group(block.get(), "PointData");
-    std::vector<double> selected;
-    for (int n : points)
-      selected.push_back((*potential)[n]);
-    h5.values(point_data.get(), "A_normal_Wb_per_m", selected);
+    std::vector<double> values;
+    for (const auto &state : states)
+      values.insert(values.end(), state.potential.begin(), state.potential.end());
+    h5.values(point_data.get(), "A_normal_Wb_per_m", values);
+  }
+  if (times.empty())
+    return;
+  auto steps = h5.group(block.get(), "Steps");
+  const auto count = static_cast<int64_t>(times.size());
+  h5.attribute(steps.get(), "NSteps", count);
+  h5.values(steps.get(), "Values", times);
+  const std::vector<int64_t> zeros(times.size(), 0), ones(times.size(), 1);
+  auto scaled = [&](int64_t size) {
+    std::vector<int64_t> out;
+    for (int64_t k : state_at)
+      out.push_back(k * size);
+    return out;
+  };
+  h5.values(steps.get(), "PartOffsets", zeros);
+  h5.values(steps.get(), "NumberOfParts", ones);
+  h5.values(steps.get(), "PointOffsets", scaled(points));
+  h5.values(steps.get(), "CellOffsets", zeros);
+  h5.values(steps.get(), "ConnectivityIdOffsets", zeros);
+  auto cell_offsets = h5.group(steps.get(), "CellDataOffsets");
+  h5.values(cell_offsets.get(), "element_id", zeros);
+  for (const auto &[field, values] : states.front().fields)
+    h5.values(cell_offsets.get(), field, scaled(cells));
+  if (potential) {
+    auto point_offsets = h5.group(steps.get(), "PointDataOffsets");
+    h5.values(point_offsets.get(), "A_normal_Wb_per_m", scaled(points));
+  }
+}
+
+// The per-subcase source, circuit, force and probe tables of one or more
+// states. stepped gives every dataset a leading axis over the states (MOTION
+// positions); a single static state is written without it.
+void write_tables(Hdf5File &h5, hid_t group, const Model &model,
+                  const Subcase &subcase,
+                  const std::vector<const CaseResults *> &states, bool stepped) {
+  auto shape = [&](std::vector<hsize_t> dims) {
+    if (stepped)
+      dims.insert(dims.begin(), states.size());
+    return dims;
+  };
+  auto flat = [](std::vector<double> &out, const Vector &v) {
+    out.insert(out.end(), {v.x(), v.y(), v.z()});
+  };
+  auto rows = [](std::vector<double> &out, const Eigen::MatrixXd &m) {
+    for (Eigen::Index i = 0; i < m.rows(); ++i)
+      for (Eigen::Index j = 0; j < m.cols(); ++j)
+        out.push_back(m(i, j));
+  };
+  const auto &first = *states.front();
+  const hsize_t ns = first.sources.size(), nc = first.circuits.size(),
+                nf = first.forces.size(), np = model.probes.size();
+  {
+    auto sources = h5.group(group, "sources");
+    std::vector<double> current, linkage, inductance;
+    for (const auto *c : states) {
+      for (const auto &s : c->sources) {
+        current.push_back(s.current);
+        linkage.push_back(s.closed ? s.linkage : std::nan(""));
+      }
+      rows(inductance, c->differential_inductance);
+    }
+    h5.array(sources.get(), "current_A", current, shape({ns}));
+    h5.array(sources.get(), "linkage_Wb_turn", linkage, shape({ns}));
+    h5.array(sources.get(), "differential_inductance_H", inductance, shape({ns, ns}));
+  }
+  {
+    auto circuits = h5.group(group, "circuits");
+    std::vector<double> current, linkage, inductance;
+    for (const auto *c : states) {
+      for (const auto &circuit : c->circuits) {
+        current.push_back(circuit.current);
+        linkage.push_back(circuit.linkage);
+      }
+      rows(inductance, c->circuit_inductance);
+    }
+    h5.array(circuits.get(), "current_A", current, shape({nc}));
+    h5.array(circuits.get(), "linkage_Wb_turn", linkage, shape({nc}));
+    h5.array(circuits.get(), "inductance_H", inductance, shape({nc, nc}));
+  }
+  {
+    auto forces = h5.group(group, "forces");
+    std::vector<double> force, torque, force_local, torque_local, piece_force,
+        piece_torque;
+    std::vector<int64_t> offsets{0};
+    for (const auto &f : first.forces)
+      offsets.push_back(offsets.back() + static_cast<int64_t>(f.components.size()));
+    for (const auto *c : states)
+      for (size_t i = 0; i < c->forces.size(); ++i) {
+        const auto &f = c->forces[i];
+        const auto &request = model.forces[i];
+        // Torque is about the CID origin; the local components use its axes.
+        const Matrix axes =
+            request.coordinates
+                ? coordinate_axes(model.coordinates.at(request.coordinates))
+                : Matrix::Identity();
+        flat(force, f.force);
+        flat(torque, f.torque);
+        flat(force_local, axes.transpose() * f.force);
+        flat(torque_local, axes.transpose() * f.torque);
+        for (const auto &piece : f.components) {
+          flat(piece_force, piece.force);
+          flat(piece_torque, piece.torque);
+        }
+      }
+    const auto pieces = static_cast<hsize_t>(offsets.back());
+    h5.array(forces.get(), "force_N", force, shape({nf, 3}));
+    h5.array(forces.get(), "torque_Nm", torque, shape({nf, 3}));
+    h5.array(forces.get(), "force_local_N", force_local, shape({nf, 3}));
+    h5.array(forces.get(), "torque_local_Nm", torque_local, shape({nf, 3}));
+    h5.values(forces.get(), "piece_offsets", offsets);
+    h5.array(forces.get(), "piece_force_N", piece_force, shape({pieces, 3}));
+    h5.array(forces.get(), "piece_torque_Nm", piece_torque, shape({pieces, 3}));
+  }
+  if (subcase.probes) {
+    auto probes = h5.group(group, "probes");
+    std::vector<double> b, h, b_local, h_local;
+    for (const auto *c : states)
+      for (size_t i = 0; i < model.probes.size(); ++i) {
+        const auto &probe = model.probes[i];
+        // CD components use the local directions at the probe, e.g. radial
+        // and tangential for a CORD2C.
+        const Matrix axes =
+            probe.output_coordinates
+                ? local_axes(model.coordinates.at(probe.output_coordinates),
+                             probe.position)
+                : Matrix::Identity();
+        flat(b, c->probe_b[i]);
+        flat(h, c->probe_h[i]);
+        flat(b_local, axes.transpose() * c->probe_b[i]);
+        flat(h_local, axes.transpose() * c->probe_h[i]);
+      }
+    h5.array(probes.get(), "B_T", b, shape({np, 3}));
+    h5.array(probes.get(), "H_A_per_m", h, shape({np, 3}));
+    h5.array(probes.get(), "B_local_T", b_local, shape({np, 3}));
+    h5.array(probes.get(), "H_local_A_per_m", h_local, shape({np, 3}));
   }
 }
 
@@ -404,6 +698,34 @@ Status write_hdf5(const std::string &path, const Model &model,
   h5.attribute(vtkhdf.get(), "Type",
                std::string("PartitionedDataSetCollection"));
   auto assembly = h5.group(vtkhdf.get(), "Assembly");
+  // With MOTION fields the collection is a time series whose time is the
+  // position in degrees: every position BFIELD writes in any subcase. Each
+  // block holds, at each time, its state at the largest of its own positions
+  // not above it (its first position before that); static blocks hold their
+  // one state throughout. VTK requires one step count for all blocks.
+  std::vector<double> times;
+  for (size_t ci = 0; ci < results.cases.size(); ++ci)
+    if (model.subcases[ci].field.enabled)
+      for (const auto &step : results.cases[ci].steps)
+        if (!step.b.empty())
+          times.push_back(step.position);
+  std::sort(times.begin(), times.end());
+  times.erase(std::unique(times.begin(), times.end()), times.end());
+  auto held = [&times](const std::vector<double> &positions) {
+    std::vector<int64_t> out;
+    if (times.empty())
+      return out;
+    for (double t : times) {
+      int64_t best = -1;
+      for (size_t k = 0; k < positions.size(); ++k)
+        if (positions[k] <= t && (best < 0 || positions[k] >= positions[best]))
+          best = static_cast<int64_t>(k);
+      if (best < 0)
+        best = std::min_element(positions.begin(), positions.end()) - positions.begin();
+      out.push_back(best);
+    }
+    return out;
+  };
   int64_t index = 0;
   Handle fields_node, sources_node;
   for (size_t ci = 0; ci < results.cases.size(); ++ci) {
@@ -415,9 +737,26 @@ Status write_hdf5(const std::string &path, const Model &model,
     if (request.set)
       for (int id : model.element_sets.at(request.set))
         cells.push_back(results.mesh.element_index.at(id));
+    // The air gap is drawn with every cell; an ESET holds field cells only.
+    const AirGap *gap =
+        request.set == 0 && results.mesh.air_gap ? &*results.mesh.air_gap : nullptr;
+    const auto topology = block_topology(results.mesh, std::move(cells), &model, gap);
+    std::vector<BlockState> states;
+    std::vector<double> positions;
+    if (c.steps.empty())
+      states.push_back(field_state(topology, model, results.mesh,
+                                   results.mesh.nodes, c, gap));
+    for (const auto &step : c.steps) {
+      if (step.b.empty())
+        continue;
+      states.push_back(field_state(topology, model, results.mesh, step.nodes, step,
+                                   step.air_gap ? &*step.air_gap : nullptr));
+      positions.push_back(step.position);
+    }
     const auto name = "SUBCASE_" + std::to_string(c.id);
-    write_grid(h5, vtkhdf.get(), name, index++, results.mesh, std::move(cells),
-               {{"B_T", &c.b}, {"H_A_per_m", &c.h}}, &c.potential);
+    write_block(h5, vtkhdf.get(), name, index++, topology, states, times,
+                positions.empty() ? std::vector<int64_t>(times.size(), 0)
+                                  : held(positions));
     if (!fields_node.valid())
       fields_node = h5.group(assembly.get(), "fields");
     h5.link(fields_node.get(), name, "/VTKHDF/" + name);
@@ -426,9 +765,17 @@ Status write_hdf5(const std::string &path, const Model &model,
     for (const auto &source : results.sources) {
       const auto name =
           (source.wire ? "WIRE_" : "COIL_") + std::to_string(source.id);
+      const auto topology = block_topology(source.mesh, {});
+      BlockState state;
+      for (int n : topology.nodes)
+        state.points.push_back(source.mesh.nodes[n]);
       const auto density = source_density(source);
-      write_grid(h5, vtkhdf.get(), name, index++, source.mesh, {},
-                 {{"J_per_ampere_per_m2", &density}});
+      std::vector<Vector> selected;
+      for (int c : topology.cells)
+        selected.push_back(density[c]);
+      state.fields = {{"J_per_ampere_per_m2", std::move(selected)}};
+      write_block(h5, vtkhdf.get(), name, index++, topology, {state}, times,
+                  std::vector<int64_t>(times.size(), 0));
       if (!sources_node.valid())
         sources_node = h5.group(assembly.get(), "sources");
       h5.link(sources_node.get(), name, "/VTKHDF/" + name);
@@ -527,87 +874,57 @@ Status write_hdf5(const std::string &path, const Model &model,
   auto subcases = h5.group(magstat.get(), "subcases");
   for (size_t ci = 0; ci < results.cases.size(); ++ci) {
     const auto &c = results.cases[ci];
+    const auto &subcase = model.subcases[ci];
     auto group = h5.group(subcases.get(), std::to_string(c.id));
     h5.attribute(group.get(), "id", int64_t{c.id});
     h5.attribute(group.get(), "iterations", int64_t{c.iterations});
     h5.attribute(group.get(), "residual", c.residual);
-    h5.attribute(group.get(), "energy_J", c.energy);
-    h5.attribute(group.get(), "coenergy_J", c.coenergy);
     h5.attribute(group.get(), "bh_extrapolated", uint8_t{c.extrapolated});
-    {
-      auto sources = h5.group(group.get(), "sources");
-      std::vector<double> current, linkage;
-      for (const auto &s : c.sources) {
-        current.push_back(s.current);
-        linkage.push_back(s.closed ? s.linkage : std::nan(""));
-      }
-      h5.values(sources.get(), "current_A", current);
-      h5.values(sources.get(), "linkage_Wb_turn", linkage);
-      h5.matrix(sources.get(), "differential_inductance_H",
-                c.differential_inductance);
+    if (c.steps.empty()) {
+      h5.attribute(group.get(), "energy_J", c.energy);
+      h5.attribute(group.get(), "coenergy_J", c.coenergy);
+      if (std::isfinite(c.gap_torque))
+        h5.attribute(group.get(), "air_gap_torque_Nm", c.gap_torque);
+      write_tables(h5, group.get(), model, subcase, {&c}, false);
+      continue;
     }
-    {
-      auto circuits = h5.group(group.get(), "circuits");
-      std::vector<double> current, linkage;
-      for (const auto &circuit : c.circuits) {
-        current.push_back(circuit.current);
-        linkage.push_back(circuit.linkage);
-      }
-      h5.values(circuits.get(), "current_A", current);
-      h5.values(circuits.get(), "linkage_Wb_turn", linkage);
-      h5.matrix(circuits.get(), "inductance_H", c.circuit_inductance);
+    // A MOTION subcase: the summary always, and with MSTEP = ALL every
+    // per-position value, with a leading position axis.
+    const auto &motion = model.motions.at(subcase.motion);
+    const auto summary = torque_summary(c);
+    h5.attribute(group.get(), "motion", int64_t{motion.id});
+    h5.attribute(group.get(), "positions", static_cast<int64_t>(c.steps.size()));
+    h5.attribute(group.get(), "start_deg", motion.start);
+    h5.attribute(group.get(), "step_deg", motion.step);
+    h5.attribute(group.get(), "torque_mean_Nm", summary.mean);
+    h5.attribute(group.get(), "torque_peak_to_peak_Nm", summary.peak_to_peak);
+    h5.attribute(group.get(), "torque_ripple_percent", summary.ripple);
+    h5.attribute(group.get(), "current_free", uint8_t{summary.current_free});
+    if (!subcase.steps)
+      continue;
+    std::vector<const CaseResults *> states;
+    std::vector<double> position, residual, energy, coenergy, torque;
+    std::vector<int64_t> iterations;
+    std::vector<uint8_t> extrapolated;
+    for (const auto &step : c.steps) {
+      states.push_back(&step);
+      position.push_back(step.position);
+      residual.push_back(step.residual);
+      energy.push_back(step.energy);
+      coenergy.push_back(step.coenergy);
+      torque.push_back(step.torque);
+      iterations.push_back(step.iterations);
+      extrapolated.push_back(step.extrapolated);
     }
-    {
-      auto forces = h5.group(group.get(), "forces");
-      std::vector<Vector> force, torque, force_local, torque_local,
-          piece_force, piece_torque;
-      std::vector<int64_t> offsets{0};
-      for (size_t i = 0; i < c.forces.size(); ++i) {
-        const auto &f = c.forces[i];
-        const auto &request = model.forces[i];
-        // Torque is about the CID origin; the local components use its axes.
-        const Matrix axes =
-            request.coordinates
-                ? coordinate_axes(model.coordinates.at(request.coordinates))
-                : Matrix::Identity();
-        force.push_back(f.force);
-        torque.push_back(f.torque);
-        force_local.push_back(axes.transpose() * f.force);
-        torque_local.push_back(axes.transpose() * f.torque);
-        for (const auto &piece : f.components) {
-          piece_force.push_back(piece.force);
-          piece_torque.push_back(piece.torque);
-        }
-        offsets.push_back(static_cast<int64_t>(piece_force.size()));
-      }
-      h5.vectors(forces.get(), "force_N", force);
-      h5.vectors(forces.get(), "torque_Nm", torque);
-      h5.vectors(forces.get(), "force_local_N", force_local);
-      h5.vectors(forces.get(), "torque_local_Nm", torque_local);
-      h5.values(forces.get(), "piece_offsets", offsets);
-      h5.vectors(forces.get(), "piece_force_N", piece_force);
-      h5.vectors(forces.get(), "piece_torque_Nm", piece_torque);
-    }
-    if (model.subcases[ci].probes) {
-      auto probes = h5.group(group.get(), "probes");
-      std::vector<Vector> b_local, h_local;
-      for (size_t i = 0; i < model.probes.size(); ++i) {
-        const auto &probe = model.probes[i];
-        // CD components use the local directions at the probe, e.g. radial
-        // and tangential for a CORD2C.
-        const Matrix axes =
-            probe.output_coordinates
-                ? local_axes(model.coordinates.at(probe.output_coordinates),
-                             probe.position)
-                : Matrix::Identity();
-        b_local.push_back(axes.transpose() * c.probe_b[i]);
-        h_local.push_back(axes.transpose() * c.probe_h[i]);
-      }
-      h5.vectors(probes.get(), "B_T", c.probe_b);
-      h5.vectors(probes.get(), "H_A_per_m", c.probe_h);
-      h5.vectors(probes.get(), "B_local_T", b_local);
-      h5.vectors(probes.get(), "H_local_A_per_m", h_local);
-    }
+    h5.values(group.get(), "positions_deg", position);
+    h5.values(group.get(), "iterations", iterations);
+    h5.values(group.get(), "residual", residual);
+    h5.values(group.get(), "energy_J", energy);
+    h5.values(group.get(), "coenergy_J", coenergy);
+    h5.values(group.get(), "bh_extrapolated", extrapolated);
+    auto motion_group = h5.group(group.get(), "motion");
+    h5.values(motion_group.get(), "torque_Nm", torque);
+    write_tables(h5, group.get(), model, subcase, states, true);
   }
   // Groups must close before the file so the flush covers everything.
   fields_node.reset();

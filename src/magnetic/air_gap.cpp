@@ -294,17 +294,25 @@ bool in_air_gap(const AirGap &gap, const Vector &x) {
          r >= gap.inner_chord && r <= gap.outer.radius;
 }
 
-Vector air_gap_field(const AirGap &gap, const Eigen::VectorXd &a, const Vector &x) {
+namespace {
+// The annulus solution at x: A and its polar derivatives.
+struct GapPoint {
+  double a{0}, da_dr{0}, da_dtheta{0}, r{0}, theta{0};
+};
+GapPoint evaluate(const AirGap &gap, const Eigen::VectorXd &a, const Vector &x) {
   const auto [alpha, beta] = coefficients(gap, a);
   const Vector d = x - gap.center;
-  const double px = d.dot(gap.u), py = d.dot(gap.v), r = std::hypot(px, py),
-               theta = std::atan2(py, px);
+  GapPoint p;
+  const double px = d.dot(gap.u), py = d.dot(gap.v);
+  p.r = std::hypot(px, py);
+  p.theta = std::atan2(py, px);
   const double r1 = gap.inner.radius, total = std::log(gap.outer.radius / r1);
   // Slightly negative between the inner circle and its chords, where the
   // annulus solution continues smoothly.
-  const double from_inner = std::min(std::log(r / r1), total),
+  const double from_inner = std::min(std::log(p.r / r1), total),
                from_outer = total - from_inner;
-  double da_dr = (beta[0] - alpha[0]) / (r * total), da_dtheta = 0;
+  p.a = alpha[0] + (beta[0] - alpha[0]) * from_inner / total;
+  p.da_dr = (beta[0] - alpha[0]) / (p.r * total);
   for (int m = 1; m <= gap.harmonics; ++m) {
     // sinh(m y)/sinh(m L) and cosh(m y)/sinh(m L), y = from_outer, and the
     // same with from_inner, written to stay finite for large m L.
@@ -316,15 +324,43 @@ Vector air_gap_field(const AirGap &gap, const Eigen::VectorXd &a, const Vector &
                  cosh_x = std::exp(-m * from_outer) * (1 + ex) / den;
     const double cos_part = alpha[2 * m - 1] * sinh_y + beta[2 * m - 1] * sinh_x,
                  sin_part = alpha[2 * m] * sinh_y + beta[2 * m] * sinh_x,
-                 dcos = m / r * (-alpha[2 * m - 1] * cosh_y + beta[2 * m - 1] * cosh_x),
-                 dsin = m / r * (-alpha[2 * m] * cosh_y + beta[2 * m] * cosh_x);
-    const double c = std::cos(m * theta), s = std::sin(m * theta);
-    da_dr += dcos * c + dsin * s;
-    da_dtheta += m * (-cos_part * s + sin_part * c);
+                 dcos = m / p.r * (-alpha[2 * m - 1] * cosh_y + beta[2 * m - 1] * cosh_x),
+                 dsin = m / p.r * (-alpha[2 * m] * cosh_y + beta[2 * m] * cosh_x);
+    const double c = std::cos(m * p.theta), s = std::sin(m * p.theta);
+    p.a += cos_part * c + sin_part * s;
+    p.da_dr += dcos * c + dsin * s;
+    p.da_dtheta += m * (-cos_part * s + sin_part * c);
   }
-  const Vector radial = std::cos(theta) * gap.u + std::sin(theta) * gap.v,
-               tangential = -std::sin(theta) * gap.u + std::cos(theta) * gap.v;
-  const Vector gradient = da_dr * radial + da_dtheta / r * tangential;
+  return p;
+}
+} // namespace
+
+Vector air_gap_field(const AirGap &gap, const Eigen::VectorXd &a, const Vector &x) {
+  const auto p = evaluate(gap, a, x);
+  const Vector radial = std::cos(p.theta) * gap.u + std::sin(p.theta) * gap.v,
+               tangential = -std::sin(p.theta) * gap.u + std::cos(p.theta) * gap.v;
+  const Vector gradient = p.da_dr * radial + p.da_dtheta / p.r * tangential;
   return gradient.cross(gap.u.cross(gap.v));
+}
+
+double air_gap_potential(const AirGap &gap, const Eigen::VectorXd &a, const Vector &x) {
+  return evaluate(gap, a, x).a;
+}
+
+double air_gap_torque(const AirGap &gap, const Eigen::VectorXd &a) {
+  // Rotating the inner circle by delta turns its (cos, sin) pair of harmonic
+  // m at rate (-m s, m c). Only the mutual term of W changes, by
+  // m M_m (alpha_c beta_s - alpha_s beta_c) per radian, with M_m the mutual
+  // coefficient of air_gap_stiffness.
+  const auto [alpha, beta] = coefficients(gap, a);
+  const double log_ratio = std::log(gap.inner.radius / gap.outer.radius);
+  double torque = 0;
+  for (int m = 1; m <= gap.harmonics; ++m) {
+    const double q = std::exp(m * log_ratio),
+                 mutual = -pi * m / mu0 * 2 * q / -std::expm1(2 * m * log_ratio);
+    torque -= m * mutual *
+              (alpha[2 * m - 1] * beta[2 * m] - alpha[2 * m] * beta[2 * m - 1]);
+  }
+  return torque;
 }
 } // namespace vibestran::magnetic
