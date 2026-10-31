@@ -551,10 +551,11 @@ does not remesh or silently rotate selected material regions:
 ```
 
 ```sh
-python3 tools/magnetic_sweep.py manifest.json --vibestran build/vibestran --output /tmp/magnetic/sweep
+.venv/bin/python tools/magnetic_sweep.py manifest.json --vibestran build/vibestran --output /tmp/magnetic/sweep
 ```
 
-The sweep runner reads each run's `/MAGSTAT` results with `h5py`.
+The sweep runner reads each run's `/MAGSTAT` results with `h5py`, so it runs
+from the `.venv` described under the tests below.
 
 `sweep.csv` includes circuit currents/linkages and surface force/torque. At interior
 angles it computes the three-point derivative of coenergy with respect to angle
@@ -596,11 +597,26 @@ warped-background transfer, open terminals and material exclusion. Cubic monomia
 integrals verify the five-point rule; arbitrary face fluxes verify cached currents
 on affine, warped, reflected and translated cells. Tet transfer is invariant to
 local vertex order and rigid motion. The spatial-loop AUTO fallback and strict
-HEX rejection are checked against the current moment. The CLI test checks
-actual HDF5 values, VTK topology, planar nodal potentials, exported ampere-turn
-integrals and the prepared-deck sweep, and loads every field block through
-VTK's own `vtkHDFReader`, as ParaView does. It needs `h5py` and the VTK Python
-module and is skipped without them.
+HEX rejection are checked against the current moment.
+
+The `magnetic_cli` test (`tests/e2e/test_magnetic_cli.cpp`) runs the
+`vibestran` executable on decks from the standard-library generators in
+`tools/` and reads the HDF5 results through the C API. It checks analytical
+energies and fields, VTK cell types, planar nodal potentials, nonlinear BH
+energy and H, circuit linkage and inductance identities, exported ampere-turn
+integrals and wire-mesh schemes. It needs no third-party Python packages.
+
+The optional `magnetic_vtkhdf` test (`tools/magnetic_vtkhdf_check.py`) loads
+every block through VTK's own `vtkHDFReader`, as ParaView does, and checks it
+against the raw datasets; it also runs the prepared-deck sweep. It needs the
+packages in `tools/requirements-magnetic.txt`, which it takes from the
+repository `.venv` when the current interpreter lacks them, and is reported as
+skipped without them:
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r tools/requirements-magnetic.txt
+```
 
 Run `meson test --print-errorlogs` and `ninja cppcheck` from `build`.
 Independent tool comparisons, their dependencies and their outputs live in

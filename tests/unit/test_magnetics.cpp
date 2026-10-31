@@ -8,67 +8,12 @@
 #include <numbers>
 #include <sstream>
 #ifdef VIBESTRAN_HAS_HDF5
-#include <hdf5.h>
+#include "../common/hdf5_results.hpp"
+using namespace vibestran::test;
 #endif
 
 using namespace vibestran::magnetic;
 namespace {
-#ifdef VIBESTRAN_HAS_HDF5
-// Independent readers for the result file, written against the HDF5 C API
-// rather than the solver's writer.
-struct Table {
-  std::vector<double> values; // row-major; HDF5 converts integer storage
-  std::vector<hsize_t> dims;
-  double at(size_t row, size_t column = 0) const {
-    return values[row * (dims.size() > 1 ? dims[1] : 1) + column];
-  }
-};
-// True when every component of the path exists.
-bool h5_exists(const std::filesystem::path &file, const std::string &path) {
-  const hid_t f = H5Fopen(file.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
-  if (f < 0)
-    return false;
-  bool found = true;
-  for (size_t at = path.find('/', 1); found; at = path.find('/', at + 1)) {
-    found = H5Lexists(f, path.substr(0, at).c_str(), H5P_DEFAULT) > 0;
-    if (at == std::string::npos)
-      break;
-  }
-  H5Fclose(f);
-  return found;
-}
-Table h5_table(const std::filesystem::path &file, const std::string &path) {
-  Table t;
-  const hid_t f = H5Fopen(file.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
-  const hid_t d = H5Dopen2(f, path.c_str(), H5P_DEFAULT);
-  if (d >= 0) {
-    const hid_t space = H5Dget_space(d);
-    t.dims.resize(static_cast<size_t>(H5Sget_simple_extent_ndims(space)));
-    H5Sget_simple_extent_dims(space, t.dims.data(), nullptr);
-    t.values.resize(static_cast<size_t>(H5Sget_simple_extent_npoints(space)));
-    if (!t.values.empty())
-      H5Dread(d, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT,
-              t.values.data());
-    H5Sclose(space);
-    H5Dclose(d);
-  }
-  H5Fclose(f);
-  return t;
-}
-double h5_attribute(const std::filesystem::path &file, const std::string &path,
-                    const std::string &name) {
-  const hid_t f = H5Fopen(file.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
-  double value = std::nan("");
-  const hid_t a = H5Aopen_by_name(f, path.c_str(), name.c_str(), H5P_DEFAULT,
-                                  H5P_DEFAULT);
-  if (a >= 0) {
-    H5Aread(a, H5T_NATIVE_DOUBLE, &value);
-    H5Aclose(a);
-  }
-  H5Fclose(f);
-  return value;
-}
-#endif
 // These helpers only generate independent analytical verification fixtures.
 Model box(int n, double extent = 1) {
   Model m;

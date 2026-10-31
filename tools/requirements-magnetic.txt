@@ -1,0 +1,8 @@
+# Optional Python packages for MAGSTAT result tooling: the VTKHDF/ParaView
+# compatibility check (tools/magnetic_vtkhdf_check.py), tools/magnetic_sweep.py
+# and scripts that read name.mag.vtkhdf. The standard test suite does not need
+# them. Install into the repository venv:
+#   python3 -m venv .venv && .venv/bin/pip install -r tools/requirements-magnetic.txt
+h5py>=3.10
+numpy>=1.26
+vtk>=9.4

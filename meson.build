@@ -578,15 +578,34 @@ test('unit_tests', unit_tests,
   suite   : 'unit',
 )
 
-# Analytical CLI checks only. External solvers live in Magnetic_Validation and
-# are deliberately not registered with Meson or ordinary CI. MAGSTAT needs
-# HDF5; the script skips (exit 77) when h5py or the VTK Python module is
-# missing.
+# Analytical MAGSTAT CLI checks. External solvers live in Magnetic_Validation
+# and are deliberately not registered with Meson or ordinary CI. MAGSTAT needs
+# HDF5, so both tests exist only in HDF5 builds.
 if hdf5_dep.found()
-  test('magnetic_e2e', python,
-    args : [files('tools/magnetic_e2e.py'), vibestran_exe],
-    timeout : 60,
-    suite : 'e2e',
+  # Black-box: links only HDF5 to read the results, and drives the vibestran
+  # executable on decks from the standard-library Python generators.
+  magnetic_cli_tests = executable(
+    'magnetic_cli_tests',
+    'tests/e2e/test_magnetic_cli.cpp',
+    dependencies : [hdf5_dep, gtest_dep],
+  )
+  test('magnetic_cli', magnetic_cli_tests,
+    timeout : 120,
+    suite   : 'e2e',
+    depends : vibestran_exe,
+    env     : {
+      'VIBESTRAN'        : vibestran_exe.full_path(),
+      'VIBESTRAN_PYTHON' : python.full_path(),
+      'VIBESTRAN_TOOLS'  : join_paths(meson.project_source_root(), 'tools'),
+    },
+  )
+  # Optional: VTK's own VTKHDF reader and the h5py-based sweep tool. Needs the
+  # packages in tools/requirements-magnetic.txt, taken from the repository
+  # .venv when present; reported as skipped (exit 77) otherwise.
+  test('magnetic_vtkhdf', python,
+    args    : [files('tools/magnetic_vtkhdf_check.py'), vibestran_exe],
+    timeout : 120,
+    suite   : 'e2e',
   )
 endif
 
