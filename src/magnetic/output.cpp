@@ -9,6 +9,7 @@
 #include <limits>
 #include <map>
 #include <numbers>
+#include <optional>
 #include <numeric>
 #include <utility>
 #ifdef VIBESTRAN_HAS_HDF5
@@ -20,7 +21,10 @@ namespace {
 // Torque on the moving part over a MOTION subcase's positions.
 struct TorqueSummary {
   double mean{0}, peak_to_peak{0};
-  double ripple{std::numeric_limits<double>::quiet_NaN()}; // percent of |mean|
+  // Percent of |mean|. NaN for a zero mean, and without current at any
+  // position: cogging alone averages to zero over its period by energy
+  // balance, so its mean is sampling residue and no base for a percentage.
+  double ripple{std::numeric_limits<double>::quiet_NaN()};
   bool current_free{true}; // no current at any position: cogging
 };
 TorqueSummary torque_summary(const CaseResults &c) {
@@ -34,7 +38,7 @@ TorqueSummary torque_summary(const CaseResults &c) {
       out.current_free &= s.current == 0;
   }
   out.peak_to_peak = high - low;
-  if (out.mean != 0)
+  if (out.mean != 0 && !out.current_free)
     out.ripple = 100 * out.peak_to_peak / std::abs(out.mean);
   return out;
 }
@@ -161,7 +165,8 @@ void write_motion_f06(std::ostream &f06, const Model &model,
   if (std::isfinite(summary.ripple))
     f06 << summary.ripple << " %\n";
   else
-    f06 << "undefined (zero mean)\n";
+    f06 << (summary.current_free ? "undefined (no current: cogging)\n"
+                                 : "undefined (zero mean)\n");
   if (summary.current_free)
     f06 << "No current at any position: cogging torque peak-to-peak (Nm) "
         << summary.peak_to_peak << '\n';
@@ -635,8 +640,11 @@ BlockState field_state(const BlockTopology &t, const Model &model,
     b.push_back(state.b[c]);
     h.push_back(state.h[c]);
   }
+  std::optional<AirGapSeries> series;
+  if (gap)
+    series.emplace(*gap, state.potential);
   for (const auto &x : t.gap_centroids) {
-    b.push_back(air_gap_field(*gap, state.potential, x));
+    b.push_back(series->field(x));
     h.push_back(b.back() / mu0);
   }
   out.fields = {{"B_T", std::move(b)}, {"H_A_per_m", std::move(h)}};
@@ -645,8 +653,7 @@ BlockState field_state(const BlockTopology &t, const Model &model,
     for (int n : t.nodes)
       out.potential.push_back(state.potential[n]);
     for (int id : t.gap_grids)
-      out.potential.push_back(
-          air_gap_potential(*gap, state.potential, model.nodes.at(id).position));
+      out.potential.push_back(series->potential(model.nodes.at(id).position));
   }
   for (int id : t.gap_grids)
     out.points.push_back(model.nodes.at(id).position);

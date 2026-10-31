@@ -578,6 +578,9 @@ TEST(Drive, ResultsReportTheDqQuantitiesAndTheBackEmf) {
   EXPECT_EQ(h5_attribute(file, group, "theta0_deg"), c.drive_summary->theta0);
   EXPECT_EQ(h5_attribute(file, group, "electrical_periods"), 1);
   EXPECT_EQ(h5_attribute(file, "/MAGSTAT/subcases/1", "speed_rpm"), 3000);
+  // No current anywhere: cogging, so no ripple percentage of a zero mean.
+  EXPECT_EQ(h5_attribute(file, "/MAGSTAT/subcases/1", "current_free"), 1);
+  EXPECT_TRUE(std::isnan(h5_attribute(file, "/MAGSTAT/subcases/1", "torque_ripple_percent")));
   const auto constant = h5_table(file, group + "/emf_constant_fundamental_V_s_per_rad");
   const auto distortion = h5_table(file, group + "/emf_thd_percent");
   ASSERT_EQ(constant.values.size(), 3U);
@@ -607,6 +610,7 @@ TEST(Drive, ResultsReportTheDqQuantitiesAndTheBackEmf) {
                       "constant (V s/rad, peak)"),
             std::string::npos);
   EXPECT_NE(text.find("STEP   THETA_E(deg)"), std::string::npos);
+  EXPECT_NE(text.find("ripple undefined (no current: cogging)"), std::string::npos);
   EXPECT_NE(text.find("EMF      1(V)"), std::string::npos);
 #endif
 }

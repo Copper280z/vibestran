@@ -146,7 +146,8 @@ TEST(AirGapStiffness, UniformFieldEnergyAndGapFieldConvergeAtSecondOrder) {
       for (double r : {r1 + .25 * (r2 - r1), (r1 + r2) / 2, r1 + .75 * (r2 - r1)})
         field_error = std::max(
             field_error,
-            (air_gap_field(g, a, Vector(r * std::cos(t), r * std::sin(t), 0)) - field).norm() /
+            (AirGapSeries(g, a).field(Vector(r * std::cos(t), r * std::sin(t), 0)) - field)
+                    .norm() /
                 field.norm());
     const double energy_error = std::abs(energy - exact) / exact;
     EXPECT_LT(energy_error, previous_energy / 3.5) << n;
@@ -161,7 +162,7 @@ TEST(AirGapStiffness, UniformFieldEnergyAndGapFieldConvergeAtSecondOrder) {
 TEST(AirGapStiffness, PotentialIsTheSeriesWhoseCurlIsTheGapField) {
   // A harmonic potential with a mean (log) term, a growing and a decaying
   // harmonic: A = b0 [r1 ln(r/r1) + (x^2 - y^2) / (2 r1) + r1^2 y / r^2].
-  // air_gap_potential must be the series whose curl air_gap_field returns
+  // The series' potential must be the one whose curl its field returns
   // (B = (dA/dy, -dA/dx), checked by central differences), and it must
   // converge to the exact A at O(h^2) inside the gap.
   const double r1 = .02, r2 = .021, b0 = .8;
@@ -174,19 +175,20 @@ TEST(AirGapStiffness, PotentialIsTheSeriesWhoseCurlIsTheGapField) {
   for (int n : {32, 64, 128}) {
     const AirGap g = direct_gap(r1, r2, n, n * 3 / 2);
     const Eigen::VectorXd a = sample(g, exact);
+    const AirGapSeries series(g, a);
     double curl_error = 0, error = 0;
     for (double t : {0., 1., 2.5, 4.})
       for (double r : {r1 + .25 * (r2 - r1), (r1 + r2) / 2, r1 + .75 * (r2 - r1)}) {
         const Vector x(r * std::cos(t), r * std::sin(t), 0);
         const double h = 1e-6 * (r2 - r1);
         auto potential = [&](double dx, double dy) {
-          return air_gap_potential(g, a, x + Vector(dx, dy, 0));
+          return series.potential(x + Vector(dx, dy, 0));
         };
         const Vector curl((potential(0, h) - potential(0, -h)) / (2 * h),
                           -(potential(h, 0) - potential(-h, 0)) / (2 * h), 0);
-        const Vector b = air_gap_field(g, a, x);
+        const Vector b = series.field(x);
         curl_error = std::max(curl_error, (curl - b).norm() / b.norm());
-        error = std::max(error, std::abs(air_gap_potential(g, a, x) - exact(x)) / (b0 * r1));
+        error = std::max(error, std::abs(series.potential(x) - exact(x)) / (b0 * r1));
       }
     SCOPED_TRACE(n);
     EXPECT_LT(curl_error, 1e-6);

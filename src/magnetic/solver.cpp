@@ -964,6 +964,8 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
         if (circuits[c].closed && circuits[d].closed)
           output.circuit_inductance(c, d) = 0;
   }
+  // The gap's harmonics, computed at the first probe in the gap and reused.
+  std::optional<AirGapSeries> gap_series;
   for (const auto &probe : model.probes) {
     Vector b = Vector::Zero(), h = Vector::Zero();
     int count = 0;
@@ -979,7 +981,9 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
     }
     if (count == 0 && mesh.air_gap && in_air_gap(*mesh.air_gap, probe.position)) {
       // The gap is air: H = B / mu0.
-      b = air_gap_field(*mesh.air_gap, eq.a, probe.position);
+      if (!gap_series)
+        gap_series.emplace(*mesh.air_gap, eq.a);
+      b = gap_series->field(probe.position);
       h = b / mu0;
       count = 1;
     }

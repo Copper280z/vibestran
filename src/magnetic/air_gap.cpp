@@ -294,26 +294,27 @@ bool in_air_gap(const AirGap &gap, const Vector &x) {
          r >= gap.inner_chord && r <= gap.outer.radius;
 }
 
-namespace {
+AirGapSeries::AirGapSeries(const AirGap &gap, const Eigen::VectorXd &a) : gap_(&gap) {
+  auto [inner, outer] = coefficients(gap, a);
+  inner_ = std::move(inner);
+  outer_ = std::move(outer);
+}
+
 // The annulus solution at x: A and its polar derivatives.
-struct GapPoint {
-  double a{0}, da_dr{0}, da_dtheta{0}, r{0}, theta{0};
-};
-GapPoint evaluate(const AirGap &gap, const Eigen::VectorXd &a, const Vector &x) {
-  const auto [alpha, beta] = coefficients(gap, a);
-  const Vector d = x - gap.center;
-  GapPoint p;
-  const double px = d.dot(gap.u), py = d.dot(gap.v);
+AirGapSeries::Point AirGapSeries::evaluate(const Vector &x) const {
+  const Vector d = x - gap_->center;
+  Point p;
+  const double px = d.dot(gap_->u), py = d.dot(gap_->v);
   p.r = std::hypot(px, py);
   p.theta = std::atan2(py, px);
-  const double r1 = gap.inner.radius, total = std::log(gap.outer.radius / r1);
+  const double r1 = gap_->inner.radius, total = std::log(gap_->outer.radius / r1);
   // Slightly negative between the inner circle and its chords, where the
   // annulus solution continues smoothly.
   const double from_inner = std::min(std::log(p.r / r1), total),
                from_outer = total - from_inner;
-  p.a = alpha[0] + (beta[0] - alpha[0]) * from_inner / total;
-  p.da_dr = (beta[0] - alpha[0]) / (p.r * total);
-  for (int m = 1; m <= gap.harmonics; ++m) {
+  p.a = inner_[0] + (outer_[0] - inner_[0]) * from_inner / total;
+  p.da_dr = (outer_[0] - inner_[0]) / (p.r * total);
+  for (int m = 1; m <= gap_->harmonics; ++m) {
     // sinh(m y)/sinh(m L) and cosh(m y)/sinh(m L), y = from_outer, and the
     // same with from_inner, written to stay finite for large m L.
     const double den = -std::expm1(-2 * m * total),
@@ -322,10 +323,10 @@ GapPoint evaluate(const AirGap &gap, const Eigen::VectorXd &a, const Vector &x) 
                  sinh_x = std::exp(-m * from_outer) * (1 - ex) / den,
                  cosh_y = std::exp(-m * from_inner) * (1 + ey) / den,
                  cosh_x = std::exp(-m * from_outer) * (1 + ex) / den;
-    const double cos_part = alpha[2 * m - 1] * sinh_y + beta[2 * m - 1] * sinh_x,
-                 sin_part = alpha[2 * m] * sinh_y + beta[2 * m] * sinh_x,
-                 dcos = m / p.r * (-alpha[2 * m - 1] * cosh_y + beta[2 * m - 1] * cosh_x),
-                 dsin = m / p.r * (-alpha[2 * m] * cosh_y + beta[2 * m] * cosh_x);
+    const double cos_part = inner_[2 * m - 1] * sinh_y + outer_[2 * m - 1] * sinh_x,
+                 sin_part = inner_[2 * m] * sinh_y + outer_[2 * m] * sinh_x,
+                 dcos = m / p.r * (-inner_[2 * m - 1] * cosh_y + outer_[2 * m - 1] * cosh_x),
+                 dsin = m / p.r * (-inner_[2 * m] * cosh_y + outer_[2 * m] * cosh_x);
     const double c = std::cos(m * p.theta), s = std::sin(m * p.theta);
     p.a += cos_part * c + sin_part * s;
     p.da_dr += dcos * c + dsin * s;
@@ -333,19 +334,16 @@ GapPoint evaluate(const AirGap &gap, const Eigen::VectorXd &a, const Vector &x) 
   }
   return p;
 }
-} // namespace
 
-Vector air_gap_field(const AirGap &gap, const Eigen::VectorXd &a, const Vector &x) {
-  const auto p = evaluate(gap, a, x);
-  const Vector radial = std::cos(p.theta) * gap.u + std::sin(p.theta) * gap.v,
-               tangential = -std::sin(p.theta) * gap.u + std::cos(p.theta) * gap.v;
+Vector AirGapSeries::field(const Vector &x) const {
+  const auto p = evaluate(x);
+  const Vector radial = std::cos(p.theta) * gap_->u + std::sin(p.theta) * gap_->v,
+               tangential = -std::sin(p.theta) * gap_->u + std::cos(p.theta) * gap_->v;
   const Vector gradient = p.da_dr * radial + p.da_dtheta / p.r * tangential;
-  return gradient.cross(gap.u.cross(gap.v));
+  return gradient.cross(gap_->u.cross(gap_->v));
 }
 
-double air_gap_potential(const AirGap &gap, const Eigen::VectorXd &a, const Vector &x) {
-  return evaluate(gap, a, x).a;
-}
+double AirGapSeries::potential(const Vector &x) const { return evaluate(x).a; }
 
 double air_gap_torque(const AirGap &gap, const Eigen::VectorXd &a) {
   // Rotating the inner circle by delta turns its (cos, sin) pair of harmonic

@@ -714,8 +714,9 @@ ESET's elements and grids, the axis, which circle turns and the positions)
 and, per MOTION subcase, the positions, total Newton iterations, their range
 per position and the largest residual. The subcase block gives the torque's
 mean, peak-to-peak and ripple (peak-to-peak as a percentage of the mean's
-magnitude), and the cogging peak-to-peak when no source carries current at
-any position. With `MSTEP = ALL` it adds a table of position, torque,
+magnitude). When no source carries current at any position it gives the
+cogging peak-to-peak instead of a ripple: cogging averages to zero over its
+period, so its mean is only sampling residue and no base for a percentage. With `MSTEP = ALL` it adds a table of position, torque,
 energy, coenergy, Newton iterations, residual and each closed circuit's
 linkage. The HDF5 subcase group holds the same summary (see
 [Results](#results-and-angle-sweeps)), and with `MSTEP = ALL` every
@@ -1090,7 +1091,7 @@ solving. The file has two top-level groups:
     (the total), `residual` (the largest), `bh_extrapolated` (at any
     position), `motion`, `positions`, `start_deg`, `step_deg`,
     `torque_mean_Nm`, `torque_peak_to_peak_Nm`, `torque_ripple_percent` (NaN
-    for a zero mean) and `current_free`. With `MSTEP = ALL` it also has the
+    for a zero mean or a current-free sweep) and `current_free`. With `MSTEP = ALL` it also has the
     datasets `positions_deg`, `iterations`, `residual`, `energy_J`,
     `coenergy_J`, `bh_extrapolated` and `motion/torque_Nm`, one row per
     position, and the `sources/`, `circuits/`, `forces/` and `probes/`

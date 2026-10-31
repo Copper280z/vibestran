@@ -569,7 +569,8 @@ TEST(Motion, ResultsHoldEveryPositionAndTheFieldsAreATimeSeries) {
   const auto b = h5_table(file, "/VTKHDF/SUBCASE_1/CellData/B_T");
   const auto &at20 = sweep[2];
   const auto &last = m.elements[static_cast<size_t>(gap.elements.back() - 1)];
-  const Vector expected = air_gap_field(*at20.air_gap, at20.potential, centroid(m, last));
+  const Vector expected =
+      AirGapSeries(*at20.air_gap, at20.potential).field(centroid(m, last));
   for (int c = 0; c < 3; ++c)
     EXPECT_EQ(b.values[(cells + cells - 1) * 3 + static_cast<size_t>(c)], expected[c]);
   const auto points = h5_table(file, "/VTKHDF/SUBCASE_1/Points");
