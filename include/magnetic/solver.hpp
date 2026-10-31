@@ -90,6 +90,10 @@ circuit_currents(const Model &model,
 [[nodiscard]] Result<std::vector<double>>
 source_currents(const Model &model, std::span<const Source> sources, int set);
 [[nodiscard]] Result<Results> solve(const Model &model);
+// False when the build has no HDF5, which MAGSTAT results require.
+[[nodiscard]] bool output_available();
+// Writes the F06 report and name.mag.vtkhdf: VTKHDF fields that ParaView
+// opens directly, plus the /MAGSTAT results group.
 [[nodiscard]] Status write_results(const Model &model, const Results &results,
                                    const std::filesystem::path &report);
 } // namespace vibestran::magnetic

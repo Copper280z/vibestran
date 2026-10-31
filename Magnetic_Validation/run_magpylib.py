@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Optional external comparison; deliberately absent from Meson and CI.
 
-Requires Magpylib >=5. A thin rectangular loop is compared to an independent
+Requires Magpylib >=5 and h5py. A thin rectangular loop is compared to an independent
 filament solution at probes away from the conductor. The finite wire section,
 field mesh and truncated air domain each contribute error; this is not a
 reference for finite-section self-inductance or force.
@@ -14,6 +14,8 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+
+import h5py
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"tools"))
 from magnetic_examples import deck
@@ -48,13 +50,15 @@ def main():
             with (args.output/(name+".log")).open("w") as log:
                 subprocess.run([str(args.vibestran.resolve()), str(path.resolve())],
                                stdout=log, stderr=subprocess.STDOUT, check=True)
-            result = json.loads(path.with_suffix(".mag.json").read_text())
-            observed = [probe["B_T"] for probe in result["cases"][0]["probes"]]
+            with h5py.File(path.with_suffix(".mag.vtkhdf"), "r") as result:
+                case = result["MAGSTAT/subcases/1"]
+                observed = case["probes/B_T"][()].tolist()
+                linkage = float(case["sources/linkage_Wb_turn"][0])
             errors = [math.sqrt(sum((x-y)**2 for x, y in zip(a, b)))/math.sqrt(sum(y*y for y in b))
                       for a, b in zip(observed, expected)]
             record = dict(n=n, extent=extent, elapsed_s=time.monotonic()-start,
                           observed_T=observed, relative_errors=errors,
-                          linkage_Wb_turn=result["cases"][0]["sources"][0]["linkage_Wb_turn"])
+                          linkage_Wb_turn=linkage)
             runs.append(record)
             print(f"{name}: max field error {max(errors):.3%}", flush=True)
     finest = max(runs, key=lambda row: (row["extent"], row["n"]))

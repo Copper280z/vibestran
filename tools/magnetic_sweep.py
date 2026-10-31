@@ -3,6 +3,7 @@
 
 Manifest: {"cases": [{"angle_deg": 0, "deck": "angle0.bdf"}, ...]}
 Deck paths are relative to the manifest. This tool does not remesh or rotate data.
+Results are read from each run's name.mag.vtkhdf (/MAGSTAT group); needs h5py.
 """
 import argparse
 import csv
@@ -10,6 +11,8 @@ import json
 import math
 from pathlib import Path
 import subprocess
+
+import h5py
 
 
 def run(executable, manifest, output):
@@ -27,20 +30,23 @@ def run(executable, manifest, output):
         with (output / f"angle_{index:04d}.log").open("w") as log:
             subprocess.run([str(executable), "--backend=cpu", str(deck), str(report)],
                            stdout=log, stderr=subprocess.STDOUT, check=True)
-        results = json.loads(report.with_suffix(".mag.json").read_text())
-        for case in results["cases"]:
-            row = dict(angle_deg=angle, subcase=case["id"], energy_J=case["energy_J"],
-                       coenergy_J=case["coenergy_J"], residual=case["residual"],
-                       bh_extrapolated=case["bh_extrapolated"])
-            for surface in case["forces"]:
-                for field, values in (("force_N", surface["force_N"]), ("torque_Nm", surface["torque_Nm"])):
-                    for axis, value in zip("xyz", values):
-                        row[f"surface{surface['id']}_{field}_{axis}"] = value
-            for circuit in case["circuits"]:
-                name = f"circuit{circuit['id']}"
-                row[name+"_current_A"] = circuit["current_A"]
-                row[name+"_linkage_Wb_turn"] = circuit["linkage_Wb_turn"]
-            rows.append(row)
+        with h5py.File(report.with_suffix(".mag.vtkhdf"), "r") as results:
+            magstat = results["MAGSTAT"]
+            for subcase in magstat["subcase_ids"]:
+                case = magstat[f"subcases/{subcase}"]
+                attrs = case.attrs
+                row = dict(angle_deg=angle, subcase=int(subcase), energy_J=float(attrs["energy_J"]),
+                           coenergy_J=float(attrs["coenergy_J"]), residual=float(attrs["residual"]),
+                           bh_extrapolated=bool(attrs["bh_extrapolated"]))
+                for i, surface in enumerate(magstat["forces/id"]):
+                    for field in ("force_N", "torque_Nm"):
+                        for axis, value in zip("xyz", case["forces"][field][i]):
+                            row[f"surface{surface}_{field}_{axis}"] = float(value)
+                for i, circuit in enumerate(magstat["circuits/id"]):
+                    name = f"circuit{circuit}"
+                    row[name+"_current_A"] = float(case["circuits/current_A"][i])
+                    row[name+"_linkage_Wb_turn"] = float(case["circuits/linkage_Wb_turn"][i])
+                rows.append(row)
     # At fixed currents, d(I.lambda-W)/d(theta) is the virtual-work torque.
     # Three adjacent prepared angles are needed; endpoints stay blank.
     for subcase in {row["subcase"] for row in rows}:

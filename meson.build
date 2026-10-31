@@ -159,6 +159,22 @@ if not openmp_dep.found() and host_machine.system() == 'darwin'
   message('Then reconfigure with -Dcpp_args=-I/opt/homebrew/opt/libomp/include etc.')
 endif
 
+# ── HDF5 result output (optional; required for SOL MAGSTAT) ──────────────────
+# Magnetostatic results are written only as HDF5 (VTKHDF fields plus a
+# MAGSTAT results group). Structural solutions do not need it, so without
+# HDF5 the solver still builds and MAGSTAT decks fail with a clear error.
+# Meson's HDF5 lookup needs a C compiler even though only the C API headers
+# and library are used from C++.
+add_languages('c', native : false, required : get_option('hdf5'))
+hdf5_dep = dependency('hdf5', method : 'pkg-config', required : get_option('hdf5'))
+hdf5_args = []
+if hdf5_dep.found()
+  hdf5_args = ['-DVIBESTRAN_HAS_HDF5']
+  message('HDF5 output: enabled (SOL MAGSTAT available)')
+else
+  message('HDF5 output: disabled; SOL MAGSTAT unavailable (install libhdf5-dev or brew install hdf5)')
+endif
+
 # ── Vulkan compute backend (optional) ────────────────────────────────────────
 vulkan_dep = dependency('vulkan', required : false)
 glslc      = find_program('glslc', required : false)
@@ -417,6 +433,9 @@ src_inc = include_directories('src/solver') # for internal vulkan_pipelines.hpp
 tbb_args = tbb_dep.found() ? ['-DHAVE_TBB=1'] : []
 
 solver_lib_deps = [eigen_dep, spectra_dep, spdlog_dep, thread_dep]
+if hdf5_dep.found()
+  solver_lib_deps += hdf5_dep
+endif
 if tbb_dep.found()
   solver_lib_deps += tbb_dep
 endif
@@ -474,7 +493,7 @@ magnetic_lib = static_library(
         'src/magnetic/solver.cpp', 'src/magnetic/output.cpp'),
   include_directories : [inc],
   dependencies        : solver_lib_deps,
-  cpp_args            : magnetic_args + accelerate_args + cholmod_args,
+  cpp_args            : magnetic_args + accelerate_args + cholmod_args + hdf5_args,
   install             : false,
 )
 
@@ -492,7 +511,7 @@ solver_lib_dep = declare_dependency(
   link_with           : solver_lib,
   include_directories : [inc, src_inc],
   dependencies        : solver_lib_deps,
-  compile_args        : vulkan_compile_args + cuda_compile_args + cholmod_args,
+  compile_args        : vulkan_compile_args + cuda_compile_args + cholmod_args + hdf5_args,
 )
 
 # ── Executable ───────────────────────────────────────────────────────────────
@@ -560,12 +579,16 @@ test('unit_tests', unit_tests,
 )
 
 # Analytical CLI checks only. External solvers live in Magnetic_Validation and
-# are deliberately not registered with Meson or ordinary CI.
-test('magnetic_e2e', python,
-  args : [files('tools/magnetic_e2e.py'), vibestran_exe],
-  timeout : 60,
-  suite : 'e2e',
-)
+# are deliberately not registered with Meson or ordinary CI. MAGSTAT needs
+# HDF5; the script skips (exit 77) when h5py or the VTK Python module is
+# missing.
+if hdf5_dep.found()
+  test('magnetic_e2e', python,
+    args : [files('tools/magnetic_e2e.py'), vibestran_exe],
+    timeout : 60,
+    suite : 'e2e',
+  )
+endif
 
 # Integration tests
 integration_test_sources = files(

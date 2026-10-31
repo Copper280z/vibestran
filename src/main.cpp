@@ -33,6 +33,8 @@
 //   <stem>.op2   OP2 binary results (always written)
 //   <stem>.node.csv  Nodal results CSV  \  written when PARAM,CSVOUT,YES is in
 //   <stem>.elem.csv  Element results CSV/  the BDF, or when --csv is passed.
+//   SOL MAGSTAT writes the F06 and <stem>.mag.vtkhdf (HDF5: VTKHDF fields for
+//   ParaView plus the /MAGSTAT results group) instead.
 //
 // Logging:
 //   --log-file=<path>  Write all log output to <path> in addition to stdout.
@@ -278,6 +280,10 @@ int main(int argc, const char *argv[]) {
           spdlog::error("SOL MAGSTAT supports the CPU direct solver and its mandatory magnetic checks; structural solver overrides are unavailable");
           return 1;
         }
+        if (!vibestran::magnetic::output_available()) {
+          spdlog::error("SOL MAGSTAT writes its results as HDF5, but this build has no HDF5; install it (libhdf5-dev or brew install hdf5) and reconfigure with -Dhdf5=enabled");
+          return 1;
+        }
         auto parsed = vibestran::magnetic::parse_file(bdf_path);
         if (auto* error = std::get_if<vibestran::magnetic::Error>(&parsed)) {
           spdlog::error("{}", error->message);
@@ -299,7 +305,7 @@ int main(int argc, const char *argv[]) {
         for (const auto& result : results.cases)
           spdlog::info("Magnetic subcase {}: residual {:.3e}, energy {:.8e} J{}", result.id,
                        result.residual, result.energy, result.extrapolated ? " (BH extrapolated)" : "");
-        spdlog::info("Wrote magnetic F06, VTU, JSON and probe CSV: {}", f06_path.string());
+        spdlog::info("Wrote magnetic F06 and VTKHDF results: {}", f06_path.string());
         return 0;
       }
     }

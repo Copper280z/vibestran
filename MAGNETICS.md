@@ -124,8 +124,8 @@ L_cd     = sum_(i in c) sum_(j in d) P_i P_j L_ij / (a_c a_d)
 computed from the circuit coupling vector `sum P_i c_i / a`, so they cost one
 tangent solve per circuit. They are available when every 3D member is closed,
 or when a planar circuit's polarity-weighted signed turns sum to zero. The F06
-and JSON report circuits in ID order, including implicit ones; per-source
-values remain in JSON.
+and HDF5 results report circuits in ID order, including implicit ones;
+per-source values remain in the HDF5 `sources` groups.
 
 ### Volumetric windings
 
@@ -191,8 +191,8 @@ ICIRC,100,60,4.0
 Every connected CWIRE path is named by exactly one `WIREPATH`, which may name
 any of its elements. Positive current flows from G1 to G2 of the named element.
 The solver propagates the direction along the path, so reversed segments need
-no sign bookkeeping; JSON `wire_elements` records each element with its
-traversal sign relative to the path. A path that carries no current is simply
+no sign bookkeeping; `/MAGSTAT/sources/wire_elements` records each element
+with its traversal sign relative to the path. A path that carries no current is simply
 not in any load set.
 
 Rectangular section orientation is the width axis, projected perpendicular to
@@ -219,8 +219,9 @@ Use `PARAM,WIREMESH,HEX` to require hexahedra, or `PARAM,WIREMESH,TET` to split
 each lofted quad prism into six conforming tetrahedra. Both choices use the
 same section partition and axial refinement. HEX returns a diagnostic if the
 sweep needs the geometric fallback. These restrictions apply only to internal
-CWIRE cells; user CHEXA/CPENTA faces may be warped. The source VTU exposes the
-actual cell types and the report includes preprocessing mesh sizes.
+CWIRE cells; user CHEXA/CPENTA faces may be warped. The `WIRE_<ID>` source
+block exposes the actual cell types and the report includes preprocessing mesh
+sizes.
 
 Hexes reduce the current-preprocessing system, while tets have cheaper polynomial
 transfer on planar-faced backgrounds. The faster choice depends on the source
@@ -387,7 +388,7 @@ measure and pointwise normal, including in Maxwell stress and enclosed-volume
 checks. Jacobian validation bounds the determinant over the whole reference
 cell using Bernstein coefficients and subdivision (see
 [Johnen, Weill and Remacle](https://arxiv.org/abs/1706.01613)), rather than relying
-only on corner or Gauss-point samples. Cell VTU
+only on corner or Gauss-point samples. Exported cell
 fields are volume averages. A boundary-contracted spanning tree removes the gradient nullspace. The
 reduced curl-curl system is SPD for positive reluctivity. Nonlinear solves use
 the consistent material tangent, residual line search and, on failure, an
@@ -436,7 +437,7 @@ coverage 1e-8.
 Closed-source linkage is the same coupling vector dotted with A; differential
 inductance uses the converged tangent solve. This ensures discrete energy and
 reciprocity consistency. Open-source linkage and inductance are unavailable
-(`null` in JSON) because they depend on an unspecified return path.
+(NaN in the HDF5 results) because they depend on an unspecified return path.
 
 MFORCE integrates Maxwell stress on a closed outward-oriented mesh-face surface
 with mu_r=1, remanence-free material on both sides, reporting force and torque
@@ -463,8 +464,8 @@ between touching parts, so add it to the body set (rotor = shaft + core +
 magnets) or mesh a gap. A magnetic cell further out means the gap is too
 thin for LAYER, and a body within LAYER cells of the domain exterior is
 rejected; request the opposite body instead. The body need not be connected
-or manifold. A disconnected set reports the total and, in JSON `components`,
-the force on each connected piece.
+or manifold. A disconnected set reports the total and, in the HDF5 `piece_*`
+datasets, the force on each connected piece.
 
 ```text
 ESET,70,PROP,21,22,23       $ shaft, core and magnet properties
@@ -480,33 +481,61 @@ slowly than field values. Thin air gaps need several element layers.
 
 ## Results and angle sweeps
 
-For `name.F06`, the solver also writes:
+For `name.F06`, the solver also writes `name.mag.vtkhdf`, a single HDF5
+file. SOL MAGSTAT needs a build with HDF5 (the meson `hdf5` feature, on
+automatically when `libhdf5-dev` or Homebrew `hdf5` is installed); without it,
+structural solutions are unaffected and MAGSTAT decks stop with an error before
+solving. The file has two top-level groups:
 
-Output requests select the field files. `BFIELD=ALL` (default), `NONE` or an
-ESET ID writes the subcase cell VTU for every cell, none, or only that set
+- `/VTKHDF`: fields in the VTKHDF format, which ParaView opens directly
+  (File > Open; the `.vtkhdf` extension selects its VTKHDF reader). It is a
+  PartitionedDataSetCollection whose assembly has a `fields` node with one
+  `SUBCASE_<ID>` block per subcase, and a `sources` node with one `COIL_<ID>`
+  or `WIRE_<ID>` block per source mesh. Field blocks carry unsmoothed cell
+  `B_T`, `H_A_per_m` and `element_id`; planar blocks also carry nodal
+  `A_normal_Wb_per_m`. Source blocks carry `J_per_ampere_per_m2`.
+- `/MAGSTAT`: SI scalar results, ignored by ParaView. Attributes give `schema`,
+  `units`, `dimension` and `depth_m`. Definition tables, one row per item in
+  ID order:
+  - `sources/`: `id`, `wire`, `closed`, `conservation_error`,
+    `transfer_error`, and `wire_elements` (element ID, traversal sign) with
+    `wire_element_offsets` giving each source's rows.
+  - `circuits/`: `id`, `parallel`, `closed`, and `members` (source ID,
+    polarity) with `member_offsets`.
+  - `forces/`: `id`, `body`, `cid`. `probes/`: `id`, `cd`, `position_m`.
+  - `subcase_ids`, and `subcases/<ID>/` per subcase, with attributes `id`,
+    `iterations`, `residual`, `energy_J`, `coenergy_J`, `bh_extrapolated`.
+    Its `sources/`, `circuits/`, `forces/` and `probes/` groups line up row
+    for row with the definition tables:
+    - `sources/current_A`, `linkage_Wb_turn`, `differential_inductance_H`
+      (square, source order);
+    - `circuits/current_A`, `linkage_Wb_turn`, `inductance_H` (square,
+      circuit order);
+    - `forces/force_N`, `torque_Nm`, `force_local_N`, `torque_local_Nm`, and
+      per connected piece `piece_force_N`, `piece_torque_Nm` with
+      `piece_offsets`;
+    - `probes/B_T`, `H_A_per_m` in basic components, and `B_local_T`,
+      `H_local_A_per_m` in the local directions of CD at the probe (e.g.
+      radial and tangential for a CORD2C). On an element boundary a probe
+      value is the arithmetic mean of the incident cell traces, including
+      different materials; place probes within the intended material when a
+      one-sided value is needed.
+
+Vectors are rows of length 3. Unavailable linkage and inductance entries are
+NaN. Groups keep creation order, so subcases appear in deck order. `h5py`
+reads everything, e.g.
+`h5py.File("name.mag.vtkhdf")["MAGSTAT/subcases/1"].attrs["energy_J"]`.
+
+Output requests select what is written. `BFIELD=ALL` (default), `NONE` or an
+ESET ID writes the subcase field block for every cell, none, or only that set
 (points are compacted to the set's cells). A selected ESET must reference
 existing field elements; CWIRE IDs are not field elements. `MPROBE=ALL|NONE`
-keeps or drops the subcase's CSV probe rows. Both may be global or set per
+keeps or drops the subcase's `probes` group. Both may be global or set per
 subcase; a subcase value overrides the global one. `MSOURCE=ALL|NONE` is
-global only and controls the coil and wire source VTUs. JSON scalar results,
-including probes and forces, are always written.
+global only and controls the source blocks. The other scalar results are
+always written.
 
-- `name.mag.json`: SI scalar results, residuals, source orientation maps,
-  conservation checks, linkage, differential inductance, force/torque and probes.
-- `name_sc<ID>.vtu`: unsmoothed cell B and H plus element IDs.
-- Planar field VTU also contains nodal `A_normal_Wb_per_m`; JSON records dimension and depth.
-- `name_coil<ID>.vtu` / `name_wire<ID>.vtu`: source meshes and J per ampere.
-- `name.probes.csv`: field at requested probes, in basic components and in the
-  local directions of CD at the probe (`B1_T` ... `H3_A_per_m`, e.g. radial
-  and tangential for a CORD2C). On an element boundary this is the arithmetic
-  mean of the incident cell traces, including different materials; place
-  probes within the intended material when a one-sided value is needed.
-
-JSON `differential_inductance_H` follows the source array and
-`circuit_inductance_H` the circuit array; unavailable entries are `null`. A
-wire path ID is its WIREPATH ID; `wire_elements` records each constituent
-element and traversal sign.
-No magnetic OP2 tables are emitted. The JSON `coenergy_J` is the source Legendre
+No magnetic OP2 tables are emitted. `coenergy_J` is the source Legendre
 transform `sum(I*lambda)-W`, retaining PM energy constants; it is not generally
 `W` when permanent magnets or imposed exterior fields are present.
 
@@ -524,6 +553,8 @@ does not remesh or silently rotate selected material regions:
 ```sh
 python3 tools/magnetic_sweep.py manifest.json --vibestran build/vibestran --output /tmp/magnetic/sweep
 ```
+
+The sweep runner reads each run's `/MAGSTAT` results with `h5py`.
 
 `sweep.csv` includes circuit currents/linkages and surface force/torque. At interior
 angles it computes the three-point derivative of coenergy with respect to angle
@@ -566,9 +597,10 @@ integrals verify the five-point rule; arbitrary face fluxes verify cached curren
 on affine, warped, reflected and translated cells. Tet transfer is invariant to
 local vertex order and rigid motion. The spatial-loop AUTO fallback and strict
 HEX rejection are checked against the current moment. The CLI test checks
-actual JSON/VTU/CSV
-values, VTK topology, planar nodal potentials, exported ampere-turn integrals,
-and the prepared-deck sweep.
+actual HDF5 values, VTK topology, planar nodal potentials, exported ampere-turn
+integrals and the prepared-deck sweep, and loads every field block through
+VTK's own `vtkHDFReader`, as ParaView does. It needs `h5py` and the VTK Python
+module and is skipped without them.
 
 Run `meson test --print-errorlogs` and `ninja cppcheck` from `build`.
 Independent tool comparisons, their dependencies and their outputs live in

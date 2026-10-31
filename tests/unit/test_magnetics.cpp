@@ -4,11 +4,71 @@
 #include <format>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <map>
 #include <numbers>
 #include <sstream>
+#ifdef VIBESTRAN_HAS_HDF5
+#include <hdf5.h>
+#endif
 
 using namespace vibestran::magnetic;
 namespace {
+#ifdef VIBESTRAN_HAS_HDF5
+// Independent readers for the result file, written against the HDF5 C API
+// rather than the solver's writer.
+struct Table {
+  std::vector<double> values; // row-major; HDF5 converts integer storage
+  std::vector<hsize_t> dims;
+  double at(size_t row, size_t column = 0) const {
+    return values[row * (dims.size() > 1 ? dims[1] : 1) + column];
+  }
+};
+// True when every component of the path exists.
+bool h5_exists(const std::filesystem::path &file, const std::string &path) {
+  const hid_t f = H5Fopen(file.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+  if (f < 0)
+    return false;
+  bool found = true;
+  for (size_t at = path.find('/', 1); found; at = path.find('/', at + 1)) {
+    found = H5Lexists(f, path.substr(0, at).c_str(), H5P_DEFAULT) > 0;
+    if (at == std::string::npos)
+      break;
+  }
+  H5Fclose(f);
+  return found;
+}
+Table h5_table(const std::filesystem::path &file, const std::string &path) {
+  Table t;
+  const hid_t f = H5Fopen(file.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+  const hid_t d = H5Dopen2(f, path.c_str(), H5P_DEFAULT);
+  if (d >= 0) {
+    const hid_t space = H5Dget_space(d);
+    t.dims.resize(static_cast<size_t>(H5Sget_simple_extent_ndims(space)));
+    H5Sget_simple_extent_dims(space, t.dims.data(), nullptr);
+    t.values.resize(static_cast<size_t>(H5Sget_simple_extent_npoints(space)));
+    if (!t.values.empty())
+      H5Dread(d, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT,
+              t.values.data());
+    H5Sclose(space);
+    H5Dclose(d);
+  }
+  H5Fclose(f);
+  return t;
+}
+double h5_attribute(const std::filesystem::path &file, const std::string &path,
+                    const std::string &name) {
+  const hid_t f = H5Fopen(file.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+  double value = std::nan("");
+  const hid_t a = H5Aopen_by_name(f, path.c_str(), name.c_str(), H5P_DEFAULT,
+                                  H5P_DEFAULT);
+  if (a >= 0) {
+    H5Aread(a, H5T_NATIVE_DOUBLE, &value);
+    H5Aclose(a);
+  }
+  H5Fclose(f);
+  return value;
+}
+#endif
 // These helpers only generate independent analytical verification fixtures.
 Model box(int n, double extent = 1) {
   Model m;
@@ -774,14 +834,25 @@ TEST(MagneticIO, IncludesFixedFieldsAndResultFieldValues) {
   ASSERT_TRUE(std::holds_alternative<Model>(parsed)) << error_of(parsed);
   auto solved = solve(std::get<Model>(parsed));
   ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+#ifdef VIBESTRAN_HAS_HDF5
   EXPECT_FALSE(write_results(std::get<Model>(parsed), std::get<Results>(solved),
                              directory / "result.F06")
                    .has_value());
-  std::ifstream probe(directory / "result.probes.csv");
-  std::string line;
-  std::getline(probe, line);
-  std::getline(probe, line);
-  EXPECT_NE(line.find(",0,0,0.25,"), std::string::npos) << line;
+  // The included fixed-format grids carry the uniform field to the probe.
+  const auto probe = h5_table(directory / "result.mag.vtkhdf",
+                              "/MAGSTAT/subcases/1/probes/B_T");
+  ASSERT_EQ(probe.dims, (std::vector<hsize_t>{1, 3}));
+  EXPECT_NEAR(probe.at(0, 0), 0, 1e-14);
+  EXPECT_NEAR(probe.at(0, 1), 0, 1e-14);
+  EXPECT_NEAR(probe.at(0, 2), .25, 1e-14);
+#else
+  // Without HDF5 the results cannot be written, and the error says why.
+  EXPECT_FALSE(output_available());
+  const auto unwritten = write_results(
+      std::get<Model>(parsed), std::get<Results>(solved), directory / "result.F06");
+  ASSERT_TRUE(unwritten.has_value());
+  EXPECT_NE(unwritten->message.find("no HDF5"), std::string::npos);
+#endif
   std::ofstream cycle(directory / "cycle.inc");
   cycle << "INCLUDE 'model.bdf'\n";
   cycle.close();
@@ -3157,33 +3228,27 @@ TEST(MagneticIO, ProbeAndForceFramesInTheReports) {
   EXPECT_NEAR(model.probes[0].position.z(), .1, 1e-15);
   auto solved = solve(model);
   ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+#ifdef VIBESTRAN_HAS_HDF5
   ASSERT_FALSE(
       write_results(model, std::get<Results>(solved), directory / "frames.F06")
           .has_value());
-  std::ifstream csv(directory / "frames.probes.csv");
-  std::string header, line;
-  std::getline(csv, header);
-  EXPECT_NE(header.find(",cd,B1_T,B2_T,B3_T,"), std::string::npos);
-  std::vector<std::vector<double>> rows;
-  while (std::getline(csv, line)) {
-    std::vector<double> values;
-    std::stringstream fields(line);
-    for (std::string field; std::getline(fields, field, ',');)
-      values.push_back(std::stod(field));
-    rows.push_back(values);
-  }
-  ASSERT_EQ(rows.size(), 2U);
+  const auto file = directory / "frames.mag.vtkhdf";
+  const auto cd = h5_table(file, "/MAGSTAT/probes/cd");
+  const auto basic = h5_table(file, "/MAGSTAT/subcases/1/probes/B_T");
+  const auto local = h5_table(file, "/MAGSTAT/subcases/1/probes/B_local_T");
+  ASSERT_EQ(basic.dims, (std::vector<hsize_t>{2, 3}));
+  ASSERT_EQ(local.dims, basic.dims);
   const double c = std::cos(theta * degree), s = std::sin(theta * degree);
-  // Columns: subcase, probe, x, y, z, B, H, cd, B local, H local.
-  EXPECT_EQ(rows[0][11], 5);
-  EXPECT_NEAR(rows[0][12], .1 * c + .2 * s, 1e-12);
-  EXPECT_NEAR(rows[0][13], -.1 * s + .2 * c, 1e-12);
-  EXPECT_NEAR(rows[0][14], .3, 1e-12);
-  EXPECT_EQ(rows[1][11], 0);
-  for (int k = 0; k < 3; ++k) {
-    EXPECT_NEAR(rows[0][5 + k], rows[1][5 + k], 1e-12);
-    EXPECT_NEAR(rows[1][12 + k], rows[1][5 + k], 1e-15);
+  // Probe 1 reports radial, tangential and axial components at theta.
+  EXPECT_EQ(cd.values, (std::vector<double>{5, 0}));
+  EXPECT_NEAR(local.at(0, 0), .1 * c + .2 * s, 1e-12);
+  EXPECT_NEAR(local.at(0, 1), -.1 * s + .2 * c, 1e-12);
+  EXPECT_NEAR(local.at(0, 2), .3, 1e-12);
+  for (size_t k = 0; k < 3; ++k) {
+    EXPECT_NEAR(basic.at(0, k), basic.at(1, k), 1e-12);
+    EXPECT_NEAR(local.at(1, k), basic.at(1, k), 1e-15);
   }
+#endif
   std::filesystem::remove_all(directory);
 }
 
@@ -3286,30 +3351,73 @@ TEST(MagneticIO, OutputRequestsSelectFieldSourceAndProbeFiles) {
     return write_results(std::get<Model>(parsed), std::get<Results>(solved),
                          directory / "requests.F06");
   };
-  // Defaults write every file; requests are inherited by subcases unless
-  // overridden.
+#ifdef VIBESTRAN_HAS_HDF5
+  const auto file = directory / "requests.mag.vtkhdf";
+  // Element ID -> the coordinates of its cell's points, read through the
+  // block's own connectivity.
+  auto geometry = [&](const std::string &block) {
+    const auto root = "/VTKHDF/" + block;
+    const auto ids = h5_table(file, root + "/CellData/element_id");
+    const auto points = h5_table(file, root + "/Points");
+    const auto connectivity = h5_table(file, root + "/Connectivity");
+    const auto offsets = h5_table(file, root + "/Offsets");
+    std::map<int, std::vector<double>> cells;
+    for (size_t c = 0; c + 1 < offsets.values.size(); ++c)
+      for (auto k = static_cast<size_t>(offsets.values[c]);
+           k < static_cast<size_t>(offsets.values[c + 1]); ++k)
+        for (size_t j = 0; j < 3; ++j)
+          cells[static_cast<int>(ids.values[c])].push_back(
+              points.at(static_cast<size_t>(connectivity.values[k]), j));
+    return cells;
+  };
+  // Requests are inherited by subcases unless overridden.
   write("LOAD=1\nMSOURCE=NONE\nBFIELD=NONE\nSUBCASE 1\nSUBCASE 2\n"
         "  BFIELD=3\n  MPROBE=NONE\nSUBCASE 3\n  BFIELD=ALL\n");
   ASSERT_FALSE(run().has_value()) << run()->message;
-  EXPECT_FALSE(std::filesystem::exists(directory / "requests_coil11.vtu"));
-  EXPECT_FALSE(std::filesystem::exists(directory / "requests_sc1.vtu"));
-  auto cells = [&](const std::string &name) {
-    std::ifstream in(directory / name);
-    std::stringstream text;
-    text << in.rdbuf();
-    const auto s = text.str();
-    const auto at = s.find("NumberOfCells=\"");
-    return std::stoi(s.substr(at + 15));
-  };
-  EXPECT_EQ(cells("requests_sc2.vtu"), 4);
-  EXPECT_EQ(cells("requests_sc3.vtu"), 16);
-  std::ifstream csv(directory / "requests.probes.csv");
-  std::string line;
-  std::vector<std::string> subcases;
-  std::getline(csv, line);
-  while (std::getline(csv, line))
-    subcases.push_back(line.substr(0, line.find(',')));
-  EXPECT_EQ(subcases, (std::vector<std::string>{"1", "3"}));
+  EXPECT_FALSE(h5_exists(file, "/VTKHDF/SUBCASE_1"));
+  EXPECT_FALSE(h5_exists(file, "/VTKHDF/COIL_11"));
+  EXPECT_FALSE(h5_exists(file, "/VTKHDF/Assembly/sources"));
+  const auto subset = geometry("SUBCASE_2"), whole = geometry("SUBCASE_3");
+  EXPECT_EQ(whole.size(), 16U);
+  ASSERT_EQ(subset.size(), 4U);
+  // The ESET block keeps its own compacted points, yet every cell has the
+  // same corner coordinates as in the full-mesh block.
+  for (const auto &[id, corners] : subset) {
+    EXPECT_TRUE(id >= 1 && id <= 4) << id;
+    EXPECT_EQ(corners, whole.at(id)) << id;
+  }
+  const auto subset_points = h5_table(file, "/VTKHDF/SUBCASE_2/Points");
+  EXPECT_EQ(subset_points.dims[0],
+            h5_table(file, "/VTKHDF/SUBCASE_2/NumberOfPoints").at(0));
+  EXPECT_LT(subset_points.dims[0],
+            h5_table(file, "/VTKHDF/SUBCASE_3/Points").dims[0]);
+  EXPECT_EQ(h5_attribute(file, "/VTKHDF/SUBCASE_2", "Index"), 0);
+  EXPECT_EQ(h5_attribute(file, "/VTKHDF/SUBCASE_3", "Index"), 1);
+  EXPECT_TRUE(h5_exists(file, "/MAGSTAT/subcases/1/probes/B_T"));
+  EXPECT_FALSE(h5_exists(file, "/MAGSTAT/subcases/2/probes"));
+  EXPECT_TRUE(h5_exists(file, "/MAGSTAT/subcases/3/probes/B_T"));
+  // Scalar results are written whatever the field requests.
+  EXPECT_TRUE(std::isfinite(h5_attribute(file, "/MAGSTAT/subcases/2",
+                                         "energy_J")));
+  // The defaults write every field and source block, indexed in file order
+  // and reachable through the assembly.
+  write("LOAD=1\n");
+  ASSERT_FALSE(run().has_value()) << run()->message;
+  EXPECT_EQ(geometry("SUBCASE_1").size(), 16U);
+  EXPECT_EQ(h5_attribute(file, "/VTKHDF/COIL_11", "Index"), 1);
+  EXPECT_EQ(h5_attribute(file, "/VTKHDF/COIL_12", "Index"), 2);
+  EXPECT_TRUE(h5_exists(file, "/VTKHDF/Assembly/fields/SUBCASE_1"));
+  EXPECT_TRUE(h5_exists(file, "/VTKHDF/Assembly/sources/COIL_12"));
+  // An unwritable result path is an error value naming the file and step.
+  std::filesystem::remove(file);
+  std::filesystem::create_directory(file);
+  const auto blocked = run();
+  ASSERT_TRUE(blocked.has_value());
+  EXPECT_NE(blocked->message.find("HDF5 output " + file.string() +
+                                  ": cannot create the file"),
+            std::string::npos)
+      << blocked->message;
+#endif
   write("LOAD=1\nSUBCASE 1\n  MSOURCE=NONE\n");
   EXPECT_NE(run()->message.find("MSOURCE is a global request"),
             std::string::npos);

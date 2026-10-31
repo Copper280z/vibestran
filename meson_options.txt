@@ -3,3 +3,8 @@ option('use_suitesparse',
   value       : 'auto',
   description : 'Use SuiteSparse CHOLMOD for multithreaded Cholesky factorization',
 )
+option('hdf5',
+  type        : 'feature',
+  value       : 'auto',
+  description : 'HDF5 result output; SOL MAGSTAT requires it',
+)

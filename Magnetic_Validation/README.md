@@ -18,7 +18,7 @@ describes the line-current model and SI units.
 
 ```sh
 python3 -m venv /tmp/magnetic-validation-env
-/tmp/magnetic-validation-env/bin/pip install 'magpylib>=5,<7'
+/tmp/magnetic-validation-env/bin/pip install 'magpylib>=5,<7' h5py
 /tmp/magnetic-validation-env/bin/python Magnetic_Validation/run_magpylib.py \
   --vibestran build/vibestran --output /tmp/magnetic-comparison
 ```
