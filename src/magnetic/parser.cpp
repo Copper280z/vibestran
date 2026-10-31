@@ -379,6 +379,13 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
           sc.boundary = r.integer(1);
         else if (key == "MOTION")
           sc.motion = r.integer(1);
+        else if (key == "DRIVE")
+          sc.drive = r.integer(1);
+        else if (key == "LDQ") {
+          if (value != "APPARENT" && value != "INCREMENTAL")
+            return Error{lines[i].location + ": LDQ must be APPARENT or INCREMENTAL"};
+          sc.apparent = value == "APPARENT";
+        }
         else if (key == "MSTEP") {
           if (value != "ALL" && value != "NONE")
             return Error{lines[i].location + ": MSTEP must be ALL or NONE"};
@@ -501,11 +508,26 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       motion.start = r.real(5);
       motion.step = r.real(6);
       motion.count = r.integer(7, 1);
-      if (!r.get(9).empty())
-        return Error{r.where + ": MOTION SPEED is not supported yet; it scales "
-                               "back-EMF, which arrives with DRIVE"};
-      r.last(7);
+      motion.speed = r.real(9);
+      r.last(9);
       insert_unique(m.motions, motion.id, motion, r);
+    } else if (key == "DRIVE") {
+      Drive drive;
+      drive.id = r.integer(1);
+      const auto wave = upper(r.get(2));
+      if (wave != "SINE" && wave != "SIX")
+        return Error{r.where + ": DRIVE WAVE must be SINE or SIX"};
+      drive.six = wave == "SIX";
+      drive.poles = r.integer(3);
+      drive.peak = r.real(4);
+      drive.gamma = r.real(5);
+      if (const auto theta0 = upper(r.get(6)); !theta0.empty() && theta0 != "AUTO")
+        drive.theta0 = r.real(6);
+      if (!r.get(7).empty() || !r.get(8).empty())
+        return Error{r.where + ": DRIVE fields 7 and 8 must be blank; the phase "
+                               "circuits start on the continuation"};
+      drive.phases = r.list(9);
+      insert_unique(m.drives, drive.id, std::move(drive), r);
     } else if (key == "MAG2D") {
       if (m.options.planar)
         r.error = Error{r.where + ": duplicate MAG2D"};
@@ -1183,6 +1205,34 @@ Status validate(const Model &m) {
                                "moving and fixed parts",
                                id)};
   }
+  for (const auto &[id, drive] : m.drives) {
+    const auto count = drive.phases.size();
+    if (drive.poles < 1)
+      return Error{std::format("DRIVE {} requires POLES >= 1 pole pairs", id)};
+    if (drive.peak < 0)
+      return Error{std::format("DRIVE {} requires IPEAK >= 0", id)};
+    if (count < 3)
+      return Error{std::format("DRIVE {} lists {} phase circuits; it needs at "
+                               "least 3, in phase sequence",
+                               id, count)};
+    if (drive.six && count != 3)
+      return Error{std::format("DRIVE {} SIX is the three-phase six-step "
+                               "waveform and lists {} phase circuits",
+                               id, count)};
+    std::set<int> listed;
+    for (int phase : drive.phases) {
+      if (!listed.insert(phase).second)
+        return Error{std::format("DRIVE {} lists circuit {} twice", id, phase)};
+      if (members.contains(phase))
+        return Error{std::format("DRIVE {} phase {} is a source that belongs to "
+                                 "a CIRCUIT; name the circuit",
+                                 id, phase)};
+      if (!sources.contains(phase))
+        return Error{std::format("DRIVE {} references undefined circuit or "
+                                 "source {}",
+                                 id, phase)};
+    }
+  }
   ids.clear();
   for (const auto &sc : m.subcases) {
     if (sc.id <= 0 || !ids.insert(sc.id).second)
@@ -1207,6 +1257,30 @@ Status validate(const Model &m) {
     auto r = load_factors(m, sc.load);
     if (auto *e = std::get_if<Error>(&r))
       return *e;
+    if (!sc.drive)
+      continue;
+    if (!m.drives.contains(sc.drive))
+      return Error{std::format("Subcase {} references undefined DRIVE {}", sc.id,
+                               sc.drive)};
+    if (!sc.motion)
+      return Error{std::format("Subcase {} DRIVE {} needs MOTION in the same "
+                               "subcase: the phase currents follow the rotor "
+                               "position",
+                               sc.id, sc.drive)};
+    const auto &drive = m.drives.at(sc.drive);
+    const auto &factors = std::get<std::map<int, double>>(r);
+    const auto loaded = std::find_if(m.currents.begin(), m.currents.end(),
+                                     [&](const Current &c) {
+                                       return factors.contains(c.set) &&
+                                              std::find(drive.phases.begin(),
+                                                        drive.phases.end(),
+                                                        c.target) != drive.phases.end();
+                                     });
+    if (loaded != m.currents.end())
+      return Error{std::format("Subcase {}: circuit {} is a phase of DRIVE {} and "
+                               "also has an ICIRC current in LOAD {} (set {}); a "
+                               "DRIVE phase takes its current from DRIVE alone",
+                               sc.id, loaded->target, sc.drive, sc.load, loaded->set)};
   }
   for (const auto &[id, g] : m.nodes)
     if (id <= 0 || !g.position.allFinite())

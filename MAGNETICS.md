@@ -74,7 +74,8 @@ in the deck, overriding the cards ([Air gap](#air-gap-pairgap)).
 | `MAG2D` | `CID,DEPTH` (one card activates planar mode; CID=0 uses basic z) |
 | `PMAG2D` | `PID,MID,CID,AXIS` (planar magnetic property; orientation as PMAG) |
 | `PAIRGAP` | `PID,METHOD,NHARM` (planar air-gap property; METHOD `AGE` or `MESH`; see [Air gap](#air-gap-pairgap)) |
-| `MOTION` | `ID,ESET,CID,ROTATE,START,STEP,COUNT` (planar rotation of ESET through the air gap, degrees; see [Motion](#motion-motion)) |
+| `MOTION` | `ID,ESET,CID,ROTATE,START,STEP,COUNT` + `,SPEED` (planar rotation of ESET through the air gap, degrees; SPEED in rpm; see [Motion](#motion-motion)) |
+| `DRIVE` | `ID,WAVE,POLES,IPEAK,GAMMA,THETA0` + `,C1,C2,...` (phase currents from the rotor position; WAVE `SINE` or `SIX`; see [Phase currents](#phase-currents-drive)) |
 | `COIL2D` | `ID,ESET,SIGNED_TURNS` (one planar winding region; ID unique) |
 | `PSOLID` | `PID,MID,CORDM` (CORDM orients remanence along its axis 1) |
 | `PMAG` | `PID,MID,CID,AXIS` (3D magnetic property with a signed orientation axis) |
@@ -95,7 +96,7 @@ in the deck, overriding the cards ([Air gap](#air-gap-pairgap)).
 | `MFORCE` | `ID,FACES,FSET,CID` or `ID,BODY,ESET,CID,LAYER` (torque about CID origin) |
 
 Case control accepts `LOAD`, `MAGBC`, `BFIELD`, `MPROBE`, `MSOURCE`, `MOTION`,
-`MSTEP`, `LABEL`, `TITLE`, `SUBTITLE` and `SUBCASE`; `BFIELD` takes the
+`DRIVE`, `MSTEP`, `LDQ`, `LABEL`, `TITLE`, `SUBTITLE` and `SUBCASE`; `BFIELD` takes the
 describer `(EVERY=n)` for MOTION subcases. Global settings are inherited by
 subcases. Unexcited subcases can
 solve permanent magnets alone. Nested LOAD combinations are additive; cycles
@@ -567,18 +568,14 @@ MOTION,ID,ESET,CID,TYPE,START,STEP,COUNT
 | `CID` | The axis is the z axis of CID through its origin; 0 is basic z through the basic origin. It must be parallel to the MAG2D plane normal, in either direction. |
 | `TYPE` | `ROTATE`. `TRANSLATE` is reserved for linear motion along the CID x axis and is an error for now (see below). |
 | `START`, `STEP`, `COUNT` | Positions `START + k*STEP` degrees for k = 0 … COUNT−1, relative to the mesh as given. Positive angles turn counterclockwise looking down the CID z axis. COUNT ≥ 1 (blank is 1); STEP must be nonzero when COUNT > 1. |
-| `SPEED` | Reserved for the rotor speed (rpm), which will scale back-EMF. It must be blank for now (see below). |
+| `SPEED` | Optional rotor speed in rpm, positive toward increasing positions. It only converts the back-EMF per unit speed into volts (see Back-EMF below); every position is still a static solve. |
 
-**Reserved fields.** `TRANSLATE` and `SPEED` are part of the card so decks
-keep one layout as the features arrive, but each is an error until it can
-take effect. A field that is accepted but changes nothing would leave a deck
-that reads as solved but was not. `TRANSLATE` needs a different air-gap
-element: the AGE is the exact field of an annulus, and a gap that slides in
-a straight line needs the field of a periodic strip. `SPEED` is used only for
-back-EMF, the rate of change of linkage, which is
-EMF = (dλ/dφ)·ω. That needs phase currents that follow the rotor, which
-arrive with `DRIVE`. A sweep at fixed current has no speed: every position
-is a static solve.
+**A reserved type.** `TRANSLATE` is part of the card so decks keep one
+layout when linear motion arrives, but it is an error until it can take
+effect. A value that is accepted but changes nothing would leave a deck that
+reads as solved but was not. `TRANSLATE` needs a different air-gap element:
+the AGE is the exact field of an annulus, and a gap that slides in a
+straight line needs the field of a periodic strip.
 
 **What moves.** Every grid of a moving element turns rigidly about the axis.
 Everything defined on the moving elements turns with them: magnetization
@@ -653,6 +650,23 @@ the air-gap torque above, with its sign taken for the moving side and the
 axis direction. It is exactly the derivative of the solved model's coenergy
 with respect to the position at fixed current.
 
+**Back-EMF.** At each position the solver reports each closed circuit's
+dλ/dφ at fixed currents, in Wb per radian. That is V·s/rad, the back-EMF
+per unit speed: at a speed ω the circuit sees e = ω·dλ/dφ, and with `SPEED`
+the volts are reported too. It comes from the torque, by reciprocity. The
+coenergy W'(i, φ) has ∂W'/∂i_c = λ_c and ∂W'/∂φ = T, so
+
+  ∂λ_c/∂φ = ∂²W'/∂φ∂i_c = ∂T/∂i_c = (∂T/∂a) · (∂a/∂i_c).
+
+The AGE torque is bilinear in the two circles' harmonics, so ∂T/∂a is
+closed-form. ∂a/∂i_c is the solution's response to the circuit's current,
+which the inductance solve at that position has already computed. So the
+back-EMF costs no extra solve, and it is exact for the solved model, not a
+difference between positions. It is the motional EMF at the position's
+currents. When the currents also change in time (a `DRIVE` sweep at speed),
+the terminal voltage adds the incremental inductance times di/dt, and the
+winding's resistive drop. A static subcase with a PAIRGAP reports the same
+rate for a turn of the part inside the gap about the plane normal.
 | Case control | Values | Default | Meaning |
 |---|---|---|---|
 | `MOTION` | ID | none | The subcase solves every position of MOTION ID, with its LOAD and MAGBC at each. |
@@ -671,6 +685,7 @@ MOTION did. The test suite checks each of these:
 |---|---|
 | MOTION at angle φ against the static deck with the rotor grids and magnet frame turned by φ and no MOTION card | The same model. The only difference is Newton's start (the previous position against zero), so they agree to round-off with linear materials (measured 1e-13 in energy, coenergy, linkage, inductance, torque and probes) and to Newton's tolerance with B–H curves (measured at most 2e-8 relative in differential inductance, 4e-10 in energy and 3e-9 in torque, with a 1e-8 relative residual). |
 | Torque against the coenergy | The torque is the derivative of the coenergy at fixed current: a central difference over ±0.05° agrees to 1.3e-7 with linear iron (the difference's own truncation) and 3.5e-6 with saturated iron (Newton's tolerance in the coenergy). |
+| Back-EMF against the linkage | dλ/dφ from reciprocity against a central difference of each phase's linkage: 1.3e-7 of the largest rate over ±0.05° with an air stator (the difference's own truncation), 5.3e-9 over ±0.01° with saturated iron and `MAGTOL` 1e-12. A piecewise-linear B–H table makes the linkage's derivative kink wherever an element crosses a breakpoint, so a wider difference is only first order there; the reported rate is exact at the position. |
 | A magnet rotor (Br 1 T, μr 1) in a uniform 0.3 T field held by MBC, over a full turn | The analytic torque m × B0 at every position, to 7.9e-4 of its amplitude at 48 rotor divisions and 2.0e-4 at 96: O(h²). |
 | AGE torque against Maxwell stress (`PARAM,AIRGAP,MESH` and MFORCE BODY on the rotor, four gap layers, `LAYER=2`) | 7.4e-4, 1.4e-4 and 1.1e-5 apart at 48, 96 and 192 rotor divisions with a wound iron stator. |
 | A round, unmagnetized iron rotor in a wound stator | Every position the same to round-off and zero torque, between mesh pitches too: the rotor polygon's shape is above the gap's harmonics. |
@@ -730,9 +745,176 @@ A held state is not copied. The topology is written once, and each time
 step's offsets point at the state it shows.
 
 **Limits.** One moving part (one AGE gap); rotation only; planar only.
-Currents are fixed by LOAD at every position: phase currents that follow the
-rotor (`DRIVE`) and back-EMF are planned. A probe in the moving part stays in
-space while the rotor's cells pass under it.
+Currents are fixed by LOAD at every position unless `DRIVE` sets the phase
+currents from the position (next section). A probe in the moving part stays
+in space while the rotor's cells pass under it.
+
+### Phase currents (DRIVE)
+
+A `DRIVE` gives the phase circuits of a MOTION subcase currents that follow
+the rotor, as a current-controlled drive does, and reports the machine in dq
+axes. Set `DRIVE = ID` in a subcase that also has `MOTION`:
+
+```text
+DRIVE,ID,WAVE,POLES,IPEAK,GAMMA,THETA0
+,C1,C2,C3,...
+```
+
+| Field | Meaning |
+|---|---|
+| `ID` | Referenced by the case control `DRIVE = ID`. |
+| `WAVE` | `SINE` for sinusoidal currents, or `SIX` for 120° six-step (block) currents, which needs three phases. |
+| `POLES` | Pole pairs p, at least 1. |
+| `IPEAK` | Peak phase current I in A, at least 0. For `SIX` it is the block's amplitude. |
+| `GAMMA` | Current angle γ in electrical degrees, from +q towards −d: i_d = −I sin γ, i_q = I cos γ. γ = 0 is pure q-axis current; γ > 0 weakens the field. Blank is 0. |
+| `THETA0` | The rotor position, in degrees, at which the rotor's d axis lines up with phase 1's axis. Blank or `AUTO` finds it (see below). |
+| `C1 … Cm` | The phase circuits in phase sequence, at least three: CIRCUIT IDs, or COIL2D IDs that belong to no CIRCUIT. Each must be closed. |
+
+Fields 7 and 8 of the first line must be blank; the phases start on the
+continuation.
+
+**The currents.** At position φ the electrical angle is θe = p(φ − THETA0).
+Phase k (k = 1 … m) is at θ_k = θe − 2π(k−1)/m and carries the terminal
+current
+
+  i_k = i_d cos θ_k − i_q sin θ_k            (`SINE`)
+
+The same current is I cos(θ_k + γ + 90°). `SIX` conducts +I while that
+sinusoid is within 60 electrical degrees of its positive peak, −I within 60°
+of its negative peak, and nothing in the 60° between. So at every angle two
+phases conduct, in the same sequence, and the fundamental of a phase's
+current is (2√3/π) I ≈ 1.103 I, in phase with `SINE`'s. A phase circuit
+takes its current from the DRIVE alone: an ICIRC on it in the subcase's LOAD
+is an error. Other circuits, such as a field winding, keep their LOAD
+current at every position.
+
+**THETA0 AUTO.** The d axis is where a phase links the most magnet flux.
+With `THETA0` blank, the solver finds it from a no-load pre-sweep:
+
+1. It solves eight positions over one electrical period, 360·j/(8p) degrees
+   (j = 0 … 7) from the mesh as given, with no current in any circuit and
+   the subcase's MAGBC. These are ordinary MOTION positions.
+2. It fits each phase's no-load linkage with its first harmonic,
+   λ_k ≈ λ_pm cos(pφ − ψ_k), by the discrete Fourier transform of the eight
+   samples.
+3. THETA0 = ψ_1/p, in [0, 360/p) degrees, so phase 1's no-load linkage
+   peaks at θe = 0.
+4. It checks the phase sequence: each phase k must lag phase 1 by
+   360(k−1)/m electrical degrees, to within half the phase spacing.
+
+If the phases lag the other way, the phase sequence opposes the direction
+of increasing position, and the error says so, with "swap C2 and C3" for
+three phases. Phases out of sequence in any other way are an error that
+lists each measured lag. A phase 1 with no position-dependent no-load
+linkage has no d axis to find: a rotor without magnets, for example. That
+is an error too, asking for THETA0.
+
+The F06 `Drive` row reports the THETA0 found (nine digits), phase 1's
+fundamental λ_pm and each phase's lag. The pre-sweep runs once for each
+DRIVE, MOTION and MAGBC, and every subcase that needs it reuses it.
+Eight samples alias the 7th and 9th harmonics of the linkage onto the
+fundamental, which shifts the THETA0 found by their share. A winding whose
+linkage carries those harmonics may want its THETA0 given instead. Either
+way the dq results use exactly the THETA0 reported, so giving that value
+reproduces the subcase.
+
+**The dq quantities.** Every DRIVE position reports the amplitude-invariant
+Park transform of the phase values. With C the m × 2 matrix of rows
+(cos θ_k, −sin θ_k), so that the phase values of d and q components are
+C·(d, q):
+
+- currents: (i_d, i_q) = (2/m) Cᵀ i;
+- linkages: (λ_d, λ_q) = (2/m) Cᵀ λ, using the phase circuits' linkages;
+- **incremental inductance:** L_dq = (2/m) Cᵀ L C, from the phase circuits'
+  differential (tangent) inductance L at the position. It is the dq
+  response to a small change in current.
+- **apparent inductance** (`LDQ = APPARENT`, the default): the same
+  transform of the frozen-permeability inductance. Every element's
+  permeability is frozen at its secant value at the loaded state,
+  μ = |B|/|H| (a linear material keeps its own), and the magnets are
+  switched off.
+
+  The loaded state solves this frozen linear problem exactly: at the
+  converged B every element's H is the secant times B. So by superposition
+  its linkage is the frozen inductance times the currents plus what the
+  magnets (and any MBC field) link at that permeability. The solver reports
+  that rest as the magnet linkage, (λ_m,d, λ_m,q) = λ_dq − L_app,dq i_dq.
+  This is the usual frozen-permeability split, λ_d = λ_m,d + L_d i_d +
+  L_dq i_q, with L_d and L_q defined at every current angle, γ = 0 and 90°
+  included. The cost is one extra factorization of the secant stiffness
+  per position, solved for the m phases together. `LDQ = INCREMENTAL`
+  skips it.
+
+With linear materials the secant is the tangent, so the apparent and
+incremental inductances are the same.
+
+**Torque in dq.** The AGE torque at each position is the reference. In a
+machine whose phases link exact sinusoids and whose inductances do not
+depend on position, it equals (m/2) p (λ_d i_q − λ_q i_d). Slotting,
+saturation and winding harmonics make the two differ, and the AGE torque
+includes them.
+
+**Back-EMF over an electrical period.** When the positions sample whole
+electrical periods uniformly (COUNT·|STEP|·p a multiple of 360° and at least
+two samples per period), each phase's back-EMF per unit speed (see
+[Motion](#motion-motion)) is Fourier analysed over the sweep. The summary
+gives its fundamental, the back-EMF constant in V·s/rad (peak), and the
+total harmonic distortion of the electrical harmonics below the sampling
+Nyquist rate. With `SPEED` it also gives the fundamental's RMS in volts.
+Use IPEAK 0 for the no-load (open-circuit) back-EMF; at load the same figures
+are the motional EMF at the drive's currents.
+
+| Case control | Values | Default | Meaning |
+|---|---|---|---|
+| `DRIVE` | ID | none | Phase currents from DRIVE ID at each MOTION position. The subcase needs `MOTION`. |
+| `LDQ` | `APPARENT` / `INCREMENTAL` | `APPARENT` | Whether a DRIVE subcase also reports the frozen-permeability L_dq and magnet linkage. |
+
+**What DRIVE guarantees.** Take the DRIVE card out and the deck still runs:
+each position as a single-position MOTION subcase, with ICIRC currents equal
+to the phase currents the DRIVE set there. The test suite
+(`tests/unit/test_drive.cpp`) checks each of these:
+
+| Comparison | Result |
+|---|---|
+| A DRIVE position against the static deck at that position with the same ICIRC phase currents | The same model, from a different Newton start: round-off with linear materials, Newton's tolerance with B–H curves. Measured with an air stator 5e-16 in energy, 2e-13 in torque, 2e-14 in linkage and 2e-16 in inductance; with saturated iron 7e-11 in energy, 9e-9 in torque, 5e-8 in linkage (relative to 1 mWb), 4e-9 in inductance and 9e-10 in back-EMF. |
+| THETA0 AUTO against the THETA0 it reports | The same subcase (3e-15 in energy). |
+| THETA0 AUTO on a uniformly magnetized two-pole rotor in an air stator | The magnet's axis to round-off, and lags of exactly 120° and 240°. A uniformly magnetized 48-gon rotor of unit permeability has no harmonics between 2 and NHARM on the gap circle, so each phase links an exact first harmonic. |
+| The same sinusoidal machine with SINE currents at γ = 0°, 30° and 90° | To 1e-13 at every position: the AGE torque equals (3/2) p (λ_d i_q − λ_q i_d) and is constant at (3/2) p λ_pm I cos γ; L_d = L_q; the apparent inductance equals the incremental one; the magnet linkage is λ_pm on d; the back-EMF per unit speed is −p λ_pm sin θe. Over one period its fundamental constant is λ_pm with 3e-13 % distortion. |
+| SIX currents in the same machine | Two phases at ±I at every position, and the AGE torque is (3/2) p λ_pm i_q of the six-step currents (3e-13). |
+| Apparent inductance, saturated iron, against a linear deck with every iron element given its own MATMAG at its loaded secant permeability and the magnets off | The same inductance (3e-16, on a triangle mesh, where B is uniform in each element). With the magnets on and the DRIVE currents that deck reproduces the loaded linkage (1e-10), and without current its linkage is the reported magnet linkage (7e-11). |
+
+```text
+SUBCASE 1
+  LABEL = NO LOAD
+  MOTION = 1
+  DRIVE = 11
+SUBCASE 2
+  LABEL = RATED
+  MOTION = 1
+  DRIVE = 10
+  MSTEP = ALL
+BEGIN BULK
+ESET,20,PROP,2,3                    $ rotor iron and magnets
+MOTION,1,20,0,ROTATE,0.,1.25,72     $ one electrical period of a 4-pole-pair rotor
+,3000.                              $ rpm, for the back-EMF in volts
+DRIVE,10,SINE,4,20.,30.             $ 20 A peak, gamma 30 deg, THETA0 AUTO
+,1,2,3                              $ phase circuits in sequence
+DRIVE,11,SINE,4,0.                  $ no load: back-EMF and magnet linkage
+,1,2,3
+...
+```
+
+**Results.** The F06 SOLUTION section gains a `Drive` row per DRIVE (wave,
+pole pairs, current, γ, phases, THETA0) and, for THETA0 AUTO, a row with the
+pre-sweep and what it found. The subcase block adds the DRIVE line, the mean
+i_d, i_q, λ_d and λ_q over the positions, the mean incremental and apparent
+L_d, L_q and L_dq, the mean magnet linkage, and each phase's back-EMF
+constant and distortion when the sweep covers whole electrical periods.
+With `MSTEP = ALL` there is also a table of θe, i_d, i_q, λ_d, λ_q and the
+inductances at each position. Every MOTION subcase with a closed circuit
+also gets a table of each circuit's dλ/dφ, or EMF in volts with `SPEED`.
+The HDF5 subcase group gains a `drive` group (see
+[Results](#results-and-angle-sweeps)).
 
 Full 3D magnetic shells are a separate physical model: a thin magnetic layer or
 surface-current sheet coupled to the surrounding 3D field. Mechanical shell
@@ -892,7 +1074,8 @@ solving. The file has two top-level groups:
     - `sources/current_A`, `linkage_Wb_turn`, `differential_inductance_H`
       (square, source order);
     - `circuits/current_A`, `linkage_Wb_turn`, `inductance_H` (square,
-      circuit order);
+      circuit order), and with an AGE gap `linkage_rate_Wb_per_rad`, each
+      circuit's dλ/dφ at fixed current (NaN for open circuits);
     - `forces/force_N`, `torque_Nm`, `force_local_N`, `torque_local_Nm`, and
       per connected piece `piece_force_N`, `piece_torque_Nm` with
       `piece_offsets`;
@@ -912,7 +1095,24 @@ solving. The file has two top-level groups:
     `coenergy_J`, `bh_extrapolated` and `motion/torque_Nm`, one row per
     position, and the `sources/`, `circuits/`, `forces/` and `probes/`
     tables above with a leading position axis (e.g. `forces/torque_Nm` is
-    [positions, surfaces, 3]).
+    [positions, surfaces, 3]). With `SPEED` the group has the attribute
+    `speed_rpm`, and with `MSTEP = ALL` `motion/emf_V` [positions, circuits].
+  - A DRIVE subcase's group also has a `drive/` group with the attributes
+    `id`, `wave` (`SINE` or `SIX`), `pole_pairs`, `current_peak_A`,
+    `gamma_deg`, `theta0_deg`, `theta0_auto` and the means over the
+    positions `i_d_mean_A`, `i_q_mean_A`, `lambda_d_mean_Wb`,
+    `lambda_q_mean_Wb`, `L_d_incremental_mean_H`, `L_q_incremental_mean_H`,
+    and under `LDQ = APPARENT` `L_d_apparent_mean_H`, `L_q_apparent_mean_H`,
+    `lambda_magnet_d_mean_Wb`, `lambda_magnet_q_mean_Wb`. Its datasets are
+    `phase_circuits`; for THETA0 AUTO the attribute `alignment_linkage_Wb`
+    (phase 1's no-load fundamental) and the dataset `alignment_lag_deg`;
+    and when the sweep covers whole electrical periods the attribute
+    `electrical_periods` with the per-phase datasets
+    `emf_constant_fundamental_V_s_per_rad` and `emf_thd_percent`. With
+    `MSTEP = ALL` it adds per position `theta_e_deg`, `i_d_A`, `i_q_A`,
+    `lambda_d_Wb`, `lambda_q_Wb` and `L_dq_incremental_H` [positions, 2, 2]
+    (d first), and under `LDQ = APPARENT` `L_dq_apparent_H`,
+    `lambda_magnet_d_Wb` and `lambda_magnet_q_Wb`.
 
 Vectors are rows of length 3. Unavailable linkage and inductance entries are
 NaN. Groups keep creation order, so subcases appear in deck order. `h5py`

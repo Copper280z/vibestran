@@ -2,11 +2,13 @@
 #include "magnetic/air_gap.hpp"
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <numbers>
 #include <numeric>
 #include <utility>
 #ifdef VIBESTRAN_HAS_HDF5
@@ -36,6 +38,111 @@ TorqueSummary torque_summary(const CaseResults &c) {
     out.ripple = 100 * out.peak_to_peak / std::abs(out.mean);
   return out;
 }
+// The whole electrical periods a DRIVE subcase's positions sample
+// uniformly (COUNT STEP POLES a multiple of 360 degrees), or 0.
+int electrical_periods(const Model &model, const Subcase &subcase) {
+  if (!subcase.drive)
+    return 0;
+  const auto &motion = model.motions.at(subcase.motion);
+  const double span =
+      motion.count * std::abs(motion.step) * model.drives.at(subcase.drive).poles;
+  const auto periods = static_cast<int>(std::lround(span / 360));
+  return periods >= 1 && 2 * periods < motion.count &&
+                 std::abs(span - 360. * periods) <= 1e-9 * span
+             ? periods
+             : 0;
+}
+// The fundamental amplitude and total harmonic distortion (percent, over the
+// electrical harmonics below the Nyquist rate) of samples covering periods
+// whole electrical periods.
+struct Spectrum {
+  double fundamental{0}, distortion{0};
+};
+Spectrum spectrum(const std::vector<double> &samples, int periods) {
+  const auto n = static_cast<double>(samples.size());
+  auto amplitude = [&](int bin) {
+    std::complex<double> sum = 0;
+    for (size_t j = 0; j < samples.size(); ++j)
+      sum += samples[j] *
+             std::polar(1., -2 * std::numbers::pi * bin * static_cast<double>(j) / n);
+    return 2 * std::abs(sum) / n;
+  };
+  Spectrum out;
+  out.fundamental = amplitude(periods);
+  double harmonics = 0;
+  for (int h = 2; 2 * h * periods < static_cast<int>(samples.size()); ++h)
+    harmonics += std::pow(amplitude(h * periods), 2);
+  out.distortion = out.fundamental > 0 ? 100 * std::sqrt(harmonics) / out.fundamental
+                                       : std::numeric_limits<double>::quiet_NaN();
+  return out;
+}
+// Means of the dq quantities over a DRIVE subcase's positions.
+DriveState drive_means(const CaseResults &c) {
+  DriveState out;
+  out.apparent.setZero();
+  out.magnet.setZero();
+  const auto n = static_cast<double>(c.steps.size());
+  for (const auto &step : c.steps) {
+    const auto &d = *step.drive;
+    out.current += d.current / n;
+    out.linkage += d.linkage / n;
+    out.incremental += d.incremental / n;
+    out.apparent += d.apparent / n;
+    out.magnet += d.magnet / n;
+  }
+  return out;
+}
+// A circuit's dlambda/dphi at each position of a MOTION subcase.
+std::vector<double> linkage_rates(const CaseResults &c, int circuit) {
+  std::vector<double> out(c.steps.size());
+  std::transform(c.steps.begin(), c.steps.end(), out.begin(),
+                 [&](const CaseResults &step) { return step.linkage_rate[circuit]; });
+  return out;
+}
+// The rotor speed in rad/s, which turns dlambda/dphi into volts.
+double angular_speed(const Motion &motion) {
+  return motion.speed * 2 * std::numbers::pi / 60;
+}
+void write_drive_f06(std::ostream &f06, const Model &model,
+                     const Subcase &subcase, const CaseResults &c,
+                     const std::vector<CircuitResults> &circuits) {
+  const auto &drive = model.drives.at(subcase.drive);
+  const auto &summary = *c.drive_summary;
+  f06 << "DRIVE " << drive.id << ": " << (drive.six ? "six-step" : "sinusoidal")
+      << " currents, " << drive.peak << " A peak, gamma " << drive.gamma
+      << " electrical degrees, " << drive.poles
+      << (drive.poles == 1 ? " pole pair" : " pole pairs") << ", THETA0 "
+      << summary.theta0 << " degrees";
+  if (summary.automatic)
+    f06 << " (AUTO: phase 1 no-load fundamental " << summary.linkage << " Wb)";
+  f06 << '\n';
+  const auto mean = drive_means(c);
+  f06 << "Mean over positions (amplitude-invariant dq): i_d(A) " << mean.current[0]
+      << "  i_q(A) " << mean.current[1] << "  lambda_d(Wb) " << mean.linkage[0]
+      << "  lambda_q(Wb) " << mean.linkage[1] << '\n'
+      << "Incremental inductance, mean (H): L_d " << mean.incremental(0, 0)
+      << "  L_q " << mean.incremental(1, 1) << "  L_dq " << mean.incremental(0, 1)
+      << '\n';
+  if (subcase.apparent)
+    f06 << "Apparent inductance (frozen permeability, magnets off), mean (H): L_d "
+        << mean.apparent(0, 0) << "  L_q " << mean.apparent(1, 1) << "  L_dq "
+        << mean.apparent(0, 1) << "  magnet linkage lambda_m,d(Wb) "
+        << mean.magnet[0] << "  lambda_m,q(Wb) " << mean.magnet[1] << '\n';
+  const auto &motion = model.motions.at(subcase.motion);
+  if (const int periods = electrical_periods(model, subcase)) {
+    for (size_t k = 0; k < summary.phases.size(); ++k) {
+      const auto s = spectrum(linkage_rates(c, summary.phases[k]), periods);
+      f06 << "Phase " << k + 1 << " (circuit " << circuits[summary.phases[k]].id
+          << ") back-EMF over " << periods << " electrical "
+          << (periods == 1 ? "period" : "periods")
+          << ": fundamental constant (V s/rad, peak) " << s.fundamental;
+      if (motion.speed != 0)
+        f06 << "  fundamental RMS at " << motion.speed << " rpm (V) "
+            << s.fundamental * std::abs(angular_speed(motion)) / std::sqrt(2.);
+      f06 << "  THD (%) " << s.distortion << '\n';
+    }
+  }
+}
 void write_motion_f06(std::ostream &f06, const Model &model,
                       const Subcase &subcase, const CaseResults &c) {
   const auto &motion = model.motions.at(subcase.motion);
@@ -58,6 +165,8 @@ void write_motion_f06(std::ostream &f06, const Model &model,
   if (summary.current_free)
     f06 << "No current at any position: cogging torque peak-to-peak (Nm) "
         << summary.peak_to_peak << '\n';
+  if (c.drive_summary)
+    write_drive_f06(f06, model, subcase, c, c.steps.front().circuits);
   if (!subcase.steps)
     return;
   // MSTEP = ALL: one row per position, with every closed circuit's linkage.
@@ -78,6 +187,42 @@ void write_motion_f06(std::ostream &f06, const Model &model,
     for (const auto &circuit : step.circuits)
       if (std::isfinite(circuit.linkage))
         f06 << std::setw(25) << circuit.linkage;
+    f06 << '\n';
+  }
+  if (c.drive_summary) {
+    f06 << "\n  STEP   THETA_E(deg)            I_D(A)            I_Q(A)"
+           "      LAMBDA_D(Wb)      LAMBDA_Q(Wb)      LD_INC(H)      LQ_INC(H)";
+    if (subcase.apparent)
+      f06 << "      LD_APP(H)      LQ_APP(H)";
+    f06 << '\n';
+    for (size_t k = 0; k < c.steps.size(); ++k) {
+      const auto &d = *c.steps[k].drive;
+      f06 << std::setw(6) << k + 1 << std::setw(15) << d.electrical << std::setw(18)
+          << d.current[0] << std::setw(18) << d.current[1] << std::setw(18)
+          << d.linkage[0] << std::setw(18) << d.linkage[1] << std::setw(15)
+          << d.incremental(0, 0) << std::setw(15) << d.incremental(1, 1);
+      if (subcase.apparent)
+        f06 << std::setw(15) << d.apparent(0, 0) << std::setw(15) << d.apparent(1, 1);
+      f06 << '\n';
+    }
+  }
+  if (!first.linkage_rate.array().isFinite().any())
+    return;
+  // Back-EMF per unit speed, and in volts with SPEED.
+  const bool volts = motion.speed != 0;
+  f06 << "\n  STEP   POSITION(deg)";
+  for (Eigen::Index i = 0; i < first.linkage_rate.size(); ++i)
+    if (std::isfinite(first.linkage_rate[i]))
+      f06 << (volts ? "         EMF " : "  DLAMBDA/DPHI ") << std::setw(6)
+          << first.circuits[i].id << (volts ? "(V)" : "(V s/rad)");
+  f06 << '\n';
+  for (size_t k = 0; k < c.steps.size(); ++k) {
+    const auto &step = c.steps[k];
+    f06 << std::setw(6) << k + 1 << std::setw(16) << step.position;
+    for (Eigen::Index i = 0; i < step.linkage_rate.size(); ++i)
+      if (std::isfinite(first.linkage_rate[i]))
+        f06 << std::setw(volts ? 25 : 31)
+            << step.linkage_rate[i] * (volts ? angular_speed(motion) : 1);
     f06 << '\n';
   }
 }
@@ -627,6 +772,14 @@ void write_tables(Hdf5File &h5, hid_t group, const Model &model,
     h5.array(circuits.get(), "current_A", current, shape({nc}));
     h5.array(circuits.get(), "linkage_Wb_turn", linkage, shape({nc}));
     h5.array(circuits.get(), "inductance_H", inductance, shape({nc, nc}));
+    // With an air-gap element: dlambda/d(delta), the back-EMF per unit speed.
+    if (first.linkage_rate.array().isFinite().any()) {
+      std::vector<double> rate;
+      for (const auto *c : states)
+        rate.insert(rate.end(), c->linkage_rate.data(),
+                    c->linkage_rate.data() + c->linkage_rate.size());
+      h5.array(circuits.get(), "linkage_rate_Wb_per_rad", rate, shape({nc}));
+    }
   }
   {
     auto forces = h5.group(group, "forces");
@@ -900,6 +1053,83 @@ Status write_hdf5(const std::string &path, const Model &model,
     h5.attribute(group.get(), "torque_peak_to_peak_Nm", summary.peak_to_peak);
     h5.attribute(group.get(), "torque_ripple_percent", summary.ripple);
     h5.attribute(group.get(), "current_free", uint8_t{summary.current_free});
+    if (motion.speed != 0)
+      h5.attribute(group.get(), "speed_rpm", motion.speed);
+    if (c.drive_summary) {
+      const auto &drive = model.drives.at(subcase.drive);
+      const auto &found = *c.drive_summary;
+      const auto mean = drive_means(c);
+      auto attributes = h5.group(group.get(), "drive");
+      const hid_t d = attributes.get();
+      h5.attribute(d, "id", int64_t{drive.id});
+      h5.attribute(d, "wave", std::string(drive.six ? "SIX" : "SINE"));
+      h5.attribute(d, "pole_pairs", int64_t{drive.poles});
+      h5.attribute(d, "current_peak_A", drive.peak);
+      h5.attribute(d, "gamma_deg", drive.gamma);
+      h5.attribute(d, "theta0_deg", found.theta0);
+      h5.attribute(d, "theta0_auto", uint8_t{found.automatic});
+      if (found.automatic) {
+        h5.attribute(d, "alignment_linkage_Wb", found.linkage);
+        h5.values(d, "alignment_lag_deg", found.lag);
+      }
+      std::vector<int64_t> phases;
+      for (int k : found.phases)
+        phases.push_back(c.steps.front().circuits[k].id);
+      h5.values(d, "phase_circuits", phases);
+      h5.attribute(d, "i_d_mean_A", mean.current[0]);
+      h5.attribute(d, "i_q_mean_A", mean.current[1]);
+      h5.attribute(d, "lambda_d_mean_Wb", mean.linkage[0]);
+      h5.attribute(d, "lambda_q_mean_Wb", mean.linkage[1]);
+      h5.attribute(d, "L_d_incremental_mean_H", mean.incremental(0, 0));
+      h5.attribute(d, "L_q_incremental_mean_H", mean.incremental(1, 1));
+      if (subcase.apparent) {
+        h5.attribute(d, "L_d_apparent_mean_H", mean.apparent(0, 0));
+        h5.attribute(d, "L_q_apparent_mean_H", mean.apparent(1, 1));
+        h5.attribute(d, "lambda_magnet_d_mean_Wb", mean.magnet[0]);
+        h5.attribute(d, "lambda_magnet_q_mean_Wb", mean.magnet[1]);
+      }
+      if (const int periods = electrical_periods(model, subcase)) {
+        std::vector<double> constant, distortion;
+        for (int k : found.phases) {
+          const auto spectral = spectrum(linkage_rates(c, k), periods);
+          constant.push_back(spectral.fundamental);
+          distortion.push_back(spectral.distortion);
+        }
+        h5.attribute(d, "electrical_periods", int64_t{periods});
+        h5.values(d, "emf_constant_fundamental_V_s_per_rad", constant);
+        h5.values(d, "emf_thd_percent", distortion);
+      }
+      if (subcase.steps) {
+        std::vector<double> angle, id, iq, ld, lq, incremental, apparent, md, mq;
+        for (const auto &step : c.steps) {
+          const auto &s = *step.drive;
+          angle.push_back(s.electrical);
+          id.push_back(s.current[0]);
+          iq.push_back(s.current[1]);
+          ld.push_back(s.linkage[0]);
+          lq.push_back(s.linkage[1]);
+          md.push_back(s.magnet[0]);
+          mq.push_back(s.magnet[1]);
+          for (int i = 0; i < 2; ++i)
+            for (int j = 0; j < 2; ++j) {
+              incremental.push_back(s.incremental(i, j));
+              apparent.push_back(s.apparent(i, j));
+            }
+        }
+        const hsize_t steps = c.steps.size();
+        h5.values(d, "theta_e_deg", angle);
+        h5.values(d, "i_d_A", id);
+        h5.values(d, "i_q_A", iq);
+        h5.values(d, "lambda_d_Wb", ld);
+        h5.values(d, "lambda_q_Wb", lq);
+        h5.array(d, "L_dq_incremental_H", incremental, {steps, 2, 2});
+        if (subcase.apparent) {
+          h5.array(d, "L_dq_apparent_H", apparent, {steps, 2, 2});
+          h5.values(d, "lambda_magnet_d_Wb", md);
+          h5.values(d, "lambda_magnet_q_Wb", mq);
+        }
+      }
+    }
     if (!subcase.steps)
       continue;
     std::vector<const CaseResults *> states;
@@ -924,6 +1154,14 @@ Status write_hdf5(const std::string &path, const Model &model,
     h5.values(group.get(), "bh_extrapolated", extrapolated);
     auto motion_group = h5.group(group.get(), "motion");
     h5.values(motion_group.get(), "torque_Nm", torque);
+    if (motion.speed != 0 && c.steps.front().linkage_rate.array().isFinite().any()) {
+      std::vector<double> emf;
+      for (const auto &step : c.steps)
+        for (Eigen::Index i = 0; i < step.linkage_rate.size(); ++i)
+          emf.push_back(step.linkage_rate[i] * angular_speed(motion));
+      h5.array(motion_group.get(), "emf_V", emf,
+               {c.steps.size(), static_cast<hsize_t>(c.steps.front().linkage_rate.size())});
+    }
     write_tables(h5, group.get(), model, subcase, states, true);
   }
   // Groups must close before the file so the flush covers everything.

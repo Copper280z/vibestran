@@ -42,4 +42,10 @@ inline constexpr double kAirGapTolerance = 1e-6;
 // outside the gap takes the opposite torque. It equals the Maxwell stress
 // torque on any circle in the annulus.
 [[nodiscard]] double air_gap_torque(const AirGap &gap, const Eigen::VectorXd &a);
+// The gradient of air_gap_torque with respect to the nodal potentials a
+// (zero off the circles). The torque is bilinear, so gradient . a is twice
+// the torque. With the response da/di of a solve to a circuit's current it
+// gives dT/di, which by reciprocity is the circuit's dlambda/d(delta).
+[[nodiscard]] Eigen::VectorXd air_gap_torque_gradient(const AirGap &gap,
+                                                      const Eigen::VectorXd &a);
 } // namespace vibestran::magnetic

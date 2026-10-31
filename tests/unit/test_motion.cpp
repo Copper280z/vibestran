@@ -353,8 +353,6 @@ TEST(Motion, CardsAndCaseControl) {
             std::string::npos);
   EXPECT_NE(error("MOTION,1,20,0,SPIN,0.,1.,2\n").find("MOTION TYPE must be ROTATE"),
             std::string::npos);
-  EXPECT_NE(error("MOTION,1,20,0,ROTATE,0.,1.,2,\n,3000.\n").find("MOTION SPEED is not supported yet"),
-            std::string::npos);
   EXPECT_NE(error("MOTION,1,20,0,ROTATE,0.,0.,2\n").find(
                 "MOTION 1 requires COUNT >= 1, and a nonzero STEP when COUNT > 1"),
             std::string::npos);
@@ -593,8 +591,13 @@ TEST(Motion, ResultsHoldEveryPositionAndTheFieldsAreATimeSeries) {
         "MOTION 2: 2 positions from 5 to 25 degrees",
         "Air-gap torque on the part inside the gap, about the plane normal (Nm): "})
     EXPECT_NE(f06.find(expected_text), std::string::npos) << expected_text << "\n" << f06;
-  // One table, of four rows.
-  EXPECT_EQ(f06.find("  STEP   POSITION"), f06.rfind("  STEP   POSITION"));
+  // One position table, and one of the back-EMF per unit speed (the AGE
+  // gives dlambda/dphi of the closed circuit), both for subcase 1 alone.
+  const std::string table = "  STEP   POSITION(deg)          TORQUE(Nm)",
+                    emf = "  DLAMBDA/DPHI      1(V s/rad)";
+  EXPECT_EQ(f06.find(table), f06.rfind(table));
+  EXPECT_NE(f06.find(emf), std::string::npos);
+  EXPECT_EQ(f06.find(emf), f06.rfind(emf));
   std::filesystem::remove_all(directory);
 #else
   GTEST_SKIP() << "MAGSTAT results need HDF5";

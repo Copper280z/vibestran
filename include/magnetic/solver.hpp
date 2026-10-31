@@ -47,6 +47,34 @@ struct ForceResult {
   // BODY requests: one entry per connected piece of the enclosed region.
   std::vector<ForceComponent> components;
 };
+// The dq quantities of a DRIVE position: the amplitude-invariant Park
+// transform (2/m) C^T of the phase circuits' values (see park_columns), with
+// d first. Inductances are (2/m) C^T L C of the phase circuits' L.
+struct DriveState {
+  double electrical{0}; // theta_e, degrees
+  Eigen::Vector2d current{Eigen::Vector2d::Zero()}, linkage{Eigen::Vector2d::Zero()};
+  Eigen::Matrix2d incremental{Eigen::Matrix2d::Zero()};
+  // LDQ = APPARENT: the inductance of the loaded secant permeability with
+  // the magnets off, and the linkage the currents do not make at that
+  // permeability (the magnets', and any MBC field's). NaN under
+  // LDQ = INCREMENTAL.
+  Eigen::Matrix2d apparent{
+      Eigen::Matrix2d::Constant(std::numeric_limits<double>::quiet_NaN())};
+  Eigen::Vector2d magnet{
+      Eigen::Vector2d::Constant(std::numeric_limits<double>::quiet_NaN())};
+};
+// How a DRIVE subcase set its electrical angle.
+struct DriveSummary {
+  int id{0};
+  double theta0{0}; // degrees
+  // THETA0 AUTO: found by the no-load pre-sweep at alignment_positions,
+  // with phase 1's fundamental no-load linkage (Wb) and each phase's lag
+  // behind phase 1 (electrical degrees).
+  bool automatic{false};
+  double linkage{0};
+  std::vector<double> lag;
+  std::vector<int> phases; // indices into Results::circuits
+};
 // One solved state: a static subcase, or one position of a MOTION subcase.
 struct CaseResults {
   int id{0}, iterations{0};
@@ -63,6 +91,11 @@ struct CaseResults {
   // With an air-gap element: the torque on the part inside the gap about the
   // gap's plane normal u x v (N m); NaN without one.
   double gap_torque{std::numeric_limits<double>::quiet_NaN()};
+  // With an air-gap element: each circuit's dlambda/d(delta) at fixed
+  // currents (Wb per radian, the back-EMF per unit speed), for the same
+  // rotation as gap_torque, or in a MOTION step about the MOTION axis. It is
+  // dT/di by reciprocity, from the inductance solves. NaN for open circuits.
+  Eigen::VectorXd linkage_rate;
   // A MOTION subcase keeps one state per position in steps, in order; its
   // own fields then hold only the total Newton iterations, the largest
   // residual and whether any position extrapolated a B-H curve.
@@ -73,6 +106,8 @@ struct CaseResults {
   double position{0}, torque{std::numeric_limits<double>::quiet_NaN()};
   std::vector<Vector> nodes;
   std::optional<AirGap> air_gap;
+  std::optional<DriveState> drive;          // a DRIVE step
+  std::optional<DriveSummary> drive_summary; // a DRIVE subcase
 };
 struct Results {
   Mesh mesh;

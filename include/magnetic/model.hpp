@@ -38,6 +38,9 @@ struct Property {
 struct Response {
   Vector h{Vector::Zero()};
   Matrix tangent{Matrix::Zero()};
+  // The frozen (secant) reluctivity at this B: H = secant (B - Br). Equal to
+  // tangent for a linear material.
+  Matrix secant{Matrix::Zero()};
   double energy{0};
   bool extrapolated{false};
 };
@@ -117,10 +120,14 @@ struct FieldOutput {
 struct Subcase {
   int id{1}, load{0}, boundary{0};
   int motion{0}; // MOTION ID; 0 for a single static solve
+  int drive{0};  // DRIVE ID: phase currents from the MOTION position
   std::string label;
   FieldOutput field;
   bool probes{true};
   bool steps{false}; // MSTEP = ALL: per-position tables for a MOTION subcase
+  // LDQ = APPARENT (default) adds the frozen-permeability L_dq to the
+  // incremental one in a DRIVE subcase; LDQ = INCREMENTAL omits it.
+  bool apparent{true};
 };
 // MOTION: rigid rotation of the cells of ESET set about the z axis of
 // coordinates, through its origin, to the positions start + k * step degrees
@@ -129,7 +136,24 @@ struct Subcase {
 struct Motion {
   int id{0}, set{0}, coordinates{0}, count{1};
   double start{0}, step{0}; // degrees
+  // SPEED (rpm, positive toward increasing positions): scales the back-EMF
+  // dlambda/dphi to volts. 0 when blank.
+  double speed{0};
   [[nodiscard]] double position(int k) const { return start + k * step; }
+};
+// DRIVE: phase currents set from the electrical angle
+// theta_e = poles (phi - theta0) at each MOTION position phi. Phase k
+// (k = 0 .. m - 1, circuit phases[k]) carries
+// i_d cos(theta_k) - i_q sin(theta_k), theta_k = theta_e - 2 pi k / m, with
+// i_d = -peak sin(gamma) and i_q = peak cos(gamma) for SINE; SIX is the
+// 120-degree six-step waveform with the same fundamental phase.
+struct Drive {
+  int id{0};
+  bool six{false};
+  int poles{1};              // pole pairs
+  double peak{0}, gamma{0};  // A, electrical degrees from +q towards -d
+  std::optional<double> theta0; // degrees; empty for AUTO
+  std::vector<int> phases;   // circuit IDs in phase sequence
 };
 struct Boundary {
   int faces{0};
@@ -197,6 +221,7 @@ struct Model {
   std::map<int, AirGapProperty> air_gaps;
   std::map<int, std::string> meshed_air_gaps; // PID -> what selected MESH
   std::map<int, Motion> motions;
+  std::map<int, Drive> drives;
   Options options;
 };
 

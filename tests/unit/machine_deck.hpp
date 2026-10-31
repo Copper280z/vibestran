@@ -39,6 +39,7 @@ struct Machine {
   double jitter{0};       // uneven angular spacing, fraction of a division
   double rotation{0};     // rigid rotation of everything about the center
   double rotor_turn{0};   // further rotation of the rotor grids alone
+  bool triangles{false};  // split every quadrilateral into two triangles
   Vector center{Vector::Zero()};
   int rotor_property{1}, stator_property{1};
   std::string gap{"PAIRGAP,9\n"}; // what PID 9 is
@@ -76,7 +77,11 @@ inline Geometry geometry(const Machine &g) {
   auto quads = [&](const std::vector<int> &a, const std::vector<int> &b, int property) {
     const int n = static_cast<int>(a.size());
     for (int k = 0; k < n; ++k)
-      add(property, {a[k], a[(k + 1) % n], b[(k + 1) % n], b[k]});
+      if (g.triangles) {
+        add(property, {a[k], a[(k + 1) % n], b[(k + 1) % n]});
+        add(property, {a[k], b[(k + 1) % n], b[k]});
+      } else
+        add(property, {a[k], a[(k + 1) % n], b[(k + 1) % n], b[k]});
   };
   // Triangles between rings of different divisions, advancing along
   // whichever ring's next grid comes first in angle (angles unwrapped from

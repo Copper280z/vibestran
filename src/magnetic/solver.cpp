@@ -1,15 +1,19 @@
 #include "magnetic/solver.hpp"
 #include "core/notices.hpp"
 #include "magnetic/air_gap.hpp"
+#include "magnetic/drive.hpp"
 #include "magnetic/motion.hpp"
 #include "solver/solver_backend.hpp"
 #include <algorithm>
 #include <cmath>
 #include <format>
 #include <limits>
+#include <map>
+#include <numbers>
 #include <numeric>
 #include <optional>
 #include <set>
+#include <tuple>
 
 namespace vibestran::magnetic {
 namespace {
@@ -153,9 +157,12 @@ bool on_air_gap(const Mesh &mesh, int face) {
                                    mesh.air_gap->faces.end(),
                                    face) != mesh.air_gap->faces.end();
 }
+// frozen assembles the secant (frozen-permeability) stiffness in place of
+// the tangent; the residual and fields are the same.
 Assembly assemble(const Materials &materials, const Mesh &mesh,
                   const Gauge &gauge, const GapCoupling &gap,
-                  const Eigen::VectorXd &a, const Eigen::VectorXd &load) {
+                  const Eigen::VectorXd &a, const Eigen::VectorXd &load,
+                  bool frozen = false) {
   Assembly out;
   out.residual = Eigen::VectorXd::Zero(gauge.size);
   std::vector<Triplet> entries;
@@ -176,10 +183,11 @@ Assembly assemble(const Materials &materials, const Mesh &mesh,
       const double weight = s.weight * mesh.depth;
       out.energy += weight * response.energy;
       out.extrapolated |= response.extrapolated;
+      const Matrix &stiffness = frozen ? response.secant : response.tangent;
       for (int i = 0; i < ne; ++i) {
         residual[i] += weight * curl[i].dot(response.h);
         for (int j = 0; j < ne; ++j)
-          local(i, j) += weight * curl[i].dot(response.tangent * curl[j]);
+          local(i, j) += weight * curl[i].dot(stiffness * curl[j]);
       }
     }
     out.b.push_back(average_b / cell.volume);
@@ -763,12 +771,21 @@ Result<Setup> prepare(const Model &model) {
   s.index.emplace(s.mesh);
   return s;
 }
+// What a DRIVE position adds to its subcase's LOAD.
+struct StateRequest {
+  std::vector<double> driven; // terminal current added to each circuit
+  // Circuits (indices) whose frozen-permeability inductance is wanted.
+  std::vector<int> frozen;
+};
 // One equilibrium of subcase's load on setup and the results that follow
 // from it. warm, when given, is a nearby solution to start Newton from (the
 // previous MOTION position); continued reports current continuation.
+// frozen_inductance receives the request's frozen-permeability inductance.
 Result<CaseResults> solve_state(const Model &model, const Setup &setup,
                                 const Subcase &subcase, Tangent &tangent,
-                                const Eigen::VectorXd *warm, bool &continued) {
+                                const Eigen::VectorXd *warm, bool &continued,
+                                const StateRequest *request = nullptr,
+                                Eigen::MatrixXd *frozen_inductance = nullptr) {
   const auto &mesh = setup.mesh;
   const auto &gauge = setup.gauge;
   const auto &circuits = setup.circuits;
@@ -779,7 +796,10 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
   auto terminal = circuit_currents(model, circuits, subcase.load);
   if (auto *e = std::get_if<Error>(&terminal))
     return *e;
-  const auto &circuit_amps = std::get<std::vector<double>>(terminal);
+  auto circuit_amps = std::get<std::vector<double>>(terminal);
+  if (request && !request->driven.empty())
+    for (int c = 0; c < nc; ++c)
+      circuit_amps[c] += request->driven[c];
   std::vector<double> amps(ns, 0);
   for (int c = 0; c < nc; ++c)
     for (auto [i, polarity] : circuits[c].members)
@@ -852,6 +872,7 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
   output.differential_inductance =
       Eigen::MatrixXd::Constant(ns, ns, unavailable);
   output.circuit_inductance = Eigen::MatrixXd::Constant(nc, nc, unavailable);
+  output.linkage_rate = Eigen::VectorXd::Constant(nc, unavailable);
   if (gauge.size > 0) {
     // Reduced couplings of the closed sources, then of the closed circuits,
     // solved together with one factorization of the converged tangent.
@@ -895,6 +916,43 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
           output.circuit_inductance(closed_circuits[c], closed_circuits[d]) =
               linkage(first_circuit + static_cast<Eigen::Index>(c),
                       first_circuit + static_cast<Eigen::Index>(d));
+      if (mesh.air_gap) {
+        // dlambda_c/d(delta) = dT/di_c: the torque's gradient against the
+        // potential's response to the circuit's current.
+        const Eigen::VectorXd gradient =
+            mesh.depth * air_gap_torque_gradient(*mesh.air_gap, eq.a);
+        Eigen::VectorXd reduced_gradient = Eigen::VectorXd::Zero(gauge.size);
+        for (size_t e = 0; e < mesh.dofs(); ++e)
+          if (gauge.equations[e] >= 0)
+            reduced_gradient[gauge.equations[e]] = gradient[e];
+        const Eigen::VectorXd rates =
+            std::get<Eigen::MatrixXd>(responses).transpose() * reduced_gradient;
+        for (size_t c = 0; c < closed_circuits.size(); ++c)
+          output.linkage_rate[closed_circuits[c]] =
+              rates[first_circuit + static_cast<Eigen::Index>(c)];
+      }
+    }
+    if (request && !request->frozen.empty() && frozen_inductance) {
+      // The secant stiffness of the converged state: the linear problem
+      // whose solution with the magnets on is this state, so its response
+      // to the phase currents alone is the apparent inductance.
+      const auto frozen = assemble(setup.materials, mesh, gauge, setup.gap, eq.a,
+                                   Eigen::VectorXd::Zero(mesh.dofs()), true);
+      const auto count = static_cast<Eigen::Index>(request->frozen.size());
+      Eigen::MatrixXd reduced = Eigen::MatrixXd::Zero(gauge.size, count);
+      for (Eigen::Index k = 0; k < count; ++k)
+        for (size_t e = 0; e < mesh.dofs(); ++e)
+          if (gauge.equations[e] >= 0)
+            reduced(gauge.equations[e], k) =
+                setup.circuit_coupling[request->frozen[k]][e];
+      if (auto e = tangent.factor(frozen.stiffness))
+        return Error{std::format("Frozen-permeability factorization failed ({})",
+                                 e->message)};
+      auto responses = tangent.solve(reduced);
+      if (auto *e = std::get_if<Error>(&responses))
+        return Error{std::format("Frozen-permeability solve failed ({})",
+                                 e->message)};
+      *frozen_inductance = reduced.transpose() * std::get<Eigen::MatrixXd>(responses);
     }
   } else {
     for (int i = 0; i < ns; ++i)
@@ -942,6 +1000,94 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
 std::string iterations_text(int iterations) {
   return std::format("{} Newton {}", iterations,
                      iterations == 1 ? "iteration" : "iterations");
+}
+// The circuit index of each DRIVE phase; every phase must be closed.
+Result<std::vector<int>> phase_indices(const Drive &drive,
+                                       std::span<const CircuitDefinition> circuits) {
+  std::vector<int> out;
+  for (size_t k = 0; k < drive.phases.size(); ++k) {
+    const auto it = std::find_if(circuits.begin(), circuits.end(),
+                                 [&](const CircuitDefinition &c) {
+                                   return c.id == drive.phases[k];
+                                 });
+    if (it == circuits.end())
+      return Error{std::format("DRIVE {} phase {} (circuit {}) is not a circuit",
+                               drive.id, k + 1, drive.phases[k])};
+    if (!it->closed)
+      return Error{std::format("DRIVE {} phase {} (circuit {}) is an open "
+                               "circuit, which has no linkage",
+                               drive.id, k + 1, drive.phases[k])};
+    out.push_back(static_cast<int>(it - circuits.begin()));
+  }
+  return out;
+}
+// The dq quantities of a DRIVE step; frozen is the frozen-permeability
+// inductance of the phases, empty under LDQ = INCREMENTAL.
+DriveState drive_state(double theta_e, const CaseResults &step,
+                       const std::vector<int> &phases,
+                       const Eigen::MatrixXd &frozen) {
+  const auto m = static_cast<Eigen::Index>(phases.size());
+  const Eigen::MatrixXd c = park_columns(static_cast<int>(m), theta_e),
+                        park = 2. / static_cast<double>(m) * c.transpose();
+  Eigen::VectorXd current(m), linkage(m);
+  Eigen::MatrixXd inductance(m, m);
+  for (Eigen::Index j = 0; j < m; ++j) {
+    current[j] = step.circuits[phases[j]].current;
+    linkage[j] = step.circuits[phases[j]].linkage;
+    for (Eigen::Index k = 0; k < m; ++k)
+      inductance(j, k) = step.circuit_inductance(phases[j], phases[k]);
+  }
+  DriveState out;
+  out.electrical = theta_e * 180 / std::numbers::pi;
+  out.current = park * current;
+  out.linkage = park * linkage;
+  out.incremental = park * inductance * c;
+  if (frozen.size()) {
+    out.apparent = park * frozen * c;
+    out.magnet = park * (linkage - frozen * current);
+  }
+  return out;
+}
+// THETA0 AUTO: the no-load linkage of each phase at alignment_positions,
+// with subcase's boundary condition and no current, fitted by align_drive.
+// iterations receives the Newton iterations of the pre-sweep.
+Result<DriveSummary> auto_alignment(const Model &model, const Setup &base,
+                                    const Motion &motion, const MovingPart &part,
+                                    const Drive &drive,
+                                    const std::vector<int> &phases,
+                                    Subcase subcase, Tangent &tangent,
+                                    int &iterations) {
+  subcase.load = 0;
+  std::vector<std::vector<double>> linkages;
+  Eigen::VectorXd previous;
+  iterations = 0;
+  for (double angle : alignment_positions(drive)) {
+    const Model moved = moved_model(model, motion, part, angle);
+    std::optional<Setup> own;
+    if (angle != 0) {
+      auto built = prepare(moved);
+      if (auto *e = std::get_if<Error>(&built))
+        return Error{std::format("at {:.6g} degrees: {}", angle, e->message)};
+      own = std::get<Setup>(std::move(built));
+    }
+    bool continued = false;
+    auto state = solve_state(moved, own ? *own : base, subcase, tangent,
+                             previous.size() ? &previous : nullptr, continued);
+    if (auto *e = std::get_if<Error>(&state))
+      return Error{std::format("at {:.6g} degrees: {}", angle, e->message)};
+    const auto &solved = std::get<CaseResults>(state);
+    iterations += solved.iterations;
+    previous = solved.potential;
+    std::vector<double> row(phases.size());
+    std::transform(phases.begin(), phases.end(), row.begin(),
+                   [&](int c) { return solved.circuits[c].linkage; });
+    linkages.push_back(std::move(row));
+  }
+  auto aligned = align_drive(drive, linkages);
+  if (auto *e = std::get_if<Error>(&aligned))
+    return *e;
+  const auto &a = std::get<Alignment>(aligned);
+  return DriveSummary{drive.id, a.theta0, true, a.linkage, a.lag, phases};
 }
 } // namespace
 
@@ -1016,6 +1162,24 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
                     motion.position(0), motion.position(motion.count - 1)));
     parts.emplace(subcase.motion, moving);
   }
+  std::set<int> drives_used;
+  for (const auto &subcase : model.subcases) {
+    if (!subcase.drive || !drives_used.insert(subcase.drive).second)
+      continue;
+    const auto &drive = model.drives.at(subcase.drive);
+    std::string phases;
+    for (int c : drive.phases)
+      phases += (phases.empty() ? "" : ", ") + std::to_string(c);
+    solution.add("Drive",
+                 std::format("DRIVE {}: {} currents, {} pole {}, {:.6g} A peak, "
+                             "gamma {:.6g} electrical degrees, phase circuits {}, "
+                             "THETA0 {}",
+                             drive.id, drive.six ? "six-step" : "sinusoidal",
+                             drive.poles, drive.poles == 1 ? "pair" : "pairs",
+                             drive.peak, drive.gamma, phases,
+                             drive.theta0 ? std::format("{:.6g} degrees", *drive.theta0)
+                                          : std::string("AUTO")));
+  }
   solution.add("Equations",
                std::format("{} ({} degrees of freedom before the gauge and "
                            "boundary conditions)",
@@ -1030,6 +1194,8 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
   result.summary.solver.set("Indefinite fallback",
                             "none, positive definite required");
   Tangent tangent(backend);
+  // THETA0 AUTO results by DRIVE, MOTION and MBC.
+  std::map<std::tuple<int, int, int>, DriveSummary> alignments;
   for (const auto &subcase : model.subcases) {
     Notices notices;
     const std::string context = std::format("Subcase {}", subcase.id);
@@ -1059,6 +1225,47 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
       CaseResults output;
       output.id = subcase.id;
       output.residual = 0;
+      const Drive *drive = subcase.drive ? &model.drives.at(subcase.drive) : nullptr;
+      if (drive) {
+        auto indexed = phase_indices(*drive, base.circuits);
+        if (auto *e = std::get_if<Error>(&indexed))
+          return Error{std::format("{}: {}", context, e->message)};
+        const auto &phases = std::get<std::vector<int>>(indexed);
+        if (drive->theta0) {
+          output.drive_summary = DriveSummary{drive->id, *drive->theta0, false, 0,
+                                              {}, phases};
+        } else {
+          const std::tuple key{drive->id, motion.id, subcase.boundary};
+          if (!alignments.contains(key)) {
+            int iterations = 0;
+            auto aligned = auto_alignment(model, base, motion, part, *drive, phases,
+                                          subcase, tangent, iterations);
+            if (auto *e = std::get_if<Error>(&aligned))
+              return Error{std::format("{}, DRIVE {} THETA0 AUTO with MOTION {}: {}",
+                                       context, drive->id, motion.id, e->message)};
+            const auto &found = std::get<DriveSummary>(aligned);
+            std::string lags;
+            for (size_t k = 1; k < found.lag.size(); ++k)
+              lags += std::format("{}{:.2f}", lags.empty() ? "" : ", ", found.lag[k]);
+            const auto positions = alignment_positions(*drive);
+            solution.add(
+                "Drive",
+                std::format("DRIVE {} THETA0 AUTO with MOTION {}{}: no-load "
+                            "linkage at {} positions from 0 to {:.6g} degrees ({}); "
+                            "THETA0 {:.9g} degrees, phase 1 fundamental {:.6g} "
+                            "Wb, later phases lag by {} electrical degrees",
+                            drive->id, motion.id,
+                            subcase.boundary ? std::format(" and MAGBC {}",
+                                                           subcase.boundary)
+                                             : "",
+                            positions.size(), positions.back(),
+                            iterations_text(iterations), found.theta0,
+                            found.linkage, lags));
+            alignments.emplace(key, found);
+          }
+          output.drive_summary = alignments.at(key);
+        }
+      }
       Eigen::VectorXd previous;
       int continued_at = 0, fewest = std::numeric_limits<int>::max(), most = 0;
       std::optional<double> first_continued, first_extrapolated;
@@ -1075,14 +1282,33 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
         }
         const Setup &setup = own ? *own : base;
         bool continued = false;
+        StateRequest request;
+        double theta_e = 0;
+        if (drive) {
+          const auto &phases = output.drive_summary->phases;
+          theta_e = electrical_angle(*drive, output.drive_summary->theta0, angle);
+          const auto currents = phase_currents(*drive, theta_e);
+          request.driven.assign(base.circuits.size(), 0);
+          for (size_t j = 0; j < phases.size(); ++j)
+            request.driven[phases[j]] = currents[j];
+          if (subcase.apparent)
+            request.frozen = phases;
+        }
+        Eigen::MatrixXd frozen;
         auto state = solve_state(moved, setup, subcase, tangent,
-                                 k ? &previous : nullptr, continued);
+                                 k ? &previous : nullptr, continued,
+                                 drive ? &request : nullptr, &frozen);
         if (auto *e = std::get_if<Error>(&state))
           return Error{std::format("{}, MOTION {} at {:.6g} degrees: {}", context,
                                    motion.id, angle, e->message)};
         auto step = std::get<CaseResults>(std::move(state));
         step.position = angle;
-        step.torque = part.sign * (part.inner ? 1 : -1) * step.gap_torque;
+        const double turn = part.sign * (part.inner ? 1 : -1);
+        step.torque = turn * step.gap_torque;
+        step.linkage_rate *= turn;
+        if (drive)
+          step.drive =
+              drive_state(theta_e, step, output.drive_summary->phases, frozen);
         if (continued) {
           ++continued_at;
           first_continued = first_continued.value_or(angle);

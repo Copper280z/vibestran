@@ -10,6 +10,7 @@ Response material_response(const Material &material,
     r.tangent = Matrix::Identity() / (mu0 * material.mur);
     const Vector shifted = b - remanence;
     r.h = r.tangent * shifted;
+    r.secant = r.tangent;
     r.energy = 0.5 * shifted.dot(r.h);
     return r;
   }
@@ -31,14 +32,16 @@ Response material_response(const Material &material,
       r.extrapolated = true;
     }
   }
-  if (magnitude == 0)
+  if (magnitude == 0) {
     r.tangent = slope * Matrix::Identity();
-  else {
+    r.secant = r.tangent;
+  } else {
     const Vector direction = b / magnitude;
     const double secant = h / magnitude;
     r.h = h * direction;
     r.tangent = secant * Matrix::Identity() +
                 (slope - secant) * direction * direction.transpose();
+    r.secant = secant * Matrix::Identity();
   }
   return r;
 }

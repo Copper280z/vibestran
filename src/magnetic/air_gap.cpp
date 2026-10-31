@@ -363,4 +363,32 @@ double air_gap_torque(const AirGap &gap, const Eigen::VectorXd &a) {
   }
   return torque;
 }
+
+Eigen::VectorXd air_gap_torque_gradient(const AirGap &gap, const Eigen::VectorXd &a) {
+  // The torque is bilinear in the two circles' harmonics: its derivative
+  // with respect to alpha is linear in beta and the reverse, mapped back to
+  // the grids through each circle's transform.
+  const auto [alpha, beta] = coefficients(gap, a);
+  const double log_ratio = std::log(gap.inner.radius / gap.outer.radius);
+  Eigen::VectorXd d_alpha = Eigen::VectorXd::Zero(alpha.size()),
+                  d_beta = Eigen::VectorXd::Zero(beta.size());
+  for (int m = 1; m <= gap.harmonics; ++m) {
+    const double q = std::exp(m * log_ratio),
+                 rate = -m * (-pi * m / mu0 * 2 * q / -std::expm1(2 * m * log_ratio));
+    const int c = 2 * m - 1, s = 2 * m;
+    d_alpha[c] = rate * beta[s];
+    d_alpha[s] = -rate * beta[c];
+    d_beta[s] = rate * alpha[c];
+    d_beta[c] = -rate * alpha[s];
+  }
+  Eigen::VectorXd out = Eigen::VectorXd::Zero(a.size());
+  for (const auto &[circle, d] :
+       {std::pair{&gap.inner, &d_alpha}, std::pair{&gap.outer, &d_beta}}) {
+    const Eigen::VectorXd nodal =
+        gap_transform(*circle, gap.harmonics).transpose() * *d;
+    for (size_t k = 0; k < circle->nodes.size(); ++k)
+      out[circle->nodes[k]] += nodal[static_cast<Eigen::Index>(k)];
+  }
+  return out;
+}
 } // namespace vibestran::magnetic
