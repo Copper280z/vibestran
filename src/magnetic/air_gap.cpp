@@ -4,6 +4,8 @@
 #include <cmath>
 #include <complex>
 #include <format>
+#include <map>
+#include <set>
 #include <numbers>
 #include <numeric>
 
@@ -11,20 +13,8 @@ namespace vibestran::magnetic {
 namespace {
 constexpr double pi = std::numbers::pi;
 
-struct Parts {
-  std::vector<int> parent;
-  explicit Parts(int n) : parent(n) { std::iota(parent.begin(), parent.end(), 0); }
-  int root(int i) {
-    while (parent[i] != i)
-      i = parent[i] = parent[parent[i]];
-    return i;
-  }
-  void join(int a, int b) { parent[root(a)] = root(b); }
-};
-
 // A closed chain of boundary faces, its grids in order.
 struct Loop {
-  int part{0};
   std::vector<int> nodes, faces;
   Eigen::Vector2d center{Eigen::Vector2d::Zero()};
   double radius{0}, deviation{std::numeric_limits<double>::infinity()};
@@ -93,199 +83,150 @@ Harmonics coefficients(const AirGap &gap, const Eigen::VectorXd &a) {
 }
 } // namespace
 
-Result<std::optional<AirGap>> find_air_gap(const Mesh &mesh) {
-  if (!mesh.planar)
-    return std::nullopt;
-  const int n = static_cast<int>(mesh.nodes.size());
-  Parts parts(n);
-  for (const auto &c : mesh.cells)
-    for (int v : c.nodes)
-      parts.join(v, c.nodes.front());
-  std::vector<int> roots;
-  for (int i = 0; i < n; ++i)
-    if (parts.root(i) == i)
-      roots.push_back(i);
-  if (roots.size() == 1)
-    return std::nullopt;
+Result<AirGap> make_air_gap(const Mesh &mesh, const Model &model, int pid) {
+  AirGap gap;
+  gap.property = pid;
+  // Edges of the gap elements used once are the boundary of the gap region.
+  struct Use {
+    int count{0}, element{0};
+  };
+  std::map<std::array<int, 2>, Use> uses; // grid IDs, sorted
+  for (const auto &e : model.elements) {
+    if (e.property != pid)
+      continue;
+    gap.elements.push_back(e.id);
+    for (size_t k = 0; k < e.nodes.size(); ++k) {
+      std::array<int, 2> edge{e.nodes[k], e.nodes[(k + 1) % e.nodes.size()]};
+      std::sort(edge.begin(), edge.end());
+      auto &use = uses[edge];
+      ++use.count;
+      use.element = e.id;
+    }
+  }
+  // Every boundary edge must be an edge of the field mesh (then its own
+  // boundary, the gap being on the other side).
+  std::map<int, std::vector<int>> boundary; // grid ID -> other grid IDs
+  std::map<std::array<int, 2>, int> faces;  // grid IDs -> field face
+  for (const auto &[edge, use] : uses) {
+    if (use.count != 1)
+      continue;
+    const auto a = mesh.node_index.find(edge[0]), b = mesh.node_index.find(edge[1]);
+    const auto face = a == mesh.node_index.end() || b == mesh.node_index.end()
+                          ? mesh.face_index.end()
+                          : mesh.face_index.find(NodeList{std::min(a->second, b->second),
+                                                          std::max(a->second, b->second)});
+    if (face == mesh.face_index.end() || mesh.faces[face->second].cells[1] >= 0)
+      return Error{std::format(
+          "PAIRGAP {}: edge ({},{}) of air-gap element {} is not shared with a field "
+          "element. The air gap must lie between two meshed parts, the rotor and "
+          "the stator: its elements' inner edges on one part's boundary and their "
+          "outer edges on the other's",
+          pid, edge[0], edge[1], use.element)};
+    faces[edge] = face->second;
+    boundary[edge[0]].push_back(edge[1]);
+    boundary[edge[1]].push_back(edge[0]);
+  }
+  for (const auto &[grid, others] : boundary)
+    if (others.size() != 2)
+      return Error{std::format("PAIRGAP {}: the boundary of the air-gap elements "
+                               "meets itself at grid {}",
+                               pid, grid)};
+
+  // Closed loops of boundary grids, in mesh indices.
+  std::vector<Loop> loops;
+  std::set<int> visited;
+  for (const auto &[first, others] : boundary) {
+    if (visited.contains(first))
+      continue;
+    Loop loop;
+    int previous = -1, at = first;
+    do {
+      visited.insert(at);
+      loop.nodes.push_back(mesh.node_index.at(at));
+      const auto &next = boundary.at(at);
+      const int step = next[0] != previous ? next[0] : next[1];
+      std::array<int, 2> edge{at, step};
+      std::sort(edge.begin(), edge.end());
+      loop.faces.push_back(faces.at(edge));
+      previous = at;
+      at = step;
+    } while (at != first);
+    loops.push_back(std::move(loop));
+  }
+  if (loops.size() != 2)
+    return Error{std::format(
+        "PAIRGAP {}: the air-gap elements must form one annulus, bounded by a "
+        "circle on the rotor and a circle on the stator, but their boundary has "
+        "{} closed {}{}",
+        pid, loops.size(), loops.size() == 1 ? "loop" : "loops",
+        loops.size() == 1 ? " (a sector or a disk, not a full ring)"
+                          : " (holes, or separate pieces)")};
 
   // In-plane frame with u x v = normal, and plane coordinates of the grids.
-  AirGap gap;
   const Vector &normal = mesh.normal;
-  gap.u = normal.cross(std::abs(normal.x()) < .9 ? Vector::UnitX()
-                                                 : Vector::UnitY())
+  gap.u = normal.cross(std::abs(normal.x()) < .9 ? Vector::UnitX() : Vector::UnitY())
               .normalized();
   gap.v = normal.cross(gap.u);
   const Vector origin = mesh.nodes.front();
-  std::vector<Eigen::Vector2d> p(n);
-  for (int i = 0; i < n; ++i)
+  std::vector<Eigen::Vector2d> p(mesh.nodes.size());
+  for (size_t i = 0; i < mesh.nodes.size(); ++i)
     p[i] = {(mesh.nodes[i] - origin).dot(gap.u), (mesh.nodes[i] - origin).dot(gap.v)};
-  auto grid = [&mesh](int i) { return mesh.node_ids.empty() ? i + 1 : mesh.node_ids[i]; };
-  auto element_of_part = [&](int root) {
-    const auto c = std::find_if(mesh.cells.begin(), mesh.cells.end(), [&](const Cell &cell) {
-      return parts.root(cell.nodes.front()) == root;
-    });
-    return c == mesh.cells.end() ? 0 : c->id;
-  };
-
-  // Boundary loops; a grid shared by more than two boundary faces (a pinch)
-  // ends its loop's eligibility.
-  std::vector<std::vector<int>> boundary_faces(n);
-  for (size_t f = 0; f < mesh.faces.size(); ++f)
-    if (mesh.faces[f].cells[1] < 0)
-      for (int v : mesh.faces[f].nodes)
-        boundary_faces[v].push_back(static_cast<int>(f));
-  std::vector<bool> visited(mesh.faces.size(), false);
-  std::vector<Loop> loops;
-  for (size_t start = 0; start < mesh.faces.size(); ++start) {
-    if (mesh.faces[start].cells[1] >= 0 || visited[start])
-      continue;
-    Loop loop;
-    bool simple = boundary_faces[mesh.faces[start].nodes[0]].size() == 2;
-    int f = static_cast<int>(start), at = mesh.faces[start].nodes[1];
-    loop.nodes.push_back(mesh.faces[start].nodes[0]);
-    while (!visited[f]) {
-      visited[f] = true;
-      loop.faces.push_back(f);
-      if (at == loop.nodes.front())
-        break;
-      loop.nodes.push_back(at);
-      if (boundary_faces[at].size() != 2) {
-        simple = false;
-        break;
-      }
-      f = boundary_faces[at][0] == f ? boundary_faces[at][1] : boundary_faces[at][0];
-      const auto &next = mesh.faces[f].nodes;
-      at = next[0] == at ? next[1] : next[0];
-    }
-    // Any three points lie on a circle, so a gap circle needs four grids.
-    if (!simple || loop.nodes.size() < 4)
-      continue;
-    loop.part = parts.root(loop.nodes.front());
+  for (auto &loop : loops)
     fit_circle(loop, p);
-    loops.push_back(std::move(loop));
-  }
-
-  // Gap candidates: circular loops on different parts, concentric, with no
-  // grid strictly between them. Pairs that fail are kept as diagnostics:
-  // a third part inside the annulus, then the most nearly concentric pair of
-  // circles, then the pair whose worse boundary is closest to a circle.
-  // (Grids of a pair's own parts between its circles mean the pair is not a
-  // gap at all, as for a rotor and a stator's outer boundary.)
-  struct Candidate {
-    int inner, outer;
-    Eigen::Vector2d center;
-  };
-  std::vector<Candidate> candidates;
-  std::string occupied, offset_reason, shape_reason;
-  double best_offset = std::numeric_limits<double>::infinity(),
-         best_shape = std::numeric_limits<double>::infinity();
-  for (size_t i = 0; i < loops.size(); ++i)
-    for (size_t j = i + 1; j < loops.size(); ++j) {
-      const Loop *a = &loops[i], *b = &loops[j];
-      if (a->part == b->part)
-        continue;
-      if (a->radius > b->radius)
-        std::swap(a, b);
-      const double scale = b->radius;
-      if (a->deviation > kAirGapTolerance || b->deviation > kAirGapTolerance) {
-        const Loop *worse = a->deviation > b->deviation ? a : b;
-        if (worse->deviation < best_shape) {
-          best_shape = worse->deviation;
-          shape_reason = std::format(
-              "the boundary through grid {} on the part containing element {} "
-              "deviates from a circle by {:.2e} of its radius at grid {} "
-              "(tolerance {:.0e}; write GRID coordinates in large-field or "
-              "free-field format if they lose digits in small fields)",
-              grid(worse->nodes.front()), element_of_part(worse->part),
-              worse->deviation, grid(worse->worst), kAirGapTolerance);
-        }
-        continue;
-      }
-      if (b->radius - a->radius <= kAirGapTolerance * scale)
-        continue;
-      const double offset = (a->center - b->center).norm();
-      const Eigen::Vector2d center = (a->center + b->center) / 2;
-      const Vector center3 = origin + center.x() * gap.u + center.y() * gap.v;
-      if (offset > kAirGapTolerance * scale) {
-        if (offset / scale < best_offset) {
-          best_offset = offset / scale;
-          offset_reason = std::format(
-              "the boundary circles through grid {} (radius {:.6g}) and grid {} "
-              "(radius {:.6g}) are not concentric: their centers are {:.3e} apart",
-              grid(a->nodes.front()), a->radius, grid(b->nodes.front()), b->radius,
-              offset);
-        }
-        continue;
-      }
-      int inside = -1, stranger = -1;
-      for (int k = 0; k < n && stranger < 0; ++k) {
-        const double r = (p[k] - center).norm();
-        if (r > a->radius * (1 + kAirGapTolerance) &&
-            r < b->radius * (1 - kAirGapTolerance)) {
-          inside = k;
-          if (parts.root(k) != a->part && parts.root(k) != b->part)
-            stranger = k;
-        }
-      }
-      if (stranger >= 0 && occupied.empty())
-        occupied = std::format(
-            "grid {} lies inside the annulus between the circles of radius "
-            "{:.6g} and {:.6g} about ({:.6g}, {:.6g}, {:.6g})",
-            grid(stranger), a->radius, b->radius, center3.x(), center3.y(),
-            center3.z());
-      if (inside < 0)
-        candidates.push_back({static_cast<int>(a - loops.data()),
-                              static_cast<int>(b - loops.data()), center});
-    }
-  const std::string reason = !occupied.empty()        ? occupied
-                             : !offset_reason.empty() ? offset_reason
-                             : !shape_reason.empty()  ? shape_reason
-                                 : "no two parts have circular boundaries";
-
-  if (candidates.size() > 1) {
-    std::string list;
-    for (const auto &c : candidates)
-      list += std::format("{}{:.6g} to {:.6g}", list.empty() ? "" : "; ",
-                          loops[c.inner].radius, loops[c.outer].radius);
-    return Error{std::format("The magnetic mesh has {} candidate air gaps (radii {}); "
-                             "only one air gap is supported",
-                             candidates.size(), list)};
-  }
-  if (candidates.empty()) {
+  if (loops[0].radius > loops[1].radius)
+    std::swap(loops[0], loops[1]);
+  const Loop &inner = loops[0], &outer = loops[1];
+  for (const Loop *loop : {&inner, &outer})
+    if (loop->deviation > kAirGapTolerance)
+      return Error{std::format(
+          "PAIRGAP {}: the {} boundary of the air gap is not a circle: grid {} "
+          "deviates from the best-fit circle (radius {:.6g}) by {:.2e} of its "
+          "radius; the tolerance is {:.0e}. Place the grids on a circle, and "
+          "write GRID coordinates in large-field or free-field format if small "
+          "fields lose digits",
+          pid, loop == &inner ? "inner" : "outer", mesh.node_ids[loop->worst],
+          loop->radius, loop->deviation, kAirGapTolerance)};
+  const double offset = (inner.center - outer.center).norm();
+  if (offset > kAirGapTolerance * outer.radius)
     return Error{std::format(
-        "The magnetic mesh has {} parts not joined by elements, and no air gap "
-        "joins them. An air gap is an unmeshed annulus between a circle of "
-        "boundary grids on one part and a concentric circle on another, with no "
-        "grid inside it; {}",
-        roots.size(), reason)};
-  }
+        "PAIRGAP {}: the inner and outer circles of the air gap (radii {:.6g} and "
+        "{:.6g}) are not concentric: their centers are {:.3e} apart",
+        pid, inner.radius, outer.radius, offset)};
+  if (outer.radius - inner.radius <= kAirGapTolerance * outer.radius)
+    return Error{std::format("PAIRGAP {}: the air gap has no width (radius {:.6g})",
+                             pid, inner.radius)};
 
-  const auto &chosen = candidates.front();
-  const Loop &inner = loops[chosen.inner], &outer = loops[chosen.outer];
-  parts.join(inner.part, outer.part);
-  const auto stray = std::find_if(roots.begin(), roots.end(), [&](int root) {
-    return parts.root(root) != parts.root(inner.part);
-  });
-  if (stray != roots.end())
-    return Error{std::format(
-        "Element {} is not joined to the rest of the magnetic mesh by elements "
-        "or by the air gap between radii {:.6g} and {:.6g}",
-        element_of_part(*stray), inner.radius, outer.radius)};
-  gap.center = origin + chosen.center.x() * gap.u + chosen.center.y() * gap.v;
-  gap.inner = circle(inner, chosen.center, p);
-  gap.outer = circle(outer, chosen.center, p);
-  // Radii about the common center.
+  const Eigen::Vector2d center = (inner.center + outer.center) / 2;
+  gap.center = origin + center.x() * gap.u + center.y() * gap.v;
+  gap.inner = circle(inner, center, p);
+  gap.outer = circle(outer, center, p);
   for (GapCircle *c : {&gap.inner, &gap.outer})
     c->radius = std::accumulate(c->nodes.begin(), c->nodes.end(), 0.0,
                                 [&](double sum, int i) {
-                                  return sum + (p[i] - chosen.center).norm();
+                                  return sum + (p[i] - center).norm();
                                 }) /
                 static_cast<double>(c->nodes.size());
   gap.faces = inner.faces;
   gap.faces.insert(gap.faces.end(), outer.faces.begin(), outer.faces.end());
   gap.deviation = std::max(inner.deviation, outer.deviation);
-  gap.harmonics = static_cast<int>(
-      std::min(gap.inner.nodes.size(), gap.outer.nodes.size()) / 2);
+  // Points between the inner circle and its chords lie in the gap too.
+  double widest = 0;
+  for (size_t k = 0; k < gap.inner.angles.size(); ++k)
+    widest = std::max(widest, (k + 1 < gap.inner.angles.size()
+                                   ? gap.inner.angles[k + 1]
+                                   : gap.inner.angles[0] + 2 * pi) -
+                                  gap.inner.angles[k]);
+  gap.inner_chord = gap.inner.radius * std::cos(std::min(widest, pi) / 2);
+
+  const auto coarse = std::min(gap.inner.nodes.size(), gap.outer.nodes.size()),
+             fine = std::max(gap.inner.nodes.size(), gap.outer.nodes.size());
+  const int requested = model.air_gaps.at(pid).harmonics;
+  if (requested > static_cast<int>(fine / 2))
+    return Error{std::format(
+        "PAIRGAP {}: NHARM {} exceeds half the grid count of the finer circle "
+        "({} grids), beyond which neither circle resolves a harmonic",
+        pid, requested, fine)};
+  gap.harmonics = requested > 0 ? requested : static_cast<int>(coarse / 2);
   return gap;
 }
 
@@ -350,7 +291,7 @@ bool in_air_gap(const AirGap &gap, const Vector &x) {
   const double r = std::hypot(d.dot(gap.u), d.dot(gap.v));
   const double out_of_plane = std::abs(d.dot(gap.u.cross(gap.v)));
   return out_of_plane <= kAirGapTolerance * gap.outer.radius &&
-         r >= gap.inner.radius && r <= gap.outer.radius;
+         r >= gap.inner_chord && r <= gap.outer.radius;
 }
 
 Vector air_gap_field(const AirGap &gap, const Eigen::VectorXd &a, const Vector &x) {
@@ -359,7 +300,9 @@ Vector air_gap_field(const AirGap &gap, const Eigen::VectorXd &a, const Vector &
   const double px = d.dot(gap.u), py = d.dot(gap.v), r = std::hypot(px, py),
                theta = std::atan2(py, px);
   const double r1 = gap.inner.radius, total = std::log(gap.outer.radius / r1);
-  const double from_inner = std::clamp(std::log(r / r1), 0.0, total),
+  // Slightly negative between the inner circle and its chords, where the
+  // annulus solution continues smoothly.
+  const double from_inner = std::min(std::log(r / r1), total),
                from_outer = total - from_inner;
   double da_dr = (beta[0] - alpha[0]) / (r * total), da_dtheta = 0;
   for (int m = 1; m <= gap.harmonics; ++m) {

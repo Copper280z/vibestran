@@ -35,15 +35,18 @@ struct GapCircle {
   std::vector<int> nodes;     // mesh node indices
   std::vector<double> angles; // radians in [angles[0], angles[0] + 2 pi)
 };
-// An unmeshed air annulus of a planar mesh between a circle of boundary
-// grids on one part of the mesh and a concentric circle on another, coupled
+// The air annulus of a PAIRGAP property between a circle of boundary grids
+// on one part of the field mesh and a concentric circle on another, coupled
 // analytically by the air-gap element (air_gap.hpp).
 struct AirGap {
+  int property{0};
+  std::vector<int> elements; // PAIRGAP element IDs, not field cells
   Vector center{Vector::Zero()};
   Vector u{Vector::UnitX()}, v{Vector::UnitY()}; // in-plane, u x v = normal
   GapCircle inner, outer;
   std::vector<int> faces; // boundary faces on either circle
   double deviation{0};    // largest |distance - radius| / radius of a grid
+  double inner_chord{0};  // nearest approach of the inner circle's edges
   int harmonics{0};
 };
 struct Mesh {

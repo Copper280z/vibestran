@@ -235,11 +235,19 @@ Result<Mesh> make_mesh(std::vector<Vector> nodes,
 }
 
 Result<Mesh> make_mesh(const Model &model) {
+  // Elements of an AGE air gap (PAIRGAP) are not field cells: the air-gap
+  // element replaces them. MESH gaps were made ordinary air by the parser.
+  std::vector<const Element *> field;
+  for (const auto &c : model.elements)
+    if (!model.air_gaps.contains(c.property))
+      field.push_back(&c);
+  if (field.empty())
+    return Error{"Magnetic mesh contains no elements outside the air gap"};
   std::vector<Vector> nodes;
   std::map<int, int> index;
   std::set<int> active;
-  for (const auto &c : model.elements)
-    for (int n : c.nodes)
+  for (const auto *c : field)
+    for (int n : c->nodes)
       active.insert(n);
   for (int id : active) {
     auto it = model.nodes.find(id);
@@ -249,10 +257,10 @@ Result<Mesh> make_mesh(const Model &model) {
     nodes.push_back(it->second.position);
   }
   std::vector<NodeList> cells;
-  for (const auto &c : model.elements) {
-    NodeList ids;
-    for (int n : c.nodes)
-      ids.push_back(index.at(n));
+  for (const auto *c : field) {
+    NodeList ids(c->nodes.size());
+    std::transform(c->nodes.begin(), c->nodes.end(), ids.begin(),
+                   [&index](int n) { return index.at(n); });
     cells.push_back(ids);
   }
   Vector normal = Vector::UnitZ();
@@ -269,8 +277,8 @@ Result<Mesh> make_mesh(const Model &model) {
   mesh.node_index = index;
   mesh.node_ids.assign(active.begin(), active.end());
   for (size_t i = 0; i < mesh.cells.size(); ++i) {
-    mesh.cells[i].id = model.elements[i].id;
-    const auto prop = model.properties.find(model.elements[i].property);
+    mesh.cells[i].id = field[i]->id;
+    const auto prop = model.properties.find(field[i]->property);
     if (prop == model.properties.end())
       return Error{"Magnetic element references undefined property"};
     mesh.cells[i].property = prop->first;
@@ -279,10 +287,43 @@ Result<Mesh> make_mesh(const Model &model) {
              .second)
       return Error{"Duplicate magnetic element id"};
   }
-  auto gap = find_air_gap(mesh);
-  if (auto *e = std::get_if<Error>(&gap))
-    return *e;
-  mesh.air_gap = std::get<std::optional<AirGap>>(std::move(gap));
+  if (!model.air_gaps.empty()) {
+    auto gap = make_air_gap(mesh, model, model.air_gaps.begin()->first);
+    if (auto *e = std::get_if<Error>(&gap))
+      return *e;
+    mesh.air_gap = std::get<AirGap>(std::move(gap));
+  }
+  if (mesh.planar) {
+    // A planar field mesh must be one piece, or two pieces joined by the
+    // air gap; name an element that is cut off.
+    Disjoint parts(static_cast<int>(mesh.nodes.size()));
+    for (const auto &c : mesh.cells)
+      for (size_t k = 1; k < c.nodes.size(); ++k)
+        parts.join(c.nodes[0], c.nodes[k]);
+    if (mesh.air_gap)
+      parts.join(mesh.air_gap->inner.nodes.front(),
+                 mesh.air_gap->outer.nodes.front());
+    const int root = parts.root(mesh.cells.front().nodes.front());
+    const auto apart =
+        std::find_if(mesh.cells.begin(), mesh.cells.end(), [&](const Cell &c) {
+          return parts.root(c.nodes.front()) != root;
+        });
+    if (apart != mesh.cells.end())
+      return Error{
+          mesh.air_gap
+              ? std::format("Element {} is not joined to element {} by elements "
+                            "or by the PAIRGAP {} air gap; a MAG2D mesh must be "
+                            "one connected domain",
+                            apart->id, mesh.cells.front().id,
+                            mesh.air_gap->property)
+              : std::format(
+                    "Element {} is not joined to element {} by any chain of "
+                    "elements; a MAG2D mesh must be one connected domain. If "
+                    "they are a rotor and a stator separated by an unmeshed "
+                    "air gap, mesh the air gap between them and give it a "
+                    "PAIRGAP property, or join the parts",
+                    apart->id, mesh.cells.front().id)};
+  }
   return mesh;
 }
 
@@ -295,6 +336,13 @@ selected_faces(const Model &model, const Mesh &mesh, int selection) {
   std::set<int> seen;
   for (const auto &s : it->second) {
     auto ci = mesh.element_index.find(s.element);
+    if (ci == mesh.element_index.end() && mesh.air_gap &&
+        std::ranges::find(mesh.air_gap->elements, s.element) !=
+            mesh.air_gap->elements.end())
+      return Error{std::format(
+          "FSET {} references air-gap element {} (PAIRGAP {}); air-gap "
+          "elements are not field cells and have no faces of their own",
+          selection, s.element, mesh.air_gap->property)};
     if (ci == mesh.element_index.end())
       return Error{
           std::format("FSET {} references undefined magnetic element {}",

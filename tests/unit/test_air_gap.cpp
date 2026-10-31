@@ -1,10 +1,12 @@
 // tests/unit/test_air_gap.cpp
-// Air-gap element (AGE) for planar MAGSTAT: gap detection, the harmonic
-// transforms and stiffness, and solutions against analytic fields and a
-// meshed gap.
+// Air-gap element (AGE) for planar MAGSTAT: the harmonic transforms and
+// stiffness, the PAIRGAP property and the validation of its region, and
+// solutions against analytic fields and the same gap solved as meshed air.
+// Models are written as deck text and parsed, as a user would run them.
 
 #include "magnetic/air_gap.hpp"
 #include "magnetic/solver.hpp"
+#include "solver/solver_backend.hpp"
 #ifdef VIBESTRAN_HAS_HDF5
 #include "../common/hdf5_results.hpp"
 #endif
@@ -12,13 +14,14 @@
 #include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
 #include <algorithm>
-#include <map>
 #include <cmath>
 #include <filesystem>
-#include <fstream>
-#include <sstream>
 #include <format>
+#include <fstream>
+#include <map>
 #include <numbers>
+#include <numeric>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -35,82 +38,175 @@ std::string error_of(const auto &result) {
   return {};
 }
 
-// A rotor disk and a stator ring in the z = 0 plane, as rings of grids.
-// gap_rings = 0 leaves the annulus between rotor and gap_outer unmeshed;
-// otherwise it is meshed with that many layers of rotor_div quads (and the
-// stator then also has rotor_div divisions).
+// A rotor disk and a stator ring in a MAG2D deck, as rings of grids, with
+// the air gap between them meshed in gap_layers layers of property 9 and
+// defined by the gap cards (by default PAIRGAP,9). Intermediate gap rings
+// have the rotor's divisions; the band against the stator is quads when the
+// divisions conform and a strip of triangles when they do not.
 struct Machine {
   double rotor{.02}, gap_outer{.021}, stator{.04};
-  int rotor_div{48}, stator_div{48}, rotor_rings{6}, stator_rings{8}, gap_rings{0};
+  int rotor_div{48}, stator_div{48}, rotor_rings{6}, stator_rings{8}, gap_layers{1};
   double stator_phase{0}; // fraction of a stator division
   double jitter{0};       // uneven angular spacing, fraction of a division
   double rotation{0};     // rigid rotation of everything about the center
   Vector center{Vector::Zero()};
   int rotor_property{1}, stator_property{1};
+  std::string gap{"PAIRGAP,9\n"}; // what PID 9 is
+  std::string cards;              // further bulk data
+};
+struct Geometry {
+  std::map<int, Vector> grids;
+  std::vector<Element> elements; // element ID = position + 1
+  std::vector<int> rotor_edge, stator_edge; // grids on the gap's circles
+  std::vector<int> gap_elements;
 };
 
-Model machine(const Machine &g) {
-  Model m;
-  m.options.planar = true;
-  m.options.depth = .1;
-  m.materials[1] = {};
-  m.properties[1] = {1};
-  m.subcases.push_back({});
+Geometry geometry(const Machine &g) {
+  Geometry out;
   int next = 1;
+  std::map<int, double> angle;
   auto ring = [&](double r, int n, double phase) {
     std::vector<int> ids;
     for (int k = 0; k < n; ++k) {
       const double t =
           2 * pi * (k + phase + g.jitter * std::sin(1.7 * k + 3 * r / g.stator)) / n +
           g.rotation;
-      m.nodes[next] = {g.center + Vector(r * std::cos(t), r * std::sin(t), 0), 0};
+      out.grids[next] = g.center + Vector(r * std::cos(t), r * std::sin(t), 0);
+      angle[next] = t;
       ids.push_back(next++);
     }
     return ids;
   };
+  auto add = [&](int property, NodeList nodes) {
+    const int id = static_cast<int>(out.elements.size()) + 1;
+    out.elements.push_back({id, property, std::move(nodes)});
+    if (property == 9)
+      out.gap_elements.push_back(id);
+  };
   auto quads = [&](const std::vector<int> &a, const std::vector<int> &b, int property) {
     const int n = static_cast<int>(a.size());
     for (int k = 0; k < n; ++k)
-      m.elements.push_back({static_cast<int>(m.elements.size()) + 1, property,
-                            {a[k], a[(k + 1) % n], b[(k + 1) % n], b[k]}});
+      add(property, {a[k], a[(k + 1) % n], b[(k + 1) % n], b[k]});
+  };
+  // Triangles between rings of different divisions, advancing along
+  // whichever ring's next grid comes first in angle (angles unwrapped from
+  // a's first grid and the b grid nearest it).
+  auto zip = [&](const std::vector<int> &a, const std::vector<int> &b, int property) {
+    const int na = static_cast<int>(a.size()), nb = static_cast<int>(b.size());
+    auto wrapped = [](double x) { return std::remainder(x, 2 * pi); };
+    int j0 = 0;
+    for (int j = 1; j < nb; ++j)
+      if (std::abs(wrapped(angle[b[j]] - angle[a[0]])) <
+          std::abs(wrapped(angle[b[j0]] - angle[a[0]])))
+        j0 = j;
+    auto unwrap = [&](const std::vector<int> &ring, int first, double start) {
+      const int n = static_cast<int>(ring.size());
+      std::vector<double> out{start};
+      for (int k = 1; k < n; ++k) {
+        double d = wrapped(angle[ring[(first + k) % n]] - angle[ring[(first + k - 1) % n]]);
+        out.push_back(out.back() + (d < 0 ? d + 2 * pi : d));
+      }
+      out.push_back(start + 2 * pi);
+      return out;
+    };
+    const auto alpha = unwrap(a, 0, angle[a[0]]);
+    const auto beta = unwrap(b, j0, angle[a[0]] + wrapped(angle[b[j0]] - angle[a[0]]));
+    auto bj = [&](int j) { return b[(j0 + j) % nb]; };
+    for (int i = 0, j = 0; i < na || j < nb;) {
+      if (j == nb || (i < na && alpha[i + 1] < beta[j + 1])) {
+        add(property, {a[i], a[(i + 1) % na], bj(j)});
+        ++i;
+      } else {
+        add(property, {a[i % na], bj(j + 1), bj(j)});
+        ++j;
+      }
+    }
   };
   const int center = next;
-  m.nodes[next++] = {g.center, 0};
+  out.grids[next++] = g.center;
   std::vector<int> previous = ring(g.rotor / g.rotor_rings, g.rotor_div, 0);
   for (int k = 0; k < g.rotor_div; ++k)
-    m.elements.push_back({static_cast<int>(m.elements.size()) + 1, g.rotor_property,
-                          {center, previous[k], previous[(k + 1) % g.rotor_div]}});
+    add(g.rotor_property, {center, previous[k], previous[(k + 1) % g.rotor_div]});
   for (int j = 2; j <= g.rotor_rings; ++j) {
     auto current = ring(g.rotor * j / g.rotor_rings, g.rotor_div, 0);
     quads(previous, current, g.rotor_property);
     previous = std::move(current);
   }
-  const int stator_div = g.gap_rings ? g.rotor_div : g.stator_div;
-  for (int j = 1; j <= g.gap_rings; ++j) {
-    auto current = ring(g.rotor + (g.gap_outer - g.rotor) * j / g.gap_rings,
+  out.rotor_edge = previous;
+  for (int j = 1; j < g.gap_layers; ++j) {
+    auto current = ring(g.rotor + (g.gap_outer - g.rotor) * j / g.gap_layers,
                         g.rotor_div, 0);
-    quads(previous, current, 1);
+    quads(previous, current, 9);
     previous = std::move(current);
   }
-  if (!g.gap_rings)
-    previous = ring(g.gap_outer, stator_div, g.stator_phase);
+  auto stator = ring(g.gap_outer, g.stator_div, g.stator_phase);
+  out.stator_edge = stator;
+  if (g.stator_div == g.rotor_div && g.stator_phase == 0)
+    quads(previous, stator, 9);
+  else
+    zip(previous, stator, 9);
+  previous = std::move(stator);
   for (int j = 1; j <= g.stator_rings; ++j) {
     auto current = ring(g.gap_outer + (g.stator - g.gap_outer) * j / g.stator_rings,
-                        stator_div, g.gap_rings ? 0 : g.stator_phase);
+                        g.stator_div, g.stator_phase);
     quads(previous, current, g.stator_property);
     previous = std::move(current);
   }
-  return m;
+  return out;
 }
 
-// Uniform remanence along x in the rotor (mu_r = 1), and the analytic field
-// with A = 0 at the stator's outer radius R: B = (Br/2)(1 - a^2/R^2) x
-// inside, and A = D (r - R^2/r) sin(theta), D = -Br a^2 / (2 R^2), outside.
-void magnetize_rotor(Model &m, double br, double angle = 0) {
-  m.coordinates[1] = {0, 'R', Vector::Zero(), Vector::UnitZ(),
-                      Vector(std::cos(angle), std::sin(angle), 0)};
-  m.materials[2] = {1, 0, br};
-  m.properties[2] = {2, 1, 1, true};
+std::string deck(const Machine &g, const Geometry &geo) {
+  std::string out = "SOL MAGSTAT\nCEND\nBEGIN BULK\nMAG2D,0,.1\nMATMAG,1,1.\n"
+                    "PMAG2D,1,1\n" +
+                    g.gap + g.cards;
+  for (const auto &[id, x] : geo.grids)
+    out += std::format("GRID,{},,{:.17g},{:.17g},{:.17g}\n", id, x.x(), x.y(), x.z());
+  for (const auto &e : geo.elements) {
+    out += std::format("{},{},{}", e.nodes.size() == 3 ? "CTRIA3" : "CQUAD4", e.id,
+                       e.property);
+    for (int n : e.nodes)
+      out += std::format(",{}", n);
+    out += '\n';
+  }
+  return out + "ENDDATA\n";
+}
+
+Result<Model> parse(const Machine &g, const Geometry &geo) {
+  return parse_string(deck(g, geo));
+}
+Model parsed(const Machine &g, const Geometry &geo) {
+  auto out = parse(g, geo);
+  EXPECT_TRUE(std::holds_alternative<Model>(out)) << error_of(out);
+  return std::holds_alternative<Model>(out) ? std::get<Model>(std::move(out)) : Model{};
+}
+Model model(const Machine &g) { return parsed(g, geometry(g)); }
+Mesh mesh_of(const Model &m) {
+  auto built = make_mesh(m);
+  EXPECT_TRUE(std::holds_alternative<Mesh>(built)) << error_of(built);
+  return std::holds_alternative<Mesh>(built) ? std::get<Mesh>(std::move(built)) : Mesh{};
+}
+Results solved(const Model &m) {
+  auto out = solve(m);
+  EXPECT_TRUE(std::holds_alternative<Results>(out)) << error_of(out);
+  return std::holds_alternative<Results>(out) ? std::get<Results>(std::move(out))
+                                              : Results{};
+}
+std::vector<std::string> gap_rows(const Results &r) {
+  std::vector<std::string> out;
+  for (const auto &[label, text] : r.summary.solution.rows)
+    if (label == "Air gap")
+      out.push_back(text);
+  return out;
+}
+
+// Uniform remanence br along angle in the rotor (property 2, mu_r = 1),
+// and the analytic field with A = 0 at the stator's outer radius R:
+// B = (Br/2)(1 - a^2/R^2) inside, and A = D (r - R^2/r) sin(theta),
+// D = -Br a^2 / (2 R^2), outside.
+std::string magnetized_rotor(double br, double angle = 0) {
+  return std::format("CORD2R,1,,0.,0.,0.,0.,0.,1.\n,{:.17g},{:.17g},0.\n"
+                     "MATMAG,2,1.,,{:.17g}\nPMAG2D,2,2,1,1\n",
+                     std::cos(angle), std::sin(angle), br);
 }
 Vector magnet_field_outside(const Machine &g, double br, const Vector &x) {
   const double a = g.rotor, big = g.stator, d = -br * a * a / (2 * big * big);
@@ -120,6 +216,38 @@ Vector magnet_field_outside(const Machine &g, double br, const Vector &x) {
                bt = -d * (1 + big * big / (r * r)) * std::sin(t);
   return {br_r * std::cos(t) - bt * std::sin(t), br_r * std::sin(t) + bt * std::cos(t), 0};
 }
+Vector centroid(const Model &m, const Element &e) {
+  return std::accumulate(e.nodes.begin(), e.nodes.end(), Vector(Vector::Zero()),
+                         [&](const Vector &sum, int v) {
+                           return Vector(sum + m.nodes.at(v).position);
+                         }) /
+         static_cast<double>(e.nodes.size());
+}
+std::vector<int> elements_within(const Model &m, double r0, double r1) {
+  std::vector<int> out;
+  for (const auto &e : m.elements)
+    if (const double r = centroid(m, e).norm(); r > r0 && r < r1)
+      out.push_back(e.id);
+  return out;
+}
+// Two opposite slots of the stator as a winding of ordinary air (PID 1),
+// driven by a 30 A circuit.
+void wind(Model &m, double turns, double half_width) {
+  for (int id : elements_within(m, .026, .034)) {
+    auto &e = m.elements[static_cast<size_t>(id - 1)];
+    const Vector c = centroid(m, e);
+    const double t = std::atan2(c.y(), c.x());
+    if (std::abs(t) < half_width || std::abs(std::abs(t) - pi) < half_width) {
+      e.property = 1;
+      m.element_sets[std::abs(t) < half_width ? 1 : 2].push_back(id);
+    }
+  }
+  m.planar_coils = {{11, 1, turns}, {12, 2, -turns}};
+  m.circuits[1] = {1, 1, {{11, 1}, {12, 1}}};
+  m.currents = {{1, 1, 30}};
+  m.subcases = {{.id = 1, .load = 1}};
+}
+const std::string iron_table = "TABLEBH,1\n,0.,0.,.1,100.,.3,2000.,1.,100000.\n,ENDT\n";
 
 // A gap built directly: circles of n_inner and n_outer grids (indices
 // 0.. and n_inner..) about the origin, smoothly graded so that the spacing
@@ -150,12 +278,6 @@ Eigen::VectorXd sample(const AirGap &g, auto potential) {
       a[c->nodes[k]] = potential(
           Vector(c->radius * std::cos(c->angles[k]), c->radius * std::sin(c->angles[k]), 0));
   return a;
-}
-
-Mesh mesh_of(const Model &m) {
-  auto built = make_mesh(m);
-  EXPECT_TRUE(std::holds_alternative<Mesh>(built)) << error_of(built);
-  return std::holds_alternative<Mesh>(built) ? std::get<Mesh>(std::move(built)) : Mesh{};
 }
 
 } // namespace
@@ -253,16 +375,95 @@ TEST(AirGapStiffness, UniformFieldEnergyAndGapFieldConvergeAtSecondOrder) {
   EXPECT_LT(previous_field, 4e-3);
 }
 
-TEST(AirGapDetection, FindsTheAnnulusOnUnevenNonconformingCircles) {
+TEST(AirGapParser, PairgapAndAirgapParameterCards) {
+  const Geometry geo = geometry(Machine{});
+  auto message = [&](const std::string &gap) {
+    Machine g;
+    g.gap = gap;
+    return error_of(parse(g, geo));
+  };
+  for (const auto &[cards, expected] : std::vector<std::pair<std::string, std::string>>{
+           {"PAIRGAP,9,FEM\n", "PAIRGAP METHOD must be AGE or MESH"},
+           {"PAIRGAP,9,AGE,-2\n", "PAIRGAP NHARM must not be negative"},
+           {"PAIRGAP,9,AGE,4,7\n", "unexpected field 4"},
+           {"PAIRGAP,9\nPARAM,AIRGAP,FEM\n", "AIRGAP must be AGE or MESH"},
+           {"PAIRGAP,9\nPMAG2D,9,1\n", "PAIRGAP 9 duplicates the ID of a PSOLID, PMAG or PMAG2D"},
+           {"PAIRGAP,9\nPAIRGAP,9\n", "duplicate id 9"},
+           {"PAIRGAP,9\nPAIRGAP,8\n", "PAIRGAP 8 has no elements; mesh the air gap and give "
+                                      "its elements PID 8"},
+           {"", "references undefined property 9"}}) {
+    SCOPED_TRACE(cards);
+    const auto text = message(cards);
+    EXPECT_FALSE(text.empty());
+    EXPECT_NE(text.find(expected), std::string::npos) << text;
+  }
+  // METHOD is AGE when blank.
+  Machine g;
+  g.gap = "PAIRGAP,9,,12\n";
+  auto m = parsed(g, geo);
+  ASSERT_EQ(m.air_gaps.size(), 1U);
+  EXPECT_EQ(m.air_gaps.at(9).method, AirGapMethod::Age);
+  EXPECT_EQ(m.air_gaps.at(9).harmonics, 12);
+  EXPECT_FALSE(m.properties.contains(9));
+  // A PAIRGAP in a 3D model.
+  const auto solid = parse_string(
+      "SOL MAGSTAT\nCEND\nBEGIN BULK\nPAIRGAP,9\nGRID,1,,0.,0.,0.\nGRID,2,,1.,0.,0.\n"
+      "GRID,3,,0.,1.,0.\nGRID,4,,0.,0.,1.\nCTETRA,1,9,1,2,3,4\nENDDATA\n");
+  EXPECT_NE(error_of(solid).find("PAIRGAP 9 requires MAG2D"), std::string::npos)
+      << error_of(solid);
+}
+
+TEST(AirGapParser, MeshMethodIsAnOrdinaryAirProperty) {
+  // METHOD=MESH, or PARAM,AIRGAP,MESH over METHOD=AGE, leaves no gap: PID 9
+  // is a property of a new mu_r = 1 material, and the model records why.
+  const Geometry geo = geometry(Machine{});
+  for (const std::string gap : {"PAIRGAP,9,MESH\n", "PAIRGAP,9\nPARAM,AIRGAP,MESH\n",
+                                "PAIRGAP,9,AGE,8\nPARAM,AIRGAP,MESH\n"}) {
+    SCOPED_TRACE(gap);
+    Machine g;
+    g.gap = gap;
+    const auto m = parsed(g, geo);
+    EXPECT_TRUE(m.air_gaps.empty());
+    ASSERT_TRUE(m.properties.contains(9));
+    EXPECT_EQ(m.properties.at(9).material, 2);
+    const auto &air = m.materials.at(m.properties.at(9).material);
+    EXPECT_EQ(air.mur, 1);
+    EXPECT_EQ(air.bh_table, 0);
+    EXPECT_EQ(air.br, 0);
+    EXPECT_FALSE(m.properties.at(9).oriented);
+    EXPECT_EQ(m.meshed_air_gaps.at(9), gap.starts_with("PAIRGAP,9,MESH")
+                                           ? "PAIRGAP METHOD=MESH"
+                                           : "PARAM,AIRGAP,MESH");
+  }
+  // PARAM,AIRGAP,AGE overrides METHOD=MESH.
+  Machine g;
+  g.gap = "PAIRGAP,9,MESH\nPARAM,AIRGAP,AGE\n";
+  const auto m = parsed(g, geo);
+  EXPECT_TRUE(m.air_gaps.contains(9));
+  EXPECT_FALSE(m.properties.contains(9));
+}
+
+TEST(AirGapRegion, BuildsTheAnnulusFromThePairgapElements) {
+  // Nonconforming, unevenly spaced circles about an offset center, with the
+  // gap meshed in triangles: the gap elements are not field cells, and the
+  // AGE takes the circles from the boundary of their region.
   Machine g;
   g.center = Vector(.3, -.2, 0);
   g.rotor_div = 48;
   g.stator_div = 72;
   g.stator_phase = .37;
   g.jitter = .2;
-  const Mesh mesh = mesh_of(machine(g));
+  const Geometry geo = geometry(g);
+  ASSERT_EQ(geo.gap_elements.size(), 120U);
+  const auto m = parsed(g, geo);
+  const Mesh mesh = mesh_of(m);
   ASSERT_TRUE(mesh.air_gap.has_value());
   const auto &gap = *mesh.air_gap;
+  EXPECT_EQ(mesh.cells.size(), m.elements.size() - 120);
+  for (int id : geo.gap_elements)
+    EXPECT_FALSE(mesh.element_index.contains(id));
+  EXPECT_EQ(gap.property, 9);
+  EXPECT_EQ(gap.elements, geo.gap_elements);
   EXPECT_LT((gap.center - g.center).norm(), 1e-12);
   EXPECT_NEAR(gap.inner.radius, g.rotor, 1e-14);
   EXPECT_NEAR(gap.outer.radius, g.gap_outer, 1e-14);
@@ -271,6 +472,25 @@ TEST(AirGapDetection, FindsTheAnnulusOnUnevenNonconformingCircles) {
   EXPECT_EQ(gap.faces.size(), 120U);
   EXPECT_EQ(gap.harmonics, 24);
   EXPECT_LT(gap.deviation, 1e-12);
+  // The polygon of the rotor's edges comes no closer to the center than
+  // the midpoint of its widest chord.
+  double nearest = g.rotor;
+  for (size_t k = 0; k < gap.inner.nodes.size(); ++k) {
+    const int a = gap.inner.nodes[k], b = gap.inner.nodes[(k + 1) % gap.inner.nodes.size()];
+    nearest = std::min(nearest, ((mesh.nodes[a] + mesh.nodes[b]) / 2 - g.center).norm());
+  }
+  EXPECT_NEAR(gap.inner_chord, nearest, 1e-12);
+  auto grid_ids = [&mesh](const GapCircle &c) {
+    std::vector<int> ids(c.nodes.size());
+    std::transform(c.nodes.begin(), c.nodes.end(), ids.begin(),
+                   [&mesh](int v) { return mesh.node_ids[v]; });
+    return ids;
+  };
+  std::vector<int> inner_ids = grid_ids(gap.inner), outer_ids = grid_ids(gap.outer);
+  std::sort(inner_ids.begin(), inner_ids.end());
+  std::sort(outer_ids.begin(), outer_ids.end());
+  EXPECT_EQ(inner_ids, geo.rotor_edge);
+  EXPECT_EQ(outer_ids, geo.stator_edge);
   for (const GapCircle *c : {&gap.inner, &gap.outer}) {
     EXPECT_TRUE(std::is_sorted(c->angles.begin(), c->angles.end()));
     EXPECT_LT(c->angles.back(), c->angles.front() + 2 * pi);
@@ -294,91 +514,266 @@ TEST(AirGapDetection, FindsTheAnnulusOnUnevenNonconformingCircles) {
     }
   EXPECT_EQ(prescribed, 72);
 
-  // Meshing the gap joins the parts: there is nothing to detect.
-  g.gap_rings = 2;
-  EXPECT_FALSE(mesh_of(machine(g)).air_gap.has_value());
+  // NHARM sets the harmonics.
+  g.gap = "PAIRGAP,9,,10\n";
+  EXPECT_EQ(mesh_of(parsed(g, geo)).air_gap->harmonics, 10);
+  // Solved as meshed air, the gap elements are field cells and there is no
+  // air-gap element.
+  g.gap = "PAIRGAP,9,MESH\n";
+  const Mesh meshed = mesh_of(parsed(g, geo));
+  EXPECT_FALSE(meshed.air_gap.has_value());
+  EXPECT_EQ(meshed.cells.size(), m.elements.size());
+
+  // Grids inside a layered gap belong to no field cell and are left out.
+  Machine layered;
+  layered.gap_layers = 3;
+  const Geometry layers = geometry(layered);
+  const Mesh dropped = mesh_of(parsed(layered, layers));
+  EXPECT_EQ(dropped.nodes.size(), layers.grids.size() - 2 * 48);
+  EXPECT_EQ(dropped.air_gap->elements.size(), 3U * 48);
 }
 
-TEST(AirGapDetection, ErrorsNameTheGridsAndRadiiThatFailed) {
-  Machine g;
-  auto message = [](const Model &m) { return error_of(make_mesh(m)); };
+TEST(AirGapRegion, ErrorsNameTheGridsElementsAndRadiiThatFail) {
+  const Machine g;
+  auto message = [](const Machine &machine, const Geometry &geo) {
+    const auto out = parse(machine, geo);
+    if (const auto *e = std::get_if<Error>(&out))
+      return e->message;
+    return error_of(make_mesh(std::get<Model>(out)));
+  };
+  auto expect = [](const std::string &text, const std::string &part) {
+    EXPECT_NE(text.find(part), std::string::npos) << text;
+  };
 
-  // One rotor grid off the circle by 1e-4 of the radius.
-  auto off = machine(g);
-  const int moved = static_cast<int>(off.nodes.size()) - 8 * g.stator_div - 3;
-  off.nodes.at(moved).position *= 1 + 1e-4;
-  auto text = message(off);
-  EXPECT_NE(text.find("no air gap joins them"), std::string::npos) << text;
-  // The least-squares circle absorbs a little of the offset.
-  EXPECT_NE(text.find("deviates from a circle by 9."), std::string::npos) << text;
-  EXPECT_NE(text.find(std::format("e-05 of its radius at grid {}", moved)),
-            std::string::npos)
-      << text;
+  // One rotor grid off the circle by 1e-4 of the radius. The least-squares
+  // circle absorbs a little of the offset.
+  auto off = geometry(g);
+  const int moved = off.rotor_edge[5];
+  off.grids.at(moved) *= 1 + 1e-4;
+  auto text = message(g, off);
+  expect(text, std::format("PAIRGAP 9: the inner boundary of the air gap is not a "
+                           "circle: grid {} deviates from the best-fit circle (radius",
+                           moved));
+  expect(text, "by 9.");
+  expect(text, "e-05 of its radius; the tolerance is 1e-06");
 
   // The stator shifted off the rotor's center.
-  auto shifted = machine(g);
-  for (auto &[id, grid] : shifted.nodes)
-    if (grid.position.norm() > g.rotor * 1.01)
-      grid.position += Vector(1e-5, 0, 0);
-  text = message(shifted);
-  EXPECT_NE(text.find("are not concentric: their centers are 1.000e-05 apart"),
-            std::string::npos)
-      << text;
+  auto shifted = geometry(g);
+  for (auto &[id, x] : shifted.grids)
+    if (x.norm() > g.rotor * 1.01)
+      x += Vector(1e-5, 0, 0);
+  expect(message(g, shifted), "PAIRGAP 9: the inner and outer circles of the air gap "
+                              "(radii 0.02 and 0.021) are not concentric: their "
+                              "centers are 1.000e-05 apart");
 
-  // An island inside the annulus.
-  auto island = machine(g);
-  const int base = 100000;
-  const double r = (g.rotor + g.gap_outer) / 2;
-  island.nodes[base] = {Vector(r, 0, 0), 0};
-  island.nodes[base + 1] = {Vector(r, 1e-4, 0), 0};
-  island.nodes[base + 2] = {Vector(r - 1e-4, 0, 0), 0};
-  island.elements.push_back({90000, 1, {base, base + 2, base + 1}});
-  text = message(island);
-  EXPECT_NE(text.find(std::format("grid {} lies inside the annulus between the circles "
-                                  "of radius 0.02 and 0.021",
-                                  base)),
-            std::string::npos)
-      << text;
+  // PAIRGAP on a sector of the band, the rest of it ordinary air.
+  auto sector = geometry(g);
+  for (size_t k = 0; k < 20; ++k)
+    sector.elements[static_cast<size_t>(sector.gap_elements[k] - 1)].property = 1;
+  expect(message(g, sector), "PAIRGAP 9: the air-gap elements must form one annulus, "
+                             "bounded by a circle on the rotor and a circle on the "
+                             "stator, but their boundary has 1 closed loop (a sector");
 
-  // Two gaps: a ring between rotor and stator.
-  g.stator = .03;
-  auto ringed = machine(g);
-  {
-    // The outer ring, 0.032 to 0.04, cut from a second machine.
-    Machine big;
-    big.gap_outer = .032;
-    big.stator = .04;
-    big.stator_div = 60;
-    auto shell = machine(big);
-    std::map<int, int> renumber;
-    for (const auto &[id, grid] : shell.nodes)
-      if (grid.position.norm() > .0315)
-        ringed.nodes[renumber[id] = 200000 + id] = grid;
-    for (const auto &e : shell.elements) {
-      if (!std::all_of(e.nodes.begin(), e.nodes.end(),
-                       [&](int v) { return renumber.contains(v); }))
-        continue;
-      Element copy = e;
-      copy.id += 200000;
-      std::transform(copy.nodes.begin(), copy.nodes.end(), copy.nodes.begin(),
-                     [&](int v) { return renumber.at(v); });
-      ringed.elements.push_back(copy);
-    }
+  // A field cell inside a three-layer gap.
+  Machine layered = g;
+  layered.gap_layers = 3;
+  auto island = geometry(layered);
+  island.elements[static_cast<size_t>(island.gap_elements[48 + 7] - 1)].property = 1;
+  expect(message(layered, island), "boundary has 3 closed loops (holes, or separate pieces)");
+
+  // Gap elements on the model's exterior: the outer stator ring.
+  auto exterior = geometry(g);
+  for (size_t k = exterior.elements.size() - 48; k < exterior.elements.size(); ++k)
+    exterior.elements[k].property = 9;
+  text = message(g, exterior);
+  expect(text, "is not shared with a field element. The air gap must lie between two "
+               "meshed parts");
+
+  // A missing gap element leaves its neighbors' edges unshared.
+  auto removed = geometry(g);
+  removed.elements.erase(removed.elements.begin() + removed.gap_elements[3] - 1);
+  expect(message(g, removed), "is not shared with a field element");
+
+  // NHARM beyond what the circles resolve.
+  Machine many = g;
+  many.gap = "PAIRGAP,9,AGE,25\n";
+  expect(message(many, geometry(g)), "PAIRGAP 9: NHARM 25 exceeds half the grid count "
+                                     "of the finer circle (48 grids)");
+
+  // Two AGE gaps.
+  auto two = geometry(g);
+  for (size_t k = two.elements.size() - 48; k < two.elements.size(); ++k)
+    two.elements[k].property = 8;
+  Machine both = g;
+  both.gap = "PAIRGAP,9\nPAIRGAP,8\n";
+  expect(message(both, two), "PAIRGAP 8 and 9 both use the air-gap element; one air "
+                             "gap per model is supported");
+  // As meshed air they are two ordinary properties.
+  both.gap += "PARAM,AIRGAP,MESH\n";
+  EXPECT_EQ(message(both, two), "");
+
+  // Sets that act on field cells may not hold gap elements.
+  const int member = geometry(g).gap_elements[4];
+  for (const auto &[cards, part] : std::vector<std::pair<std::string, std::string>>{
+           {std::format("ESET,5,{}\nCOIL2D,11,5,10.\n", member), "COIL2D 11 ESET 5"},
+           {std::format("ESET,5,{}\nMFORCE,1,BODY,5\n", member), "MFORCE 1 body ESET 5"}}) {
+    Machine with = g;
+    with.cards = cards;
+    expect(message(with, geometry(g)),
+           part + std::format(" contains air-gap element {} (PAIRGAP 9); air-gap "
+                              "elements are not field cells",
+                              member));
   }
-  text = message(ringed);
-  EXPECT_NE(text.find("has 2 candidate air gaps (radii 0.02 to 0.021; 0.03 to 0.032)"),
-            std::string::npos)
-      << text;
+  {
+    auto bfield = deck(g, geometry(g));
+    bfield.replace(bfield.find("CEND\n"), 5, "CEND\nBFIELD=5\n");
+    bfield.replace(bfield.find("ENDDATA"), 7, std::format("ESET,5,{}\nENDDATA", member));
+    expect(error_of(parse_string(bfield)),
+           std::format("BFIELD ESET 5 contains air-gap element {}", member));
+  }
+  {
+    // An FSET on a gap element's edge.
+    auto m = model(g);
+    const auto &e = m.elements[static_cast<size_t>(member - 1)];
+    m.face_sets[7] = {{member, {e.nodes[0], e.nodes[1]}}};
+    m.boundaries[1] = {7, Vector::Zero()};
+    m.subcases[0].boundary = 1;
+    expect(error_of(solve(m)), std::format("FSET 7 references air-gap element {} "
+                                           "(PAIRGAP 9)",
+                                           member));
+  }
 
-  // A third part that no gap reaches.
-  auto stray = machine(Machine{});
+  // Without the gap elements and PAIRGAP, rotor and stator are apart.
+  auto apart = geometry(g);
+  std::erase_if(apart.elements, [](const Element &e) { return e.property == 9; });
+  Machine bare = g;
+  bare.gap = "";
+  text = message(bare, apart);
+  expect(text, std::format("Element {} is not joined to element 1 by any chain of "
+                           "elements",
+                           apart.elements[6 * 48].id));
+  expect(text, "mesh the air gap between them and give it a PAIRGAP property, or join "
+               "the parts");
+
+  // A third part that the gap does not reach.
+  auto stray = geometry(g);
   for (int k = 0; k < 3; ++k)
-    stray.nodes[base + k] = {Vector(.1 + .01 * (k == 1), .1 + .01 * (k == 2), 0), 0};
-  stray.elements.push_back({90000, 1, {base, base + 1, base + 2}});
-  text = message(stray);
-  EXPECT_NE(text.find("Element 90000 is not joined to the rest of the magnetic mesh"),
-            std::string::npos)
-      << text;
+    stray.grids[100000 + k] = Vector(.1 + .01 * (k == 1), .1 + .01 * (k == 2), 0);
+  stray.elements.push_back({90000, 1, {100000, 100001, 100002}});
+  expect(message(g, stray), "Element 90000 is not joined to element 1 by elements or by "
+                            "the PAIRGAP 9 air gap");
+}
+
+TEST(AirGapSolve, MeshMethodIsIdenticalToPlainAir) {
+  // The analyst's cross-check: the deck with PAIRGAP,9,MESH, the deck with
+  // no PAIRGAP and PID 9 an ordinary air property, and the deck with
+  // PARAM,AIRGAP,MESH over the AGE are one model, through a saturating
+  // Newton solve with a magnet, a winding, probes and a force.
+  Machine g;
+  g.rotor_div = 40;
+  g.stator_div = 60;
+  g.stator_phase = .25;
+  g.gap_layers = 2;
+  g.rotor_property = 2;
+  g.stator_property = 3;
+  g.cards = magnetized_rotor(.8, .3) + "MATMAG,3,,1\nPMAG2D,3,3\n" + iron_table;
+  const Geometry geo = geometry(g);
+  auto run = [&](const std::string &gap, vibestran::SolverBackend &backend,
+                 bool force = true) {
+    Machine h = g;
+    h.gap = gap;
+    auto m = parsed(h, geo);
+    wind(m, 50, .4);
+    m.options.nonlinear_tolerance = 1e-10;
+    if (force) {
+      m.element_sets[5] = elements_within(m, 0, g.rotor);
+      m.forces = {{1, 5, true}};
+    }
+    const double r = (g.rotor + g.gap_outer) / 2;
+    m.probes = {{1, Vector(r * std::cos(.7), r * std::sin(.7), 0)},
+                {2, Vector(.005, .003, 0)},
+                {3, Vector(.03, -.01, 0)}};
+    auto out = solve(m, backend);
+    EXPECT_TRUE(std::holds_alternative<Results>(out)) << error_of(out);
+    return std::holds_alternative<Results>(out) ? std::get<Results>(std::move(out))
+                                                : Results{};
+  };
+  const std::vector<std::string> decks{"PAIRGAP,9,MESH\n", "MATMAG,8,1.\nPMAG2D,9,8\n",
+                                       "PAIRGAP,9,AGE,7\nPARAM,AIRGAP,MESH\n"};
+
+  // With a deterministic linear solver every result is bitwise equal: the
+  // solver receives the same equations.
+  vibestran::EigenPCGSolverBackend pcg(1e-12);
+  std::vector<Results> exact(decks.size());
+  std::transform(decks.begin(), decks.end(), exact.begin(),
+                 [&](const std::string &gap) { return run(gap, pcg); });
+  ASSERT_EQ(exact[0].cases.size(), 1U);
+  const auto &a = exact[0].cases[0];
+  EXPECT_GT(a.iterations, 2);
+  ASSERT_FALSE(a.b.empty());
+  for (size_t k = 1; k < exact.size(); ++k) {
+    SCOPED_TRACE(decks[k]);
+    ASSERT_EQ(exact[k].cases.size(), 1U);
+    const auto &b = exact[k].cases[0];
+    EXPECT_FALSE(exact[k].mesh.air_gap.has_value());
+    EXPECT_EQ(exact[k].mesh.cells.size(), exact[0].mesh.cells.size());
+    EXPECT_TRUE(a.potential == b.potential);
+    EXPECT_EQ(a.energy, b.energy);
+    EXPECT_EQ(a.coenergy, b.coenergy);
+    EXPECT_EQ(a.iterations, b.iterations);
+    EXPECT_EQ(a.residual, b.residual);
+    ASSERT_EQ(a.b.size(), b.b.size());
+    for (size_t i = 0; i < a.b.size(); ++i) {
+      EXPECT_EQ(a.b[i], b.b[i]) << i;
+      EXPECT_EQ(a.h[i], b.h[i]) << i;
+    }
+    ASSERT_EQ(b.probe_b.size(), 3U);
+    for (size_t i = 0; i < a.probe_b.size(); ++i)
+      EXPECT_EQ(a.probe_b[i], b.probe_b[i]) << i;
+    ASSERT_EQ(b.circuits.size(), 1U);
+    EXPECT_EQ(a.circuits[0].linkage, b.circuits[0].linkage);
+    EXPECT_TRUE(a.circuit_inductance == b.circuit_inductance);
+    ASSERT_EQ(b.forces.size(), 1U);
+    EXPECT_EQ(a.forces[0].force, b.forces[0].force);
+    EXPECT_EQ(a.forces[0].torque, b.forces[0].torque);
+  }
+  // The F06 says which card made the gap meshed air.
+  EXPECT_EQ(gap_rows(exact[0]), std::vector<std::string>{"PAIRGAP 9 solved as meshed air "
+                                                         "(relative permeability 1) by "
+                                                         "PAIRGAP METHOD=MESH"});
+  EXPECT_TRUE(gap_rows(exact[1]).empty());
+  EXPECT_EQ(gap_rows(exact[2]), std::vector<std::string>{"PAIRGAP 9 solved as meshed air "
+                                                         "(relative permeability 1) by "
+                                                         "PARAM,AIRGAP,MESH"});
+
+  // A multithreaded sparse factorization (the default backend's) sums in
+  // an order that varies from run to run, so even one deck solved twice
+  // differs in the last bits; across the three decks the results agree to
+  // that round-off and no more.
+  vibestran::EigenSolverBackend direct;
+  std::vector<Results> runs(decks.size());
+  std::transform(decks.begin(), decks.end(), runs.begin(),
+                 [&](const std::string &gap) { return run(gap, direct); });
+  for (size_t k = 1; k < runs.size(); ++k) {
+    SCOPED_TRACE(decks[k]);
+    ASSERT_EQ(runs[k].cases.size(), 1U);
+    const auto &x = runs[0].cases[0], &y = runs[k].cases[0];
+    EXPECT_LT((x.potential - y.potential).norm(), 1e-12 * x.potential.norm());
+    EXPECT_NEAR(x.energy, y.energy, 1e-13 * x.energy);
+    EXPECT_NEAR(x.circuits[0].linkage, y.circuits[0].linkage,
+                1e-12 * std::abs(x.circuits[0].linkage));
+    EXPECT_LT((x.forces[0].torque - y.forces[0].torque).norm(),
+              1e-11 * x.forces[0].torque.norm());
+    EXPECT_EQ(x.iterations, y.iterations);
+  }
+  EXPECT_NEAR(runs[0].cases[0].energy, a.energy, 1e-11 * a.energy);
+
+  // The AGE is a different discretization of the gap: close, not equal.
+  const Results age = run("PAIRGAP,9\n", pcg, false);
+  ASSERT_TRUE(age.mesh.air_gap.has_value());
+  ASSERT_EQ(age.cases.size(), 1U);
+  EXPECT_NE(age.cases[0].energy, a.energy);
+  EXPECT_NEAR(age.cases[0].energy, a.energy, 1e-2 * a.energy);
 }
 
 TEST(AirGapSolve, MagnetizedRotorMatchesTheAnalyticFieldAtSecondOrder) {
@@ -396,8 +791,8 @@ TEST(AirGapSolve, MagnetizedRotorMatchesTheAnalyticFieldAtSecondOrder) {
     g.rotor_rings = div / 8;
     g.stator_rings = div / 6;
     g.rotor_property = 2;
-    auto m = machine(g);
-    magnetize_rotor(m, br);
+    g.cards = magnetized_rotor(br);
+    auto m = model(g);
     const double gap = g.gap_outer - g.rotor;
     std::vector<Vector> in_gap;
     for (double t : {.3, 2.2, 4.1})
@@ -409,9 +804,13 @@ TEST(AirGapSolve, MagnetizedRotorMatchesTheAnalyticFieldAtSecondOrder) {
     for (size_t i = 0; i < in_gap.size(); ++i)
       m.probes.push_back({static_cast<int>(i) + 1, in_gap[i]});
     m.probes.push_back({100, Vector(.005, .003, 0)});
-    auto solved = solve(m);
-    ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
-    const auto &c = std::get<Results>(solved).cases[0];
+    // Between the rotor's outermost chord and the circle: outside the
+    // polygonal magnet, in no field cell, and in the gap.
+    const double mid = pi / div, sliver = g.rotor * (1 + std::cos(mid)) / 2;
+    m.probes.push_back({101, Vector(sliver * std::cos(mid), sliver * std::sin(mid), 0)});
+    const auto results = solved(m);
+    ASSERT_EQ(results.cases.size(), 1U);
+    const auto &c = results.cases[0];
     double gap_error = 0;
     for (size_t i = 0; i < in_gap.size(); ++i) {
       const Vector expected = magnet_field_outside(g, br, in_gap[i]);
@@ -419,26 +818,33 @@ TEST(AirGapSolve, MagnetizedRotorMatchesTheAnalyticFieldAtSecondOrder) {
       EXPECT_LT((c.probe_h[i] - c.probe_b[i] / mu0).norm(), 1e-9 * c.probe_h[i].norm());
     }
     const Vector inside(br / 2 * (1 - g.rotor * g.rotor / (g.stator * g.stator)), 0, 0);
-    const double inside_error = (c.probe_b.back() - inside).norm() / inside.norm();
+    const double inside_error = (c.probe_b[in_gap.size()] - inside).norm() / inside.norm();
     EXPECT_LT(gap_error, previous_gap / 3.5);
     EXPECT_LT(inside_error, previous_inside / 3.5);
     previous_gap = gap_error;
     previous_inside = inside_error;
-    const auto &rows = std::get<Results>(solved).summary.solution.rows;
-    EXPECT_TRUE(std::any_of(rows.begin(), rows.end(), [&](const auto &row) {
-      return row.first == "Air gap" &&
-             row.second.find(std::format("{} + {} grids, {} harmonics", div, div * 3 / 2,
-                                         div / 2)) != std::string::npos;
-    }));
+    const Vector edge = magnet_field_outside(g, br, m.probes.back().position);
+    EXPECT_LT((c.probe_b.back() - edge).norm(), 2e-2 * edge.norm());
+    const auto rows = gap_rows(results);
+    ASSERT_EQ(rows.size(), 1U);
+    EXPECT_NE(rows[0].find(std::format("PAIRGAP 9, air-gap element (AGE) in place of its "
+                                       "{} elements",
+                                       div * 5 / 2)),
+              std::string::npos)
+        << rows[0];
+    EXPECT_NE(rows[0].find(std::format("{} + {} grids, {} harmonics", div, div * 3 / 2,
+                                       div / 2)),
+              std::string::npos)
+        << rows[0];
   }
   EXPECT_LT(previous_gap, 1e-3);
   EXPECT_LT(previous_inside, 5e-4);
 }
 
-TEST(AirGapSolve, AgreesWithAMeshedGapAroundAnIronStator) {
-  // The same machine with the gap meshed by four layers of air: both
-  // discretizations approach one solution, so the energy difference
-  // shrinks at O(h^2) and the gap field agrees.
+TEST(AirGapSolve, AgeConvergesToTheMeshedGapAroundAnIronStator) {
+  // The same deck with the gap meshed in four layers, solved by the AGE
+  // and as meshed air: both discretizations approach one solution, so the
+  // energy difference shrinks at O(h^2) and the gap field agrees.
   double previous = 1, previous_field = 1;
   for (int div : {48, 96, 192}) {
     SCOPED_TRACE(div);
@@ -446,24 +852,25 @@ TEST(AirGapSolve, AgreesWithAMeshedGapAroundAnIronStator) {
     g.rotor_div = g.stator_div = div;
     g.rotor_rings = div / 8;
     g.stator_rings = div / 6;
+    g.gap_layers = 4;
     g.rotor_property = 2;
     g.stator_property = 3;
+    g.cards = magnetized_rotor(1.0) + "MATMAG,3,1000.\nPMAG2D,3,3\n";
+    const Geometry geo = geometry(g);
     const double r = (g.rotor + g.gap_outer) / 2;
     const Vector probe(r * std::cos(.7), r * std::sin(.7), 0);
-    double energy[2];
-    Vector field[2];
+    double energy[2]{};
+    Vector field[2]{Vector::Zero(), Vector::Zero()};
     for (int meshed : {0, 1}) {
-      g.gap_rings = meshed ? 4 : 0;
-      auto m = machine(g);
-      magnetize_rotor(m, 1.0);
-      m.materials[3] = {1000};
-      m.properties[3] = {3};
+      Machine h = g;
+      h.gap = meshed ? "PAIRGAP,9,MESH\n" : "PAIRGAP,9\n";
+      auto m = parsed(h, geo);
       m.probes = {{1, probe}};
-      auto solved = solve(m);
-      ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
-      EXPECT_EQ(std::get<Results>(solved).mesh.air_gap.has_value(), !meshed);
-      energy[meshed] = std::get<Results>(solved).cases[0].energy;
-      field[meshed] = std::get<Results>(solved).cases[0].probe_b[0];
+      const auto results = solved(m);
+      ASSERT_EQ(results.cases.size(), 1U);
+      EXPECT_EQ(results.mesh.air_gap.has_value(), !meshed);
+      energy[meshed] = results.cases[0].energy;
+      field[meshed] = results.cases[0].probe_b[0];
     }
     const double difference = std::abs(energy[0] - energy[1]) / energy[1];
     EXPECT_LT(difference, previous / 3.4);
@@ -497,18 +904,17 @@ TEST(AirGapSolve, RigidRotationLeavesEnergyAndRotatedFieldsUnchanged) {
   for (int turned : {0, 1}) {
     Machine h = g;
     h.rotation = turned ? angle : 0;
-    auto m = machine(h);
-    magnetize_rotor(m, 1.0, h.rotation);
-    m.materials[3] = {500};
-    m.properties[3] = {3};
+    h.cards = magnetized_rotor(1.0, h.rotation) + "MATMAG,3,500.\nPMAG2D,3,3\n";
+    auto m = model(h);
     m.probes = {{1, turned ? Vector(rotate * probe) : probe}};
-    auto solved = solve(m);
-    ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
-    results[turned] = std::get<Results>(std::move(solved));
+    results[turned] = solved(m);
   }
+  ASSERT_EQ(results[0].cases.size(), 1U);
+  ASSERT_EQ(results[1].cases.size(), 1U);
   const auto &a = results[0].cases[0], &b = results[1].cases[0];
   EXPECT_NEAR(a.energy, b.energy, 1e-10 * a.energy);
   EXPECT_LT((rotate * a.probe_b[0] - b.probe_b[0]).norm(), 1e-9 * a.probe_b[0].norm());
+  ASSERT_EQ(a.b.size(), b.b.size());
   for (size_t i = 0; i < a.b.size(); ++i)
     EXPECT_LT((rotate * a.b[i] - b.b[i]).norm(), 1e-9 * (a.b[i].norm() + 1e-3));
 }
@@ -519,15 +925,15 @@ TEST(AirGapSolve, ExteriorBoundaryConditionSkipsTheGap) {
   Machine g;
   g.rotor_div = 64;
   g.stator_div = 80;
-  auto m = machine(g);
+  auto m = model(g);
   const Vector applied(.3, -.1, 0);
   m.boundaries[1] = {0, applied};
   m.subcases[0].boundary = 1;
   m.probes = {{1, Vector(.004, -.006, 0)},
               {2, Vector((g.rotor + g.gap_outer) / 2, 0, 0)}};
-  auto whole = solve(m);
-  ASSERT_TRUE(std::holds_alternative<Results>(whole)) << error_of(whole);
-  const auto &c = std::get<Results>(whole).cases[0];
+  const auto whole = solved(m);
+  ASSERT_EQ(whole.cases.size(), 1U);
+  const auto &c = whole.cases[0];
   EXPECT_LT((c.probe_b[0] - applied).norm(), 2e-3 * applied.norm());
   EXPECT_LT((c.probe_b[1] - applied).norm(), 2e-3 * applied.norm());
 
@@ -552,9 +958,9 @@ TEST(AirGapSolve, ExteriorBoundaryConditionSkipsTheGap) {
   ASSERT_EQ(outer.size(), 80U);
   m.face_sets[7] = outer;
   m.boundaries[1].faces = 7;
-  auto explicit_set = solve(m);
-  ASSERT_TRUE(std::holds_alternative<Results>(explicit_set)) << error_of(explicit_set);
-  EXPECT_LT((std::get<Results>(explicit_set).cases[0].potential - c.potential).norm(),
+  const auto explicit_set = solved(m);
+  ASSERT_EQ(explicit_set.cases.size(), 1U);
+  EXPECT_LT((explicit_set.cases[0].potential - c.potential).norm(),
             1e-12 * c.potential.norm());
 
   // The gap takes no boundary condition.
@@ -565,44 +971,29 @@ TEST(AirGapSolve, ExteriorBoundaryConditionSkipsTheGap) {
       << text;
 }
 
-TEST(AirGapSolve, SaturatedIronAndWindingMatchAMeshedGap) {
+TEST(AirGapSolve, SaturatedIronAndWindingMatchTheMeshedGap) {
   // Iron rotor and stator (saturating B-H curve) with a two-slot winding:
   // Newton runs through the AGE's constant block, and the circuit's linkage
-  // and differential inductance agree with the meshed-gap model.
-  const int div = 96;
+  // and differential inductance agree with the gap solved as meshed air.
+  Machine g;
+  g.rotor_div = g.stator_div = 96;
+  g.rotor_rings = 12;
+  g.stator_rings = 16;
+  g.gap_layers = 4;
+  g.rotor_property = g.stator_property = 2;
+  g.cards = "MATMAG,2,,1\nPMAG2D,2,2\n" + iron_table;
+  const Geometry geo = geometry(g);
   Results results[2];
   for (int meshed : {0, 1}) {
-    Machine g;
-    g.rotor_div = g.stator_div = div;
-    g.rotor_rings = 12;
-    g.stator_rings = 16;
-    g.gap_rings = meshed ? 4 : 0;
-    g.rotor_property = g.stator_property = 2;
-    auto m = machine(g);
-    m.materials[2] = {1, 1};
-    m.properties[2] = {2};
-    m.bh_tables[1] = {{0, 0}, {.1, 100}, {.3, 2000}, {1, 100000}};
+    Machine h = g;
+    h.gap = meshed ? "PAIRGAP,9,MESH\n" : "PAIRGAP,9\n";
+    auto m = parsed(h, geo);
     m.options.nonlinear_tolerance = 1e-11;
-    for (auto &e : m.elements) {
-      Vector center = Vector::Zero();
-      for (int v : e.nodes)
-        center += m.nodes.at(v).position / static_cast<double>(e.nodes.size());
-      const double r = center.norm(), t = std::atan2(center.y(), center.x());
-      if (r < .026 || r > .034)
-        continue;
-      if (std::abs(t) < .35 || std::abs(std::abs(t) - pi) < .35) {
-        e.property = 1;
-        m.element_sets[std::abs(t) < .35 ? 1 : 2].push_back(e.id);
-      }
-    }
-    m.planar_coils = {{11, 1, 100}, {12, 2, -100}};
-    m.circuits[1] = {1, 1, {{11, 1}, {12, 1}}};
-    m.currents = {{1, 1, 30}};
-    m.subcases = {{.id = 1, .load = 1}};
-    auto solved = solve(m);
-    ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
-    results[meshed] = std::get<Results>(std::move(solved));
+    wind(m, 100, .35);
+    results[meshed] = solved(m);
   }
+  ASSERT_EQ(results[0].cases.size(), 1U);
+  ASSERT_EQ(results[1].cases.size(), 1U);
   const auto &age = results[0].cases[0], &mesh = results[1].cases[0];
   // Past the end of the B-H table: well into saturation.
   EXPECT_TRUE(age.extrapolated);
@@ -619,17 +1010,11 @@ TEST(AirGapSolve, SaturatedIronAndWindingMatchAMeshedGap) {
 
 TEST(AirGapSolve, ForceSurfacesMayNotTouchTheGap) {
   Machine g;
-  auto m = machine(g);
+  auto m = model(g);
   const Mesh mesh = mesh_of(m);
   ASSERT_TRUE(mesh.air_gap.has_value());
   // The body around the rotor's elements reaches the gap at once.
-  for (const auto &e : m.elements) {
-    Vector center = Vector::Zero();
-    for (int v : e.nodes)
-      center += m.nodes.at(v).position / static_cast<double>(e.nodes.size());
-    if (center.norm() < g.rotor)
-      m.element_sets[5].push_back(e.id);
-  }
+  m.element_sets[5] = elements_within(m, 0, g.rotor);
   m.forces = {{1, 5, true}};
   auto text = error_of(solve(m));
   EXPECT_NE(text.find("MFORCE 1: the surface around body ESET 5 reaches the air gap"),
@@ -655,17 +1040,17 @@ TEST(AirGapSolve, ResultsRecordTheGap) {
   g.rotor_div = 40;
   g.stator_div = 60;
   g.rotor_property = 2;
-  auto m = machine(g);
-  magnetize_rotor(m, 1.0);
-  auto solved = solve(m);
-  ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
-  const auto &results = std::get<Results>(solved);
-  const auto &gap = *results.mesh.air_gap;
+  g.cards = magnetized_rotor(1.0);
+  const auto m = model(g);
+  const auto results = solved(m);
+  ASSERT_TRUE(results.mesh.air_gap.has_value());
 #ifdef VIBESTRAN_HAS_HDF5
+  const auto &gap = *results.mesh.air_gap;
   const auto directory = std::filesystem::temp_directory_path() / "vibestran_air_gap";
   std::filesystem::create_directories(directory);
   ASSERT_FALSE(write_results(m, results, directory / "gap.F06").has_value());
   const auto file = directory / "gap.mag.vtkhdf";
+  EXPECT_EQ(vibestran::test::h5_attribute(file, "/MAGSTAT/air_gap", "property"), 9);
   EXPECT_NEAR(vibestran::test::h5_attribute(file, "/MAGSTAT/air_gap", "inner_radius_m"),
               g.rotor, 1e-15);
   EXPECT_NEAR(vibestran::test::h5_attribute(file, "/MAGSTAT/air_gap", "outer_radius_m"),
@@ -683,8 +1068,10 @@ TEST(AirGapSolve, ResultsRecordTheGap) {
   std::ifstream in(directory / "gap.F06");
   std::stringstream f06;
   f06 << in.rdbuf();
-  EXPECT_NE(f06.str().find("   Air gap .................. radius 0.02 to 0.021 m about "
-                           "(0, 0, 0), 40 + 60 grids, 20 harmonics"),
+  EXPECT_NE(f06.str().find("   Air gap .................. PAIRGAP 9, air-gap element (AGE) "
+                           "in place of its 100 elements: radius 0.02 to 0.021 m about "
+                           "(0, 0, 0),\n"
+                           "                              40 + 60 grids, 20 harmonics"),
             std::string::npos)
       << f06.str();
   std::filesystem::remove_all(directory);

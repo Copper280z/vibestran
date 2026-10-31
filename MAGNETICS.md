@@ -60,6 +60,8 @@ probe positions and torque origins), section dimensions, `MAG2D` depth and
 `WIRESTEP` by `s`. It does not rescale current, conductivity, B–H
 data or remanence. Use `s=0.001` for millimeter geometry. Lengths are converted
 once on parsing; the C++ magnetic model API takes resolved SI coordinates.
+`PARAM,AIRGAP,AGE` or `PARAM,AIRGAP,MESH` sets the METHOD of every `PAIRGAP`
+in the deck, overriding the cards ([Air gap](#air-gap-pairgap)).
 
 | Card | Fields after the card name |
 |---|---|
@@ -71,6 +73,7 @@ once on parsing; the C++ magnetic model API takes resolved SI coordinates.
 | `CTRIA3` / `CQUAD4` | `EID,PID,G1,...` (three/four corners, planar mode only) |
 | `MAG2D` | `CID,DEPTH` (one card activates planar mode; CID=0 uses basic z) |
 | `PMAG2D` | `PID,MID,CID,AXIS` (planar magnetic property; orientation as PMAG) |
+| `PAIRGAP` | `PID,METHOD,NHARM` (planar air-gap property; METHOD `AGE` or `MESH`; see [Air gap](#air-gap-pairgap)) |
 | `COIL2D` | `ID,ESET,SIGNED_TURNS` (one planar winding region; ID unique) |
 | `PSOLID` | `PID,MID,CORDM` (CORDM orients remanence along its axis 1) |
 | `PMAG` | `PID,MID,CID,AXIS` (3D magnetic property with a signed orientation axis) |
@@ -301,9 +304,9 @@ check truncation error. Periodic, symmetry, infinite elements and multiply
 connected magnetic domains are not implemented.
 
 `MAGBC=SID` selects MBC. FSET=0 means the whole exterior; an explicit FSET must
-cover the whole exterior. A planar [air gap](#unmeshed-air-gap) is not
-exterior: FSET=0 leaves it out, and an FSET that selects a gap edge is an
-error. UNIFORM prescribes the tangential trace of
+cover the whole exterior. A planar [air gap](#air-gap-pairgap) solved by
+the air-gap element is not exterior: FSET=0 leaves its circles out, and an
+FSET that selects an edge on them is an error. UNIFORM prescribes the tangential trace of
 `A = B cross x / 2`, useful for applied uniform fields and exact patch tests.
 The source perturbation still has zero tangential exterior trace.
 
@@ -316,7 +319,8 @@ and CQUAD4 can be mixed on conforming edges, using `PMAG2D` and the same MATMAG
 materials. Distorted convex planar quads are supported. The solver uses scalar
 nodal P1/Q1 potentials and `B = grad(A_n) cross n`; there is no vector-potential
 gradient nullspace. All exterior nodes have prescribed A_n, zero by default,
-except those on an [air gap](#unmeshed-air-gap).
+except those on the circles of an [air gap](#air-gap-pairgap) solved by the
+air-gap element.
 UNIFORM uses `A_n = (B cross (x-x0)).n`, with x0 the first active mesh node.
 Applied B and remanence must lie in the plane.
 
@@ -373,36 +377,133 @@ The planar motor demonstration uses the same illustrative steel/PM geometry
 as the 3D example, with signed slot regions and an air torque contour. Its
 synthetic steel and coarse mesh do not constitute engineering validation.
 
-### Unmeshed air gap
+### Air gap (PAIRGAP)
 
-A planar model may leave the air gap between a rotor and a stator unmeshed.
-Mesh both parts as usual, with the rotor's outer boundary and the stator's
-inner boundary on concentric circles; the solver finds the gap and couples it
-with an air-gap element (AGE): the exact Laplace field of the air annulus that
-matches the potential on both circles. No card is needed.
+The air gap between a rotor and a stator is meshed like any other air: a band
+of CTRIA3/CQUAD4 elements between the rotor's outer boundary and the stator's
+inner boundary. Give those elements a property ID of their own and define it
+with `PAIRGAP` instead of `PMAG2D`:
 
-- **Detection.** A planar mesh whose parts are not joined by elements must
-  have exactly one gap: a circle of boundary grids on one part and a
-  concentric circle on another, at least four grids each, with no grid
-  between them. Every grid must lie within 1e-6 of the radius of its circle,
-  and the centers must agree to 1e-6 of the radius. Write GRID coordinates in
-  large-field or free-field format when small fields would lose digits.
-  Errors name the grid and deviation, the radii, or the grid inside the
-  annulus that failed. Which part is inside does not matter.
-- **Discretization.** The two circles may have different grid counts and
-  uneven spacing; the element is exact for the piecewise-linear traces it
-  receives, with harmonics up to half the coarser circle's grid count. The
-  error comes from the meshed regions and converges at O(h²) in the field
-  and energy. In a thin gap, matching or similar grid spacing on the two
-  circles keeps the error constant small.
-- **Results.** Probes in the annulus report the analytic gap field (H =
-  B/μ0). The F06 SOLUTION section has an `Air gap` row (radii, center, grid
-  counts, harmonics, worst radial deviation), and the HDF5 results an
-  `air_gap` group. Field blocks contain the meshed cells only.
-- **Limits.** MBC does not apply to gap edges, and MFORCE surfaces may not
-  touch the gap. Rotor torque from the AGE, and rotor motion, will come with
-  the planned `MOTION` card.
-  3D models still need a meshed, connected domain.
+```text
+PAIRGAP,PID,METHOD,NHARM
+```
+
+| Field | Meaning |
+|---|---|
+| `PID` | Property ID of the gap elements. It must not also be a PSOLID, PMAG or PMAG2D ID, and at least one element must use it. |
+| `METHOD` | `AGE` (blank is AGE): replace the gap elements by the air-gap element. `MESH`: solve them as ordinary meshed air. |
+| `NHARM` | AGE harmonics. Blank uses half the grid count of the coarser circle; at most half the grid count of the finer one. Ignored by MESH. |
+
+There is no material field: a gap is air (relative permeability 1, no
+remanence, no B–H table). Under the AGE the gap elements are not field cells,
+so a COIL2D, MFORCE BODY or BFIELD ESET may not contain them and an FSET may
+not name them; under MESH they are ordinary air elements. Keep such sets off
+the gap if the deck is to run both ways. `PARAM,AIRGAP,AGE|MESH` overrides
+METHOD on every PAIRGAP in the deck. PAIRGAP requires MAG2D.
+
+**METHOD=MESH** is resolved when the deck is read. The PID becomes an
+ordinary property of a new MUR=1 material, exactly what the deck would say
+with the PAIRGAP card replaced by
+
+```text
+MATMAG,MID,1.
+PMAG2D,PID,MID
+```
+
+The solver then sees no gap at all. The F06 SOLUTION section records the
+substitution, e.g. `Air gap ... PAIRGAP 9 solved as meshed air (relative
+permeability 1) by PAIRGAP METHOD=MESH` (or `by PARAM,AIRGAP,MESH`).
+
+**METHOD=AGE** removes the gap elements from the field mesh and couples the
+two circles that bound them with an air-gap element: the exact Laplace field
+of an air annulus that matches the potential on both circles, expanded in
+harmonics up to NHARM. The gap elements only mark the region. Their shape,
+their number of layers and the grids inside the band do not enter the
+solution; one layer of triangles between two different grid counts is enough.
+The region is validated, and each failure is an error naming the PAIRGAP
+and the grid, element or radii involved:
+
+1. Every boundary edge of the gap elements is an edge of a field element.
+   The gap lies between two meshed parts, not on the model's exterior.
+2. The boundary does not touch itself at a grid.
+3. The boundary is exactly two closed loops: one full annulus, not a sector,
+   with no holes and no field elements inside it.
+4. Each loop lies on a circle: every grid is within 1e-6 of the best-fit
+   radius. Write GRID coordinates in large-field or free-field format when
+   small fields would lose digits.
+5. The circles are concentric to 1e-6 of the outer radius, and the gap has
+   nonzero width.
+6. NHARM, when given, is at most half the finer circle's grid count.
+
+The two circles may have different grid counts and uneven spacing. A model
+has at most one AGE gap; any number of PAIRGAPs may be solved as MESH. A
+planar mesh must be one connected domain, through its elements and the AGE.
+A rotor and stator with no elements between them are rejected, with a hint
+to mesh the gap and give it a PAIRGAP property.
+
+**What each method guarantees.** These hold for every deck, and the test
+suite (`tests/unit/test_air_gap.cpp`) checks each on a magnet rotor in a
+saturating stator with a winding:
+
+| Comparison | Result |
+|---|---|
+| `PAIRGAP,PID,MESH`, `PARAM,AIRGAP,MESH`, and the deck with PAIRGAP replaced by MATMAG + PMAG2D air | The same equations. Every result (potentials, energies, B, H, probes, linkage, inductance, force, torque, Newton iterations) is bitwise identical with a deterministic linear solver. The default multithreaded sparse factorization varies in its last bits from run to run on any deck, so with it the three agree to round-off (measured 6e-16 in energy). |
+| AGE against MESH on the same gap mesh | Two discretizations of the same gap, not identical. Both converge to one solution, and their difference falls at O(h²) in energy, linkage and inductance. |
+| AGE against an analytic magnetized rotor | O(h²) in the gap field and in the magnet. The AGE adds no error of its own for the piecewise-linear traces it receives; the meshed parts set the error. |
+| MOTION at angle φ (planned) against a static solve of the rotor rotated by φ | The same to round-off. |
+
+Measured convergence, for a 20 mm rotor in a 1 mm gap with a 40 mm stator:
+
+| Rotor divisions | AGE vs analytic, gap B | AGE vs analytic, magnet B | AGE vs MESH (4 layers), energy |
+|---|---|---|---|
+| 24 | 9.6e-3 | 4.6e-3 | |
+| 48 | 2.4e-3 | 1.1e-3 | 1.4e-3 |
+| 96 | 6.0e-4 | 2.9e-4 | 3.6e-4 |
+| 192 | | | 9.8e-5 |
+
+With saturated iron (past the end of the B–H table) and a two-slot winding at
+96 divisions, AGE and MESH energies, linkages and differential inductances
+agree to 2.4e-5, 2.3e-5 and 3.4e-5, in the same 9 Newton iterations. A meshed
+gap's B is the gradient of a piecewise-linear potential and only first-order
+accurate inside the gap cells; compare energies, linkages, inductances and
+torques rather than B in gap cells.
+
+**Cross-checking a deck.** Run it as written (AGE), then add
+`PARAM,AIRGAP,MESH` and run again. The second run is the deck you would have
+written without the AGE: an ordinary meshed air gap. The difference between
+the two is the discretization error of the gap, and it shrinks as the
+circles are refined. A meshed gap needs several element layers to be
+accurate (see MFORCE below); the AGE does not, so a deck meant for the AGE
+can carry a single layer and be refined in the gap only for the cross-check.
+In a thin gap, give the two circles similar grid spacing: the energy depends
+on the difference between the two traces, amplified by about radius / gap.
+
+```text
+MAG2D,0,0.05
+MATMAG,1,1.
+MATMAG,2,,10
+TABLEBH,10
+,0.,0.,1.,200.,1.6,4000.,2.,60000.
+,ENDT
+PMAG2D,1,1           $ slots and other air
+PMAG2D,2,2           $ rotor and stator iron
+PAIRGAP,9            $ the gap band: CQUAD4/CTRIA3 elements with PID 9
+$ PARAM,AIRGAP,MESH  $ uncomment to solve the same band as meshed air
+```
+
+**Results.** Probes in the annulus report the analytic gap field (H = B/μ0),
+including probes between the rotor's outermost element edges and its circle.
+The F06 SOLUTION section has an `Air gap` row: the PAIRGAP ID, the number of
+gap elements replaced, the radii, center, grid counts, harmonics and worst
+radial deviation. The HDF5 results have an `air_gap` group. Under the AGE the
+VTKHDF field blocks contain the field cells only; the gap elements are not in
+them. Under MESH the gap elements are ordinary field cells.
+
+**Limits.** MBC does not apply to the AGE's circles, and MFORCE surfaces may
+not touch them, so rotor torque is not yet available with the AGE (use MESH
+for torque until MOTION reports it). The planned `MOTION` card will rotate
+the rotor through the AGE and report its torque. 3D models mesh their air
+gap with ordinary air elements; PAIRGAP is planar only.
 
 Full 3D magnetic shells are a separate physical model: a thin magnetic layer or
 surface-current sheet coupled to the surrounding 3D field. Mechanical shell
@@ -549,8 +650,9 @@ solving. The file has two top-level groups:
   - `circuits/`: `id`, `parallel`, `closed`, and `members` (source ID,
     polarity) with `member_offsets`.
   - `forces/`: `id`, `body`, `cid`. `probes/`: `id`, `cd`, `position_m`.
-  - `air_gap/` (planar models with an unmeshed gap): attributes
-    `inner_radius_m`, `outer_radius_m`, `harmonics`, `radial_deviation`;
+  - `air_gap/` (planar models with a PAIRGAP solved by the AGE): attributes
+    `property`, `inner_radius_m`, `outer_radius_m`, `harmonics`,
+    `radial_deviation`;
     `center_m`; and `inner_grids`, `outer_grids`, the grid IDs on each
     circle in increasing angle.
   - `subcase_ids`, and `subcases/<ID>/` per subcase, with attributes `id`,

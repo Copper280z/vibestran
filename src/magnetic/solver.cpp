@@ -768,13 +768,20 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
       return std::abs(x) < 1e-12 * g.outer.radius ? 0.0 : x;
     };
     solution.add("Air gap",
-                 std::format("radius {:.6g} to {:.6g} m about ({:.6g}, {:.6g}, {:.6g}), "
-                             "{} + {} grids, {} harmonics, largest radial deviation "
-                             "{:.1e} of the radius",
-                             g.inner.radius, g.outer.radius, shown(g.center.x()),
-                             shown(g.center.y()), shown(g.center.z()), g.inner.nodes.size(),
+                 std::format("PAIRGAP {}, air-gap element (AGE) in place of its {} "
+                             "elements: radius {:.6g} to {:.6g} m about ({:.6g}, "
+                             "{:.6g}, {:.6g}), {} + {} grids, {} harmonics, largest "
+                             "radial deviation {:.1e} of the radius",
+                             g.property, g.elements.size(), g.inner.radius,
+                             g.outer.radius, shown(g.center.x()), shown(g.center.y()),
+                             shown(g.center.z()), g.inner.nodes.size(),
                              g.outer.nodes.size(), g.harmonics, g.deviation));
   }
+  for (const auto &[pid, reason] : model.meshed_air_gaps)
+    solution.add("Air gap",
+                 std::format("PAIRGAP {} solved as meshed air (relative "
+                             "permeability 1) by {}",
+                             pid, reason));
   solution.add("Equations",
                std::format("{} ({} degrees of freedom before the gauge and "
                            "boundary conditions)",

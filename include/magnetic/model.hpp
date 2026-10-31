@@ -139,6 +139,13 @@ struct ForceSurface {
   int coordinates{0}, layers{1};
 };
 enum class WireMesh { Auto, Hex, Tet };
+// PAIRGAP: the elements of an air gap. AGE replaces them by the air-gap
+// element; MESH solves them as ordinary air (mu_r = 1).
+enum class AirGapMethod { Age, Mesh };
+struct AirGapProperty {
+  AirGapMethod method{AirGapMethod::Age};
+  int harmonics{0}; // NHARM; 0 for half the coarser circle's grid count
+};
 struct Options {
   double length_scale{1}, nonlinear_tolerance{1e-8};
   int max_iterations{80}, wire_sides{16}, wire_layers{2};
@@ -147,6 +154,7 @@ struct Options {
   double depth{1};
   double wire_step{0}; // zero: automatic from section size
   WireMesh wire_mesh{WireMesh::Auto};
+  std::optional<AirGapMethod> air_gap_method; // PARAM,AIRGAP overrides PAIRGAP
   bool source_output{true}; // MSOURCE: coil/wire VTU files
 };
 struct Model {
@@ -171,6 +179,11 @@ struct Model {
   std::vector<Subcase> subcases;
   std::vector<Probe> probes;
   std::vector<ForceSurface> forces;
+  // PAIRGAP properties solved by the air-gap element. A deck's METHOD=MESH
+  // gaps (or all of them under PARAM,AIRGAP,MESH) are resolved on parsing
+  // into ordinary air properties, and kept here only to be reported.
+  std::map<int, AirGapProperty> air_gaps;
+  std::map<int, std::string> meshed_air_gaps; // PID -> what selected MESH
   Options options;
 };
 

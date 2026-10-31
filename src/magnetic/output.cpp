@@ -444,6 +444,7 @@ Status write_hdf5(const std::string &path, const Model &model,
   h5.attribute(magstat.get(), "depth_m", results.mesh.depth);
   if (const auto &gap = results.mesh.air_gap) {
     auto group = h5.group(magstat.get(), "air_gap");
+    h5.attribute(group.get(), "property", int64_t{gap->property});
     h5.attribute(group.get(), "inner_radius_m", gap->inner.radius);
     h5.attribute(group.get(), "outer_radius_m", gap->outer.radius);
     h5.attribute(group.get(), "harmonics", int64_t{gap->harmonics});

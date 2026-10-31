@@ -260,6 +260,39 @@ Status resolve_coordinates(Model &m) {
   m.options.depth *= m.options.length_scale;
   return {};
 }
+// A PAIRGAP solved as meshed air becomes exactly what the deck would say
+// without it: an ordinary property of a mu_r = 1 material (a new MATMAG ID).
+// The solver then sees no gap at all; the PID is kept only for reporting.
+Status resolve_air_gaps(Model &m) {
+  if (!m.air_gaps.empty() && !m.options.planar)
+    return Error{std::format("PAIRGAP {} requires MAG2D; a 3D model meshes its "
+                             "air gap with ordinary air elements",
+                             m.air_gaps.begin()->first)};
+  for (auto it = m.air_gaps.begin(); it != m.air_gaps.end();) {
+    const auto [id, gap] = *it;
+    if (m.properties.contains(id))
+      return Error{std::format("PAIRGAP {} duplicates the ID of a PSOLID, PMAG or "
+                               "PMAG2D property",
+                               id)};
+    if (std::none_of(m.elements.begin(), m.elements.end(),
+                     [id](const Element &c) { return c.property == id; }))
+      return Error{std::format("PAIRGAP {} has no elements; mesh the air gap and "
+                               "give its elements PID {}",
+                               id, id)};
+    const auto method = m.options.air_gap_method.value_or(gap.method);
+    if (method != AirGapMethod::Mesh) {
+      ++it;
+      continue;
+    }
+    const int air = m.materials.empty() ? 1 : m.materials.rbegin()->first + 1;
+    m.materials[air] = Material{};
+    m.properties[id] = Property{air};
+    m.meshed_air_gaps[id] = m.options.air_gap_method ? "PARAM,AIRGAP,MESH"
+                                                     : "PAIRGAP METHOD=MESH";
+    it = m.air_gaps.erase(it);
+  }
+  return {};
+}
 // Appends the elements of each ESET PROP row, in element order, then rejects
 // any set that selects an element twice.
 Status expand_property_sets(Model &m,
@@ -412,6 +445,19 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
         p.axis = r.integer(4, 1);
       r.last(key == "PSOLID" ? 3 : 4);
       insert_unique(m.properties, id, p, r);
+    } else if (key == "PAIRGAP") {
+      AirGapProperty gap;
+      const int id = r.integer(1);
+      const auto method = upper(r.get(2));
+      if (method == "MESH")
+        gap.method = AirGapMethod::Mesh;
+      else if (!method.empty() && method != "AGE")
+        return Error{r.where + ": PAIRGAP METHOD must be AGE or MESH"};
+      gap.harmonics = r.integer(3);
+      if (gap.harmonics < 0)
+        return Error{r.where + ": PAIRGAP NHARM must not be negative (blank for the default)"};
+      r.last(3);
+      insert_unique(m.air_gaps, id, gap, r);
     } else if (key == "MAG2D") {
       if (m.options.planar)
         r.error = Error{r.where + ": duplicate MAG2D"};
@@ -633,6 +679,14 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
           m.options.wire_mesh = WireMesh::Tet;
         else
           return Error{r.where + ": WIREMESH must be AUTO, HEX or TET"};
+      } else if (option == "AIRGAP") {
+        const auto value = upper(r.get(2));
+        if (value == "AGE")
+          m.options.air_gap_method = AirGapMethod::Age;
+        else if (value == "MESH")
+          m.options.air_gap_method = AirGapMethod::Mesh;
+        else
+          return Error{r.where + ": AIRGAP must be AGE or MESH"};
       } else
         return Error{r.where + ": unsupported MAGSTAT parameter " + option};
       r.last(2);
@@ -653,6 +707,8 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
     m.subcases.push_back(global);
   if (!(m.options.length_scale > 0))
     return Error{"MAGLEN must be positive"};
+  if (auto e = resolve_air_gaps(m))
+    return *e;
   if (auto e = expand_property_sets(m, property_rows))
     return *e;
   if (auto e = resolve_coordinates(m))
@@ -854,15 +910,37 @@ Status validate(const Model &m) {
                  "require 3D"};
   if (!m.options.planar && !m.planar_coils.empty())
     return Error{"COIL2D requires MAG2D"};
-  std::set<int> ids;
+  if (m.air_gaps.size() > 1)
+    return Error{std::format("PAIRGAP {} and {} both use the air-gap element; "
+                             "one air gap per model is supported",
+                             m.air_gaps.begin()->first,
+                             std::next(m.air_gaps.begin())->first)};
+  // Air-gap elements mark the gap; under the air-gap element they are not
+  // field cells, so sets that act on field cells may not contain them.
+  std::set<int> ids, gap_elements;
   for (const auto &c : m.elements) {
     if (c.id <= 0 || !ids.insert(c.id).second)
       return Error{"Invalid/duplicate magnetic element id"};
-    if (!m.properties.contains(c.property))
+    if (m.air_gaps.contains(c.property))
+      gap_elements.insert(c.id);
+    else if (!m.properties.contains(c.property))
       return Error{std::format("Magnetic element {} references undefined "
                                "property {}",
                                c.id, c.property)};
   }
+  auto gap_member = [&](int set, const std::string &use) -> Status {
+    for (int id : m.element_sets.at(set))
+      if (gap_elements.contains(id))
+        return Error{std::format("{} ESET {} contains air-gap element {} "
+                                 "(PAIRGAP {}); air-gap elements are not field "
+                                 "cells",
+                                 use, set, id,
+                                 std::find_if(m.elements.begin(), m.elements.end(),
+                                              [id](const Element &c) {
+                                                return c.id == id;
+                                              })->property)};
+    return {};
+  };
   std::set<int> wireids;
   for (const auto &w : m.wires) {
     if (w.id <= 0 || ids.contains(w.id) || !wireids.insert(w.id).second)
@@ -925,6 +1003,8 @@ Status validate(const Model &m) {
     if (c.turns == 0 || !std::isfinite(c.turns) ||
         !m.element_sets.contains(c.elements))
       return Error{"Invalid COIL2D definition"};
+    if (auto e = gap_member(c.elements, std::format("COIL2D {}", c.id)))
+      return e;
     std::set<int> selected;
     for (int id : m.element_sets.at(c.elements))
       if (!ids.contains(id) || !selected.insert(id).second)
@@ -1004,6 +1084,9 @@ Status validate(const Model &m) {
     if (force.layers < 1 || force.layers > 64)
       return Error{std::format("MFORCE {} LAYER must be 1 to 64", force.id)};
     if (force.body)
+      if (auto e = gap_member(force.set, std::format("MFORCE {} body", force.id)))
+        return e;
+    if (force.body)
       for (int id : m.element_sets.at(force.set))
         if (!element_ids.contains(id))
           return Error{std::format("MFORCE {} body ESET references undefined "
@@ -1019,6 +1102,9 @@ Status validate(const Model &m) {
     if (sc.field.set && !m.element_sets.contains(sc.field.set))
       return Error{std::format("Subcase {} BFIELD references undefined ESET {}",
                                sc.id, sc.field.set)};
+    if (sc.field.set)
+      if (auto e = gap_member(sc.field.set, std::format("Subcase {} BFIELD", sc.id)))
+        return e;
     if (sc.field.set)
       for (int id : m.element_sets.at(sc.field.set))
         if (!element_ids.contains(id))
