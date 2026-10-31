@@ -75,15 +75,8 @@ Eigen::Vector3d snorm_director(const Model &model, const ElementData &elem,
 double shell_fold_angle(const Model &model) {
   constexpr double kDefaultDegrees = 20.0;
   double deg = kDefaultDegrees;
-  if (const auto it = model.params.find("SNORM"); it != model.params.end()) {
-    try {
-      const double v = std::stod(it->second);
-      if (v > 0.0)
-        deg = v;
-    } catch (...) {
-      // Non-numeric SNORM: keep the default.
-    }
-  }
+  if (const auto v = model.param_real("SNORM"); v && *v > 0.0)
+    deg = *v;
   return deg * std::numbers::pi / 180.0;
 }
 

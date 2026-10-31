@@ -846,3 +846,16 @@ ALL, 1, 3
     // 3 nodes in set, each gets an SPC
     EXPECT_EQ(m.spcs.size(), 3u);
 }
+
+// ── Strict numeric data lines ────────────────────────────────────────────────
+
+TEST(InpParser, PartialNumbersInDataLinesAreErrors) {
+    // std::stod/stoi read "1.5abc" as 1.5 and "2.7" as node 2.
+    EXPECT_THROW((void)InpParser::parse_string("*NODE\n1, 0.0, 1.5abc, 0.0\n"),
+                 ParseError);
+    EXPECT_THROW((void)InpParser::parse_string("*NODE\n2.7, 0.0, 0.0, 0.0\n"),
+                 ParseError);
+    const Model m = InpParser::parse_string("*NODE\n3, 1.5E+2, -2.5e-1, 0\n");
+    EXPECT_DOUBLE_EQ(m.nodes.at(NodeId{3}).position.x, 150.0);
+    EXPECT_DOUBLE_EQ(m.nodes.at(NodeId{3}).position.y, -0.25);
+}

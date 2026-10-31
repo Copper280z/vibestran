@@ -5,6 +5,7 @@
 
 #include "core/types.hpp"
 #include "core/coord_sys.hpp"
+#include "core/numbers.hpp"
 #include <algorithm>
 #include <cmath>
 #include <array>
@@ -800,6 +801,29 @@ public:
   // PARAM entries (name → value as string)
   std::unordered_map<std::string, std::string> params;
 
+  /// A numeric PARAM, or nullopt when it is absent or blank. The BDF parser
+  /// rejects malformed numeric PARAMs with the card's line, so a malformed
+  /// value here means a model built elsewhere; that is reported as an error
+  /// rather than replaced by a default.
+  [[nodiscard]] std::optional<double> param_real(const std::string &name) const {
+    const auto it = params.find(name);
+    if (it == params.end() || detail::trim_blanks(it->second).empty())
+      return std::nullopt;
+    if (const auto value = parse_real(it->second))
+      return value;
+    throw SolverError("PARAM," + name + " value '" + it->second +
+                      "' is not a real number");
+  }
+  [[nodiscard]] std::optional<int> param_integer(const std::string &name) const {
+    const auto it = params.find(name);
+    if (it == params.end() || detail::trim_blanks(it->second).empty())
+      return std::nullopt;
+    if (const auto value = parse_integer(it->second))
+      return value;
+    throw SolverError("PARAM," + name + " value '" + it->second +
+                      "' is not an integer");
+  }
+
   // EIGRL cards (keyed by SID)
   std::unordered_map<int, EigRL> eigrls;
 
@@ -946,14 +970,8 @@ public:
   /// default); a positive value, or no PARAM, selects consistent mass, which
   /// is vibestran's default.
   [[nodiscard]] bool use_lumped_mass() const {
-    const auto it = params.find("COUPMASS");
-    if (it == params.end() || it->second.empty())
-      return false;
-    try {
-      return std::stod(it->second) <= 0.0;
-    } catch (...) {
-      return false;
-    }
+    const auto coupmass = param_real("COUPMASS");
+    return coupmass && *coupmass <= 0.0;
   }
 
   /// Retrieve all MPCs for a given set

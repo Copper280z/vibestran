@@ -6,6 +6,7 @@
 #include "elements/element_factory.hpp"
 #include "core/logger.hpp"
 #include "core/model.hpp"
+#include "core/factor_ratio_check.hpp"
 #include <filesystem>
 #include <fstream>
 #include <numbers>
@@ -1673,4 +1674,103 @@ ENDDATA
     EXPECT_THROW((void)BdfParser::parse_string(
                      "BEGIN BULK\nGRID,7,,1.,0.,0.\nSNORM,7,4,0.,0.,1.\nENDDATA\n"),
                  ParseError);
+}
+
+// ── Strict numeric fields ────────────────────────────────────────────────────
+
+namespace {
+// The ParseError message for a deck, or "" if it parsed.
+std::string parse_error_of(const std::string &bdf) {
+    try {
+        (void)BdfParser::parse_string(bdf);
+    } catch (const ParseError &e) {
+        return e.what();
+    }
+    return {};
+}
+} // namespace
+
+TEST(BdfParser, BlankInsideFieldIsNullNotTerminator) {
+    // Fortran NASTRAN ignores blanks inside a field, so "12 456" is DOFs
+    // 1,2,4,5,6. Truncating at the blank would silently drop rotations.
+    const Model m = BdfParser::parse_string(R"(
+BEGIN BULK
+GRID,1,,0.,0.,0.
+SPC1,1,12 456,1
+ENDDATA
+)");
+    ASSERT_EQ(m.spcs.size(), 1u);
+    EXPECT_EQ(m.spcs[0].dofs.mask, DofSet::from_nastran_string("12456").mask);
+}
+
+TEST(BdfParser, ParamRealUsesImplicitExponent) {
+    // 1.+7 is 1e7, not 1.0 (the prefix std::stod would have read).
+    const Model m = BdfParser::parse_string(R"(
+BEGIN BULK
+PARAM,MAXRATIO,1.+3
+PARAM,WTMASS,2.5-3
+ENDDATA
+)");
+    const auto policy = build_factor_ratio_check_policy(m, "test", "KLL");
+    EXPECT_DOUBLE_EQ(policy.maxratio, 1.0e3);
+    EXPECT_DOUBLE_EQ(*m.param_real("WTMASS"), 2.5e-3);
+}
+
+TEST(BdfParser, MalformedNumericParamIsReportedWithLine) {
+    const std::string msg = parse_error_of(R"(BEGIN BULK
+GRID,1,,0.,0.,0.
+PARAM,WTMASS,abc
+ENDDATA
+)");
+    EXPECT_NE(msg.find("Line 3"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("PARAM,WTMASS"), std::string::npos) << msg;
+
+    EXPECT_NE(parse_error_of("BEGIN BULK\nPARAM,BAILOUT,1.5\nENDDATA\n")
+                  .find("PARAM,BAILOUT"),
+              std::string::npos);
+}
+
+TEST(BdfParser, NonNumericParamsKeepTheirText) {
+    // Only known numeric PARAMs are validated; others stay free text.
+    const Model m = BdfParser::parse_string(
+        "BEGIN BULK\nPARAM,CHECKMODE,LENIENT\nPARAM,POST,-1\nENDDATA\n");
+    EXPECT_EQ(m.params.at("CHECKMODE"), "LENIENT");
+    EXPECT_EQ(*m.param_integer("POST"), -1);
+}
+
+TEST(BdfParser, PartialNumericBulkFieldsAreErrors) {
+    // A non-integer ID or a trailing-garbage coordinate used to parse as its
+    // numeric prefix (1 and 1.5) and produce a different model.
+    EXPECT_FALSE(parse_error_of("BEGIN BULK\nGRID,1.5,,0.,0.,0.\nENDDATA\n").empty());
+    EXPECT_FALSE(
+        parse_error_of("BEGIN BULK\nGRID,1,,1.5abc,0.,0.\nENDDATA\n").empty());
+    EXPECT_FALSE(parse_error_of(R"(BEGIN BULK
+EIGRL,1,abc,,5
+ENDDATA
+)").empty());
+}
+
+TEST(BdfParser, CaseControlIdMustBeInteger) {
+    const std::string msg = parse_error_of(R"(SOL 101
+CEND
+SUBCASE 1
+  LOAD = X
+BEGIN BULK
+ENDDATA
+)");
+    EXPECT_NE(msg.find("LOAD"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("'X'"), std::string::npos) << msg;
+}
+
+TEST(Model, ParamAccessorsRejectMalformedProgrammaticValues) {
+    // A Model built outside the parser can still hold bad text; the accessors
+    // refuse it instead of treating it as absent.
+    Model m;
+    m.params["WTMASS"] = "0.5x";
+    m.params["BAILOUT"] = "  ";
+    EXPECT_THROW((void)m.param_real("WTMASS"), SolverError);
+    EXPECT_FALSE(m.param_integer("BAILOUT"));
+    EXPECT_FALSE(m.param_real("COUPMASS"));
+    m.params["COUPMASS"] = "-1.";
+    EXPECT_TRUE(m.use_lumped_mass());
 }

@@ -38,27 +38,14 @@ build_factor_ratio_check_policy(const Model &model, std::string context,
   policy.context = std::move(context);
   policy.matrix_name = std::move(matrix_name);
 
-  auto mr_it = model.params.find("MAXRATIO");
-  if (mr_it != model.params.end()) {
-    try {
-      policy.maxratio = std::stod(mr_it->second);
-    } catch (...) {
-    }
-  }
-
-  int bailout = 0;
-  auto bo_it = model.params.find("BAILOUT");
-  if (bo_it != model.params.end()) {
-    try {
-      bailout = std::stoi(bo_it->second);
-    } catch (...) {
-    }
-  }
+  policy.maxratio = model.param_real("MAXRATIO").value_or(policy.maxratio);
+  const auto bailout_param = model.param_integer("BAILOUT");
+  int bailout = bailout_param.value_or(0);
 
   const auto cm_it = model.params.find("CHECKMODE");
   const bool lenient =
       (cm_it != model.params.end() && cm_it->second == "LENIENT");
-  if (lenient && bo_it == model.params.end())
+  if (lenient && !bailout_param)
     bailout = -1;
 
   policy.fatal = (bailout == 0 && !lenient);

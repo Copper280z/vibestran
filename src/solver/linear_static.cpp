@@ -98,14 +98,7 @@ namespace {
 }
 
 [[nodiscard]] double wtmass_scale(const Model &model) {
-  auto wt_it = model.params.find("WTMASS");
-  if (wt_it == model.params.end())
-    return 1.0;
-  try {
-    return std::stod(wt_it->second);
-  } catch (...) {
-    return 1.0;
-  }
+  return model.param_real("WTMASS").value_or(1.0);
 }
 
 [[nodiscard]] Vec3 load_direction_in_basic(const Model &model, const CoordId cid,

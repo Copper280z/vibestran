@@ -2,6 +2,7 @@
 // CalculiX/Abaqus .inp file parser implementation.
 
 #include "io/inp_parser.hpp"
+#include "core/numbers.hpp"
 #include "core/exceptions.hpp"
 #include <algorithm>
 #include <cctype>
@@ -46,6 +47,21 @@ struct KeywordBlock {
     std::vector<std::string> data_lines;
     int line_num{0};       // line number of the keyword line
 };
+
+// Whole-field numbers in a block's data lines. Malformed text is reported
+// with the block's keyword and line instead of being read as a numeric prefix.
+static int inp_int(const KeywordBlock& block, const std::string& text) {
+    if (const auto value = parse_integer(text))
+        return *value;
+    throw ParseError(std::format("*{} data after line {}: '{}' is not an integer",
+                                 block.keyword, block.line_num, text));
+}
+static double inp_real(const KeywordBlock& block, const std::string& text) {
+    if (const auto value = parse_real(text))
+        return *value;
+    throw ParseError(std::format("*{} data after line {}: '{}' is not a real number",
+                                 block.keyword, block.line_num, text));
+}
 
 // ── ParseContext ─────────────────────────────────────────────────────────────
 
@@ -134,11 +150,9 @@ static KeywordBlock parse_keyword_line(const std::string& line, int line_num) {
 
 static std::vector<NodeId> resolve_node_ref(const InpParser::ParseContext& ctx,
                                             const std::string& ref) {
-    // Try numeric first
-    try {
-        int id = std::stoi(ref);
-        return {NodeId{id}};
-    } catch (...) {}
+    // A whole-field integer is a node ID; anything else is a set name.
+    if (const auto id = parse_integer(ref))
+        return {NodeId{*id}};
 
     // Look up as set name (case-insensitive)
     std::string upper = to_upper(ref);
@@ -246,10 +260,10 @@ static void process_nodes(InpParser::ParseContext& ctx, const KeywordBlock& bloc
         auto fields = split_csv(line);
         if (fields.size() < 4) continue;
 
-        int id = std::stoi(fields[0]);
-        double x = std::stod(fields[1]);
-        double y = std::stod(fields[2]);
-        double z = std::stod(fields[3]);
+        int id = inp_int(block, fields[0]);
+        double x = inp_real(block, fields[1]);
+        double y = inp_real(block, fields[2]);
+        double z = inp_real(block, fields[3]);
 
         GridPoint gp;
         gp.id = NodeId{id};
@@ -288,7 +302,7 @@ static void process_elements(InpParser::ParseContext& ctx, const KeywordBlock& b
         auto fields = split_csv(line);
         if (fields.empty()) continue;
 
-        int eid = std::stoi(fields[0]);
+        int eid = inp_int(block, fields[0]);
 
         ElementData elem;
         elem.id = ElementId{eid};
@@ -297,7 +311,7 @@ static void process_elements(InpParser::ParseContext& ctx, const KeywordBlock& b
 
         for (size_t i = 1; i < fields.size(); ++i) {
             if (fields[i].empty()) continue;
-            elem.nodes.push_back(NodeId{std::stoi(fields[i])});
+            elem.nodes.push_back(NodeId{inp_int(block, fields[i])});
         }
 
         if (static_cast<int>(elem.nodes.size()) != type_info->num_nodes) {
@@ -324,9 +338,9 @@ static void parse_set_data(const KeywordBlock& block,
         for (const auto& line : block.data_lines) {
             auto fields = split_csv(line);
             if (fields.size() < 2) continue;
-            int start = std::stoi(fields[0]);
-            int end = std::stoi(fields[1]);
-            int inc = (fields.size() >= 3 && !fields[2].empty()) ? std::stoi(fields[2]) : 1;
+            int start = inp_int(block, fields[0]);
+            int end = inp_int(block, fields[1]);
+            int inc = (fields.size() >= 3 && !fields[2].empty()) ? inp_int(block, fields[2]) : 1;
             for (int i = start; i <= end; i += inc) {
                 ids.push_back(i);
             }
@@ -337,7 +351,7 @@ static void parse_set_data(const KeywordBlock& block,
             auto fields = split_csv(line);
             for (const auto& f : fields) {
                 if (f.empty()) continue;
-                ids.push_back(std::stoi(f));
+                ids.push_back(inp_int(block, f));
             }
         }
     }
@@ -407,8 +421,8 @@ static void process_elastic(InpParser::ParseContext& ctx, const KeywordBlock& bl
     }
 
     auto& mat = ctx.materials_by_name[ctx.current_material_name];
-    mat.E = std::stod(fields[0]);
-    mat.nu = std::stod(fields[1]);
+    mat.E = inp_real(block, fields[0]);
+    mat.nu = inp_real(block, fields[1]);
 }
 
 static void process_density(InpParser::ParseContext& ctx, const KeywordBlock& block) {
@@ -422,7 +436,7 @@ static void process_density(InpParser::ParseContext& ctx, const KeywordBlock& bl
     auto fields = split_csv(block.data_lines[0]);
     if (fields.empty()) return;
 
-    ctx.materials_by_name[ctx.current_material_name].rho = std::stod(fields[0]);
+    ctx.materials_by_name[ctx.current_material_name].rho = inp_real(block, fields[0]);
 }
 
 static void process_expansion(InpParser::ParseContext& ctx, const KeywordBlock& block) {
@@ -436,7 +450,7 @@ static void process_expansion(InpParser::ParseContext& ctx, const KeywordBlock& 
     auto fields = split_csv(block.data_lines[0]);
     if (fields.empty()) return;
 
-    ctx.materials_by_name[ctx.current_material_name].A = std::stod(fields[0]);
+    ctx.materials_by_name[ctx.current_material_name].A = inp_real(block, fields[0]);
 }
 
 static void process_solid_section(InpParser::ParseContext& ctx, const KeywordBlock& block) {
@@ -486,7 +500,7 @@ static void process_shell_section(InpParser::ParseContext& ctx, const KeywordBlo
     if (!block.data_lines.empty()) {
         auto fields = split_csv(block.data_lines[0]);
         if (!fields.empty() && !fields[0].empty()) {
-            thickness = std::stod(fields[0]);
+            thickness = inp_real(block, fields[0]);
         }
     }
 
@@ -526,11 +540,11 @@ static void process_boundary(InpParser::ParseContext& ctx, const KeywordBlock& b
         // First field: node ID or set name
         auto node_ids = resolve_node_ref(ctx, fields[0]);
 
-        int first_dof = std::stoi(fields[1]);
+        int first_dof = inp_int(block, fields[1]);
         int last_dof = (fields.size() >= 3 && !fields[2].empty())
-                       ? std::stoi(fields[2]) : first_dof;
+                       ? inp_int(block, fields[2]) : first_dof;
         double value = (fields.size() >= 4 && !fields[3].empty())
-                       ? std::stod(fields[3]) : 0.0;
+                       ? inp_real(block, fields[3]) : 0.0;
 
         for (const auto& nid : node_ids) {
             DofSet dofs;
@@ -561,8 +575,8 @@ static void process_cload(InpParser::ParseContext& ctx, const KeywordBlock& bloc
         if (fields.size() < 3) continue;
 
         auto node_ids = resolve_node_ref(ctx, fields[0]);
-        int dof = std::stoi(fields[1]);
-        double magnitude = std::stod(fields[2]);
+        int dof = inp_int(block, fields[1]);
+        double magnitude = inp_real(block, fields[2]);
 
         for (const auto& nid : node_ids) {
             ForceLoad f;
@@ -599,7 +613,7 @@ static void process_temperature(InpParser::ParseContext& ctx, const KeywordBlock
         if (fields.size() < 2) continue;
 
         auto node_ids = resolve_node_ref(ctx, fields[0]);
-        double temp = std::stod(fields[1]);
+        double temp = inp_real(block, fields[1]);
 
         for (const auto& nid : node_ids) {
             TempLoad tl;
@@ -621,7 +635,7 @@ static void process_initial_conditions(InpParser::ParseContext& ctx, const Keywo
         auto fields = split_csv(line);
         if (fields.size() < 2) continue;
 
-        double temp = std::stod(fields[1]);
+        double temp = inp_real(block, fields[1]);
         // Store as default temperature for set 1
         ctx.model.tempd[1] = temp;
     }

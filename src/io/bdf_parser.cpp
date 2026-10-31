@@ -6,6 +6,7 @@
 #include "io/bdf_parser.hpp"
 #include "core/coord_sys.hpp"
 #include "core/logger.hpp"
+#include "core/numbers.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <array>
@@ -213,16 +214,15 @@ Model BdfParser::parse_stream(std::istream &in) {
       break;
     } else if (begin_bulk_line == -1 && keyword.starts_with("SOL ")) {
       // Parse SOL in case control
-      int sol_num = 0;
       std::string num_str = std::string(keyword.substr(4));
       // trim
       size_t ns = num_str.find_first_not_of(" \t");
       if (ns != std::string::npos)
         num_str = num_str.substr(ns);
-      try {
-        sol_num = std::stoi(num_str);
-      } catch (...) {
-      }
+      // The solution is the first token; a name or other non-number is an
+      // unsupported solution type below.
+      num_str = num_str.substr(0, num_str.find_first_of(" \t,$"));
+      const int sol_num = parse_integer(num_str).value_or(0);
       if (sol_num == 1 || sol_num == 101)
         ctx.model.analysis.sol = SolutionType::LinearStatic;
       else if (sol_num == 3 || sol_num == 103)
@@ -334,6 +334,13 @@ Model BdfParser::parse_stream(std::istream &in) {
         continue;
       std::string kw = canonicalize_case_control_command(upper.substr(first));
       bool handled = true;
+      // A set or subcase ID; a malformed one is an error, not a default.
+      auto case_id = [&](const std::string &text) {
+        if (const auto id = parse_integer(text))
+          return *id;
+        throw ParseError(std::format("Line {}: '{}' needs an integer ID, got '{}'",
+                                     i + 1, kw, detail::trim_blanks(text)));
+      };
 
       if (kw.starts_with("SUBCASE")) {
         if (in_sc)
@@ -345,44 +352,29 @@ Model BdfParser::parse_stream(std::istream &in) {
         // Parse ID
         size_t eq = kw.find('=');
         if (eq != std::string::npos) {
-          try {
-            cur_sc.id = std::stoi(kw.substr(eq + 1));
-          } catch (...) {
-          }
+          cur_sc.id = case_id(kw.substr(eq + 1));
         } else {
           // "SUBCASE 1" form
           size_t sp = kw.find(' ');
-          if (sp != std::string::npos) {
-            try {
-              cur_sc.id = std::stoi(kw.substr(sp + 1));
-            } catch (...) {
-            }
-          }
+          if (sp != std::string::npos)
+            cur_sc.id = case_id(kw.substr(sp + 1));
         }
       } else if (kw.starts_with("LOAD")) {
         SubCase& sc = current_subcase();
         size_t eq = kw.find('=');
         if (eq != std::string::npos)
-          try {
-            sc.load_set = LoadSetId(std::stoi(kw.substr(eq + 1)));
-          } catch (...) {
-          }
+          sc.load_set = LoadSetId(case_id(kw.substr(eq + 1)));
       } else if (kw.starts_with("MPC") && kw.find('=') != std::string::npos
                  && !kw.starts_with("MPCADD") && !kw.starts_with("MPCF")) {
         SubCase& sc = current_subcase();
         size_t eq = kw.find('=');
-        try {
-          sc.mpc_set = MpcSetId(std::stoi(kw.substr(eq + 1)));
-        } catch (...) {}
+        sc.mpc_set = MpcSetId(case_id(kw.substr(eq + 1)));
       } else if (kw.starts_with("SPC") && !kw.starts_with("SPCADD") &&
                  !kw.starts_with("SPCFORCE")) {
         SubCase& sc = current_subcase();
         size_t eq = kw.find('=');
         if (eq != std::string::npos)
-          try {
-            sc.spc_set = SpcSetId(std::stoi(kw.substr(eq + 1)));
-          } catch (...) {
-          }
+          sc.spc_set = SpcSetId(case_id(kw.substr(eq + 1)));
       } else if (kw.starts_with("LABEL")) {
         SubCase& sc = current_subcase();
         size_t eq = kw.find('=');
@@ -398,7 +390,7 @@ Model BdfParser::parse_stream(std::istream &in) {
           if (val.starts_with("THERMAL")) {
             sc.temp_from_heat = true;
           } else {
-            try { sc.temp_load_set = std::stoi(val); } catch (...) {}
+            sc.temp_load_set = case_id(val);
           }
         }
       } else if (kw.starts_with("TEMP(INIT)") || kw.starts_with("TEMPERATURE(INIT)")) {
@@ -423,9 +415,8 @@ Model BdfParser::parse_stream(std::istream &in) {
           std::string val = kw.substr(eq + 1);
           const size_t ns = val.find_first_not_of(" \t");
           if (ns != std::string::npos) val = val.substr(ns);
-          if (!val.empty() && std::isdigit(static_cast<unsigned char>(val[0]))) {
-            try { sc.temp_load_set = std::stoi(val); } catch (...) {}
-          }
+          if (!val.empty() && std::isdigit(static_cast<unsigned char>(val[0])))
+            sc.temp_load_set = case_id(val);
         }
       } else if (kw.starts_with("DISPLACEMENT")) {
         SubCase& sc = current_subcase();
@@ -460,7 +451,7 @@ Model BdfParser::parse_stream(std::istream &in) {
         // METHOD = <sid>  — references an EIGRL card SID
         size_t eq = kw.find('=');
         if (eq != std::string::npos)
-          try { sc.eigrl_id = std::stoi(kw.substr(eq + 1)); } catch (...) {}
+          sc.eigrl_id = case_id(kw.substr(eq + 1));
       } else if (kw.starts_with("EIGENVECTOR") || kw.starts_with("VECTOR")) {
         SubCase& sc = current_subcase();
         // EIGENVECTOR[(PRINT[,PLOT])] = ALL
@@ -1225,70 +1216,44 @@ std::vector<std::string> BdfParser::split_free_field(const std::string &line) {
 // ── Numeric field parsing
 // ─────────────────────────────────────────────────────
 
+namespace {
+// Bulk data fields are read as Fortran NASTRAN reads them, with blanks inside
+// a field ignored: a component field "12 456" is 12456, not 12.
+std::string without_blanks(std::string s) {
+  std::erase_if(s, [](char c) { return c == ' ' || c == '\t'; });
+  return s;
+}
+} // namespace
+
 double BdfParser::parse_double(const std::string &s, int line) {
   if (s.empty())
     return 0.0;
-
-  // Nastran allows "1.5E+3", "1.5+3" (implicit E), "1.5D+3" (Fortran D)
-  std::string clean = s;
-  // Replace D exponent with E
-  std::replace_if(clean.begin(), clean.end(),
-                  [](char c) { return c == 'D' || c == 'd'; }, 'E');
-
-  // Handle implicit exponent: "1.5+3" → "1.5E+3"
-  // Look for +/- not preceded by E or at the start
-  for (size_t i = 1; i < clean.size(); ++i) {
-    if ((clean[i] == '+' || clean[i] == '-') &&
-        std::toupper(clean[i - 1]) != 'E') {
-      clean.insert(i, 1, 'E');
-      break;
-    }
-  }
-
-  try {
-    return std::stod(clean);
-  } catch (...) {
-    throw ParseError(
-        std::format("Line {}: cannot parse double: '{}'", line, s));
-  }
+  // Nastran allows "1.5E+3", "1.5+3" (implicit E) and "1.5D+3" (Fortran D).
+  if (const auto value = parse_real(without_blanks(s)))
+    return *value;
+  throw ParseError(std::format("Line {}: cannot parse double: '{}'", line, s));
 }
 
 int BdfParser::parse_int(const std::string &s, int line) {
   if (s.empty())
     return 0;
-  try {
-    return std::stoi(s);
-  } catch (...) {
-    throw ParseError(std::format("Line {}: cannot parse int: '{}'", line, s));
-  }
+  if (const auto value = parse_integer(without_blanks(s)))
+    return *value;
+  throw ParseError(std::format("Line {}: cannot parse int: '{}'", line, s));
 }
 
 namespace {
 
-double parse_double_field(std::string s, const int line) {
-  std::replace_if(s.begin(), s.end(),
-                  [](char c) { return c == 'D' || c == 'd'; }, 'E');
-  for (size_t i = 1; i < s.size(); ++i) {
-    if ((s[i] == '+' || s[i] == '-') &&
-        std::toupper(static_cast<unsigned char>(s[i - 1])) != 'E') {
-      s.insert(i, 1, 'E');
-      break;
-    }
-  }
-  try {
-    return std::stod(s);
-  } catch (...) {
-    throw ParseError(
-        std::format("Line {}: cannot parse double: '{}'", line, s));
-  }
+double parse_double_field(const std::string &s, const int line) {
+  if (const auto value = parse_real(without_blanks(s)))
+    return *value;
+  throw ParseError(std::format("Line {}: cannot parse double: '{}'", line, s));
 }
 
 int parse_int_field(const std::string &s, const int line) {
-  try {
-    return std::stoi(s);
-  } catch (...) {
-    throw ParseError(std::format("Line {}: cannot parse int: '{}'", line, s));
-  }
+  if (const auto value = parse_integer(without_blanks(s)))
+    return *value;
+  throw ParseError(std::format("Line {}: cannot parse int: '{}'", line, s));
 }
 
 bool field_is_integer_like(const std::string &s) {
@@ -1382,7 +1347,7 @@ std::vector<int> expand_id_list(const std::vector<std::string> &fields,
           fields[i]));
     }
 
-    const int value = std::stoi(fields[i]);
+    const int value = parse_int_field(fields[i], line);
     if (expecting_range_end) {
       if (value < range_start) {
         throw ParseError(std::format(
@@ -2897,6 +2862,22 @@ void BdfParser::process_param(ParseContext &ctx,
   if (f.size() < 3 || f[1].empty()) return;
   std::string name = f[1];
   std::transform(name.begin(), name.end(), name.begin(), ::toupper);
+  // Numeric PARAMs are checked here, with the card's line, so a malformed
+  // value is reported rather than replaced by a default where it is used.
+  static const std::unordered_map<std::string, bool> numeric{
+      // name -> integer (true) or real (false)
+      {"WTMASS", false},   {"COUPMASS", false}, {"SNORM", false},
+      {"MAXRATIO", false}, {"BAILOUT", true},   {"ASPECT", false},
+      {"JACMIN", false},   {"WARP", false},     {"TAPER", false},
+      {"MINANGLE", false}, {"MAXANGLE", false}, {"DUPNODTOL", false},
+      {"AUTOMERGE", true}};
+  if (const auto it = numeric.find(name);
+      it != numeric.end() && !f[2].empty() &&
+      !(it->second ? parse_integer(f[2]).has_value()
+                   : parse_real(f[2]).has_value()))
+    throw ParseError(std::format("Line {}: PARAM,{} value '{}' is not {}",
+                                 ctx.line_num, name, f[2],
+                                 it->second ? "an integer" : "a real number"));
   ctx.model.params[name] = f[2];
 }
 
@@ -3043,14 +3024,13 @@ void BdfParser::process_rbe3(ParseContext &ctx,
   while (i < f.size()) {
     if (f[i].empty()) { ++i; continue; }
 
-    // Try to parse as real weight
-    double w = 0.0;
-    try {
-      w = parse_double(f[i], ctx.line_num);
-    } catch (...) {
+    // A weight group starts with a real weight; skip anything else.
+    const auto weight = parse_real(f[i]);
+    if (!weight) {
       ++i;
       continue;
     }
+    const double w = *weight;
     ++i;
 
     if (i >= f.size() || f[i].empty()) break;
@@ -3070,13 +3050,10 @@ void BdfParser::process_rbe3(ParseContext &ctx,
                      fld.find('e') != std::string::npos;
       if (is_real)
         break; // start of next weight group
-      // Check if it's an integer
-      try {
-        int nid = parse_int(fld, ctx.line_num);
-        wg.nodes.push_back(NodeId(nid));
-      } catch (...) {
+      const auto nid = parse_integer(fld);
+      if (!nid)
         break;
-      }
+      wg.nodes.push_back(NodeId(*nid));
       ++i;
     }
 
@@ -3096,11 +3073,11 @@ void BdfParser::process_eigrl(ParseContext& ctx,
   EigRL e;
   e.sid = parse_int(f[1], ctx.line_num);
   if (f.size() > 2 && !f[2].empty())
-    try { e.v1 = parse_double(f[2], ctx.line_num); } catch (...) {}
+    e.v1 = parse_double(f[2], ctx.line_num);
   if (f.size() > 3 && !f[3].empty())
-    try { e.v2 = parse_double(f[3], ctx.line_num); } catch (...) {}
+    e.v2 = parse_double(f[3], ctx.line_num);
   if (f.size() > 4 && !f[4].empty())
-    try { e.nd = parse_int(f[4], ctx.line_num); } catch (...) {}
+    e.nd = parse_int(f[4], ctx.line_num);
   // Field 5 = MSGLVL, 6 = MAXSET, 7 = SHFSCL — skip
   if (f.size() > 8 && !f[8].empty()) {
     std::string norm = f[8];
@@ -3129,19 +3106,16 @@ namespace {
   if (u == "FTUBE") return ChbdyType::FTUBE;
   // Numeric legacy form (NASTRAN-95 FLAG: 1=POINT, 2=LINE, 3=REV, 4=AREA3,
   // 5=AREA4, 6=ELCYL, 7=FTUBE)
-  try {
-    const int v = std::stoi(s);
-    switch (v) {
-    case 1: return ChbdyType::POINT;
-    case 2: return ChbdyType::LINE;
-    case 3: return ChbdyType::REV;
-    case 4: return ChbdyType::AREA3;
-    case 5: return ChbdyType::AREA4;
-    case 6: return ChbdyType::ELCYL;
-    case 7: return ChbdyType::FTUBE;
-    default: break;
-    }
-  } catch (...) {}
+  switch (parse_integer(s).value_or(0)) {
+  case 1: return ChbdyType::POINT;
+  case 2: return ChbdyType::LINE;
+  case 3: return ChbdyType::REV;
+  case 4: return ChbdyType::AREA3;
+  case 5: return ChbdyType::AREA4;
+  case 6: return ChbdyType::ELCYL;
+  case 7: return ChbdyType::FTUBE;
+  default: break;
+  }
   throw ParseError(std::format("Line {}: invalid CHBDY type '{}'", line, s));
 }
 

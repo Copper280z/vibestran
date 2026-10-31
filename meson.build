@@ -564,6 +564,7 @@ unit_test_sources = files(
   'tests/unit/test_coord_sys.cpp',
   'tests/unit/test_mpc_handler.cpp',
   'tests/unit/test_inp_parser.cpp',
+  'tests/unit/test_numbers.cpp',
 )
 
 unit_tests = executable(

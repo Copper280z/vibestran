@@ -448,14 +448,10 @@ QualityThresholds build_thresholds(const Model& model) {
         return (it != model.params.end()) ? it->second : std::string{};
     };
     auto get_double = [&](const std::string& key, double def) -> double {
-        auto s = get(key);
-        if (s.empty()) return def;
-        try { return std::stod(s); } catch (...) { return def; }
+        return model.param_real(key).value_or(def);
     };
     auto get_int = [&](const std::string& key, int def) -> int {
-        auto s = get(key);
-        if (s.empty()) return def;
-        try { return std::stoi(s); } catch (...) { return def; }
+        return model.param_integer(key).value_or(def);
     };
 
     if (get("CHECKMODE") == "LENIENT")

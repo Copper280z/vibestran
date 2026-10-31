@@ -49,12 +49,7 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
     const EigRL& eigrl = eigrl_it->second;
 
     // ── WTMASS ────────────────────────────────────────────────────────────────
-    double wtmass = 1.0;
-    auto wt_it = model.params.find("WTMASS");
-    if (wt_it != model.params.end()) {
-        try { wtmass = std::stod(wt_it->second); }
-        catch (...) {}
-    }
+    const double wtmass = model.param_real("WTMASS").value_or(1.0);
 
     // ── 1. DOF map ────────────────────────────────────────────────────────────
     DofMap dof_map = build_dof_map(model, sc);
