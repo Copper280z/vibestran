@@ -2,6 +2,7 @@
 // include/io/results.hpp
 // Solution results and output writers (F06, OP2, CSV).
 
+#include "io/f06_header.hpp"
 #include "core/model.hpp"
 #include "core/types.hpp"
 #include <array>
@@ -204,6 +205,7 @@ struct SubCaseResults {
 
 struct SolverResults {
   std::vector<SubCaseResults> subcases;
+  SolveSummary summary; ///< F06 header SOLUTION, SOLVER and NOTICES
 };
 
 // ── Modal result data ─────────────────────────────────────────────────────────
@@ -227,6 +229,7 @@ struct ModalSubCaseResults {
 
 struct ModalSolverResults {
   std::vector<ModalSubCaseResults> subcases;
+  SolveSummary summary; ///< F06 header SOLUTION, SOLVER and NOTICES
 };
 
 // ── Principal stress helpers ──────────────────────────────────────────────────
@@ -247,31 +250,35 @@ void compute_principal_3d(double sx, double sy, double sz,
 
 class F06Writer {
 public:
+  // Every writer starts with the uniform run header (f06_header.hpp) from
+  // results.summary; run adds its RUN section and may be null.
+
   /// Write linear-static results to an F06 file (respects SubCase output flags)
   static void write(const SolverResults &results, const Model &model,
-                    const std::filesystem::path &path);
+                    const std::filesystem::path &path,
+                    const F06RunInfo *run = nullptr);
 
   /// Write linear-static results to stream (for testing)
   static void write(const SolverResults &results, const Model &model,
-                    std::ostream &out);
+                    std::ostream &out, const F06RunInfo *run = nullptr);
 
   /// Write modal results to an F06 file
   static void write_modal(const ModalSolverResults &results, const Model &model,
-                          const std::filesystem::path &path);
+                          const std::filesystem::path &path,
+                          const F06RunInfo *run = nullptr);
 
   /// Write modal results to stream (for testing)
   static void write_modal(const ModalSolverResults &results, const Model &model,
-                          std::ostream &out);
+                          std::ostream &out, const F06RunInfo *run = nullptr);
 
   /// Write heat-transfer (SOL 153) results to an F06 file.
   static void write_thermal(const SolverResults &results, const Model &model,
-                            const std::filesystem::path &path);
+                            const std::filesystem::path &path,
+                            const F06RunInfo *run = nullptr);
   static void write_thermal(const SolverResults &results, const Model &model,
-                            std::ostream &out);
+                            std::ostream &out, const F06RunInfo *run = nullptr);
 
 private:
-  static void write_header(std::ostream& out);
-  static void write_modal_header(std::ostream& out);
   /// " OUTPUT FOR SUBCASE " + %8d line required by the MYSTRAN validation
   /// suite parser before every results block.
   static void write_subcase_header(std::ostream& out, int subcase_id);

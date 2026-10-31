@@ -296,13 +296,19 @@ preceding_heat_result_index(std::span<const SubCase> subcases,
 SolverResults HeatTransferSteadySolver::solve(const Model &model) {
   model.validate();
   SolverResults results;
-  for (const auto &sc : model.analysis.subcases)
-    results.subcases.push_back(solve_subcase(model, sc));
+  results.summary.solution = solution_section(model, "SOL 153 steady heat transfer");
+  results.summary.solver = solver_section(*backend_);
+  for (const auto &sc : model.analysis.subcases) {
+    results.subcases.push_back(solve_subcase(model, sc, results.summary));
+    collect_notices(results.summary, backend_->notices().take(),
+                    std::format("Subcase {}", sc.id));
+  }
   return results;
 }
 
 SubCaseResults HeatTransferSteadySolver::solve_subcase(const Model &model,
-                                                       const SubCase &sc) {
+                                                       const SubCase &sc,
+                                                       SolveSummary &summary) {
   using Clock = std::chrono::steady_clock;
   using Ms = std::chrono::duration<double, std::milli>;
   const auto t0 = Clock::now();
@@ -313,6 +319,10 @@ SubCaseResults HeatTransferSteadySolver::solve_subcase(const Model &model,
   const int n_free = dof_map.num_free_dofs();
   spdlog::debug("[heat subcase {}] active nodes: {}  prescribed: {}  free DOFs: {}",
                 sc.id, active.size(), prescribed.size(), n_free);
+  summary.solution.add(std::format("Subcase {}", sc.id),
+                       std::format("{} equation{}, {} prescribed temperature{}", n_free,
+                                   n_free == 1 ? "" : "s", prescribed.size(),
+                                   prescribed.size() == 1 ? "" : "s"));
 
   std::vector<double> T_free;
   if (n_free > 0) {

@@ -326,6 +326,18 @@ int main(int argc, const char *argv[]) {
 
   try {
     auto t0 = std::chrono::steady_clock::now();
+    // RUN section of the F06 header; the wall time is set before each write.
+    vibestran::F06RunInfo run;
+    run.input = std::filesystem::absolute(bdf_path);
+    for (int i = 0; i < argc; ++i)
+      run.command_line += (i ? " " : "") + std::string(argv[i]);
+    run.started = vibestran::local_time_text();
+    run.cpu_threads = Eigen::nbThreads();
+    const auto stamp = [&run, t0] {
+      run.elapsed_seconds =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      return &run;
+    };
 
     spdlog::info("Reading: {}", bdf_path.string());
     std::string ext = bdf_path.extension().string();
@@ -364,7 +376,7 @@ int main(int argc, const char *argv[]) {
           return 1;
         }
         const auto& results = std::get<vibestran::magnetic::Results>(solved);
-        if (auto error = vibestran::magnetic::write_results(magnetic_model, results, f06_path)) {
+        if (auto error = vibestran::magnetic::write_results(magnetic_model, results, f06_path, stamp())) {
           spdlog::error("{}", error->message);
           return 1;
         }
@@ -448,7 +460,7 @@ int main(int argc, const char *argv[]) {
                    std::chrono::duration<double>(t1 - t0).count());
 
       // Write thermal F06
-      vibestran::F06Writer::write_thermal(thermal_results, heat_model, f06_path);
+      vibestran::F06Writer::write_thermal(thermal_results, heat_model, f06_path, stamp());
       spdlog::info("F06 written: {}", f06_path.string());
 
       // ── STATICS chain ────────────────────────────────────────────────────
@@ -504,7 +516,7 @@ int main(int argc, const char *argv[]) {
         // Append structural F06 to a sibling file <stem>.structural.F06
         auto struct_f06 =
             std::filesystem::path(f06_path).replace_extension(".structural.F06");
-        vibestran::F06Writer::write(stat_results, stat_model, struct_f06);
+        vibestran::F06Writer::write(stat_results, stat_model, struct_f06, stamp());
         spdlog::info("F06 written: {}", struct_f06.string());
 
         auto struct_op2 =
@@ -558,7 +570,7 @@ int main(int argc, const char *argv[]) {
       double elapsed = std::chrono::duration<double>(t1 - t0).count();
       spdlog::info("Solution complete in {:.3f} s", elapsed);
 
-      vibestran::F06Writer::write_modal(modal_results, model, f06_path);
+      vibestran::F06Writer::write_modal(modal_results, model, f06_path, stamp());
       spdlog::info("F06 written: {}", f06_path.string());
 
       vibestran::Op2Writer::write_modal(modal_results, model, op2_path);
@@ -575,7 +587,7 @@ int main(int argc, const char *argv[]) {
       double elapsed = std::chrono::duration<double>(t1 - t0).count();
       spdlog::info("Solution complete in {:.3f} s", elapsed);
 
-      vibestran::F06Writer::write(results, model, f06_path);
+      vibestran::F06Writer::write(results, model, f06_path, stamp());
       spdlog::info("F06 written: {}", f06_path.string());
 
       vibestran::Op2Writer::write(results, model, op2_path);

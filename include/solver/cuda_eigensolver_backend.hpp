@@ -65,6 +65,8 @@ public:
 
     [[nodiscard]] std::string name() const override;
 
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>> details() const override;
+
     /// GPU device name reported by the CUDA runtime.
     [[nodiscard]] std::string_view device_name() const noexcept;
 

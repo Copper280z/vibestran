@@ -58,6 +58,8 @@ public:
 
     [[nodiscard]] std::string_view name() const noexcept override;
 
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>> details() const override;
+
     /// Phased cuDSS factorization: the analysis is done once per sparsity
     /// pattern, refactor() repeats only the numeric factorization, and solve()
     /// takes any number of right-hand sides. Cholesky is tried first; a

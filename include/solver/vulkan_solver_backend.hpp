@@ -77,6 +77,7 @@ public:
         const FactorRatioCheckPolicy *factor_ratio_policy = nullptr) override;
 
   [[nodiscard]] std::string_view name() const noexcept override;
+  [[nodiscard]] std::vector<std::pair<std::string, std::string>> details() const override;
   // cppcheck-suppress unusedFunction -- queried via SolverBackend in linear_static.cpp
   [[nodiscard]] bool requires_full_symmetric_csr() const noexcept override {
     return true;

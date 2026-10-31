@@ -54,7 +54,7 @@ std::vector<double> copy_diagonal(const DiagonalExpr& diag_expr) {
 [[maybe_unused]] void
 report_factor_ratio_result(const FactorRatioCheckPolicy& policy,
                            const FactorRatioCheckResult& result,
-                           std::string_view backend_label) {
+                           std::string_view backend_label, Notices& notices) {
     if (result.status == FactorRatioCheckStatus::Ok)
         return;
 
@@ -77,7 +77,7 @@ report_factor_ratio_result(const FactorRatioCheckPolicy& policy,
         backend_label);
     if (policy.fatal)
         throw SolverError(message);
-    spdlog::warn("{}", message);
+    notices.add(message);
 }
 #endif
 
@@ -130,9 +130,10 @@ public:
     using Index = Eigen::Index;
 
     SpectraDirectShiftInvert(const SparseMatrix& K, const SparseMatrix& M,
-                             const FactorRatioCheckPolicy* factor_ratio_policy)
+                             const FactorRatioCheckPolicy* factor_ratio_policy,
+                             Notices& notices)
         : K_(K), M_(M), n_(K.rows()),
-          factor_ratio_policy_(factor_ratio_policy) {
+          factor_ratio_policy_(factor_ratio_policy), notices_(notices) {
         if (n_ != K.cols() || n_ != M.rows() || n_ != M.cols()) {
             throw std::invalid_argument(
                 "SpectraDirectShiftInvert: K and M must be square matrices of the same size");
@@ -217,7 +218,7 @@ public:
                         copy_diagonal(shift_.diagonal()),
                         copy_diagonal(simplicial_ldlt_.vectorD()),
                         factor_ratio_policy_->maxratio),
-                    backend_label_);
+                    backend_label_, notices_);
             }
             return;
         }
@@ -240,7 +241,7 @@ public:
                         copy_diagonal(shift_.diagonal()),
                         copy_diagonal(simplicial_llt_.matrixL().diagonal()),
                         factor_ratio_policy_->maxratio),
-                    backend_label_);
+                    backend_label_, notices_);
             }
             return;
         }
@@ -256,7 +257,7 @@ public:
                         copy_diagonal(shift_.diagonal()),
                         copy_diagonal(simplicial_ldlt_.vectorD()),
                         factor_ratio_policy_->maxratio),
-                    backend_label_);
+                    backend_label_, notices_);
             }
             return;
         }
@@ -321,6 +322,7 @@ private:
     Scalar factored_sigma_{0.0};
     std::string backend_label_{"uninitialized"};
     const FactorRatioCheckPolicy* factor_ratio_policy_{nullptr};
+    Notices& notices_;
 
 #if defined(HAVE_ACCELERATE)
     Eigen::AccelerateLLT<SparseMatrix> accelerate_llt_;
@@ -464,7 +466,7 @@ std::vector<EigenPair> SpectraEigensolverBackend::solve(
     // eigenvector is recovered exactly as (lambda - sigma)(K - sigma M)^-1 M phi.
     // Without massless DOFs this is the ordinary shift-invert solve.
     using FullOp = SpectraDirectShiftInvert;
-    FullOp full_op(K, M, factor_ratio_policy);
+    FullOp full_op(K, M, factor_ratio_policy, notices());
 
     const std::vector<int> massed = massed_dof_indices(M);
     const int nm = static_cast<int>(massed.size());

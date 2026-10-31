@@ -915,6 +915,9 @@ struct PreparedPcgSystem {
     int nnz = 0;
     bool lower_only = false;
     PrecondKind precond_kind = PrecondKind::Jacobi;
+    /// Preconditioner fallbacks taken while preparing, for the F06 (they are
+    /// logged when they happen).
+    std::vector<std::string> notices;
 
     PCGDeviceBuffer<T>   d_values;
     PCGDeviceBuffer<int> d_row_ptr;
@@ -1652,8 +1655,14 @@ static PreparedPcgSystem<T> prepare_pcg_system(
             if (ilu_ok) {
                 prepared.precond_kind = PrecondKind::ILU0;
                 prepared.tp = std::move(try_ilu);
+                prepared.notices.push_back(
+                    "CUDA PCG: IC0 preconditioner failed even with a diagonal shift of "
+                    "1.024; used ILU0, which is not symmetric");
             } else {
-                vibestran::log_debug("[cuda-pcg] Using Jacobi preconditioner");
+                vibestran::log_warn("[cuda-pcg] ILU0 failed too -- using the Jacobi "
+                                    "preconditioner");
+                prepared.notices.push_back(
+                    "CUDA PCG: IC0 and ILU0 preconditioners failed; used Jacobi");
             }
         }
         if (profile.enabled)
@@ -2085,6 +2094,8 @@ struct CudaPCGContext {
     int    last_iters   = 0;
     double last_rel_res = 0.0;
     std::optional<vibestran::RefinementReport> last_refinement;
+    /// Preconditioner fallbacks of the solves since the backend last took them.
+    std::vector<std::string> notices;
 };
 
 static std::unique_ptr<CudaPCGContext>
@@ -2200,6 +2211,7 @@ static std::vector<double> solve_cuda_pcg_stable(
     const std::vector<double> diag_d = build_jacobi_diagonal(K);
     auto prepared = prepare_pcg_system<double>(
         ctx.cusparse, n, nnz, K.values, K.row_ptr, K.col_ind, diag_d, lower_only);
+    ctx.notices.insert(ctx.notices.end(), prepared.notices.begin(), prepared.notices.end());
     int total_iters = 0;
     int step = 0;
     auto inner = [&](const std::vector<double>& rhs, double tol) {
@@ -2267,6 +2279,7 @@ static std::vector<double> solve_cuda_pcg_mixed(
     const HostTimePoint prepare_start = HostClock::now();
     auto prepared = prepare_pcg_system<float>(
         ctx.cusparse, n, nnz, vals_f, K.row_ptr, K.col_ind, diag_f, lower_only);
+    ctx.notices.insert(ctx.notices.end(), prepared.notices.begin(), prepared.notices.end());
     if (profile.enabled)
         profile.prepare_system.add(host_elapsed_ms(prepare_start, HostClock::now()));
 

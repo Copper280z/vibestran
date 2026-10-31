@@ -57,6 +57,7 @@ public:
         const FactorRatioCheckPolicy* factor_ratio_policy = nullptr) override;
 
     [[nodiscard]] std::string_view name() const noexcept override;
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>> details() const override;
 
     // ── Diagnostics (valid after each solve()) ─────────────────────────────
 

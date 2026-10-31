@@ -2,6 +2,9 @@
 
 #include "solver/cuda_mixed_pcg_solver_backend.hpp"
 #include "cuda_pcg_backend_impl.hpp"
+#include <iomanip>
+#include <sstream>
+#include <utility>
 
 namespace vibestran {
 
@@ -31,7 +34,22 @@ std::vector<double>
 CudaMixedPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
                                  const std::vector<double>& F,
                                  const FactorRatioCheckPolicy*) {
-    return solve_cuda_pcg_mixed(*ctx_, K, F);
+    auto u = solve_cuda_pcg_mixed(*ctx_, K, F);
+    notices().keep(std::exchange(ctx_->notices, {}));
+    return u;
+}
+
+std::vector<std::pair<std::string, std::string>> CudaMixedPCGSolverBackend::details() const {
+    return {{"Device", ctx_->device_name},
+            {"Method", "conjugate gradient, IC0 preconditioner (ILU0, then Jacobi, when IC0 fails)"},
+            {"Tolerance", [this] {
+                 std::ostringstream text;
+                 text << std::scientific << std::setprecision(1) << ctx_->tolerance
+                      << " (estimated relative error)";
+                 return text.str();
+             }()},
+            {"Precision", "fp32 inner solves, refined in fp64"},
+            {"Iterative refinement", "always"}};
 }
 
 std::string_view CudaMixedPCGSolverBackend::name() const noexcept {

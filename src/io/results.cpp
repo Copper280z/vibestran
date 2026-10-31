@@ -15,28 +15,6 @@ namespace vibestran {
 
 namespace {
 
-constexpr int kF06PageWidth = 132;
-
-std::string center_text(std::string_view text, int width = kF06PageWidth) {
-    if (static_cast<int>(text.size()) >= width) return std::string(text);
-    const int pad = (width - static_cast<int>(text.size())) / 2;
-    return std::string(static_cast<std::size_t>(pad), ' ') + std::string(text);
-}
-
-std::string page_line(std::string_view text) {
-    return center_text(text) + "\n";
-}
-
-std::string banner_line(std::string_view left, std::string_view right,
-                        int width = kF06PageWidth) {
-    if (static_cast<int>(left.size() + right.size() + 1) >= width)
-        return std::string(left) + " " + std::string(right) + "\n";
-
-    const int gap = width - static_cast<int>(left.size()) - static_cast<int>(right.size());
-    return std::string(left) + std::string(static_cast<std::size_t>(gap), ' ')
-         + std::string(right) + "\n";
-}
-
 const SubCase* find_model_subcase(const Model& model, int subcase_id) {
     const auto it = std::find_if(
         model.analysis.subcases.begin(), model.analysis.subcases.end(),
@@ -251,15 +229,16 @@ void compute_principal_3d(double sx, double sy, double sz,
 // MYSTRAN_Validation suite parser (f06_query.py) can read our files.
 
 void F06Writer::write(const SolverResults& results, const Model& model,
-                      const std::filesystem::path& path) {
+                      const std::filesystem::path& path, const F06RunInfo* run) {
     std::ofstream f(path);
     if (!f) throw SolverError(std::format("Cannot write F06: {}", path.string()));
-    write(results, model, f);
+    write(results, model, f, run);
 }
 
 void F06Writer::write(const SolverResults& results, const Model& model,
-                      std::ostream& out) {
-    write_header(out);
+                      std::ostream& out, const F06RunInfo* run) {
+    write_f06_header(out, "S O L   1 0 1   L I N E A R   S T A T I C   A N A L Y S I S",
+                     results.summary, run);
 
     // Shell thickness and output fibres for fibre stresses and strains.
     // PCOMP has no Z1/Z2; its fibres are the laminate's faces about the
@@ -358,21 +337,6 @@ void F06Writer::write_subcase_header(std::ostream& out, const int subcase_id) {
     // suite parser reads the subcase number from columns 21-28 and expects
     // this line before (nearly) every results block.
     out << " OUTPUT FOR SUBCASE " << std::setw(8) << subcase_id << "\n";
-}
-
-void F06Writer::write_header(std::ostream& out) {
-    // Date/time for the header
-    std::time_t t = std::time(nullptr);
-    char date_buf[32];
-    std::strftime(date_buf, sizeof(date_buf), "%B %e, %Y", std::localtime(&t));
-
-    out << "1" << banner_line("V I B E S T R A N", date_buf, kF06PageWidth - 1);
-    out << "0" << std::string(static_cast<std::size_t>(kF06PageWidth - 1), ' ') << "\n";
-    // Line 3 must start with " VIBESTRAN Version" for the validation suite
-    // parser to recognise the file (see MYSTRAN_Validation/f06_query.py).
-    out << " VIBESTRAN Version 1.0.0   F06 MYSTRAN-COMPATIBLE OUTPUT\n";
-    out << page_line("S O L   1 0 1   L I N E A R   S T A T I C   A N A L Y S I S");
-    out << "\n";
 }
 
 void F06Writer::write_displacement_table(const SubCaseResults& sc,
@@ -1195,15 +1159,16 @@ void F06Writer::write_solid_gpstress_table(const SubCaseResults& sc,
 // ── F06 modal output ──────────────────────────────────────────────────────────
 
 void F06Writer::write_modal(const ModalSolverResults& results, const Model& model,
-                            const std::filesystem::path& path) {
+                            const std::filesystem::path& path, const F06RunInfo* run) {
     std::ofstream f(path);
     if (!f) throw SolverError(std::format("Cannot write F06: {}", path.string()));
-    write_modal(results, model, f);
+    write_modal(results, model, f, run);
 }
 
 void F06Writer::write_modal(const ModalSolverResults& results, const Model& /*model*/,
-                            std::ostream& out) {
-    write_modal_header(out);
+                            std::ostream& out, const F06RunInfo* run) {
+    write_f06_header(out, "S O L   1 0 3   N O R M A L   M O D E S   A N A L Y S I S",
+                     results.summary, run);
     for (const auto& msc : results.subcases) {
         const bool do_vec = msc.eigvec_print;
 
@@ -1214,20 +1179,6 @@ void F06Writer::write_modal(const ModalSolverResults& results, const Model& /*mo
                 write_eigenvector_table(mode, msc.id, msc.label, out);
     }
     out << "\n\n                     * * * END OF JOB * * *\n\n";
-}
-
-void F06Writer::write_modal_header(std::ostream& out) {
-    std::time_t t = std::time(nullptr);
-    char date_buf[32];
-    std::strftime(date_buf, sizeof(date_buf), "%B %e, %Y", std::localtime(&t));
-
-    out << "1" << banner_line("V I B E S T R A N", date_buf, kF06PageWidth - 1);
-    out << "0" << std::string(static_cast<std::size_t>(kF06PageWidth - 1), ' ') << "\n";
-    // Line 3 must start with " VIBESTRAN Version" for the validation suite
-    // parser to recognise the file (see MYSTRAN_Validation/f06_query.py).
-    out << " VIBESTRAN Version 1.0.0   F06 MYSTRAN-COMPATIBLE OUTPUT\n";
-    out << page_line("S O L   1 0 3   N O R M A L   M O D E S   A N A L Y S I S");
-    out << "\n";
 }
 
 void F06Writer::write_eigenvalue_table(const ModalSubCaseResults& msc,
@@ -1296,23 +1247,16 @@ void F06Writer::write_eigenvector_table(const ModeResult& mode, int subcase_id,
 // ── Heat-transfer (SOL 153) F06 output ───────────────────────────────────────
 
 void F06Writer::write_thermal(const SolverResults& results, const Model& model,
-                              const std::filesystem::path& path) {
+                              const std::filesystem::path& path, const F06RunInfo* run) {
     std::ofstream f(path);
     if (!f) throw SolverError(std::format("Cannot write F06: {}", path.string()));
-    write_thermal(results, model, f);
+    write_thermal(results, model, f, run);
 }
 
 void F06Writer::write_thermal(const SolverResults& results, const Model& model,
-                              std::ostream& out) {
-    // Header (heat-transfer banner instead of SOL 101)
-    std::time_t t = std::time(nullptr);
-    char date_buf[32];
-    std::strftime(date_buf, sizeof(date_buf), "%B %e, %Y", std::localtime(&t));
-    out << "1" << banner_line("V I B E S T R A N", date_buf, kF06PageWidth - 1);
-    out << "0" << std::string(static_cast<std::size_t>(kF06PageWidth - 1), ' ') << "\n";
-    out << " VIBESTRAN Version 1.0.0   F06 MYSTRAN-COMPATIBLE OUTPUT\n";
-    out << page_line("S O L   1 5 3   L I N E A R   H E A T   T R A N S F E R");
-    out << "\n";
+                              std::ostream& out, const F06RunInfo* run) {
+    write_f06_header(out, "S O L   1 5 3   L I N E A R   H E A T   T R A N S F E R",
+                     results.summary, run);
 
     for (const auto& sc : results.subcases) {
         const SubCase* msc = find_model_subcase(model, sc.id);

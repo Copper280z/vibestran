@@ -51,7 +51,8 @@ private:
     std::unique_ptr<SolverBackend> backend_;
     std::string dump_prefix_;
 
-    SubCaseResults solve_subcase(const Model& model, const SubCase& sc);
+    SubCaseResults solve_subcase(const Model& model, const SubCase& sc,
+                                 SolveSummary& summary);
 
     /// Build DofMap with SPC constraints only (no MPC elimination yet).
     DofMap build_dof_map(const Model& model, const SubCase& sc);

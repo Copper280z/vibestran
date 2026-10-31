@@ -12,12 +12,13 @@
 
 namespace vibestran::magnetic {
 namespace {
-void write_f06(std::ostream &f06, const Model &model, const Results &results) {
+void write_f06(std::ostream &f06, const Model &model, const Results &results,
+               const F06RunInfo *run) {
+  write_f06_header(f06,
+                   "S O L   M A G S T A T   M A G N E T O S T A T I C   A N A "
+                   "L Y S I S",
+                   results.summary, run);
   f06 << std::setprecision(12);
-  f06 << "VIBESTRAN SOL MAGSTAT — SI UNITS\nFirst-order magnetic elements; CPU "
-         "sparse Cholesky\n";
-  f06 << "Magnetic volume cells: " << results.mesh.cells.size()
-      << "  degrees of freedom: " << results.mesh.dofs() << "\n";
   for (const auto &source : results.sources)
     f06 << (source.wire ? "WIRE PATH " : "COIL ") << source.id
         << "  conservation error " << source.conservation_error
@@ -613,13 +614,14 @@ bool output_available() {
 }
 
 Status write_results(const Model &model, const Results &results,
-                     const std::filesystem::path &report) {
+                     const std::filesystem::path &report,
+                     const F06RunInfo *run) {
   auto base = report;
   base.replace_extension();
   std::ofstream f06(report);
   if (!f06)
     return Error{"Cannot open magnetic report " + report.string()};
-  write_f06(f06, model, results);
+  write_f06(f06, model, results, run);
   f06.close();
   if (!f06)
     return Error{"Failed writing magnetic report " + report.string()};

@@ -29,13 +29,19 @@ ModalSolver::ModalSolver(std::unique_ptr<EigensolverBackend> backend)
 ModalSolverResults ModalSolver::solve(const Model& model) {
     model.validate();
     ModalSolverResults results;
-    for (const auto& sc : model.analysis.subcases)
-        results.subcases.push_back(solve_subcase(model, sc));
+    results.summary.solution = solution_section(model, "SOL 103 normal modes");
+    results.summary.solver = solver_section(*backend_);
+    for (const auto& sc : model.analysis.subcases) {
+        results.subcases.push_back(solve_subcase(model, sc, results.summary));
+        collect_notices(results.summary, backend_->notices().take(),
+                        std::format("Subcase {}", sc.id));
+    }
     return results;
 }
 
 ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
-                                               const SubCase& sc) {
+                                               const SubCase& sc,
+                                               SolveSummary& summary) {
     using Clock = std::chrono::steady_clock;
     using Ms    = std::chrono::duration<double, std::milli>;
     const auto t0 = Clock::now();
@@ -130,6 +136,7 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
     // Log per-mode residual ||K*φ - λM*φ|| / ||K*φ||.
     // Near-zero rigid-body modes (λ ≈ 0) produce ||K*φ|| ≈ 0; the residual is
     // reported as the absolute norm ||K*φ - λM*φ|| for those modes instead.
+    double max_rel_res = 0.0;
     for (int i = 0; i < static_cast<int>(pairs.size()); ++i) {
         const Eigen::VectorXd Kphi =
             K_eigen.selfadjointView<Eigen::Lower>() * pairs[i].eigenvector;
@@ -139,6 +146,7 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
         const double kphi_norm = Kphi.norm();
         const double rel_res   = (kphi_norm > 1e-300)
             ? res.norm() / kphi_norm : res.norm();
+        max_rel_res = std::max(max_rel_res, rel_res);
         const double freq_hz =
             std::sqrt(std::max(pairs[i].eigenvalue, 0.0)) /
             (2.0 * std::numbers::pi);
@@ -146,6 +154,16 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
                      "residual ||K*φ - λM*φ|| / ||K*φ|| = {:.3e}",
                      sc.id, i + 1, freq_hz, rel_res);
     }
+
+    const std::string range = eigrl.v2 < 1e29
+        ? std::format("{:.6g} to {:.6g} Hz", eigrl.v1, eigrl.v2)
+        : std::format("above {:.6g} Hz", eigrl.v1);
+    summary.solution.add(
+        std::format("Subcase {}", sc.id),
+        std::format("{} equation{}; EIGRL {} ({}, ND={}); {} {} found, "
+                    "largest residual {:.3e}; WTMASS={:.6g}",
+                    n, n == 1 ? "" : "s", sc.eigrl_id, range, eigrl.nd, pairs.size(),
+                    pairs.size() == 1 ? "mode" : "modes", max_rel_res, wtmass));
 
     // ── 6. Build ModalSubCaseResults ──────────────────────────────────────────
     ModalSubCaseResults msc;

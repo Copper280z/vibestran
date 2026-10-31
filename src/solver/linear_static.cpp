@@ -301,14 +301,19 @@ SolverResults LinearStaticSolver::solve(const Model &model) {
   model.validate();
 
   SolverResults results;
+  results.summary.solution = solution_section(model, "SOL 101 linear static");
+  results.summary.solver = solver_section(*backend_);
   for (const auto &sc : model.analysis.subcases) {
-    results.subcases.push_back(solve_subcase(model, sc));
+    results.subcases.push_back(solve_subcase(model, sc, results.summary));
   }
   return results;
 }
 
 SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
-                                                 const SubCase &sc) {
+                                                 const SubCase &sc,
+                                                 SolveSummary &summary) {
+  // Warnings for the F06 NOTICES, with the backend's, under this subcase.
+  Notices notices;
   using Clock = std::chrono::steady_clock;
   using Ms = std::chrono::duration<double, std::milli>;
   const auto t0 = Clock::now();
@@ -417,29 +422,38 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
                    sc.id, rep->estimated_error, rep->corrections, rep->initial_error,
                    rep->epsilon, rep->relative_residual, rep->backward_error);
     }
+    summary.solution.add(
+        std::format("Subcase {}", sc.id),
+        refined ? std::format("{} equation{}; estimated relative error {:.2e} after {} "
+                              "refinement correction(s), epsilon {:.2e}",
+                              csr.n, csr.n == 1 ? "" : "s", rep->estimated_error,
+                              rep->corrections, rep->epsilon)
+                : std::format("{} equation{}; epsilon {:.2e}, backward error {:.2e}", csr.n,
+                              csr.n == 1 ? "" : "s", rep->epsilon, rep->backward_error));
     constexpr double kAccuracyWarning = 1e-6;
     constexpr double kBackwardErrorWarning = 1e-10;
     if (indicates_mechanism(*rep, refined)) {
-      spdlog::warn("[subcase {}] the solution does not equilibrate the load ({}): the "
-                   "stiffness matrix is singular or too ill-conditioned for double "
-                   "precision; the model likely has an unrestrained mechanism loaded by the "
-                   "applied forces, and results are not meaningful",
-                   sc.id,
-                   refined ? std::format("estimated relative error {:.2e} after refinement",
-                                         rep->estimated_error)
-                           : std::format("epsilon {:.2e}", rep->epsilon));
+      notices.add(std::format(
+          "the solution does not equilibrate the load ({}): the "
+          "stiffness matrix is singular or too ill-conditioned for double "
+          "precision; the model likely has an unrestrained mechanism loaded by the "
+          "applied forces, and results are not meaningful",
+          refined ? std::format("estimated relative error {:.2e} after refinement",
+                                rep->estimated_error)
+                  : std::format("epsilon {:.2e}", rep->epsilon)));
     } else if (refined && !rep->converged && rep->estimated_error > kAccuracyWarning) {
-      spdlog::warn("[subcase {}] the stiffness matrix is very ill-conditioned: the solution "
-                   "is only accurate to about {:.0e} (relative)",
-                   sc.id, rep->estimated_error);
+      notices.add(std::format("the stiffness matrix is very ill-conditioned: the solution "
+                              "is only accurate to about {:.0e} (relative)",
+                              rep->estimated_error));
     } else if (!refined && std::abs(rep->epsilon) > kAccuracyWarning) {
-      spdlog::warn("[subcase {}] the stiffness matrix is very ill-conditioned (epsilon "
-                   "{:.1e}): the solution may only be accurate to about that (relative); "
-                   "--refine (or PARAM,REFINE,YES) refines it to full accuracy",
-                   sc.id, rep->epsilon);
+      notices.add(std::format("the stiffness matrix is very ill-conditioned (epsilon "
+                              "{:.1e}): the solution may only be accurate to about that "
+                              "(relative); --refine (or PARAM,REFINE,YES) refines it to "
+                              "full accuracy",
+                              rep->epsilon));
     } else if (!refined && rep->backward_error > kBackwardErrorWarning) {
-      spdlog::warn("[subcase {}] the solve was not backward stable (backward error {:.2e})",
-                   sc.id, rep->backward_error);
+      notices.add(std::format("the solve was not backward stable (backward error {:.2e})",
+                              rep->backward_error));
     }
   }
 
@@ -464,8 +478,7 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
     GridForceOutput forces = compute_grid_forces(
         model, sc, mpc_handler, u_free, want_spc, want_mpc, want_gp);
     if (forces.error) {
-      spdlog::warn("Subcase {}: constraint forces unavailable: {}", sc.id,
-                   *forces.error);
+      notices.add(std::format("constraint forces unavailable: {}", *forces.error));
       result.constraint_force_error = std::move(*forces.error);
     }
     result.spc_forces = std::move(forces.spc_forces);
@@ -478,6 +491,9 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
 
   spdlog::debug("[subcase {}] total: {:.3f} ms", sc.id, Ms(t7 - t0).count());
 
+  const std::string context = std::format("Subcase {}", sc.id);
+  collect_notices(summary, backend_->notices().take(), context);
+  collect_notices(summary, notices.take(), context);
   return result;
 }
 

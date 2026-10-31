@@ -121,6 +121,22 @@ TEST_F(MagneticCli, UniformFieldEnergyFieldsAndProbes) {
   ASSERT_EQ(probes.rows(), 2U);
   for (size_t i = 0; i < probes.rows(); ++i)
     EXPECT_NEAR(probes.at(i, 2), .3, 1e-12);
+
+  // The F06 opens with the same header as the structural solutions, its
+  // sections in order, and the run's input deck.
+  const std::string f06 = read(fs::path(file).replace_extension("").replace_extension(".F06"));
+  size_t at = 0;
+  for (const char *line : {" VIBESTRAN Version ", "S O L   M A G S T A T", "\n RUN\n",
+                           "   Input .................... ", "\n BUILD\n", "\n SOLUTION\n",
+                           "   Formulation .............. first-order edge elements",
+                           "\n SOLVER\n", "   Backend .................. ",
+                           "   Indefinite fallback ...... none, positive definite required",
+                           "   Tangent reuse ............ ", "\nSUBCASE 1\n"}) {
+    const size_t next = f06.find(line, at);
+    ASSERT_NE(next, std::string::npos) << "'" << line << "' after offset " << at << "\n" << f06;
+    at = next;
+  }
+  EXPECT_NE(f06.find((fs::path(file).parent_path() / "uniform.bdf").string()), std::string::npos);
 }
 
 TEST_F(MagneticCli, NativeAndWarpedSolidsReproduceUniformFields) {

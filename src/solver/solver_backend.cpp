@@ -87,10 +87,10 @@ std::vector<double> copy_diagonal(const DiagonalExpr &diag_expr) {
 }
 
 /// An error for a non-positive factor diagonal or a fatal MAXRATIO breach; a
-/// non-fatal breach is a warning.
+/// non-fatal breach is a notice.
 Status factor_ratio_status(const FactorRatioCheckPolicy &policy,
                            const FactorRatioCheckResult &result,
-                           std::string_view backend_label) {
+                           std::string_view backend_label, Notices &notices) {
   if (result.status == FactorRatioCheckStatus::Ok)
     return std::nullopt;
 
@@ -112,7 +112,7 @@ Status factor_ratio_status(const FactorRatioCheckPolicy &policy,
       result.row_1based, result.matrix_diag, result.factor_diag, backend_label);
   if (policy.fatal)
     return Error{std::move(message)};
-  spdlog::warn("{}", message);
+  notices.add(std::move(message));
   return std::nullopt;
 }
 #endif
@@ -152,9 +152,10 @@ constexpr const char *kLdltLabel = "simplicial-ldlt";
 /// handles near-singular and mildly indefinite systems.
 template <class Primary> class EigenDirectFactor final : public LinearFactor {
 public:
-  EigenDirectFactor(const FactorOptions &options, const char *primary_label)
-      : require_spd_(options.require_spd), primary_label_(primary_label),
-        label_(primary_label) {
+  EigenDirectFactor(const FactorOptions &options, const char *primary_label,
+                    Notices &notices)
+      : require_spd_(options.require_spd), notices_(notices),
+        primary_label_(primary_label), label_(primary_label) {
     if (options.factor_ratio_policy != nullptr)
       policy_ = *options.factor_ratio_policy;
 #if defined(HAVE_ACCELERATE)
@@ -210,6 +211,9 @@ public:
                                  primary_label_)};
       if (auto e = factor_ldlt(A))
         return e;
+      notices_.add(std::format("The matrix is not numerically positive definite: "
+                               "{} failed and it was solved with {}",
+                               primary_label_, kLdltLabel));
     }
     const auto t_done = Clock::now();
     if (auto e = check_factor_ratio(K))
@@ -293,14 +297,14 @@ private:
           evaluate_factor_ratio_check(extract_csr_diagonal(K),
                                       copy_diagonal(ldlt_->vectorD()),
                                       policy_->maxratio),
-          label_);
+          label_, notices_);
     if constexpr (std::is_same_v<Primary, Eigen::SimplicialLLT<ESM>>)
       return factor_ratio_status(
           *policy_,
           evaluate_factor_ratio_check(extract_csr_diagonal(K),
                                       copy_diagonal(llt_.matrixL().diagonal()),
                                       policy_->maxratio),
-          label_);
+          label_, notices_);
 #endif
     spdlog::debug("[cpu-direct] skipping MAXRATIO check for {} because factor "
                   "diagonal is unavailable",
@@ -317,6 +321,7 @@ private:
   }
 
   bool require_spd_;
+  Notices &notices_;
   std::optional<FactorRatioCheckPolicy> policy_;
   const char *primary_label_;
   const char *label_;
@@ -337,8 +342,8 @@ private:
 template <class Primary>
 Result<std::unique_ptr<LinearFactor>> make_direct_factor(const CsrData &K,
                                                          const FactorOptions &options,
-                                                         const char *label) {
-  auto factor = std::make_unique<EigenDirectFactor<Primary>>(options, label);
+                                                         const char *label, Notices &notices) {
+  auto factor = std::make_unique<EigenDirectFactor<Primary>>(options, label, notices);
   if (auto e = factor->refactor(K))
     return *e;
   return std::unique_ptr<LinearFactor>(std::move(factor));
@@ -423,17 +428,51 @@ EigenSolverBackend::factor(const CsrData &K, const FactorOptions &options) {
   // Priority: Apple Accelerate (macOS) > SuiteSparse CHOLMOD (Linux) >
   // SimplicialLLT.
 #if defined(HAVE_ACCELERATE)
-  return make_direct_factor<Eigen::AccelerateLLT<ESM>>(K, options, "accelerate-llt");
+  return make_direct_factor<Eigen::AccelerateLLT<ESM>>(K, options, "accelerate-llt",
+                                                     notices());
 #elif defined(EIGEN_CHOLMOD_SUPPORT)
   // CholmodDecomposition may choose a simplicial LDL^T, which accepts
   // indefinite matrices, so require_spd uses the supernodal LL^T.
   if (options.require_spd)
     return make_direct_factor<Eigen::CholmodSupernodalLLT<ESM>>(K, options,
-                                                                "cholmod-llt");
-  return make_direct_factor<Eigen::CholmodDecomposition<ESM>>(K, options, "cholmod");
+                                                                "cholmod-llt", notices());
+  return make_direct_factor<Eigen::CholmodDecomposition<ESM>>(K, options, "cholmod",
+                                                              notices());
 #else
-  return make_direct_factor<Eigen::SimplicialLLT<ESM>>(K, options, "simplicial-llt");
+  return make_direct_factor<Eigen::SimplicialLLT<ESM>>(K, options, "simplicial-llt",
+                                                     notices());
 #endif
+}
+
+std::vector<std::pair<std::string, std::string>> EigenSolverBackend::details() const {
+#if defined(HAVE_ACCELERATE)
+  return {{"Method", "sparse Cholesky (LL^T)"},
+          {"Indefinite fallback", "LDL^T"},
+          {"Ordering", accelerate_order_config().label},
+          {"Precision", "fp64"},
+          {"Iterative refinement", refine_ ? "on" : "off"}};
+#elif defined(EIGEN_CHOLMOD_SUPPORT)
+  return {{"Method", "CHOLMOD sparse Cholesky"},
+          {"Indefinite fallback", "simplicial LDL^T"},
+          {"Ordering", "CHOLMOD default (AMD or METIS)"},
+          {"Precision", "fp64"},
+          {"Iterative refinement", refine_ ? "on" : "off"}};
+#else
+  return {{"Method", "Eigen simplicial Cholesky (LL^T)"},
+          {"Indefinite fallback", "LDL^T"},
+          {"Ordering", "AMD"},
+          {"Precision", "fp64"},
+          {"Iterative refinement", refine_ ? "on" : "off"}};
+#endif
+}
+
+std::vector<std::pair<std::string, std::string>> EigenPCGSolverBackend::details() const {
+  return {{"Method", "conjugate gradient, incomplete Cholesky preconditioner"},
+          {"Tolerance", std::format("{:.1e} (estimated relative error)", tolerance_)},
+          {"Iteration limit", max_iters_ > 0 ? std::to_string(max_iters_)
+                                             : std::string("2n per solve")},
+          {"Precision", "fp64"},
+          {"Iterative refinement", "always"}};
 }
 
 std::vector<double>

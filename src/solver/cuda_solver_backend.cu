@@ -207,6 +207,20 @@ CudaSolverPrecision CudaSolverBackend::precision() const noexcept {
   return ctx_->precision;
 }
 
+std::vector<std::pair<std::string, std::string>> CudaSolverBackend::details() const {
+  const bool fp32 = ctx_->precision == CudaSolverPrecision::Float32;
+  return {{"Device", ctx_->device_name},
+          {"Method", "cuDSS sparse Cholesky"},
+          {"Indefinite fallback", "LU"},
+          {"cuDSS version", std::to_string(CUDSS_VERSION_MAJOR) + "." +
+                                std::to_string(CUDSS_VERSION_MINOR) + "." +
+                                std::to_string(CUDSS_VERSION_PATCH)},
+          {"Precision", fp32 ? "fp32 factorization, refined in fp64 (fp64 when "
+                               "fp32 cannot converge)"
+                             : "fp64"},
+          {"Iterative refinement", fp32 ? "always" : refine_ ? "on" : "off"}};
+}
+
 // ── cudss_execute_phase: thin error-checking wrapper
 // ─────────────────────────────────────────────────────
 
@@ -473,11 +487,14 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
     // An fp32 factorization contracts the error by cond(K) * 6e-8 per
     // correction; beyond cond(K) ~ 1e7 (thin shells and solids) it cannot
     // be refined, and its solution is unusable.
-    vibestran::log_warn(
-        "[cuda] fp32 factorization could not be refined to double accuracy "
+    notices().add(
+        "cuDSS fp32 factorization could not be refined to double accuracy "
         "(estimated relative error " +
         std::format("{:.2e}", last_refinement_->estimated_error) +
-        ": the stiffness matrix is too ill-conditioned for fp32) -- retrying in fp64");
+        ": the matrix is too ill-conditioned for fp32); solved again in fp64");
+    // An unrefined fp64 solve records no report; the fp32 one must not stand
+    // in for it.
+    last_refinement_.reset();
   }
   return solve_typed<double>(K, F);
 }
@@ -605,6 +622,8 @@ CudaSolverBackend::solve_typed(const SparseMatrixBuilder::CsrData &K,
           ", n=" + std::to_string(n) +
           ") -- stiffness matrix is singular. Check boundary conditions (SPCs)");
     last_cholesky_ = false;
+    notices().add("The matrix is not numerically positive definite: cuDSS Cholesky" +
+                  suffix + " failed and it was solved with LU");
   }
 
   // The accuracy achieved is reported by the caller from last_refinement()
@@ -809,8 +828,8 @@ private:
 /// while the sparsity pattern is unchanged.
 template <typename Scalar> class CudssSystem {
 public:
-  CudssSystem(cudssHandle_t handle, bool require_spd)
-      : handle_(handle), require_spd_(require_spd) {}
+  CudssSystem(cudssHandle_t handle, bool require_spd, Notices &notices)
+      : handle_(handle), require_spd_(require_spd), notices_(notices) {}
 
   [[nodiscard]] Status factor(const CsrData &K, FactorStats &stats) {
     if (!same_pattern(K)) {
@@ -846,9 +865,6 @@ public:
       return Error{"cuDSS Cholesky" + suffix() + " factorization failed at pivot " +
                    std::to_string(info) +
                    ": the matrix is not numerically positive definite"};
-    vibestran::log_debug("[cuda] cuDSS Cholesky" + suffix() +
-                         " failed at pivot " + std::to_string(info) +
-                         " -- falling back to LU");
 
     const CsrData *full = &K;
     CsrData full_copy;
@@ -872,6 +888,9 @@ public:
                    std::to_string(lu_info) +
                    " -- the matrix may be singular. Check boundary conditions (SPCs)"};
     use_lu_ = true;
+    notices_.add("The matrix is not numerically positive definite: cuDSS Cholesky" +
+                 suffix() + " failed at pivot " + std::to_string(info) +
+                 " and it was solved with LU");
     return std::nullopt;
   }
 
@@ -898,6 +917,7 @@ private:
 
   cudssHandle_t handle_;
   bool require_spd_;
+  Notices &notices_;
   int n_{0};
   bool lower_only_{false};
   std::vector<int> row_ptr_, col_ind_;
@@ -907,12 +927,13 @@ private:
 
 class CudaFactor final : public LinearFactor {
 public:
-  CudaFactor(cudssHandle_t handle, CudaSolverPrecision precision, bool require_spd)
-      : handle_(handle), require_spd_(require_spd) {
+  CudaFactor(cudssHandle_t handle, CudaSolverPrecision precision, bool require_spd,
+             Notices &notices)
+      : handle_(handle), require_spd_(require_spd), notices_(notices) {
     if (precision == CudaSolverPrecision::Float32)
-      fp32_ = std::make_unique<CudssSystem<float>>(handle, require_spd);
+      fp32_ = std::make_unique<CudssSystem<float>>(handle, require_spd, notices);
     else
-      fp64_ = std::make_unique<CudssSystem<double>>(handle, require_spd);
+      fp64_ = std::make_unique<CudssSystem<double>>(handle, require_spd, notices);
   }
 
   [[nodiscard]] int size() const noexcept override { return n_; }
@@ -945,8 +966,7 @@ public:
         if (status) {
           // A matrix that is SPD in double can fail Cholesky in float once
           // cond(K) approaches 1/eps_float, so only fp64 decides.
-          vibestran::log_warn("[cuda] " + status->message +
-                              " -- switching this factor to fp64");
+          notices_.add(status->message + "; factored again in fp64");
           switch_to_fp64();
           status = fp64_->factor(K, stats_);
         }
@@ -979,10 +999,9 @@ public:
       std::vector<double> X(B.size());
       if (fp32_ && !solve_refined(B, X, nrhs)) {
         // cond(K) is too large for fp32: refactor in fp64 and solve again.
-        vibestran::log_warn(
-            "[cuda] fp32 factorization could not be refined to double accuracy "
-            "(the matrix is too ill-conditioned for fp32) -- switching this "
-            "factor to fp64");
+        notices_.add("cuDSS fp32 factorization could not be refined to double "
+                     "accuracy (the matrix is too ill-conditioned for fp32); "
+                     "factored again in fp64");
         const CsrData K = std::move(K_);
         switch_to_fp64();
         if (auto e = fp64_->factor(K, stats_)) {
@@ -1003,7 +1022,7 @@ public:
 
 private:
   void switch_to_fp64() {
-    fp64_ = std::make_unique<CudssSystem<double>>(handle_, require_spd_);
+    fp64_ = std::make_unique<CudssSystem<double>>(handle_, require_spd_, notices_);
     fp32_.reset();
     K_ = CsrData{};
   }
@@ -1034,6 +1053,7 @@ private:
 
   cudssHandle_t handle_;
   bool require_spd_;
+  Notices &notices_;
   int n_{0};
   bool ready_{false};
   CsrData K_;
@@ -1050,7 +1070,7 @@ CudaSolverBackend::factor(const SparseMatrixBuilder::CsrData &K,
   if (options.factor_ratio_policy != nullptr)
     vibestran::log_debug("[cuda] factor(): MAXRATIO is not checked by the cuDSS factor");
   auto factor = std::make_unique<CudaFactor>(ctx_->cudss, ctx_->precision,
-                                             options.require_spd);
+                                             options.require_spd, notices());
   if (auto e = factor->refactor(K))
     return *e;
   return std::unique_ptr<LinearFactor>(std::move(factor));

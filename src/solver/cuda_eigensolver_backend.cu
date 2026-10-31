@@ -549,6 +549,12 @@ std::string_view CudaEigensolverBackend::device_name() const noexcept {
   return ctx_->device_name;
 }
 
+std::vector<std::pair<std::string, std::string>> CudaEigensolverBackend::details() const {
+  return {{"Device", ctx_->device_name},
+          {"Method", "shift-invert Lanczos, cuDSS factorization of K - sigma M"},
+          {"Precision", "fp64"}};
+}
+
 // ── solve
 // ─────────────────────────────────────────────────────────────────────
 

@@ -1,4 +1,5 @@
 #pragma once
+#include "io/f06_header.hpp"
 #include "magnetic/mesh.hpp"
 
 namespace vibestran {
@@ -62,6 +63,7 @@ struct Results {
   std::vector<Source> sources;
   std::vector<CircuitDefinition> circuits;
   std::vector<CaseResults> cases;
+  SolveSummary summary; // F06 header sections
 };
 [[nodiscard]] Result<std::vector<Source>> prepare_sources(const Model &model,
                                                           const Mesh &mesh);
@@ -102,6 +104,8 @@ source_currents(const Model &model, std::span<const Source> sources, int set);
 [[nodiscard]] bool output_available();
 // Writes the F06 report and name.mag.vtkhdf: VTKHDF fields that ParaView
 // opens directly, plus the /MAGSTAT results group.
+// run fills the header's RUN section; null omits it.
 [[nodiscard]] Status write_results(const Model &model, const Results &results,
-                                   const std::filesystem::path &report);
+                                   const std::filesystem::path &report,
+                                   const F06RunInfo *run = nullptr);
 } // namespace vibestran::magnetic

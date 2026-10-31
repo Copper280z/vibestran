@@ -40,6 +40,17 @@ std::string_view VulkanSolverBackend::name() const noexcept {
     return "Vulkan PCG (Jacobi preconditioner)";
 }
 
+std::vector<std::pair<std::string, std::string>> VulkanSolverBackend::details() const {
+    return {{"Device", ctx_.device_info().device_name},
+            {"Method", std::format("conjugate gradient, Jacobi preconditioner (CPU direct "
+                                   "below {} equations)", cfg_.min_dofs_for_gpu)},
+            {"Tolerance", std::format("{:.1e} (estimated relative error)", cfg_.tolerance)},
+            {"Precision", cfg_.use_double ? "fp64"
+                                          : "fp32 inner solves, refined in fp64 (fp64 "
+                                            "retry when fp32 cannot converge)"},
+            {"Iterative refinement", "always"}};
+}
+
 bool   VulkanSolverBackend::last_solve_was_full_gpu() const noexcept { return last_full_gpu_; }
 int    VulkanSolverBackend::last_iteration_count()    const noexcept { return last_iters_; }
 double VulkanSolverBackend::last_residual_norm()      const noexcept { return last_residual_; }
@@ -135,9 +146,13 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
                       n, cfg_.min_dofs_for_gpu);
         last_full_gpu_ = false;
         last_iters_    = 1;
+        notices().add(std::format("Vulkan backend: {} equations is below the GPU "
+                                  "threshold of {}; solved with the CPU direct solver",
+                                  n, cfg_.min_dofs_for_gpu));
         EigenSolverBackend eigen;
         eigen.set_refinement(refine_direct_);
         auto u = eigen.solve(K, F, factor_ratio_policy);
+        notices().keep(eigen.notices().take());
         last_refinement_ = eigen.last_refinement();
         last_residual_   = last_refinement_ ? last_refinement_->relative_residual : 0.0;
         return u;
@@ -226,8 +241,9 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
     // PCG): retry in float64 when the device supports it and K fits.
     if (!rep.converged && path == Path::Float32 && ctx_.device_info().supports_float64 &&
         vram_needed_f64(K) <= available) {
-        spdlog::warn("[vulkan] float32 PCG could not reach the target accuracy (estimated "
-                     "relative error {:.2e}), retrying with float64", rep.estimated_error);
+        notices().add(std::format("Vulkan fp32 PCG could not reach the target accuracy "
+                                  "(estimated relative error {:.2e}); solved again in fp64",
+                                  rep.estimated_error));
         u = refine_on(Path::Float64, rep);
     }
     last_iters_      = total_iters;

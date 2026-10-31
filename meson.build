@@ -224,6 +224,7 @@ cuda_sources       = []
 cuda_compile_args  = []
 cuda_lib_deps      = []
 have_cuda_backend  = false
+have_cuda_eigensolver = false
 
 if have_cuda_compiler
   # nvcc's bundled host compiler (g++-12) supports C++20 except for <format>.
@@ -333,6 +334,7 @@ if have_cuda_compiler
       )
       cuda_sources      += files('src/solver/cuda_eigensolver_backend.cu')
       cuda_compile_args += ['-DHAVE_CUDA_EIGENSOLVER=1']
+      have_cuda_eigensolver = true
       cuda_lib_deps     += [cuda_eigensolver_dep]
       message('CUDA eigensolver backend: enabled (cuDSS + cuBLAS + cuSPARSE)')
     else
@@ -408,6 +410,7 @@ solver_sources = files(
   'src/io/bdf_parser.cpp',
   'src/io/inp_parser.cpp',
   'src/io/results.cpp',
+  'src/io/f06_header.cpp',
   'src/io/system_dump.cpp',
   'src/io/op2_writer.cpp',
   'src/io/csv_writer.cpp',
@@ -424,6 +427,39 @@ solver_sources = files(
 # Append Vulkan and CUDA sources when available
 solver_sources += vulkan_sources
 solver_sources += cuda_sources
+
+# Build information for the F06 run header. The static values are filled at
+# configure time; the git revision is refreshed on every build by vcs_tag.
+_components = []
+foreach c : [
+    [have_accelerate, 'Accelerate'], [have_cholmod, 'CHOLMOD'],
+    [have_cuda_backend, 'CUDA (cuDSS, PCG)'],
+    [have_cuda_eigensolver, 'CUDA eigensolver'],
+    [have_vulkan_backend, 'Vulkan'], [hdf5_dep.found(), 'HDF5'],
+    [tbb_dep.found(), 'TBB'], [openmp_dep.found(), 'OpenMP']]
+  if c[0]
+    _components += c[1]
+  endif
+endforeach
+_build_info_conf = configuration_data()
+_build_info_conf.set('VERSION', meson.project_version())
+_build_info_conf.set('GIT_REVISION', '@GIT_REVISION@') # left for vcs_tag
+_build_info_conf.set('BUILD_TYPE', get_option('buildtype'))
+_build_info_conf.set('COMPILER', cxx.get_id() + ' ' + cxx.version())
+_build_info_conf.set('PLATFORM', host_machine.system() + ' ' + host_machine.cpu_family())
+_build_info_conf.set('COMPONENTS', _components.length() > 0 ? ', '.join(_components) : 'none')
+_build_info_in = configure_file(
+  input         : 'src/core/build_info.cpp.in',
+  output        : 'build_info.cpp.in',
+  configuration : _build_info_conf,
+)
+solver_sources += vcs_tag(
+  command        : ['git', '-C', meson.project_source_root(), 'describe', '--always', '--dirty'],
+  fallback       : 'unknown',
+  input          : _build_info_in,
+  output         : 'build_info.cpp',
+  replace_string : '@GIT_REVISION@',
+)
 
 # Include directories
 inc     = include_directories('include')
@@ -544,6 +580,7 @@ gtest_dep = dependency('gtest',
 # Unit tests
 unit_test_sources = files(
   'tests/unit/test_magnetics.cpp',
+  'tests/unit/test_f06_header.cpp',
   'tests/unit/test_dof_map.cpp',
   'tests/unit/test_quality_checks.cpp',
   'tests/unit/test_factor_ratio_check.cpp',

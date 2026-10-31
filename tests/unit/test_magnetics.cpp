@@ -3421,10 +3421,15 @@ public:
     return inner_.solve(K, F, p);
   }
   std::string_view name() const noexcept override { return "recording"; }
+  std::vector<std::pair<std::string, std::string>> details() const override {
+    return {{"Method", "recorded Cholesky"}, {"Indefinite fallback", "LDL^T"}};
+  }
   vibestran::Result<std::unique_ptr<LinearFactor>>
   factor(const CsrData &K, const FactorOptions &options) override {
     ++log.factors;
     log.require_spd = options.require_spd;
+    if (!notice.empty())
+      notices().add(notice);
     auto made = inner_.factor(K, options);
     if (auto *e = std::get_if<Error>(&made))
       return *e;
@@ -3432,6 +3437,7 @@ public:
         std::get<std::unique_ptr<LinearFactor>>(std::move(made)), log));
   }
   BackendLog log;
+  std::string notice; // added to notices() by each factor() when set
 
 private:
   vibestran::EigenSolverBackend inner_;
@@ -3503,6 +3509,65 @@ TEST(MagneticBackend, OneAnalysisServesNewtonSubcasesAndInductances) {
     EXPECT_NEAR(L(0, 1), L(1, 0), 1e-12 * self);
     EXPECT_LT(std::abs(L(0, 1)), self);
   }
+}
+
+TEST(MagneticBackend, SummaryReportsTangentWorkNewtonStepsAndBackendNotices) {
+  auto model = nonlinear_planar(0);
+  nonlinear_loads(model, {4000, 2500});
+  RecordingBackend backend;
+  backend.notice = "recording backend notice";
+  const auto solved = solve(model, backend);
+  ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+  const auto &result = std::get<Results>(solved);
+  const auto &stats = backend.log.stats;
+  auto row = [](const vibestran::F06Section &section, const std::string &name) {
+    std::vector<std::string> values;
+    for (const auto &[row_name, value] : section.rows)
+      if (row_name == name)
+        values.push_back(value);
+    return values;
+  };
+  using Values = std::vector<std::string>;
+
+  // The work reported is the work the backend's factor recorded.
+  const auto &solver = result.summary.solver;
+  EXPECT_EQ(row(solver, "Backend"), Values{"recording"});
+  EXPECT_EQ(row(solver, "Method"), Values{"recorded Cholesky"});
+  EXPECT_EQ(row(solver, "Tangent reuse"),
+            Values{std::format("{} symbolic analysis, {} numeric factorizations, {} "
+                               "right-hand sides",
+                               stats.symbolic_analyses, stats.numeric_factorizations,
+                               stats.solves)});
+  EXPECT_EQ(stats.symbolic_analyses, 1);
+  // MAGSTAT never takes the backend's indefinite fallback; the row says so
+  // in place of the backend's own description.
+  EXPECT_EQ(row(solver, "Indefinite fallback"),
+            Values{"none, positive definite required"});
+
+  // One row per subcase with its Newton iterations and residual.
+  const auto &solution = result.summary.solution;
+  EXPECT_EQ(row(solution, "Subcases"), Values{std::to_string(result.cases.size())});
+  EXPECT_EQ(row(solution, "Formulation").size(), 1U);
+  EXPECT_EQ(row(solution, "Formulation")[0].rfind("planar", 0), 0U);
+  for (const auto &c : result.cases)
+    EXPECT_EQ(row(solution, std::format("Subcase {}", c.id)),
+              Values{std::format("{} Newton iteration{}, relative residual {:.3e}",
+                                 c.iterations, c.iterations == 1 ? "" : "s", c.residual)});
+
+  // The factor is made once, during the first subcase, so its notice is
+  // reported once, under that subcase. B-H extrapolation is reported for
+  // exactly the subcases that used it; the heaviest load here does.
+  Values expected{std::format("Subcase {}: recording backend notice", result.cases[0].id)};
+  bool extrapolated = false;
+  for (const auto &c : result.cases)
+    if (c.extrapolated) {
+      extrapolated = true;
+      expected.push_back(std::format(
+          "Subcase {}: The B-H curve was exceeded; its vacuum-slope extrapolation was used",
+          c.id));
+    }
+  EXPECT_TRUE(extrapolated);
+  EXPECT_EQ(result.summary.notices, expected);
 }
 
 TEST(MagneticBackend, IterativeBackendThroughTheAdapterMatchesDirect) {

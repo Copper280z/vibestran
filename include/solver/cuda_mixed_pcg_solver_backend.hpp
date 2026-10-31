@@ -43,6 +43,7 @@ public:
         const FactorRatioCheckPolicy* factor_ratio_policy = nullptr) override;
 
     [[nodiscard]] std::string_view name() const noexcept override;
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>> details() const override;
     [[nodiscard]] int last_iteration_count() const noexcept override;
     [[nodiscard]] double last_estimated_error() const noexcept override;
     [[nodiscard]] std::optional<RefinementReport> last_refinement() const noexcept override;

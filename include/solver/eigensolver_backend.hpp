@@ -4,8 +4,10 @@
 //
 // Mirrors SolverBackend to allow future GPU eigensolver backends.
 
+#include "core/notices.hpp"
 #include <Eigen/SparseCore>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace vibestran {
@@ -48,6 +50,17 @@ public:
         const FactorRatioCheckPolicy* factor_ratio_policy = nullptr) = 0;
 
     [[nodiscard]] virtual std::string name() const = 0;
+
+    /// F06 SOLVER rows beyond the name (method, factorization, device).
+    [[nodiscard]] virtual std::vector<std::pair<std::string, std::string>> details() const {
+        return {};
+    }
+
+    /// Warnings about how solves were done, for the F06 (see SolverBackend).
+    [[nodiscard]] Notices& notices() noexcept { return notices_; }
+
+private:
+    Notices notices_;
 };
 
 /// CPU implementation using Spectra (shift-and-invert Lanczos).
@@ -67,6 +80,11 @@ public:
 #else
         return "Spectra + Eigen sparse direct (CPU shift-invert Lanczos)";
 #endif
+    }
+
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>> details() const override {
+        return {{"Method", "shift-invert Lanczos (Spectra), sparse LL^T or LDL^T of K - sigma M"},
+                {"Precision", "fp64"}};
     }
 };
 

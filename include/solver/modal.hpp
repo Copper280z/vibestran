@@ -34,7 +34,8 @@ private:
     std::unique_ptr<EigensolverBackend> backend_;
     std::string dump_prefix_;
 
-    ModalSubCaseResults solve_subcase(const Model& model, const SubCase& sc);
+    ModalSubCaseResults solve_subcase(const Model& model, const SubCase& sc,
+                                      SolveSummary& summary);
 
     DofMap build_dof_map(const Model& model, const SubCase& sc);
 

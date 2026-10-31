@@ -1,4 +1,5 @@
 #include "magnetic/solver.hpp"
+#include "core/notices.hpp"
 #include "solver/solver_backend.hpp"
 #include <algorithm>
 #include <cmath>
@@ -29,8 +30,10 @@ public:
     csr.col_ind.assign(lower.innerIndexPtr(), lower.innerIndexPtr() + csr.nnz);
     csr.values.assign(lower.valuePtr(), lower.valuePtr() + csr.nnz);
     csr.symmetry = SymmetryStorage::Lower;
+    ++factorizations_;
     if (factor_)
       return factor_->refactor(csr);
+    ++analyses_;
     FactorOptions options;
     options.require_spd = true;
     auto made = backend_.factor(csr, options);
@@ -41,6 +44,7 @@ public:
   }
   // Solves for every column of rhs with the last factorization.
   Result<Eigen::MatrixXd> solve(const Eigen::MatrixXd &rhs) {
+    right_hand_sides_ += static_cast<int>(rhs.cols());
     auto x = factor_->solve({rhs.data(), static_cast<size_t>(rhs.size())},
                             static_cast<int>(rhs.cols()));
     if (auto *e = std::get_if<Error>(&x))
@@ -54,9 +58,19 @@ public:
     return out;
   }
 
+  // Work done so far, for the F06 header.
+  [[nodiscard]] std::string usage() const {
+    return std::format("{} symbolic {}, {} numeric {}, {} right-hand {}",
+                       analyses_, analyses_ == 1 ? "analysis" : "analyses",
+                       factorizations_,
+                       factorizations_ == 1 ? "factorization" : "factorizations",
+                       right_hand_sides_, right_hand_sides_ == 1 ? "side" : "sides");
+  }
+
 private:
   SolverBackend &backend_;
   std::unique_ptr<LinearFactor> factor_;
+  int analyses_{0}, factorizations_{0}, right_hand_sides_{0};
 };
 struct Assembly {
   Sparse stiffness;
@@ -674,9 +688,33 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
       g += polarity * result.sources[i].coupling;
     circuit_coupling.push_back(g / c.parallel);
   }
+  auto &solution = result.summary.solution;
+  solution.add("Solution", "SOL MAGSTAT magnetostatics, SI units");
+  solution.add("Formulation",
+               mesh.planar
+                   ? std::format("planar, nodal vector potential on first-order "
+                                 "elements, depth {:.6g} m",
+                                 mesh.depth)
+                   : "first-order edge elements, tree gauge");
+  solution.add("Field cells", std::to_string(mesh.cells.size()));
+  solution.add("Equations",
+               std::format("{} ({} degrees of freedom before the gauge and "
+                           "boundary conditions)",
+                           gauge.size, mesh.dofs()));
+  solution.add("Sources", std::format("{} ({} circuits)", ns, nc));
+  solution.add("Subcases", std::to_string(model.subcases.size()));
+  solution.add("Newton tolerance",
+               std::format("relative residual {:.3g}, at most {} iterations",
+                           model.options.nonlinear_tolerance,
+                           model.options.max_iterations));
+  result.summary.solver = solver_section(backend);
+  result.summary.solver.set("Indefinite fallback",
+                            "none, positive definite required");
   SpatialIndex index(mesh);
   Tangent tangent(backend);
   for (const auto &subcase : model.subcases) {
+    Notices notices;
+    bool continued = false;
     auto terminal = circuit_currents(model, circuits, subcase.load);
     if (auto *e = std::get_if<Error>(&terminal))
       return *e;
@@ -710,6 +748,9 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
         a = eq.a;
       }
       std::get<Equilibrium>(solved).iterations = iterations;
+      continued = true;
+      notices.add("Newton did not converge at full current; solved by current "
+                  "continuation in 8 stages");
     }
     if (auto *e = std::get_if<Error>(&solved))
       return Error{std::format("Subcase {}: {}", subcase.id, e->message)};
@@ -720,6 +761,15 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
     output.residual = eq.residual;
     output.energy = eq.assembly.energy;
     output.extrapolated = eq.assembly.extrapolated;
+    if (output.extrapolated)
+      notices.add("The B-H curve was exceeded; its vacuum-slope extrapolation "
+                  "was used");
+    solution.add(std::format("Subcase {}", subcase.id),
+                 std::format("{} Newton {}{}, relative residual {:.3e}",
+                             eq.iterations,
+                             eq.iterations == 1 ? "iteration" : "iterations",
+                             continued ? " with current continuation" : "",
+                             eq.residual));
     output.potential = eq.a;
     output.b = eq.assembly.b;
     output.h = eq.assembly.h;
@@ -822,7 +872,11 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
       return *e;
     output.forces = std::get<std::vector<ForceResult>>(std::move(force));
     result.cases.push_back(std::move(output));
+    const std::string context = std::format("Subcase {}", subcase.id);
+    collect_notices(result.summary, backend.notices().take(), context);
+    collect_notices(result.summary, notices.take(), context);
   }
+  result.summary.solver.add("Tangent reuse", tangent.usage());
   return result;
 }
 } // namespace vibestran::magnetic

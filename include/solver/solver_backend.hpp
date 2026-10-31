@@ -8,6 +8,7 @@
 //   - VulkanSolverBackend (compute shader Cholesky)
 // without touching the FE assembly code.
 
+#include "core/notices.hpp"
 #include "core/result.hpp"
 #include "core/sparse_matrix.hpp"
 #include "solver/iterative_refinement.hpp"
@@ -15,7 +16,9 @@
 #include <optional>
 #include <span>
 #include <vector>
+#include <string>
 #include <string_view>
+#include <utility>
 
 namespace vibestran {
 
@@ -99,6 +102,17 @@ public:
     /// Human-readable backend name (for logging)
     [[nodiscard]] virtual std::string_view name() const noexcept = 0;
 
+    /// F06 SOLVER rows beyond the name: method, ordering, precision,
+    /// refinement, device and so on.
+    [[nodiscard]] virtual std::vector<std::pair<std::string, std::string>> details() const {
+        return {};
+    }
+
+    /// Warnings about how solves were done (precision or method fallbacks,
+    /// MAXRATIO breaches) that the analysis writes to the F06. Factors from
+    /// factor() record theirs here too.
+    [[nodiscard]] Notices& notices() noexcept { return notices_; }
+
     /// Number of solver iterations from the most recent solve(), or -1 if the
     /// backend is a direct solver (no iterations).
     [[nodiscard]] virtual int last_iteration_count() const noexcept { return -1; }
@@ -126,6 +140,8 @@ public:
         return false;
     }
 
+private:
+    Notices notices_;
 };
 
 /// CPU backend using Eigen's sparse Cholesky.
@@ -153,6 +169,8 @@ public:
         const SparseMatrixBuilder::CsrData& K,
         const std::vector<double>& F,
         const FactorRatioCheckPolicy* factor_ratio_policy = nullptr) override;
+
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>> details() const override;
 
     [[nodiscard]] std::string_view name() const noexcept override {
 #if defined(HAVE_ACCELERATE)
@@ -196,6 +214,8 @@ public:
     [[nodiscard]] std::string_view name() const noexcept override {
         return "Eigen PCG + IncompleteCholesky (CPU)";
     }
+
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>> details() const override;
 
     /// Number of CG iterations (all solves) used in the most recent solve().
     [[nodiscard]] int last_iteration_count() const noexcept override { return last_iters_; }

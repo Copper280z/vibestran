@@ -179,14 +179,21 @@ TEST_F(CudaFactorTest, WithoutRequireSpdIndefiniteFallsBackToLu) {
     ASSERT_TRUE(factor);
     EXPECT_EQ(factor->method(), "cudss-lu");
     EXPECT_LT(relative_error(solved(factor->solve(columns(indefinite * X), 2)), X), 1e-10);
+    // Each fallback is reported for the F06.
+    const auto first = backend_->notices().take();
+    ASSERT_EQ(first.size(), 1u);
+    EXPECT_NE(first[0].find("not numerically positive definite"), std::string::npos) << first[0];
+    EXPECT_NE(first[0].find("solved with LU"), std::string::npos) << first[0];
     // SPD values go back to Cholesky; the LU analysis stays for later.
     const Eigen::MatrixXd spd = banded(60, 0.5, 0.25);
     ASSERT_FALSE(factor->refactor(to_csr(spd)));
     EXPECT_EQ(factor->method(), "cudss-cholesky");
     EXPECT_LT(relative_error(solved(factor->solve(columns(spd * X), 2)), X), 1e-12);
+    EXPECT_TRUE(backend_->notices().take().empty());
     ASSERT_FALSE(factor->refactor(to_csr(indefinite)));
     EXPECT_EQ(factor->method(), "cudss-lu");
     EXPECT_EQ(factor->stats().symbolic_analyses, 2); // one Cholesky, one LU
+    EXPECT_EQ(backend_->notices().take().size(), 1u);
 }
 
 TEST(CudaFactorFp32, SolvesAreRefinedToDoubleAccuracy) {
@@ -209,6 +216,7 @@ TEST(CudaFactorFp32, SolvesAreRefinedToDoubleAccuracy) {
     }
     EXPECT_EQ(factor->method(), "cudss-cholesky/fp32");
     EXPECT_GT(factor->stats().solves, 0);
+    EXPECT_TRUE(backend->notices().take().empty()) << "fp32 sufficed: nothing to report";
 }
 
 TEST(CudaFactorFp32, UnrefinableFp32SolveSwitchesToFp64) {
@@ -234,9 +242,55 @@ TEST(CudaFactorFp32, UnrefinableFp32SolveSwitchesToFp64) {
     EXPECT_LT(relative_error(solved(factor->solve(columns(A * X), 2)), X), 1e-7);
     EXPECT_EQ(factor->method(), "cudss-cholesky");
     EXPECT_EQ(factor->stats().symbolic_analyses, 2); // fp32, then fp64
+    const auto switched = backend->notices().take();
+    ASSERT_EQ(switched.size(), 1u);
+    EXPECT_NE(switched[0].find("could not be refined"), std::string::npos) << switched[0];
+    EXPECT_NE(switched[0].find("factored again in fp64"), std::string::npos) << switched[0];
     ASSERT_FALSE(factor->refactor(to_csr(A)));       // stays in fp64
     EXPECT_EQ(factor->method(), "cudss-cholesky");
     EXPECT_EQ(factor->stats().symbolic_analyses, 2);
+    EXPECT_TRUE(backend->notices().take().empty()) << "the switch is reported once";
+}
+
+TEST(CudaFactorFp32, LegacySolveRetriedInFp64ReportsTheFp64Solve) {
+    // solve() (SOL 101) with the matrix of UnrefinableFp32SolveSwitchesToFp64:
+    // the fp32 solve cannot be refined and is repeated in fp64. The accuracy
+    // report must describe the fp64 solve -- none when it is not refined,
+    // a converged one when it is -- never the failed fp32 attempt.
+    const int n = 50;
+    const double delta = 1e-7;
+    SparseMatrixBuilder builder(n);
+    for (int i = 0; i < n; ++i) {
+        builder.add(i, i, (i == 0 || i == n - 1 ? 1.0 : 2.0) + delta);
+        if (i > 0) {
+            builder.add(i, i - 1, -1.0);
+            builder.add(i - 1, i, -1.0);
+        }
+    }
+    const auto K = builder.build_csr();
+    const std::vector<double> F(n, 1e-7);
+    for (const bool refine : {false, true}) {
+        SCOPED_TRACE(refine);
+        auto backend = CudaSolverBackend::try_create(CudaSolverPrecision::Float32);
+        if (!backend.has_value())
+            GTEST_SKIP() << "CUDA not available on this system";
+        backend->set_refinement(refine);
+        const auto u = backend->solve(K, F);
+        // K 1 = delta 1, so u = 1 everywhere; cond ~ 4e7 bounds the error.
+        for (const double ui : u)
+            EXPECT_NEAR(ui, 1.0, 1e-6);
+        const auto notices = backend->notices().take();
+        ASSERT_FALSE(notices.empty());
+        EXPECT_NE(notices[0].find("solved again in fp64"), std::string::npos) << notices[0];
+        const auto report = backend->last_refinement();
+        if (refine) {
+            ASSERT_TRUE(report.has_value());
+            EXPECT_TRUE(report->converged);
+        } else {
+            EXPECT_FALSE(report.has_value())
+                << "stale fp32 report: estimated error " << report->estimated_error;
+        }
+    }
 }
 
 TEST(CudaFactorFp32, FailedFp32CholeskyIsRetriedInFp64) {
@@ -251,6 +305,9 @@ TEST(CudaFactorFp32, FailedFp32CholeskyIsRetriedInFp64) {
     ASSERT_TRUE(factor);
     EXPECT_EQ(factor->method(), "cudss-cholesky");
     EXPECT_EQ(factor->stats().symbolic_analyses, 2);
+    const auto retried = backend->notices().take();
+    ASSERT_EQ(retried.size(), 1u);
+    EXPECT_NE(retried[0].find("factored again in fp64"), std::string::npos) << retried[0];
     const auto x = solved(factor->solve(F, 1));
     ASSERT_EQ(x.size(), 8u);
     EXPECT_LT(test::max_error_from_one(x), 1e-4);

@@ -31,7 +31,8 @@ public:
 
 private:
   [[nodiscard]] SubCaseResults solve_subcase(const Model &model,
-                                             const SubCase &sc);
+                                             const SubCase &sc,
+                                             SolveSummary &summary);
 
   std::unique_ptr<SolverBackend> backend_;
 };

@@ -13,6 +13,7 @@
 #include "core/sparse_matrix.hpp"
 #include "core/types.hpp"
 #include <cmath>
+#include <map>
 #include <vector>
 #include <algorithm>
 #include <numeric>
@@ -356,6 +357,35 @@ TEST_F(VulkanTest, SmallProblemFallsBackToCpu) {
     for (int i = 0; i < n; ++i)
         EXPECT_NEAR(u[i], u_eigen[i], 1e-12)
             << "CPU fallback result should match Eigen to double precision";
+
+    // The fallback is reported once for the F06, then the list is empty.
+    const std::vector<std::string> expected{
+        "Vulkan backend: 5 equations is below the GPU threshold of 50000; solved with "
+        "the CPU direct solver"};
+    EXPECT_EQ(cpu_fallback_backend->notices().take(), expected);
+    EXPECT_TRUE(cpu_fallback_backend->notices().take().empty());
+}
+
+TEST_F(VulkanTest, DetailsDescribeTheConfiguredSolve) {
+    for (const bool use_double : {true, false}) {
+        SCOPED_TRACE(use_double);
+        VulkanSolverConfig cfg;
+        cfg.use_double = use_double;
+        cfg.tolerance = 2.5e-9;
+        cfg.min_dofs_for_gpu = 1234;
+        auto backend = VulkanSolverBackend::try_create(cfg);
+        ASSERT_TRUE(backend.has_value());
+        std::map<std::string, std::string> rows;
+        for (const auto& [name, value] : backend->details())
+            rows[name] = value;
+        EXPECT_EQ(rows["Device"], backend_->details().front().second);
+        EXPECT_FALSE(rows["Device"].empty());
+        EXPECT_NE(rows["Method"].find("below 1234 equations"), std::string::npos)
+            << rows["Method"];
+        EXPECT_EQ(rows["Tolerance"].rfind("2.5e-09", 0), 0U) << rows["Tolerance"];
+        EXPECT_EQ(rows["Precision"].rfind(use_double ? "fp64" : "fp32", 0), 0U)
+            << rows["Precision"];
+    }
 }
 
 // ── Test 11: Full float64 GPU path agrees with Eigen ─────────────────────────
