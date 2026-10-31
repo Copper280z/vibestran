@@ -58,7 +58,18 @@ public:
 
     [[nodiscard]] std::string_view name() const noexcept override;
 
-    /// solve() falls back to LU when Cholesky fails.
+    /// Phased cuDSS factorization: the analysis is done once per sparsity
+    /// pattern, refactor() repeats only the numeric factorization, and solve()
+    /// takes any number of right-hand sides. Cholesky is tried first; a
+    /// matrix that is not positive definite is an error under require_spd and
+    /// otherwise falls back to LU. In fp32 every solve is refined against K in
+    /// double; when that cannot converge (cond(K) above about 1e7) the factor
+    /// switches to fp64 with a warning. MAXRATIO is not checked.
+    [[nodiscard]] Result<std::unique_ptr<LinearFactor>> factor(
+        const SparseMatrixBuilder::CsrData& K, const FactorOptions& options = {}) override;
+
+    /// solve() falls back to LU when Cholesky fails. factor() honours
+    /// require_spd itself, so this only describes solve().
     [[nodiscard]] bool may_factor_indefinite() const noexcept override { return true; }
 
     // ── Diagnostics (valid after each solve()) ─────────────────────────────

@@ -768,12 +768,12 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
         if (auto e = tangent.factor(eq.assembly.stiffness))
           return Error{std::format(
               "Differential inductance factorization failed ({})", e->message)};
-        auto solved = tangent.solve(reduced);
-        if (auto *e = std::get_if<Error>(&solved))
+        auto responses = tangent.solve(reduced);
+        if (auto *e = std::get_if<Error>(&responses))
           return Error{std::format("Differential inductance solve failed ({})",
                                    e->message)};
         const Eigen::MatrixXd linkage =
-            reduced.transpose() * std::get<Eigen::MatrixXd>(solved);
+            reduced.transpose() * std::get<Eigen::MatrixXd>(responses);
         const auto first_circuit =
             static_cast<Eigen::Index>(closed_sources.size());
         for (size_t i = 0; i < closed_sources.size(); ++i)

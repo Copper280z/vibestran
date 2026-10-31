@@ -683,7 +683,7 @@ endif
 if have_cuda_backend
   cuda_tests = executable(
     'cuda_tests',
-    files('tests/unit/test_cuda_solver.cpp'),
+    files('tests/unit/test_cuda_solver.cpp', 'tests/unit/test_cuda_factor.cpp'),
     dependencies        : [solver_lib_dep, gtest_dep],
     include_directories : inc,
   )

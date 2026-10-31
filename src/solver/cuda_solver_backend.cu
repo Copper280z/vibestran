@@ -39,6 +39,8 @@
 #include <cmath>
 #include <format>
 #include <functional>
+#include <memory>
+#include <span>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -614,6 +616,444 @@ CudaSolverBackend::solve_typed(const SparseMatrixBuilder::CsrData &K,
                       ", nnz=" + std::to_string(nnz) + ", device='" +
                       ctx_->device_name + "'");
   return u;
+}
+
+// ── Phased factorization: factor()
+// ─────────────────────────────────────────────────────────────────────
+//
+// cuDSS behaviour this relies on (measured with cuDSS 0.7.1):
+//   - A Cholesky factorization of a matrix that is not positive definite
+//     returns CUDSS_STATUS_SUCCESS; only CUDSS_DATA_INFO (> 0) reports it,
+//     and solves with that factor are garbage.
+//   - CUDSS_DATA_INFO is sticky: after a failure, later factorizations of
+//     valid values silently do nothing until INFO is reset to 0. Resetting
+//     it keeps the analysis; re-running the analysis alone does not help.
+// So every factorization resets INFO first and checks it afterwards.
+
+namespace {
+
+using CsrData = SparseMatrixBuilder::CsrData;
+
+void check_cudss(cudssStatus_t st, const std::string &what) {
+  if (st != CUDSS_STATUS_SUCCESS)
+    throw SolverError("CUDA solver: " + what + " failed, status=" +
+                      std::to_string(static_cast<int>(st)));
+}
+
+/// One cuDSS problem: a matrix type, its CSR on the device, and the solver
+/// data that holds its analysis and factorization. CUDA failures throw
+/// SolverError; CudaFactor turns them into errors at its public methods.
+template <typename Scalar> class CudssProblem {
+public:
+  static constexpr cudaDataType_t kType =
+      std::is_same_v<Scalar, float> ? CUDA_R_32F : CUDA_R_64F;
+
+  CudssProblem(cudssHandle_t handle, const CsrData &storage,
+               cudssMatrixType_t mtype, cudssMatrixViewType_t mview,
+               std::string label)
+      : handle_(handle), data_(handle), n_(storage.n), nnz_(storage.nnz),
+        label_(std::move(label)), row_ptr_(static_cast<std::size_t>(n_) + 1),
+        col_ind_(static_cast<std::size_t>(nnz_)),
+        values_(static_cast<std::size_t>(nnz_)) {
+    row_ptr_.upload(storage.row_ptr.data(), static_cast<std::size_t>(n_) + 1);
+    col_ind_.upload(storage.col_ind.data(), static_cast<std::size_t>(nnz_));
+    cudssAlgType_t reorder_alg = CUDSS_ALG_DEFAULT;
+    cudssConfigSet(cfg_.cfg, CUDSS_CONFIG_REORDERING_ALG, &reorder_alg,
+                   sizeof(reorder_alg));
+    check_cudss(cudssMatrixCreateCsr(&A_.mat, n_, n_, nnz_, row_ptr_.ptr,
+                                     nullptr, col_ind_.ptr, values_.ptr,
+                                     CUDA_R_32I, kType, mtype, mview,
+                                     CUDSS_BASE_ZERO),
+                "cudssMatrixCreateCsr (" + label_ + ")");
+    dense(1);
+  }
+
+  void load(const std::vector<double> &values) {
+    if constexpr (std::is_same_v<Scalar, double>) {
+      values_.upload(values.data(), values.size());
+    } else {
+      std::vector<Scalar> v(values.begin(), values.end());
+      values_.upload(v.data(), v.size());
+    }
+  }
+
+  /// Ordering and symbolic factorization, switching to cuDSS hybrid
+  /// (host + device) memory when the device cannot hold the factor.
+  void analyze() {
+    cudssStatus_t st = execute(CUDSS_PHASE_ANALYSIS);
+    if (st == CUDSS_STATUS_ALLOC_FAILED) {
+      vibestran::log_debug("[cuda] cuDSS (" + label_ +
+                           "): analysis alloc failed -- enabling hybrid mode");
+      st = reanalyze_hybrid();
+      if (st != CUDSS_STATUS_SUCCESS)
+        throw SolverError(
+            "CUDA solver: cuDSS analysis failed even in hybrid mode (" + label_ +
+            "), status=" + std::to_string(static_cast<int>(st)) +
+            ". Retry with --cuda-precision=fp32 to halve GPU memory usage.");
+      return;
+    }
+    check_cudss(st, "cuDSS analysis (" + label_ + ")");
+    int64_t estimates[16] = {0};
+    cudssDataGet(handle_, data_.data, CUDSS_DATA_MEMORY_ESTIMATES, &estimates,
+                 sizeof(estimates), nullptr);
+    std::size_t free_bytes = 0, total_bytes = 0;
+    cudaMemGetInfo(&free_bytes, &total_bytes);
+    if (estimates[1] > static_cast<int64_t>(free_bytes * 0.85)) {
+      vibestran::log_debug("[cuda] cuDSS (" + label_ + "): device peak estimate " +
+                           std::to_string(estimates[1] >> 20) +
+                           " MiB exceeds 85% of free memory -- enabling hybrid mode");
+      check_cudss(reanalyze_hybrid(), "cuDSS hybrid analysis (" + label_ + ")");
+    }
+  }
+
+  /// Numeric factorization of the loaded values. Returns CUDSS_DATA_INFO:
+  /// 0 on success, otherwise the failing pivot.
+  [[nodiscard]] int factorize() {
+    int info = 0;
+    check_cudss(cudssDataSet(handle_, data_.data, CUDSS_DATA_INFO, &info,
+                             sizeof(info)),
+                "cudssDataSet(INFO)");
+    const cudssStatus_t st = execute(CUDSS_PHASE_FACTORIZATION);
+    if (st == CUDSS_STATUS_ALLOC_FAILED)
+      throw SolverError(
+          "CUDA solver: cuDSS factorization alloc failed (" + label_ + ", n=" +
+          std::to_string(n_) + ", nnz=" + std::to_string(nnz_) +
+          "). Retry with --cuda-precision=fp32 to halve GPU memory usage.");
+    check_cudss(st, "cuDSS factorization (" + label_ + ")");
+    check_cudss(cudssDataGet(handle_, data_.data, CUDSS_DATA_INFO, &info,
+                             sizeof(info), nullptr),
+                "cudssDataGet(INFO)");
+    return info;
+  }
+
+  /// X = K^-1 B for nrhs columns of n values. In fp32 each column is scaled
+  /// to unit max-norm before the downcast so small refinement residuals keep
+  /// their range.
+  void solve(const double *B, double *X, int nrhs) {
+    dense(nrhs);
+    const auto n = static_cast<std::size_t>(n_);
+    std::vector<double> scale(static_cast<std::size_t>(nrhs), 1.0);
+    std::vector<Scalar> b(n * static_cast<std::size_t>(nrhs));
+    for (int k = 0; k < nrhs; ++k) {
+      const double *column = B + n * static_cast<std::size_t>(k);
+      if constexpr (!std::is_same_v<Scalar, double>) {
+        double m = 0.0;
+        for (std::size_t i = 0; i < n; ++i)
+          m = std::max(m, std::abs(column[i]));
+        if (m > 0.0 && std::isfinite(m))
+          scale[static_cast<std::size_t>(k)] = m;
+      }
+      for (std::size_t i = 0; i < n; ++i)
+        b[n * static_cast<std::size_t>(k) + i] =
+            static_cast<Scalar>(column[i] / scale[static_cast<std::size_t>(k)]);
+    }
+    rhs_.upload(b.data(), b.size());
+    check_cudss(execute(CUDSS_PHASE_SOLVE), "cuDSS solve (" + label_ + ")");
+    sol_.download(b.data(), b.size());
+    for (int k = 0; k < nrhs; ++k)
+      for (std::size_t i = 0; i < n; ++i)
+        X[n * static_cast<std::size_t>(k) + i] =
+            static_cast<double>(b[n * static_cast<std::size_t>(k) + i]) *
+            scale[static_cast<std::size_t>(k)];
+  }
+
+private:
+  cudssStatus_t execute(cudssPhase_t phase) {
+    return cudssExecute(handle_, phase, cfg_.cfg, data_.data, A_.mat, X_.mat,
+                        B_.mat);
+  }
+
+  cudssStatus_t reanalyze_hybrid() {
+    int hybrid_mode = 1;
+    cudssConfigSet(cfg_.cfg, CUDSS_CONFIG_HYBRID_MODE, &hybrid_mode,
+                   sizeof(hybrid_mode));
+    return execute(CUDSS_PHASE_ANALYSIS);
+  }
+
+  /// Right-hand side and solution descriptors with exactly cols columns.
+  void dense(int cols) {
+    if (cols == cols_)
+      return;
+    const auto size = static_cast<std::size_t>(n_) * static_cast<std::size_t>(cols);
+    if (cols > capacity_) {
+      rhs_ = DeviceBuffer<Scalar>(size);
+      sol_ = DeviceBuffer<Scalar>(size);
+      capacity_ = cols;
+    }
+    for (CuDSSMatrix *m : {&B_, &X_}) {
+      if (m->mat)
+        cudssMatrixDestroy(m->mat);
+      m->mat = nullptr;
+    }
+    check_cudss(cudssMatrixCreateDn(&B_.mat, n_, cols, n_, rhs_.ptr, kType,
+                                    CUDSS_LAYOUT_COL_MAJOR),
+                "cudssMatrixCreateDn (rhs)");
+    check_cudss(cudssMatrixCreateDn(&X_.mat, n_, cols, n_, sol_.ptr, kType,
+                                    CUDSS_LAYOUT_COL_MAJOR),
+                "cudssMatrixCreateDn (solution)");
+    cols_ = cols;
+  }
+
+  cudssHandle_t handle_;
+  CuDSSConfig cfg_;
+  CuDSSData data_;
+  int n_, nnz_;
+  std::string label_;
+  DeviceBuffer<int> row_ptr_, col_ind_;
+  DeviceBuffer<Scalar> values_, rhs_, sol_;
+  int capacity_{0}, cols_{0};
+  CuDSSMatrix A_, B_, X_;
+};
+
+/// Cholesky with an LU fallback in one precision. The analyses are kept
+/// while the sparsity pattern is unchanged.
+template <typename Scalar> class CudssSystem {
+public:
+  CudssSystem(cudssHandle_t handle, bool require_spd)
+      : handle_(handle), require_spd_(require_spd) {}
+
+  [[nodiscard]] Status factor(const CsrData &K, FactorStats &stats) {
+    if (!same_pattern(K)) {
+      n_ = K.n;
+      lower_only_ = K.stores_lower_triangle_only();
+      row_ptr_ = K.row_ptr;
+      col_ind_ = K.col_ind;
+      spd_.reset();
+      lu_.reset();
+    }
+    const CsrData *lower = &K;
+    CsrData lower_copy;
+    if (!K.stores_lower_triangle_only()) {
+      lower_copy = K.lower_triangle();
+      lower = &lower_copy;
+    }
+    const bool analyze_spd = !spd_;
+    if (analyze_spd)
+      spd_ = std::make_unique<CudssProblem<Scalar>>(
+          handle_, *lower, CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER, "Cholesky" + suffix());
+    spd_->load(lower->values);
+    if (analyze_spd) {
+      spd_->analyze();
+      ++stats.symbolic_analyses;
+    }
+    const int info = spd_->factorize();
+    ++stats.numeric_factorizations;
+    if (info == 0) {
+      use_lu_ = false;
+      return std::nullopt;
+    }
+    if (require_spd_)
+      return Error{"cuDSS Cholesky" + suffix() + " factorization failed at pivot " +
+                   std::to_string(info) +
+                   ": the matrix is not numerically positive definite"};
+    vibestran::log_debug("[cuda] cuDSS Cholesky" + suffix() +
+                         " failed at pivot " + std::to_string(info) +
+                         " -- falling back to LU");
+
+    const CsrData *full = &K;
+    CsrData full_copy;
+    if (K.stores_lower_triangle_only()) {
+      full_copy = K.expanded_symmetric();
+      full = &full_copy;
+    }
+    const bool analyze_lu = !lu_;
+    if (analyze_lu)
+      lu_ = std::make_unique<CudssProblem<Scalar>>(
+          handle_, *full, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, "LU" + suffix());
+    lu_->load(full->values);
+    if (analyze_lu) {
+      lu_->analyze();
+      ++stats.symbolic_analyses;
+    }
+    const int lu_info = lu_->factorize();
+    ++stats.numeric_factorizations;
+    if (lu_info != 0)
+      return Error{"cuDSS LU" + suffix() + " factorization failed at pivot " +
+                   std::to_string(lu_info) +
+                   " -- the matrix may be singular. Check boundary conditions (SPCs)"};
+    use_lu_ = true;
+    return std::nullopt;
+  }
+
+  void solve(const double *B, double *X, int nrhs) {
+    (use_lu_ ? lu_ : spd_)->solve(B, X, nrhs);
+  }
+
+  [[nodiscard]] std::string_view method() const noexcept {
+    if constexpr (std::is_same_v<Scalar, float>)
+      return use_lu_ ? "cudss-lu/fp32" : "cudss-cholesky/fp32";
+    else
+      return use_lu_ ? "cudss-lu" : "cudss-cholesky";
+  }
+
+private:
+  [[nodiscard]] static std::string suffix() {
+    return std::is_same_v<Scalar, float> ? "/float" : "";
+  }
+
+  [[nodiscard]] bool same_pattern(const CsrData &K) const {
+    return n_ == K.n && lower_only_ == K.stores_lower_triangle_only() &&
+           row_ptr_ == K.row_ptr && col_ind_ == K.col_ind;
+  }
+
+  cudssHandle_t handle_;
+  bool require_spd_;
+  int n_{0};
+  bool lower_only_{false};
+  std::vector<int> row_ptr_, col_ind_;
+  std::unique_ptr<CudssProblem<Scalar>> spd_, lu_;
+  bool use_lu_{false};
+};
+
+class CudaFactor final : public LinearFactor {
+public:
+  CudaFactor(cudssHandle_t handle, CudaSolverPrecision precision, bool require_spd)
+      : handle_(handle), require_spd_(require_spd) {
+    if (precision == CudaSolverPrecision::Float32)
+      fp32_ = std::make_unique<CudssSystem<float>>(handle, require_spd);
+    else
+      fp64_ = std::make_unique<CudssSystem<double>>(handle, require_spd);
+  }
+
+  [[nodiscard]] int size() const noexcept override { return n_; }
+  [[nodiscard]] FactorStats stats() const noexcept override { return stats_; }
+  [[nodiscard]] std::string_view method() const noexcept override {
+    return fp32_ ? fp32_->method() : fp64_->method();
+  }
+
+  [[nodiscard]] Status refactor(const CsrData &K) override {
+    ready_ = false;
+    if (K.n == 0)
+      return Error{"Matrix is empty -- no free DOFs"};
+    if (K.row_ptr.size() != static_cast<std::size_t>(K.n) + 1 ||
+        K.col_ind.size() != static_cast<std::size_t>(K.nnz) ||
+        K.values.size() != static_cast<std::size_t>(K.nnz))
+      return Error{"Malformed CSR matrix: n=" + std::to_string(K.n) +
+                   ", nnz=" + std::to_string(K.nnz)};
+    if (n_ != 0 && K.n != n_)
+      return Error{"refactor() of a " + std::to_string(n_) +
+                   "-equation factor with a " + std::to_string(K.n) +
+                   "-equation matrix"};
+    // Transitional boundary: the cuDSS helpers throw SolverError, and this
+    // is where those failures become error values (MAGNETICS_ROADMAP.md, S11).
+    try {
+      n_ = K.n;
+      Status status;
+      if (fp32_) {
+        K_ = K; // fp32 solves are refined against K in double
+        status = fp32_->factor(K, stats_);
+        if (status) {
+          // A matrix that is SPD in double can fail Cholesky in float once
+          // cond(K) approaches 1/eps_float, so only fp64 decides.
+          vibestran::log_warn("[cuda] " + status->message +
+                              " -- switching this factor to fp64");
+          switch_to_fp64();
+          status = fp64_->factor(K, stats_);
+        }
+      } else {
+        status = fp64_->factor(K, stats_);
+      }
+      if (!status) {
+        ready_ = true;
+        vibestran::log_debug("[cuda] factor: " + std::string(method()) +
+                             ", n=" + std::to_string(K.n) + ", nnz=" +
+                             std::to_string(K.nnz) + ", symbolic analyses " +
+                             std::to_string(stats_.symbolic_analyses));
+      }
+      return status;
+    } catch (const std::exception &e) {
+      return Error{e.what()};
+    }
+  }
+
+  [[nodiscard]] Result<std::vector<double>> solve(std::span<const double> B,
+                                                  int nrhs) override {
+    if (!ready_)
+      return Error{"solve() with a factor whose last factorization failed"};
+    const auto n = static_cast<std::size_t>(n_);
+    if (nrhs < 1 || B.size() != n * static_cast<std::size_t>(nrhs))
+      return Error{"Right-hand side has " + std::to_string(B.size()) +
+                   " values; expected " + std::to_string(n_) + " x " +
+                   std::to_string(nrhs)};
+    try {
+      std::vector<double> X(B.size());
+      if (fp32_ && !solve_refined(B, X, nrhs)) {
+        // cond(K) is too large for fp32: refactor in fp64 and solve again.
+        vibestran::log_warn(
+            "[cuda] fp32 factorization could not be refined to double accuracy "
+            "(the matrix is too ill-conditioned for fp32) -- switching this "
+            "factor to fp64");
+        const CsrData K = std::move(K_);
+        switch_to_fp64();
+        if (auto e = fp64_->factor(K, stats_)) {
+          ready_ = false;
+          return *e;
+        }
+      }
+      if (fp64_)
+        fp64_->solve(B.data(), X.data(), nrhs);
+      if (!std::all_of(X.begin(), X.end(), [](double x) { return std::isfinite(x); }))
+        return Error{std::string(method()) + " solve produced a nonfinite solution"};
+      stats_.solves += nrhs;
+      return X;
+    } catch (const std::exception &e) {
+      return Error{e.what()};
+    }
+  }
+
+private:
+  void switch_to_fp64() {
+    fp64_ = std::make_unique<CudssSystem<double>>(handle_, require_spd_);
+    fp32_.reset();
+    K_ = CsrData{};
+  }
+
+  /// fp32 solve of every column, refined against K in double. False when a
+  /// column does not converge.
+  bool solve_refined(std::span<const double> B, std::vector<double> &X, int nrhs) {
+    const auto n = static_cast<std::size_t>(n_);
+    fp32_->solve(B.data(), X.data(), nrhs);
+    const FactorSolve correction = [&](const std::vector<double> &r) {
+      std::vector<double> d(n);
+      fp32_->solve(r.data(), d.data(), 1);
+      return d;
+    };
+    RefinementOptions opts;
+    opts.max_corrections = 30;
+    for (int k = 0; k < nrhs; ++k) {
+      const auto offset = n * static_cast<std::size_t>(k);
+      std::vector<double> u(X.begin() + offset, X.begin() + offset + n);
+      const RefinementReport report =
+          refine_solution(K_, B.subspan(offset, n), u, correction, opts);
+      if (!report.converged)
+        return false;
+      std::copy(u.begin(), u.end(), X.begin() + offset);
+    }
+    return true;
+  }
+
+  cudssHandle_t handle_;
+  bool require_spd_;
+  int n_{0};
+  bool ready_{false};
+  CsrData K_;
+  std::unique_ptr<CudssSystem<float>> fp32_;
+  std::unique_ptr<CudssSystem<double>> fp64_;
+  FactorStats stats_;
+};
+
+} // namespace
+
+Result<std::unique_ptr<LinearFactor>>
+CudaSolverBackend::factor(const SparseMatrixBuilder::CsrData &K,
+                          const FactorOptions &options) {
+  if (options.factor_ratio_policy != nullptr)
+    vibestran::log_debug("[cuda] factor(): MAXRATIO is not checked by the cuDSS factor");
+  auto factor = std::make_unique<CudaFactor>(ctx_->cudss, ctx_->precision,
+                                             options.require_spd);
+  if (auto e = factor->refactor(K))
+    return *e;
+  return std::unique_ptr<LinearFactor>(std::move(factor));
 }
 
 } // namespace vibestran
