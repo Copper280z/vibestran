@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 #include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
+#include <Eigen/SparseCholesky>
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -199,6 +200,167 @@ TEST(AirGapStiffness, PotentialIsTheSeriesWhoseCurlIsTheGapField) {
   EXPECT_LT(previous, 5e-4); // the r / gap amplification of the test above
 }
 
+// The sliding band (METHOD=BAND) of direct_gap's circles on n points.
+AirGap band_gap(double r1, double r2, int n_inner, int n_outer, int n) {
+  AirGap g = direct_gap(r1, r2, n_inner, n_outer);
+  g.band_points = n;
+  return g;
+}
+
+TEST(AirGapBand, SparseSymmetricWithConstantNullSpaceAndExactMeanTerm) {
+  const double r1 = .02, r2 = .021;
+  const AirGap g = band_gap(r1, r2, 40, 57, 90);
+  const Eigen::SparseMatrix<double> sparse = band_stiffness(g);
+  const Eigen::MatrixXd k(sparse);
+  ASSERT_EQ(k.rows(), 97);
+  EXPECT_LT((k - k.transpose()).norm(), 1e-12 * k.norm());
+  EXPECT_LT((k * Eigen::VectorXd::Ones(97)).norm(), 1e-10 * k.norm());
+  const Eigen::VectorXd eigenvalues = Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd>(k).eigenvalues();
+  EXPECT_GT(eigenvalues.minCoeff(), -1e-10 * eigenvalues.maxCoeff());
+  // Local: a grid's trace reaches the band points within one element of
+  // its two segments, which couple to their neighbours' averages on both
+  // circles: under 20 grids, where the harmonic AGE couples all 97.
+  for (int j = 0; j < sparse.outerSize(); ++j)
+    EXPECT_LE(sparse.col(j).nonZeros(), 20) << j;
+  // The radial functions are linear in ln r, so the logarithmic field of a
+  // constant on each circle is exact, as in the AGE.
+  Eigen::VectorXd a(97);
+  a.head(40).setConstant(.7);
+  a.tail(57).setConstant(-.2);
+  const double expected = pi * .81 / (mu0 * std::log(r2 / r1));
+  EXPECT_NEAR(.5 * a.dot(k * a), expected, 1e-12 * expected);
+}
+
+TEST(AirGapBand, HarmonicEnergyErrorIsTheOneLayerTruncation) {
+  // A trace cos(n theta) on the inner circle and 0.6 cos(n theta + 0.4) on
+  // the outer, sampled on fine circles and a fine band so that only the
+  // radial (one-layer) error is left. Exactly, the self energy per circle is
+  // n coth(nL) ~ 1/L + n^2 L/3 - n^4 L^3/45 and the coupling
+  // n / sinh(nL) ~ 1/L - n^2 L/6 + 7 n^4 L^3/360; the bilinear band keeps
+  // the first two terms of each, an error of order (nL)^4 / 45 relative to
+  // the mean term, against the exact annulus energy of the AGE.
+  const double r1 = .02, r2 = .021, l = std::log(r2 / r1);
+  for (int n : {4, 16, 48}) {
+    SCOPED_TRACE(n);
+    AirGap g = band_gap(r1, r2, 2048, 2048, 4096);
+    g.harmonics = 1024;
+    const Eigen::VectorXd a = sample(g, [&](const Vector &x) {
+      const double t = std::atan2(x.y(), x.x());
+      return x.head<2>().norm() < (r1 + r2) / 2 ? std::cos(n * t) : .6 * std::cos(n * t + .4);
+    });
+    const double band = .5 * a.dot(band_stiffness(g) * a),
+                 exact = .5 * a.dot(air_gap_stiffness(g) * a);
+    const double nl = n * l, error = std::abs(band - exact) / exact;
+    EXPECT_GT(band, exact); // too stiff: a linear radial profile
+    EXPECT_LT(error, std::max(.5 * std::pow(nl, 4), 1e-6)) << band << " " << exact;
+    if (nl > .5)
+      EXPECT_GT(error, std::pow(nl, 4) / 450);
+  }
+}
+
+TEST(AirGapBand, LayersReduceTheTruncationAsTheirSquare) {
+  // Harmonic 24 across a gap with n L = 1.17: one layer is far too stiff.
+  // The interior rings are unknowns; with them condensed out (the energy
+  // minimized over them for the given traces) the band's radial error falls
+  // as 1/M^2, the O(h^2) energy error of linear elements (measured 4.1, 4.1
+  // and 4.2 times per doubling of the layers). Each band is
+  // compared with a 32-layer band on the same angular grid, which leaves
+  // the grid's own (angular) error out; the one-layer band is also checked
+  // against the exact annulus.
+  const double r1 = .02, r2 = .021;
+  const int n = 24;
+  auto energy = [&](int layers, double *exact) {
+    AirGap g = band_gap(r1, r2, 512, 512, 1024);
+    g.harmonics = 256;
+    g.band_layers = layers;
+    g.band_first = 1024;
+    const Eigen::VectorXd traces = sample(g, [&](const Vector &x) {
+      const double t = std::atan2(x.y(), x.x());
+      return x.head<2>().norm() < (r1 + r2) / 2 ? std::cos(n * t) : .6 * std::cos(n * t + .4);
+    });
+    if (exact)
+      *exact = .5 * traces.dot(air_gap_stiffness(g) * traces);
+    const Eigen::SparseMatrix<double> k = band_stiffness(g);
+    const Eigen::Index circles = 1024, interior = k.rows() - circles;
+    EXPECT_EQ(interior, (layers - 1) * 1024);
+    double band = .5 * traces.dot(k.topLeftCorner(circles, circles) * traces);
+    if (interior > 0) {
+      const Eigen::SparseMatrix<double> kii = k.bottomRightCorner(interior, interior),
+                                        kic = k.bottomLeftCorner(interior, circles);
+      Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solve(kii);
+      const Eigen::VectorXd rhs = kic * traces, inside = solve.solve(rhs);
+      band -= .5 * rhs.dot(inside);
+    }
+    return band;
+  };
+  double exact = 0;
+  const double one = energy(1, &exact), converged = energy(32, nullptr);
+  // One layer: (n L)^4 / 45 relative to the mean term, here about 6%.
+  EXPECT_GT((one - exact) / exact, .03);
+  EXPECT_LT(std::abs(converged - exact) / exact, 1e-2); // the grid's error
+  double previous = (one - converged) / converged;
+  for (int layers : {2, 4, 8}) {
+    SCOPED_TRACE(layers);
+    const double error = (energy(layers, nullptr) - converged) / converged;
+    EXPECT_GT(error, 0);
+    EXPECT_GT(error, previous / 4.5);
+    EXPECT_LT(error, previous / 3.5);
+    previous = error;
+  }
+}
+
+TEST(AirGapBand, TorqueIsMinusTheEnergysDerivativeForATurnOfTheInnerPart) {
+  // The energy for the inner grids turned by delta (their potentials held),
+  // by central differences: the band averages the turned trace, so this is
+  // the torque band_torque returns.
+  const AirGap g = band_gap(.02, .021, 37, 52, 60);
+  Eigen::VectorXd a(89);
+  for (int i = 0; i < 89; ++i)
+    a[i] = std::sin(1.3 * i) + .2 * std::cos(.4 * i);
+  auto energy = [&](double delta) {
+    AirGap turned = g;
+    for (double &angle : turned.inner.angles)
+      angle += delta;
+    return .5 * a.dot(band_stiffness(turned) * a);
+  };
+  const double h = 1e-5, torque = band_torque(g, a);
+  const double expected = -(energy(h) - energy(-h)) / (2 * h);
+  EXPECT_NEAR(torque, expected, 1e-6 * std::abs(expected));
+  // Its gradient in a, by central differences, with gradient . a = 2 T.
+  const Eigen::VectorXd gradient = band_torque_gradient(g, a);
+  EXPECT_NEAR(gradient.dot(a), 2 * torque, 1e-10 * std::abs(torque));
+  for (int i : {0, 5, 36, 37, 60, 88}) {
+    Eigen::VectorXd up = a, down = a;
+    up[i] += 1e-4;
+    down[i] -= 1e-4;
+    EXPECT_NEAR(gradient[i], (band_torque(g, up) - band_torque(g, down)) / 2e-4,
+                1e-6 * gradient.norm())
+        << i;
+  }
+}
+
+TEST(AirGapBand, TorqueConvergesToTheAnnulusTorque) {
+  // Traces cos(3 theta) inside and cos(3 theta - 0.5) outside: the annulus
+  // torque is -3 M_3 sin(0.5), M_3 = -(3 pi / mu0) 2 rho^3 / (1 - rho^6).
+  // The band's torque converges to it at O(h^2), smoothly: the averaged
+  // traces move continuously under the band as a part turns.
+  const double r1 = .02, r2 = .021, q = std::pow(r1 / r2, 3);
+  const double exact = -3 * -(3 * pi / mu0) * 2 * q / (1 - q * q) * std::sin(.5);
+  double previous = 1;
+  for (int n : {48, 96, 192, 384}) {
+    SCOPED_TRACE(n);
+    const AirGap g = band_gap(r1, r2, n, n * 3 / 2, n * 3 / 2);
+    const Eigen::VectorXd a = sample(g, [&](const Vector &x) {
+      const double t = std::atan2(x.y(), x.x());
+      return x.head<2>().norm() < (r1 + r2) / 2 ? std::cos(3 * t) : std::cos(3 * t - .5);
+    });
+    const double error = std::abs(band_torque(g, a) - exact) / std::abs(exact);
+    EXPECT_LT(error, previous / 3.5);
+    previous = error;
+  }
+  EXPECT_LT(previous, 1e-3);
+}
+
 TEST(AirGapParser, PairgapAndAirgapParameterCards) {
   const Geometry geo = geometry(Machine{});
   auto message = [&](const std::string &gap) {
@@ -207,10 +369,13 @@ TEST(AirGapParser, PairgapAndAirgapParameterCards) {
     return error_of(parse(g, geo));
   };
   for (const auto &[cards, expected] : std::vector<std::pair<std::string, std::string>>{
-           {"PAIRGAP,9,FEM\n", "PAIRGAP METHOD must be AGE or MESH"},
+           {"PAIRGAP,9,FEM\n", "PAIRGAP METHOD must be AGE, BAND or MESH"},
            {"PAIRGAP,9,AGE,-2\n", "PAIRGAP NHARM must not be negative"},
-           {"PAIRGAP,9,AGE,4,7\n", "unexpected field 4"},
-           {"PAIRGAP,9\nPARAM,AIRGAP,FEM\n", "AIRGAP must be AGE or MESH"},
+           {"PAIRGAP,9,BAND,,2\n", "PAIRGAP NBAND must be at least 3"},
+           {"PAIRGAP,9,BAND,,-4\n", "PAIRGAP NBAND must be at least 3"},
+           {"PAIRGAP,9,BAND,,96,-1\n", "PAIRGAP NLAYER must be at least 1"},
+           {"PAIRGAP,9,AGE,4,70,1,2\n", "unexpected field 6"},
+           {"PAIRGAP,9\nPARAM,AIRGAP,FEM\n", "AIRGAP must be AGE, BAND or MESH"},
            {"PAIRGAP,9\nPMAG2D,9,1\n", "PAIRGAP 9 duplicates the ID of a PSOLID, PMAG or PMAG2D"},
            {"PAIRGAP,9\nPAIRGAP,9\n", "duplicate id 9"},
            {"PAIRGAP,9\nPAIRGAP,8\n", "PAIRGAP 8 has no elements; mesh the air gap and give "
@@ -228,6 +393,18 @@ TEST(AirGapParser, PairgapAndAirgapParameterCards) {
   ASSERT_EQ(m.air_gaps.size(), 1U);
   EXPECT_EQ(m.air_gaps.at(9).method, AirGapMethod::Age);
   EXPECT_EQ(m.air_gaps.at(9).harmonics, 12);
+  EXPECT_FALSE(m.properties.contains(9));
+  // METHOD=BAND with its grid count, and PARAM,AIRGAP,BAND over AGE.
+  g.gap = "PAIRGAP,9,BAND,,96\n";
+  m = parsed(g, geo);
+  EXPECT_EQ(m.air_gaps.at(9).method, AirGapMethod::Band);
+  EXPECT_EQ(m.air_gaps.at(9).band_points, 96);
+  g.gap = "PAIRGAP,9,BAND,,96,3\n";
+  m = parsed(g, geo);
+  EXPECT_EQ(m.air_gaps.at(9).band_layers, 3);
+  g.gap = "PAIRGAP,9\nPARAM,AIRGAP,BAND\n";
+  m = parsed(g, geo);
+  EXPECT_EQ(m.options.air_gap_method, AirGapMethod::Band);
   EXPECT_FALSE(m.properties.contains(9));
   // A PAIRGAP in a 3D model.
   const auto solid = parse_string(
@@ -663,6 +840,111 @@ TEST(AirGapSolve, MagnetizedRotorMatchesTheAnalyticFieldAtSecondOrder) {
   }
   EXPECT_LT(previous_gap, 1e-3);
   EXPECT_LT(previous_inside, 5e-4);
+}
+
+TEST(AirGapSolve, BandMatchesTheAnalyticMagnetizedRotorAtSecondOrder) {
+  // The magnetized rotor of the AGE test above with METHOD=BAND. The field
+  // is harmonic 1, for which the one-layer band's error (n ln(r2/r1))^4 / 45
+  // is 1e-7, so the sampling of the traces and the meshed parts set an
+  // O(h^2) error.
+  const double br = 1.0;
+  double previous_gap = 1, previous_inside = 1;
+  for (int div : {24, 48, 96}) {
+    SCOPED_TRACE(div);
+    Machine g;
+    g.rotor_div = div;
+    g.stator_div = div * 3 / 2;
+    g.stator_phase = 1. / 3;
+    g.rotor_rings = div / 8;
+    g.stator_rings = div / 6;
+    g.rotor_property = 2;
+    g.gap = "PAIRGAP,9,BAND\n";
+    g.cards = magnetized_rotor(br);
+    auto m = model(g);
+    const double gap = g.gap_outer - g.rotor;
+    std::vector<Vector> in_gap;
+    for (double t : {.3, 2.2, 4.1})
+      for (double depth : {.1, .5, .9}) {
+        const double r = g.rotor + depth * gap;
+        in_gap.emplace_back(r * std::cos(t), r * std::sin(t), 0);
+      }
+    m.probes.clear();
+    for (size_t i = 0; i < in_gap.size(); ++i)
+      m.probes.push_back({static_cast<int>(i) + 1, in_gap[i]});
+    m.probes.push_back({100, Vector(.005, .003, 0)});
+    const auto results = solved(m);
+    ASSERT_EQ(results.cases.size(), 1U);
+    ASSERT_TRUE(results.mesh.air_gap);
+    // NBAND blank: the finer circle's grid count.
+    EXPECT_EQ(results.mesh.air_gap->band_points, div * 3 / 2);
+    const auto &c = results.cases[0];
+    double gap_error = 0;
+    for (size_t i = 0; i < in_gap.size(); ++i) {
+      const Vector expected = magnet_field_outside(g, br, in_gap[i]);
+      gap_error = std::max(gap_error, (c.probe_b[i] - expected).norm() / expected.norm());
+    }
+    const Vector inside(br / 2 * (1 - g.rotor * g.rotor / (g.stator * g.stator)), 0, 0);
+    const double inside_error = (c.probe_b[in_gap.size()] - inside).norm() / inside.norm();
+    EXPECT_LT(gap_error, previous_gap / 3.5);
+    EXPECT_LT(inside_error, previous_inside / 3.5);
+    previous_gap = gap_error;
+    previous_inside = inside_error;
+    const auto rows = gap_rows(results);
+    ASSERT_EQ(rows.size(), 1U);
+    EXPECT_NE(rows[0].find(std::format("PAIRGAP 9, sliding band (BAND) in place of its "
+                                       "{} elements",
+                                       div * 5 / 2)),
+              std::string::npos)
+        << rows[0];
+    EXPECT_NE(rows[0].find(std::format("{} + {} grids, {} band points", div, div * 3 / 2,
+                                       div * 3 / 2)),
+              std::string::npos)
+        << rows[0];
+  }
+  EXPECT_LT(previous_gap, 2e-3);
+  EXPECT_LT(previous_inside, 1e-3);
+}
+
+TEST(AirGapSolve, BandConvergesToTheAgeAroundAnIronStator) {
+  // One deck solved with the AGE and with the band: two discretizations of
+  // the same gap, whose energies and gap fields approach each other at about
+  // second order as the circles and the band are refined together (measured
+  // 1.6e-3, 2.5e-4, 7.3e-5 in energy and 5.9e-4, 8.9e-5, 4.2e-5 in the
+  // field: 21 and 14 times over two doublings, not evenly per step).
+  std::vector<double> energies, fields;
+  for (int div : {48, 96, 192}) {
+    SCOPED_TRACE(div);
+    Machine g;
+    g.rotor_div = div;
+    g.stator_div = div * 3 / 2;
+    g.stator_phase = .3;
+    g.rotor_rings = div / 8;
+    g.stator_rings = div / 6;
+    g.rotor_property = 2;
+    g.stator_property = 3;
+    g.cards = magnetized_rotor(1.0) + "MATMAG,3,1000.\nPMAG2D,3,3\n";
+    const Geometry geo = geometry(g);
+    const double r = (g.rotor + g.gap_outer) / 2;
+    const Vector probe(r * std::cos(.7), r * std::sin(.7), 0);
+    double energy[2]{};
+    Vector field[2]{Vector::Zero(), Vector::Zero()};
+    for (int band : {0, 1}) {
+      Machine h = g;
+      h.gap = band ? "PAIRGAP,9,BAND\n" : "PAIRGAP,9\n";
+      auto m = parsed(h, geo);
+      m.probes = {{1, probe}};
+      const auto results = solved(m);
+      ASSERT_EQ(results.cases.size(), 1U);
+      energy[band] = results.cases[0].energy;
+      field[band] = results.cases[0].probe_b[0];
+    }
+    energies.push_back(std::abs(energy[0] - energy[1]) / energy[0]);
+    fields.push_back((field[0] - field[1]).norm() / field[0].norm());
+  }
+  EXPECT_LT(energies[2], energies[0] / 12);
+  EXPECT_LT(fields[2], fields[0] / 10);
+  EXPECT_LT(energies[2], 1e-4);
+  EXPECT_LT(fields[2], 6e-5);
 }
 
 TEST(AirGapSolve, AgeConvergesToTheMeshedGapAroundAnIronStator) {

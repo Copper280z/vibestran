@@ -154,23 +154,25 @@ Response response_at(const MaterialData &d, const Vector &x, const Vector &b) {
 // The air-gap element's dense block over its grids, scaled by the depth.
 // It is linear, so it is the same in every tangent.
 struct GapCoupling {
-  std::vector<int> nodes; // the circles' grids in increasing order, which
+  std::vector<int> nodes; // the unknowns it couples in increasing order (the
+                          // circles' grids, a band's interior points), which
                           // turning a part does not change
-  Eigen::MatrixXd stiffness;
+  // Over nodes: every entry for the AGE (a dense block), a sliding band's
+  // nonzeros, which move as a part turns.
+  Eigen::SparseMatrix<double> stiffness;
 };
 GapCoupling gap_coupling(const Mesh &mesh) {
   GapCoupling out;
   if (!mesh.air_gap)
     return out;
   const auto &gap = *mesh.air_gap;
-  const Eigen::MatrixXd unfolded = mesh.depth * air_gap_stiffness(gap);
-  // Each circle entry is sign times a grid's potential. In a sector model
-  // the unfolded gap is the whole machine's, and the sector's share of its
-  // energy is 1/sectors.
-  std::vector<std::pair<int, double>> entries; // grid, sign
-  for (const auto *c : {&gap.inner, &gap.outer})
-    for (size_t k = 0; k < c->nodes.size(); ++k)
-      entries.emplace_back(c->nodes[k], c->sign[k]);
+  const Eigen::SparseMatrix<double> unfolded =
+      mesh.depth * (gap.band_points > 0 ? band_stiffness(gap)
+                                        : Eigen::MatrixXd(air_gap_stiffness(gap)).sparseView(0, 0));
+  // Each entry is sign times an unknown: a circle grid's potential, or a
+  // band's interior point. In a sector model the unfolded gap is the whole
+  // machine's, and the sector's share of its energy is 1/sectors.
+  const auto entries = gap_entries(gap); // unknown, sign
   for (auto [node, sign] : entries)
     out.nodes.push_back(node);
   std::ranges::sort(out.nodes);
@@ -179,13 +181,16 @@ GapCoupling gap_coupling(const Mesh &mesh) {
   for (auto [node, sign] : entries)
     slot.push_back(std::ranges::lower_bound(out.nodes, node) - out.nodes.begin());
   const auto n = static_cast<Eigen::Index>(out.nodes.size());
-  out.stiffness = Eigen::MatrixXd::Zero(n, n);
-  for (size_t i = 0; i < entries.size(); ++i)
-    for (size_t j = 0; j < entries.size(); ++j)
-      out.stiffness(slot[i], slot[j]) +=
-          entries[i].second * entries[j].second *
-          unfolded(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j));
-  out.stiffness /= gap.sectors;
+  std::vector<Eigen::Triplet<double>> t;
+  t.reserve(static_cast<size_t>(unfolded.nonZeros()));
+  for (Eigen::Index j = 0; j < unfolded.outerSize(); ++j)
+    for (Eigen::SparseMatrix<double>::InnerIterator it(unfolded, j); it; ++it) {
+      const auto i = static_cast<size_t>(it.row()), k = static_cast<size_t>(j);
+      t.emplace_back(slot[i], slot[k],
+                     entries[i].second * entries[k].second * it.value() / gap.sectors);
+    }
+  out.stiffness.resize(n, n);
+  out.stiffness.setFromTriplets(t.begin(), t.end());
   return out;
 }
 bool on_air_gap(const Mesh &mesh, int face) {
@@ -194,17 +199,18 @@ bool on_air_gap(const Mesh &mesh, int face) {
                                    face) != mesh.air_gap->faces.end();
 }
 // The gauged stiffness's sparsity: the cells' couplings and the air gap's
-// dense block. Where each local entry lands in it is found once, so an
-// assembly only adds values into place. It depends only on the topology, so
-// MOTION positions share it.
+// (the AGE's dense block, a band's local couplings). Where each local entry
+// lands in it is found once, so an assembly only adds values into place. It
+// depends only on the topology, so MOTION positions share it while the gap's
+// couplings stay put.
 struct Pattern {
   Sparse matrix;           // the structure, with zero values
   std::vector<size_t> local, functions; // per cell (and one past): first entry
                                         // of its ne x ne block, of its ne
                                         // residuals
   std::vector<int> slots;  // value index of each local entry; -1 prescribed
-  std::vector<int> gap;    // of each gap block entry, column by column like
-                           // the matrix
+  std::vector<int> gap;    // of each nonzero of the gap's stiffness, in its
+                           // storage order
 };
 Pattern make_pattern(const Mesh &mesh, const Gauge &gauge, const GapCoupling &gap) {
   Pattern p;
@@ -225,9 +231,10 @@ Pattern make_pattern(const Mesh &mesh, const Gauge &gauge, const GapCoupling &ga
       for (int j : cell.edges)
         couple(i, j);
   }
-  for (int i : gap.nodes)
-    for (int j : gap.nodes)
-      couple(i, j);
+  const auto &gs = gap.stiffness;
+  for (Eigen::Index j = 0; j < gs.outerSize(); ++j)
+    for (Eigen::SparseMatrix<double>::InnerIterator it(gs, j); it; ++it)
+      couple(gap.nodes[static_cast<size_t>(it.row())], gap.nodes[static_cast<size_t>(j)]);
   p.matrix.resize(gauge.size, gauge.size);
   p.matrix.setFromTriplets(entries.begin(), entries.end());
   const auto slot = [&](int i, int j) {
@@ -244,9 +251,10 @@ Pattern make_pattern(const Mesh &mesh, const Gauge &gauge, const GapCoupling &ga
     for (int i : cell.edges)
       for (int j : cell.edges)
         p.slots.push_back(slot(i, j));
-  for (int j : gap.nodes)
-    for (int i : gap.nodes)
-      p.gap.push_back(slot(i, j));
+  for (Eigen::Index j = 0; j < gs.outerSize(); ++j)
+    for (Eigen::SparseMatrix<double>::InnerIterator it(gs, j); it; ++it)
+      p.gap.push_back(
+          slot(gap.nodes[static_cast<size_t>(it.row())], gap.nodes[static_cast<size_t>(j)]));
   return p;
 }
 // What solving a model needs from its geometry: built once for the model as
@@ -967,7 +975,12 @@ int normal_boundary(const Model &model, const Subcase &subcase) {
 // Whether a and b's stiffness has the same pattern: the same cells on the
 // same unknowns, gauge and gap grids.
 bool same_topology(const Setup &a, const Setup &b) {
+  const auto pattern = [](const Eigen::SparseMatrix<double> &m) {
+    return std::pair{std::vector<int>(m.outerIndexPtr(), m.outerIndexPtr() + m.outerSize() + 1),
+                     std::vector<int>(m.innerIndexPtr(), m.innerIndexPtr() + m.nonZeros())};
+  };
   return a.gauge.equations == b.gauge.equations && a.gap.nodes == b.gap.nodes &&
+         pattern(a.gap.stiffness) == pattern(b.gap.stiffness) &&
          std::ranges::equal(a.mesh.cells, b.mesh.cells,
                             [](const Cell &x, const Cell &y) { return x.edges == y.edges; });
 }
@@ -995,18 +1008,16 @@ Result<Setup> prepare(const Model &model, int normal_boundary = 0,
   s.pattern = shared && same_topology(*shared, s)
                   ? shared->pattern
                   : std::make_shared<const Pattern>(make_pattern(s.mesh, s.gauge, s.gap));
-  const auto n = s.gap.nodes.size();
-  s.gap_values.reserve(n * n);
-  for (size_t j = 0; j < n; ++j)
-    for (size_t i = 0; i < n; ++i) {
-      const int row = s.gauge.equations[s.gap.nodes[i]],
-                col = s.gauge.equations[s.gap.nodes[j]];
+  const auto &gs = s.gap.stiffness;
+  s.gap_values.reserve(static_cast<size_t>(gs.nonZeros()));
+  for (Eigen::Index j = 0; j < gs.outerSize(); ++j)
+    for (Eigen::SparseMatrix<double>::InnerIterator it(gs, j); it; ++it) {
+      const int ni = s.gap.nodes[static_cast<size_t>(it.row())],
+                nj = s.gap.nodes[static_cast<size_t>(j)];
+      const int row = s.gauge.equations[ni], col = s.gauge.equations[nj];
       s.gap_values.push_back(row < 0 || col < 0
                                  ? 0.0
-                                 : s.gauge.sign[s.gap.nodes[i]] *
-                                       s.gauge.sign[s.gap.nodes[j]] *
-                                       s.gap.stiffness(static_cast<Eigen::Index>(i),
-                                                       static_cast<Eigen::Index>(j)));
+                                 : s.gauge.sign[ni] * s.gauge.sign[nj] * it.value());
     }
   auto prepared = prepare_sources(model, s.mesh);
   if (auto *e = std::get_if<Error>(&prepared))
@@ -1168,7 +1179,9 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
         // dlambda_c/d(delta) = dT/di_c: the torque's gradient against the
         // potential's response to the circuit's current.
         const Eigen::VectorXd gradient =
-            mesh.depth * air_gap_torque_gradient(*mesh.air_gap, eq.a);
+            mesh.depth * (mesh.air_gap->band_points > 0
+                              ? band_torque_gradient(*mesh.air_gap, eq.a)
+                              : air_gap_torque_gradient(*mesh.air_gap, eq.a));
         const Eigen::VectorXd reduced_gradient = gauge.reduce(gradient);
         const Eigen::VectorXd rates =
             std::get<Eigen::MatrixXd>(responses).transpose() * reduced_gradient;
@@ -1240,7 +1253,9 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
     return *e;
   output.forces = std::get<std::vector<ForceResult>>(std::move(force));
   if (mesh.air_gap)
-    output.gap_torque = mesh.depth * air_gap_torque(*mesh.air_gap, eq.a);
+    output.gap_torque = mesh.depth * (mesh.air_gap->band_points > 0
+                                          ? band_torque(*mesh.air_gap, eq.a)
+                                          : air_gap_torque(*mesh.air_gap, eq.a));
   if (mesh.period) {
     // A sector stands for the whole machine: its cells' energy, and each
     // source's linkage, are one sector's share. A source is in series with
@@ -1386,26 +1401,38 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
     const auto shown = [&g](double x) {
       return std::abs(x) < 1e-12 * g.outer.radius ? 0.0 : x;
     };
+    const bool band = g.band_points > 0;
     solution.add("Air gap",
-                 std::format("PAIRGAP {}, air-gap element (AGE) in place of its {} "
+                 std::format("PAIRGAP {}, {} in place of its {} "
                              "elements: radius {:.6g} to {:.6g} m about ({:.6g}, "
-                             "{:.6g}, {:.6g}), {} + {} grids, {} harmonics, largest "
+                             "{:.6g}, {:.6g}), {} + {} grids, {}, largest "
                              "radial deviation {:.1e} of the radius",
-                             g.property, g.elements.size(), g.inner.radius,
+                             g.property,
+                             band ? "sliding band (BAND)" : "air-gap element (AGE)",
+                             g.elements.size(), g.inner.radius,
                              g.outer.radius, shown(g.center.x()), shown(g.center.y()),
                              shown(g.center.z()), g.inner.nodes.size(),
-                             g.outer.nodes.size(), g.harmonics, g.deviation));
+                             g.outer.nodes.size(),
+                             band ? std::format("{} band points in {} layer{}", g.band_points,
+                                                g.band_layers, g.band_layers == 1 ? "" : "s")
+                                  : std::format("{} harmonics", g.harmonics),
+                             g.deviation));
     if (g.sectors > 1)
       solution.add("Air gap",
                    std::format("the sector's arcs ({} + {} grids) unfolded around "
-                               "{} sectors{}: harmonics that are not {} vanish",
+                               "{} sectors{}{}",
                                g.inner.nodes.size() / g.sectors + 1,
                                g.outer.nodes.size() / g.sectors + 1, g.sectors,
                                mesh.period->anti ? ", changing sign in alternate sectors"
                                                  : "",
-                               mesh.period->anti
-                                   ? std::format("odd multiples of {}", g.sectors / 2)
-                                   : std::format("multiples of {}", g.sectors)));
+                               band ? std::string()
+                               : mesh.period->anti
+                                   ? std::format(": harmonics that are not odd multiples "
+                                                 "of {} vanish",
+                                                 g.sectors / 2)
+                                   : std::format(": harmonics that are not multiples of "
+                                                 "{} vanish",
+                                                 g.sectors)));
   }
   if (const auto &period = mesh.period) {
     const auto &card = *model.period;
@@ -1488,7 +1515,8 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
   result.summary.solver = solver_section(backend);
   result.summary.solver.set("Indefinite fallback",
                             "none, positive definite required");
-  Tangent tangent(backend, !base.gap.nodes.empty());
+  // Only the AGE's gap is a dense block; a sliding band's is sparse.
+  Tangent tangent(backend, base.mesh.air_gap && base.mesh.air_gap->band_points == 0);
   // THETA0 AUTO results by DRIVE, MOTION and MBC.
   std::map<std::tuple<int, int, int>, DriveSummary> alignments;
   // The setups of MBCs with NORMAL faces, whose gauge leaves them free.

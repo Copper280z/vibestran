@@ -60,7 +60,7 @@ probe positions and torque origins), section dimensions, `MAG2D` depth and
 `WIRESTEP` by `s`. It does not rescale current, conductivity, B–H
 data or remanence. Use `s=0.001` for millimeter geometry. Lengths are converted
 once on parsing; the C++ magnetic model API takes resolved SI coordinates.
-`PARAM,AIRGAP,AGE` or `PARAM,AIRGAP,MESH` sets the METHOD of every `PAIRGAP`
+`PARAM,AIRGAP,AGE`, `PARAM,AIRGAP,BAND` or `PARAM,AIRGAP,MESH` sets the METHOD of every `PAIRGAP`
 in the deck, overriding the cards ([Air gap](#air-gap-pairgap)).
 
 | Card | Fields after the card name |
@@ -73,7 +73,7 @@ in the deck, overriding the cards ([Air gap](#air-gap-pairgap)).
 | `CTRIA3` / `CQUAD4` | `EID,PID,G1,...` (three/four corners, planar mode only) |
 | `MAG2D` | `CID,DEPTH` (one card activates planar mode; CID=0 uses basic z) |
 | `PMAG2D` | `PID,MID,CID,AXIS` (planar magnetic property; orientation as PMAG) |
-| `PAIRGAP` | `PID,METHOD,NHARM` (planar air-gap property; METHOD `AGE` or `MESH`; see [Air gap](#air-gap-pairgap)) |
+| `PAIRGAP` | `PID,METHOD,NHARM,NBAND,NLAYER` (planar air-gap property; METHOD `AGE`, `BAND` or `MESH`; see [Air gap](#air-gap-pairgap)) |
 | `MOTION` | `ID,ESET,CID,ROTATE,START,STEP,COUNT` + `,SPEED` (planar rotation of ESET through the air gap, degrees; SPEED in rpm; see [Motion](#motion-motion)) |
 | `DRIVE` | `ID,WAVE,POLES,IPEAK,GAMMA,THETA0` + `,C1,C2,...` (phase currents from the rotor position; WAVE `SINE` or `SIX`; see [Phase currents](#phase-currents-drive)) |
 | `COIL2D` | `ID,ESET,SIGNED_TURNS` (one planar winding region; ID unique) |
@@ -395,20 +395,22 @@ inner boundary. Give those elements a property ID of their own and define it
 with `PAIRGAP` instead of `PMAG2D`:
 
 ```text
-PAIRGAP,PID,METHOD,NHARM
+PAIRGAP,PID,METHOD,NHARM,NBAND,NLAYER
 ```
 
 | Field | Meaning |
 |---|---|
 | `PID` | Property ID of the gap elements. It must not also be a PSOLID, PMAG or PMAG2D ID, and at least one element must use it. |
-| `METHOD` | `AGE` (blank is AGE): replace the gap elements by the air-gap element. `MESH`: solve them as ordinary meshed air. |
-| `NHARM` | AGE harmonics. Blank uses half the grid count of the coarser circle; at most half the grid count of the finer one. Ignored by MESH. |
+| `METHOD` | `AGE` (blank is AGE): replace the gap elements by the air-gap element. `BAND`: replace them by a sliding band of elements (sparse; see below). `MESH`: solve them as ordinary meshed air. |
+| `NHARM` | AGE harmonics, and the harmonics of the gap field reported for AGE and BAND. Blank uses half the grid count of the coarser circle; at most half the grid count of the finer one. Ignored by MESH. |
+| `NBAND` | BAND: points around the band, at least 3 and a multiple of a sector model's sectors. Blank uses the finer circle's grid count (unfolded in a sector model). Ignored otherwise. |
+| `NLAYER` | BAND: rings of band elements across the gap, at least 1. Blank makes the elements about square: ⌈NBAND ln(r₂/r₁) / 2π⌉. Ignored otherwise. |
 
 There is no material field: a gap is air (relative permeability 1, no
 remanence, no B–H table). Under the AGE the gap elements are not field cells,
 so a COIL2D, MFORCE BODY or BFIELD ESET may not contain them and an FSET may
 not name them; under MESH they are ordinary air elements. Keep such sets off
-the gap if the deck is to run both ways. `PARAM,AIRGAP,AGE|MESH` overrides
+the gap if the deck is to run both ways. `PARAM,AIRGAP,AGE|BAND|MESH` overrides
 METHOD on every PAIRGAP in the deck. PAIRGAP requires MAG2D.
 
 **METHOD=MESH** is resolved when the deck is read. The PID becomes an
@@ -472,6 +474,39 @@ is linear, so it adds the same term to every Newton tangent. The energy is
 exact for the gap given the traces, so discretization error stays in the
 meshed regions. The torque on the inner part is −dW/dδ for a rigid turn δ of
 its trace, which acts only on the coupling term (see Results below).
+
+**METHOD=BAND** removes the gap elements like the AGE and couples the two
+circles through a sliding band instead: NLAYER rings of NBAND elements on a
+uniform angular grid fixed in the plane. In log-polar coordinates
+ξ = ln(r/r₁)/ln(r₂/r₁) the annulus is a rectangle with constant
+coefficients, and each element is bilinear in (ξ, θ), so the mean (ln r)
+field is exact. On each circle a band point takes the circle's
+piecewise-linear trace averaged over the point's hat function. The average
+is exact for the trace, damps its grid-scale content (point samples on a
+grid that does not line up with the circle's alias it into the band), and
+moves continuously as a part turns. The band's interior point rings are
+unknowns of their own, after the grids. Each band point couples only to its
+neighbours, so the gap adds a few nonzeros per grid instead of the AGE's
+dense block, and the factorization stays as sparse as the meshed parts. In
+the 12-slot, 14-pole motor of the xfemm comparison (39,629 unknowns) that is
+170,058 lower-triangle nonzeros instead of 2,316,091.
+
+The band is a discretization of the gap, not the exact annulus: a harmonic
+n of the traces is too stiff in one layer by about (n ln(r₂/r₁))⁴/45 of the
+mean term, and M layers divide that by about M². Slot and cogging harmonics
+need several layers in a thin gap: cogging in the motor is harmonic 84,
+with n ln(r₂/r₁) = 2.8, and a one-layer band gave 0.097 N m peak to peak for
+the AGE's 0.052. The blank NLAYER, about square elements, is the guard
+against this. When a part turns, the averaged traces move under the band
+and the band's couplings change, so each MOTION position is a new symbolic
+analysis; the factorization is cheap enough that this costs little.
+
+Fields at points in the gap (probes, drawn gap cells) are, as with the
+AGE, the annulus field of the solved traces up to NHARM harmonics: the
+band's own bilinear field is only first-order accurate. The air-gap torque
+is the derivative of the band's energy for a turn of the inner part's
+traces with the band held, so it is the derivative of the coenergy that the
+band solves.
 
 **What each method guarantees.** These hold for every deck, and the test
 suite (`tests/unit/test_air_gap.cpp`, `tests/unit/test_motion.cpp`) checks
@@ -1255,9 +1290,9 @@ solving. The file has two top-level groups:
   - `circuits/`: `id`, `parallel`, `closed`, and `members` (source ID,
     polarity) with `member_offsets`.
   - `forces/`: `id`, `body`, `cid`. `probes/`: `id`, `cd`, `position_m`.
-  - `air_gap/` (planar models with a PAIRGAP solved by the AGE): attributes
-    `property`, `inner_radius_m`, `outer_radius_m`, `harmonics`,
-    `radial_deviation`;
+  - `air_gap/` (planar models with a PAIRGAP solved by the AGE or BAND):
+    attributes `property`, `inner_radius_m`, `outer_radius_m`, `harmonics`,
+    `band_points` and `band_layers` (0 for the AGE), `radial_deviation`;
     `center_m`; `sectors` (1, or MPERIOD's SECTORS); and `inner_grids`,
     `outer_grids`, the grid IDs on each circle in increasing angle (in a
     sector model, each arc grid once, without the last, which is the image
@@ -1269,7 +1304,7 @@ solving. The file has two top-level groups:
     torque in the subcase groups are the whole machine's.
   - `subcase_ids`, and `subcases/<ID>/` per subcase, with attributes `id`,
     `iterations`, `residual`, `energy_J`, `coenergy_J`, `bh_extrapolated`,
-    and `air_gap_torque_Nm` with an AGE gap.
+    and `air_gap_torque_Nm` with an AGE or BAND gap.
     Its `sources/`, `circuits/`, `forces/` and `probes/` groups line up row
     for row with the definition tables:
     - `sources/current_A`, `linkage_Wb_turn`, `differential_inductance_H`

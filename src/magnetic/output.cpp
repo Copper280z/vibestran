@@ -650,7 +650,7 @@ BlockState field_state(const BlockTopology &t, const Model &model,
   }
   out.fields = {{"B_T", std::move(b)}, {"H_A_per_m", std::move(h)}};
   if (mesh.planar &&
-      state.potential.size() == static_cast<Eigen::Index>(mesh.nodes.size())) {
+      state.potential.size() >= static_cast<Eigen::Index>(mesh.nodes.size())) {
     for (int n : t.nodes)
       out.potential.push_back(state.potential[n]);
     for (int id : t.gap_grids)
@@ -956,6 +956,8 @@ Status write_hdf5(const std::string &path, const Model &model,
     h5.attribute(group.get(), "inner_radius_m", gap->inner.radius);
     h5.attribute(group.get(), "outer_radius_m", gap->outer.radius);
     h5.attribute(group.get(), "harmonics", int64_t{gap->harmonics});
+    h5.attribute(group.get(), "band_points", int64_t{gap->band_points});
+    h5.attribute(group.get(), "band_layers", int64_t{gap->band_points > 0 ? gap->band_layers : 0});
     h5.attribute(group.get(), "radial_deviation", gap->deviation);
     h5.vectors(group.get(), "center_m", {gap->center});
     h5.attribute(group.get(), "sectors", int64_t{gap->sectors});

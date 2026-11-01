@@ -300,6 +300,12 @@ Result<Mesh> make_mesh(const Model &model) {
     if (auto *e = std::get_if<Error>(&gap))
       return *e;
     mesh.air_gap = std::get<AirGap>(std::move(gap));
+    AirGap &g = *mesh.air_gap;
+    if (g.band_points > 0) {
+      g.band_first = static_cast<int>(mesh.nodes.size());
+      mesh.band_unknowns =
+          static_cast<size_t>((g.band_layers - 1) * (g.band_points / g.sectors));
+    }
   }
   if (mesh.planar) {
     // A planar field mesh must be one piece, or two pieces joined by the
@@ -531,9 +537,10 @@ Result<Gauge> make_gauge(const Mesh &mesh, const std::vector<bool> &natural) {
   Disjoint connected(n), boundary(n), tree(n);
   Gauge gauge;
   if (mesh.planar) {
-    gauge.equations.assign(n, -1);
-    gauge.boundary.assign(n, false);
-    gauge.sign.assign(n, 1);
+    const auto unknowns = mesh.dofs();
+    gauge.equations.assign(unknowns, -1);
+    gauge.boundary.assign(unknowns, false);
+    gauge.sign.assign(unknowns, 1);
     // Air-gap faces are coupled by the air-gap element and periodic faces
     // by their images, NORMAL faces take the natural condition: none is
     // prescribed. The gap joins the parts it separates.
@@ -587,6 +594,10 @@ Result<Gauge> make_gauge(const Mesh &mesh, const std::vector<bool> &natural) {
         gauge.equations[i] = gauge.equations[image_of[i]];
         gauge.sign[i] = mesh.period->sign();
       }
+    // A sliding band's interior rings are free; their images in a sector
+    // model are folded by the band itself.
+    for (size_t i = mesh.nodes.size(); i < unknowns; ++i)
+      gauge.equations[i] = gauge.size++;
     // An anti-periodic potential has no free constant.
     if (!(mesh.period && mesh.period->anti) &&
         std::none_of(gauge.boundary.begin(), gauge.boundary.end(),

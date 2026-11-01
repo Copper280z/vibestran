@@ -181,6 +181,74 @@ TEST(Motion, MagnetInAUniformFieldFollowsTheAnalyticTorque) {
   EXPECT_LT(errors[1], errors[0] / 3);
 }
 
+TEST(Motion, BandTorqueIsTheDerivativeOfTheCoenergy) {
+  // The coenergy test above with METHOD=BAND: the band's energy is the
+  // gap's, and the band torque its derivative for a turn of the rotor's
+  // averaged traces under the band.
+  for (const bool saturating : {false, true}) {
+    SCOPED_TRACE(saturating ? "saturating stator" : "linear stator");
+    Machine g;
+    g.stator_div = 72;
+    g.rotor_property = 2;
+    g.stator_property = 3;
+    g.gap = "PAIRGAP,9,BAND\n";
+    g.cards = magnetized_rotor(1.1) + stator_iron(saturating) + "ESET,20,PROP,2\n";
+    auto m = model(g);
+    wind(m, 40, .3);
+    const double h = .05;
+    const std::vector<double> centers{3, 21, 52};
+    m.subcases.clear();
+    for (size_t k = 0; k < centers.size(); ++k) {
+      const int id = static_cast<int>(k) + 1;
+      m.motions[id] = {.id = id, .set = 20, .coordinates = 0, .count = 3,
+                       .start = centers[k] - h, .step = h};
+      m.subcases.push_back(subcase(id, 1, id));
+    }
+    const auto r = solved(m);
+    ASSERT_EQ(r.cases.size(), centers.size());
+    for (size_t k = 0; k < centers.size(); ++k) {
+      const auto &s = r.cases[k].steps;
+      const double derivative = (s[2].coenergy - s[0].coenergy) / (2 * h * degree);
+      EXPECT_NEAR(s[1].torque, derivative,
+                  (saturating ? 2e-5 : 1e-6) * std::abs(s[1].torque));
+    }
+  }
+}
+
+TEST(Motion, BandMagnetInAUniformFieldFollowsTheAnalyticTorque) {
+  // The magnet in a uniform field of the test above, across METHOD=BAND:
+  // T = -(Br / mu0) B0 S d sin(phi) at every position of a full turn, to
+  // second order in the divisions.
+  const double br = 1.0, b0 = .3, depth = .1;
+  std::vector<double> errors;
+  for (const int divisions : {48, 96}) {
+    Machine g;
+    g.rotor_div = divisions;
+    g.stator_div = divisions * 3 / 2;
+    g.rotor_rings = divisions / 8;
+    g.stator_rings = divisions / 6;
+    g.rotor_property = 2;
+    g.gap = "PAIRGAP,9,BAND\n";
+    g.cards = magnetized_rotor(br) + rotor_motion(0, 30, 12) +
+              std::format("MBC,1,0,UNIFORM,{},0.,0.\n", b0);
+    auto m = model(g);
+    m.subcases = {subcase(1, 0, 1)};
+    m.subcases[0].boundary = 1;
+    const auto r = solved(m);
+    ASSERT_EQ(r.cases.size(), 1U);
+    const double area = divisions / 2.0 * g.rotor * g.rotor * std::sin(2 * pi / divisions),
+                 amplitude = br / mu0 * b0 * area * depth;
+    double worst = 0;
+    for (const auto &step : r.cases[0].steps) {
+      const double expected = -amplitude * std::sin(step.position * degree);
+      worst = std::max(worst, std::abs(step.torque - expected) / amplitude);
+    }
+    errors.push_back(worst);
+  }
+  EXPECT_LT(errors[0], 3e-3);
+  EXPECT_LT(errors[1], errors[0] / 3);
+}
+
 TEST(Motion, ARoundRotorHasNoCoggingAtAnyPosition) {
   // A round, unmagnetized iron rotor in a wound stator: turning it changes
   // nothing physical. Its mesh is a 48-gon, but that shape is harmonic 48

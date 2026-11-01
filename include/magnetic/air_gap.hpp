@@ -33,7 +33,9 @@ inline constexpr double kAirGapTolerance = 1e-6;
 // The annulus field of one state, the nodal potential a of the planar mesh:
 // the two circles' harmonics are computed once, so evaluating many points
 // (probes, the drawn gap cells) costs a sum over the harmonics each. gap
-// must outlive the series.
+// must outlive the series. With a sliding band it is the same: the annulus
+// field of the solved traces, which converges at second order where the
+// band's own bilinear field is first order.
 class AirGapSeries {
 public:
   AirGapSeries(const AirGap &gap, const Eigen::VectorXd &a);
@@ -66,4 +68,32 @@ private:
 // gives dT/di, which by reciprocity is the circuit's dlambda/d(delta).
 [[nodiscard]] Eigen::VectorXd air_gap_torque_gradient(const AirGap &gap,
                                                       const Eigen::VectorXd &a);
+
+// The sliding band (PAIRGAP METHOD=BAND): gap.band_layers rings of
+// gap.band_points elements on a uniform angular grid, psi_k = 2 pi k / band_points from the
+// gap's u axis, fixed in the plane. Each grid point's potential on a circle
+// is that circle's piecewise-linear trace averaged over the point's hat
+// function, so turning a part only moves the traces under the band. In log-polar coordinates
+// xi = ln(r / r1) / ln(r2 / r1) the annulus is a rectangle with constant
+// coefficients, and each element is bilinear in (xi, theta): exact for the
+// mean, ln r term. For harmonic n one layer is too stiff by about
+// (n ln(r2/r1))^4 / 45 in self energy, and M layers divide the error by
+// about M^2. Fields in the gap are AirGapSeries's, from the traces.
+
+// What a gap stiffness acts on: the unknown and its sign for each inner
+// circle entry, each outer one, and for a band its interior point rings 1
+// to M-1, N points each (unfolded around a sector model like the circles).
+[[nodiscard]] std::vector<std::pair<int, double>> gap_entries(const AirGap &gap);
+// Stiffness per unit depth over gap_entries, like air_gap_stiffness (which
+// has no interior rings), but sparse: an entry couples only to entries
+// whose band points share an element.
+[[nodiscard]] Eigen::SparseMatrix<double> band_stiffness(const AirGap &gap);
+// -dW/d(delta) of the band's energy for a rigid rotation delta of the inner
+// part, its traces sampled at the turned angles, per unit depth (whole
+// machine in a sector model).
+[[nodiscard]] double band_torque(const AirGap &gap, const Eigen::VectorXd &a);
+// The gradient of band_torque with respect to a; band_torque is bilinear,
+// so gradient . a is twice the torque.
+[[nodiscard]] Eigen::VectorXd band_torque_gradient(const AirGap &gap,
+                                                   const Eigen::VectorXd &a);
 } // namespace vibestran::magnetic

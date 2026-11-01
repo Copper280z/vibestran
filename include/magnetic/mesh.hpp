@@ -53,6 +53,14 @@ struct AirGap {
   double deviation{0};    // largest |distance - radius| / radius of a grid
   double inner_chord{0};  // nearest approach of the inner circle's edges
   int harmonics{0};
+  int band_points{0}; // METHOD=BAND: the sliding band's grid; 0 for the AGE
+  int band_layers{1}; // the band's element rings, between M + 1 point rings
+  // The band's interior point rings (1..M-1) are unknowns after the mesh's
+  // nodes, from band_first: ring r's point k is unknown band_first +
+  // (r - 1) N/sectors + k mod N/sectors, times image_sign^(k div N/sectors)
+  // in a sector model.
+  int band_first{0};
+  double image_sign{1};
   int sectors{1}; // the circles are unfolded from one of this many sectors
 };
 // The two sides of an MPERIOD on the field mesh: each grid of the first
@@ -81,8 +89,11 @@ struct Mesh {
   Vector normal{Vector::UnitZ()};
   std::optional<AirGap> air_gap; // planar only
   std::optional<Periodicity> period; // planar only
+  // A planar mesh's unknowns: its nodes' potentials, then a sliding band's
+  // interior rings (AirGap::band_first).
+  size_t band_unknowns{0};
   [[nodiscard]] size_t dofs() const {
-    return planar ? nodes.size() : edges.size();
+    return planar ? nodes.size() + band_unknowns : edges.size();
   }
 };
 struct Sample {

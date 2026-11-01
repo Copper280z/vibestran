@@ -188,12 +188,15 @@ struct ForceSurface {
   int coordinates{0}, layers{1};
 };
 enum class WireMesh { Auto, Hex, Tet };
-// PAIRGAP: the elements of an air gap. AGE replaces them by the air-gap
-// element; MESH solves them as ordinary air (mu_r = 1).
-enum class AirGapMethod { Age, Mesh };
+// PAIRGAP: the elements of an air gap. AGE replaces them by the harmonic
+// air-gap element, BAND by a sliding band of elements on a uniform grid;
+// MESH solves them as ordinary air (mu_r = 1).
+enum class AirGapMethod { Age, Band, Mesh };
 struct AirGapProperty {
   AirGapMethod method{AirGapMethod::Age};
   int harmonics{0}; // NHARM; 0 for half the coarser circle's grid count
+  int band_points{0}; // NBAND; 0 for the finer circle's grid count
+  int band_layers{0}; // NLAYER; 0 for about square band elements
 };
 struct Options {
   double length_scale{1}, nonlinear_tolerance{1e-8};

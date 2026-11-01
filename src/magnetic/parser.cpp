@@ -488,12 +488,20 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       const auto method = upper(r.get(2));
       if (method == "MESH")
         gap.method = AirGapMethod::Mesh;
+      else if (method == "BAND")
+        gap.method = AirGapMethod::Band;
       else if (!method.empty() && method != "AGE")
-        return Error{r.where + ": PAIRGAP METHOD must be AGE or MESH"};
+        return Error{r.where + ": PAIRGAP METHOD must be AGE, BAND or MESH"};
       gap.harmonics = r.integer(3);
       if (gap.harmonics < 0)
         return Error{r.where + ": PAIRGAP NHARM must not be negative (blank for the default)"};
-      r.last(3);
+      gap.band_points = r.integer(4);
+      if (gap.band_points < 0 || (gap.band_points > 0 && gap.band_points < 3))
+        return Error{r.where + ": PAIRGAP NBAND must be at least 3 (blank for the default)"};
+      gap.band_layers = r.integer(5);
+      if (gap.band_layers < 0)
+        return Error{r.where + ": PAIRGAP NLAYER must be at least 1 (blank for the default)"};
+      r.last(5);
       insert_unique(m.air_gaps, id, gap, r);
     } else if (key == "MOTION") {
       Motion motion;
@@ -788,10 +796,12 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
         const auto value = upper(r.get(2));
         if (value == "AGE")
           m.options.air_gap_method = AirGapMethod::Age;
+        else if (value == "BAND")
+          m.options.air_gap_method = AirGapMethod::Band;
         else if (value == "MESH")
           m.options.air_gap_method = AirGapMethod::Mesh;
         else
-          return Error{r.where + ": AIRGAP must be AGE or MESH"};
+          return Error{r.where + ": AIRGAP must be AGE, BAND or MESH"};
       } else
         return Error{r.where + ": unsupported MAGSTAT parameter " + option};
       r.last(2);

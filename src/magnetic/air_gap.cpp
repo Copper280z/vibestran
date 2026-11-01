@@ -352,7 +352,27 @@ Result<AirGap> make_air_gap(const Mesh &mesh, const Model &model, int pid) {
 
   const auto coarse = std::min(gap.inner.nodes.size(), gap.outer.nodes.size()),
              fine = std::max(gap.inner.nodes.size(), gap.outer.nodes.size());
-  const int requested = model.air_gaps.at(pid).harmonics;
+  const AirGapProperty &property = model.air_gaps.at(pid);
+  if (model.options.air_gap_method.value_or(property.method) == AirGapMethod::Band) {
+    gap.band_points = property.band_points > 0 ? property.band_points : static_cast<int>(fine);
+    // Blank NLAYER: about square elements, the layer's thickness in ln r
+    // no more than an element's angle.
+    const double thickness = std::log(gap.outer.radius / gap.inner.radius);
+    gap.band_layers = property.band_layers > 0
+                          ? property.band_layers
+                          : std::max(1, static_cast<int>(std::ceil(
+                                            thickness * gap.band_points / (2 * pi) - 1e-9)));
+    if (mesh.period && mesh.period->anti)
+      gap.image_sign = -1;
+    // Each sector then samples its traces at the same points, so the
+    // unfolded band is the sector's, repeated.
+    if (gap.band_points % gap.sectors != 0)
+      return Error{std::format(
+          "PAIRGAP {}: NBAND {} is not a multiple of the {} sectors of the "
+          "unfolded gap",
+          pid, gap.band_points, gap.sectors)};
+  }
+  const int requested = property.harmonics;
   if (requested > static_cast<int>(fine / 2))
     return Error{std::format(
         "PAIRGAP {}: NHARM {} exceeds half the grid count of the finer circle "
@@ -520,5 +540,195 @@ Eigen::VectorXd air_gap_torque_gradient(const AirGap &gap, const Eigen::VectorXd
       out[circle->nodes[k]] += circle->sign[k] * nodal[static_cast<Eigen::Index>(k)];
   }
   return out;
+}
+} // namespace vibestran::magnetic
+
+namespace vibestran::magnetic {
+namespace {
+// The band grid's values on one circle. Value k is the trace f averaged
+// over band point k's hat function h_k (width 2 Delta, integral Delta):
+// g_k = (1/Delta) integral h_k f. Point samples of a piecewise-linear trace
+// on a grid that does not line up with its grids alias the trace's
+// grid-scale content into the band and stall convergence; the average
+// integrates the trace exactly and damps that content. For a turn delta of
+// the circle's part, f(psi - delta), dg_k/d(delta) = (1/Delta) integral
+// h_k' f, the trace's integrals over the two band elements beside point k
+// over Delta^2. Rows are weights on the circle's entries.
+struct BandRows {
+  Eigen::SparseMatrix<double> value, turn;
+};
+BandRows band_rows(const AirGap &gap, const GapCircle &c) {
+  const int n = gap.band_points;
+  const auto m = static_cast<Eigen::Index>(c.nodes.size());
+  const double h = 2 * pi / n;
+  std::vector<Eigen::Triplet<double>> value, turn;
+  // Segment j runs from entry j to entry j + 1 (the last wraps around).
+  for (Eigen::Index j = 0; j < m; ++j) {
+    const Eigen::Index next = (j + 1) % m;
+    const double u = c.angles[static_cast<size_t>(j)],
+                 w = next ? c.angles[static_cast<size_t>(next)] : c.angles[0] + 2 * pi;
+    // The segment's pieces within each band element [k h, (k + 1) h],
+    // unrolled from psi = 0 by whole turns.
+    for (double shift : {-2 * pi, 0.0, 2 * pi}) {
+      const double from = std::max(u + shift, 0.0), to = std::min(w + shift, 2 * pi);
+      if (to <= from)
+        continue;
+      for (int k = static_cast<int>(from / h); k < n && k * h < to; ++k) {
+        const double a = std::max(from, k * h), b = std::min(to, (k + 1) * h);
+        if (b <= a)
+          continue;
+        // Simpson's rule on [a, b], exact for the products of the linear
+        // node functions and hats; the node functions alone integrate
+        // exactly at the midpoint.
+        const double points[3] = {a, (a + b) / 2, b}, weights[3] = {1, 4, 1};
+        double left[2]{}, right[2]{}, plain[2];
+        for (int q = 0; q < 3; ++q) {
+          const double psi = points[q], wq = weights[q] * (b - a) / 6;
+          const double node[2] = {(w + shift - psi) / (w - u), (psi - u - shift) / (w - u)};
+          const double rising = (psi - k * h) / h; // h_{k+1}; h_k is 1 - rising
+          for (int e = 0; e < 2; ++e) {
+            left[e] += wq * (1 - rising) * node[e];
+            right[e] += wq * rising * node[e];
+          }
+        }
+        const double middle = (a + b) / 2;
+        plain[0] = (b - a) * (w + shift - middle) / (w - u);
+        plain[1] = (b - a) * (middle - u - shift) / (w - u);
+        const int here = k, there = (k + 1) % n;
+        const Eigen::Index entry[2] = {j, next};
+        for (int e = 0; e < 2; ++e) {
+          value.emplace_back(here, entry[e], left[e] / h);
+          value.emplace_back(there, entry[e], right[e] / h);
+          // h_k' = -1/Delta on this element, h_{k+1}' = +1/Delta.
+          turn.emplace_back(here, entry[e], -plain[e] / (h * h));
+          turn.emplace_back(there, entry[e], plain[e] / (h * h));
+        }
+      }
+    }
+  }
+  BandRows out{Eigen::SparseMatrix<double>(n, m), Eigen::SparseMatrix<double>(n, m)};
+  out.value.setFromTriplets(value.begin(), value.end());
+  out.turn.setFromTriplets(turn.begin(), turn.end());
+  return out;
+}
+
+// The band's stiffness per unit depth over its (M + 1) N point values,
+// ring r (0 on the inner circle, M on the outer) at r N + k. The energy
+// density in (xi, theta) is (1/(2 mu0)) ((1/L) A_xi^2 + L A_theta^2),
+// L = ln(r2/r1), and each element is the bilinear rectangle
+// [r/M, (r+1)/M] x [psi_k, psi_k+1].
+Eigen::SparseMatrix<double> ring_stiffness(const AirGap &gap) {
+  const int n = gap.band_points, m = gap.band_layers;
+  const double l = std::log(gap.outer.radius / gap.inner.radius), h = 2 * pi / n;
+  // 1-D stiffness [1 -1; -1 1] / w and mass w [1/3 1/6; 1/6 1/3] on an
+  // interval of width w: 1/M radially, h in angle.
+  const double stiff[2][2] = {{1, -1}, {-1, 1}}, mass[2][2] = {{1. / 3, 1. / 6}, {1. / 6, 1. / 3}};
+  std::vector<Eigen::Triplet<double>> t;
+  t.reserve(16 * static_cast<size_t>(n) * static_cast<size_t>(m));
+  for (int ring = 0; ring < m; ++ring)
+    for (int k = 0; k < n; ++k) {
+      const int around[2] = {k, (k + 1) % n};
+      for (int ri = 0; ri < 2; ++ri)
+        for (int ai = 0; ai < 2; ++ai)
+          for (int rj = 0; rj < 2; ++rj)
+            for (int aj = 0; aj < 2; ++aj) {
+              const double value = (stiff[ri][rj] * m * mass[ai][aj] * h / l +
+                                    l * mass[ri][rj] / m * stiff[ai][aj] / h) /
+                                   mu0;
+              t.emplace_back((ring + ri) * n + around[ai], (ring + rj) * n + around[aj],
+                             value);
+            }
+    }
+  Eigen::SparseMatrix<double> k((m + 1) * n, (m + 1) * n);
+  k.setFromTriplets(t.begin(), t.end());
+  return k;
+}
+
+// The band's map from gap_entries to its point values, and the derivative
+// of those values for a turn of the inner part (its interior rings, fixed
+// in space, held).
+struct Band {
+  Eigen::SparseMatrix<double> map, turn;
+};
+Band band_map(const AirGap &gap) {
+  const BandRows inner = band_rows(gap, gap.inner), outer = band_rows(gap, gap.outer);
+  const int n = gap.band_points, m = gap.band_layers;
+  const auto ni = static_cast<int>(gap.inner.nodes.size()),
+             no = static_cast<int>(gap.outer.nodes.size());
+  const int columns = ni + no + (m - 1) * n;
+  std::vector<Eigen::Triplet<double>> map, turn;
+  for (int k = 0; k < inner.value.outerSize(); ++k)
+    for (Eigen::SparseMatrix<double>::InnerIterator it(inner.value, k); it; ++it)
+      map.emplace_back(static_cast<int>(it.row()), static_cast<int>(it.col()), it.value());
+  for (int k = 0; k < outer.value.outerSize(); ++k)
+    for (Eigen::SparseMatrix<double>::InnerIterator it(outer.value, k); it; ++it)
+      map.emplace_back(m * n + static_cast<int>(it.row()), ni + static_cast<int>(it.col()),
+                       it.value());
+  for (int p = 0; p < (m - 1) * n; ++p)
+    map.emplace_back(n + p, ni + no + p, 1.0);
+  for (int k = 0; k < inner.turn.outerSize(); ++k)
+    for (Eigen::SparseMatrix<double>::InnerIterator it(inner.turn, k); it; ++it)
+      turn.emplace_back(static_cast<int>(it.row()), static_cast<int>(it.col()), it.value());
+  Band out{Eigen::SparseMatrix<double>((m + 1) * n, columns),
+           Eigen::SparseMatrix<double>((m + 1) * n, columns)};
+  out.map.setFromTriplets(map.begin(), map.end());
+  out.turn.setFromTriplets(turn.begin(), turn.end());
+  return out;
+}
+
+// The values of gap_entries for the unknowns a.
+Eigen::VectorXd entries(const AirGap &gap, const Eigen::VectorXd &a) {
+  const auto list = gap_entries(gap);
+  Eigen::VectorXd out(static_cast<Eigen::Index>(list.size()));
+  for (size_t k = 0; k < list.size(); ++k)
+    out[static_cast<Eigen::Index>(k)] = list[k].second * a[list[k].first];
+  return out;
+}
+
+// Maps a gradient over gap_entries to the unknowns.
+Eigen::VectorXd to_unknowns(const AirGap &gap, const Eigen::VectorXd &d, Eigen::Index size) {
+  const auto list = gap_entries(gap);
+  Eigen::VectorXd out = Eigen::VectorXd::Zero(size);
+  for (size_t k = 0; k < list.size(); ++k)
+    out[list[k].first] += list[k].second * d[static_cast<Eigen::Index>(k)];
+  return out;
+}
+} // namespace
+
+std::vector<std::pair<int, double>> gap_entries(const AirGap &gap) {
+  std::vector<std::pair<int, double>> out;
+  for (const GapCircle *c : {&gap.inner, &gap.outer})
+    for (size_t k = 0; k < c->nodes.size(); ++k)
+      out.emplace_back(c->nodes[k], c->sign[k]);
+  if (gap.band_points == 0)
+    return out;
+  const int per = gap.band_points / gap.sectors;
+  for (int ring = 1; ring < gap.band_layers; ++ring)
+    for (int k = 0; k < gap.band_points; ++k)
+      out.emplace_back(gap.band_first + (ring - 1) * per + k % per,
+                       (k / per) % 2 ? gap.image_sign : 1.0);
+  return out;
+}
+
+Eigen::SparseMatrix<double> band_stiffness(const AirGap &gap) {
+  const Band band = band_map(gap);
+  return Eigen::SparseMatrix<double>(band.map.transpose() * ring_stiffness(gap) * band.map);
+}
+
+double band_torque(const AirGap &gap, const Eigen::VectorXd &a) {
+  // W = (1/2) g^T K g with g = map x; turning the inner part changes g at
+  // rate turn x, so -dW/d(delta) = -(K g) . (turn x).
+  const Band band = band_map(gap);
+  const Eigen::VectorXd x = entries(gap, a), g = band.map * x;
+  return -(ring_stiffness(gap) * g).dot(band.turn * x);
+}
+
+Eigen::VectorXd band_torque_gradient(const AirGap &gap, const Eigen::VectorXd &a) {
+  const Band band = band_map(gap);
+  const Eigen::SparseMatrix<double> k = ring_stiffness(gap);
+  const Eigen::VectorXd x = entries(gap, a);
+  const Eigen::VectorXd d =
+      -(band.map.transpose() * (k * (band.turn * x)) + band.turn.transpose() * (k * (band.map * x)));
+  return to_unknowns(gap, d, a.size());
 }
 } // namespace vibestran::magnetic
