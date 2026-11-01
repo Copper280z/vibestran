@@ -917,6 +917,45 @@ also gets a table of each circuit's dλ/dφ, or EMF in volts with `SPEED`.
 The HDF5 subcase group gains a `drive` group (see
 [Results](#results-and-angle-sweeps)).
 
+### Worked example: a 12-slot, 14-pole motor
+
+`tools/magnetic_motor_example.py` is the reference workflow from an external
+mesher to plots. It builds a surface-magnet motor with a gmsh cross section:
+12 tooth-wound slots, 7 pole pairs, 1.2 T magnets and the nonlinear steel table
+from the script. It writes the MAGSTAT deck (PAIRGAP air gap, MOTION, DRIVE,
+720 mid-gap MPROBEs), runs vibestran, and reads `motor.mag.vtkhdf` for the
+plots:
+
+```sh
+.venv/bin/pip install -r tools/requirements-magnetic.txt gmsh matplotlib
+.venv/bin/python tools/magnetic_motor_example.py /tmp/motor
+```
+
+There are three subcases:
+
+1. Rated: 10 A peak at γ = 0, over one electrical period in 120 positions.
+2. No load: `DRIVE` at 0 A, for THETA0 AUTO's d axis, the back-EMF at
+   1000 rpm and the incremental L_d, L_q.
+3. Cogging: 40 positions over one cogging period, 360/lcm(12, 14) degrees.
+
+The script reads only `element_id`, B and A from the VTKHDF file. It reads
+torque, linkage, EMF and probes from the HDF5 subcase groups. `--reuse`
+replots an earlier run without solving. On the mesh it makes (20 500 cells, the
+3450 in the gap replaced by the AGE), the run takes about 2.5 minutes on 8 threads.
+
+The results are self-consistent where the theory gives an exact relation:
+
+| Check | Result |
+|---|---|
+| Rated torque against (3/2) p (λ_d i_q − λ_q i_d) from the mean dq quantities | 4.9201 N·m from the AGE; 4.9200 N·m from the dq relation |
+| No-load back-EMF constant against p λ_pm | 0.33200 V·s/rad against 7 × 0.047422 = 0.33195 |
+| Phase balance | The phases' back-EMF constants agree to 2e-5; the lags are 120.00° and 240.00° |
+| Cogging from the no-load sweep (120 positions per electrical period) against the cogging sweep (40 per cogging period) | 0.0598 and 0.0607 N·m peak-to-peak; the coarser sweep falls between the peaks. The cogging sweep's mean is −1.2e-4 N·m, 0.2 % of its peak-to-peak |
+
+These checks show that the AGE torque, the linkages and the dq post-processing
+are consistent with each other. They are not a validation against an
+independent solver or a test bench; the dimensions and steel are illustrative.
+
 Full 3D magnetic shells are a separate physical model: a thin magnetic layer or
 surface-current sheet coupled to the surrounding 3D field. Mechanical shell
 elements cannot simply be given the planar A_n equation on an arbitrary curved
