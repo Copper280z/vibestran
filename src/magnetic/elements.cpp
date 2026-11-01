@@ -2,6 +2,7 @@
 #include <Eigen/LU>
 #include <algorithm>
 #include <cmath>
+#include <map>
 
 namespace vibestran::magnetic {
 namespace {
@@ -192,20 +193,18 @@ std::vector<Vector> edge_basis(const Cell &c, const Vector &x) {
   }
   return n;
 }
-std::vector<Vector> edge_curls(const Cell &c, const Vector &x) {
-  if (!c.planar && c.nodes.size() == 4)
-    return c.curl;
-  const Vector r = reference_coordinates(c, x);
-  const Matrix j = c.affine ? c.jacobian : mapping(c, r).second;
-  if (c.planar) {
-    const Matrix inv = j.inverse().transpose();
-    auto s = reference_shape(c, r);
-    for (auto &g : s.gradients)
-      g = (inv * g).cross(c.normal);
-    return s.gradients;
-  }
+std::vector<Vector> reference_curls(const Cell &c, const Vector &r) {
+  if (c.planar)
+    return reference_shape(c, r).gradients;
   const auto edges = cell_edges(c);
   std::vector<Vector> n(edges.size(), Vector::Zero());
+  if (c.nodes.size() == 4) {
+    // Whitney: curl(l_i grad l_j - l_j grad l_i) = 2 grad l_i x grad l_j.
+    const auto g = reference_shape(c, r).gradients;
+    for (size_t e = 0; e < edges.size(); ++e)
+      n[e] = 2.0 * g[edges[e][0]].cross(g[edges[e][1]]);
+    return n;
+  }
   for (size_t e = 0; e < edges.size(); ++e) {
     const auto ij = edges[e];
     if (c.nodes.size() == 8) {
@@ -223,8 +222,27 @@ std::vector<Vector> edge_curls(const Cell &c, const Vector &x) {
                     tri_grad[i].cross(tri_grad[k]).z() * (1 + side * r.z()));
     } else
       n[e] = Vector(tri_grad[ij[0]].y() / 2, -tri_grad[ij[0]].x() / 2, 0);
-    n[e] = c.edge_sign[e] * j * n[e] / j.determinant();
   }
+  return n;
+}
+Matrix curl_map(const Cell &c, const Matrix &j) {
+  if (!c.planar)
+    return j / j.determinant(); // Piola: curl -> J curl / det J
+  // grad N = J^-T g, and the curl of N n is grad N x n, linear in g.
+  const Matrix inverse = j.inverse().transpose();
+  Matrix out;
+  for (int k = 0; k < 3; ++k)
+    out.col(k) = inverse.col(k).cross(c.normal);
+  return out;
+}
+std::vector<Vector> edge_curls(const Cell &c, const Vector &x) {
+  if (!c.planar && c.nodes.size() == 4)
+    return c.curl;
+  const Vector r = reference_coordinates(c, x);
+  const Matrix map = curl_map(c, c.affine ? c.jacobian : mapping(c, r).second);
+  auto n = reference_curls(c, r);
+  for (size_t e = 0; e < n.size(); ++e)
+    n[e] = (c.planar ? 1.0 : c.edge_sign[e]) * (map * n[e]);
   return n;
 }
 std::vector<Vector> flux_basis(const Mesh &, const Cell &c, const Vector &x) {
@@ -355,5 +373,60 @@ std::vector<Sample> quadrature(const Mesh &, const Cell &c) {
     s.weight *= std::abs(j.determinant());
   }
   return q;
+}
+
+CellGeometry::CellGeometry(const Mesh &mesh) {
+  std::map<std::pair<bool, size_t>, int> kinds; // (planar, nodes) -> rule
+  cells_.reserve(mesh.cells.size());
+  for (const auto &c : mesh.cells) {
+    const auto [kind, added] = kinds.emplace(std::pair{c.planar, c.nodes.size()},
+                                             static_cast<int>(rules_.size()));
+    if (added) {
+      Rule rule;
+      for (const auto &s : reference_quadrature(c)) {
+        rule.points.push_back(s.position);
+        rule.weights.push_back(s.weight);
+        const auto reference = reference_curls(c, s.position);
+        rule.functions = static_cast<int>(reference.size());
+        rule.curls.insert(rule.curls.end(), reference.begin(), reference.end());
+      }
+      rules_.push_back(std::move(rule));
+    }
+    const Rule &rule = rules_[static_cast<size_t>(kind->second)];
+    cells_.push_back({kind->second, c.affine, maps_.size(), weights_.size()});
+    // An affine cell's map is the one edge_curls uses, from its Jacobian.
+    if (c.affine)
+      maps_.push_back(curl_map(c, c.jacobian));
+    for (size_t q = 0; q < rule.points.size(); ++q) {
+      const Matrix j = mapping(c, rule.points[q]).second;
+      weights_.push_back(rule.weights[q] * std::abs(j.determinant()));
+      if (!c.affine)
+        maps_.push_back(curl_map(c, j));
+    }
+  }
+}
+int CellGeometry::points(int cell) const {
+  return static_cast<int>(rules_[static_cast<size_t>(cells_[static_cast<size_t>(cell)].rule)]
+                              .points.size());
+}
+double CellGeometry::weight(int cell, int point) const {
+  return weights_[cells_[static_cast<size_t>(cell)].weight + static_cast<size_t>(point)];
+}
+void CellGeometry::curls(const Mesh &mesh, int cell, int point,
+                         std::span<Vector> out) const {
+  const Entry &entry = cells_[static_cast<size_t>(cell)];
+  const Rule &rule = rules_[static_cast<size_t>(entry.rule)];
+  const Cell &c = mesh.cells[static_cast<size_t>(cell)];
+  const Matrix &map =
+      maps_[entry.map + (entry.affine ? 0 : static_cast<size_t>(point))];
+  const auto first = static_cast<size_t>(point) * static_cast<size_t>(rule.functions);
+  for (size_t e = 0; e < static_cast<size_t>(rule.functions); ++e)
+    out[e] = (c.planar ? 1.0 : c.edge_sign[e]) * (map * rule.curls[first + e]);
+}
+Vector CellGeometry::position(const Mesh &mesh, int cell, int point) const {
+  const Entry &entry = cells_[static_cast<size_t>(cell)];
+  return mapping(mesh.cells[static_cast<size_t>(cell)],
+                 rules_[static_cast<size_t>(entry.rule)].points[static_cast<size_t>(point)])
+      .first;
 }
 } // namespace vibestran::magnetic

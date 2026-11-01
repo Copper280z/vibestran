@@ -7,7 +7,11 @@
 #include <gtest/gtest.h>
 #include <map>
 #include <numbers>
+#include <ranges>
 #include <sstream>
+#ifdef HAVE_TBB
+#include <tbb/task_arena.h>
+#endif
 #ifdef VIBESTRAN_HAS_HDF5
 #include "../common/hdf5_results.hpp"
 using namespace vibestran::test;
@@ -2436,9 +2440,104 @@ void check_nonlinear_response(const Model &model, const Results &result) {
               .001 * std::sqrt(tangent(0, 0) * tangent(1, 1)));
   }
 }
+// The cached geometry against the pointwise path assembly used before it:
+// quadrature() for the weights and positions, then edge_curls() at each
+// position, which maps it back to the reference cell (Newton on a nonaffine
+// cell) and evaluates the basis there. nonaffine says whether the mesh must
+// exercise the per-point maps as well as the affine cells' single map.
+void check_cached_geometry(const Mesh &mesh, bool nonaffine) {
+  const CellGeometry geometry(mesh);
+  int curved = 0;
+  for (size_t c = 0; c < mesh.cells.size(); ++c) {
+    const auto &cell = mesh.cells[c];
+    curved += !cell.affine;
+    const double size = (cell.maximum - cell.minimum).norm();
+    const auto samples = quadrature(mesh, cell);
+    ASSERT_EQ(geometry.points(static_cast<int>(c)), static_cast<int>(samples.size()));
+    std::array<Vector, max_cell_functions> cached;
+    for (size_t q = 0; q < samples.size(); ++q) {
+      const int cq = static_cast<int>(q);
+      EXPECT_NEAR(geometry.weight(static_cast<int>(c), cq), samples[q].weight,
+                  1e-14 * samples[q].weight);
+      EXPECT_LT((geometry.position(mesh, static_cast<int>(c), cq) - samples[q].position)
+                    .norm(),
+                1e-14 * size);
+      const auto expected = edge_curls(cell, samples[q].position);
+      ASSERT_EQ(expected.size(), cell.edges.size());
+      geometry.curls(mesh, static_cast<int>(c), cq, cached);
+      const double scale = std::ranges::max(
+          expected | std::views::transform([](const Vector &v) { return v.norm(); }));
+      for (size_t e = 0; e < expected.size(); ++e)
+        EXPECT_LT((cached[e] - expected[e]).norm(), 1e-12 * scale)
+            << "cell " << cell.id << " point " << q << " function " << e;
+    }
+  }
+  if (nonaffine)
+    EXPECT_GT(curved, 0);
+  else
+    EXPECT_EQ(curved, 0);
+}
+// The cells are integrated in parallel and summed in cell order, so one
+// thread and many give bitwise the same solution. The PCG backend is
+// deterministic; the default one need not be.
+void check_thread_independence(Model model) {
+#ifdef HAVE_TBB
+  model.subcases.resize(1); // the saturated operating point
+  vibestran::EigenPCGSolverBackend pcg(1e-12);
+  Result<Results> serial = Error{""};
+  tbb::task_arena(1).execute([&] { serial = solve(model, pcg); });
+  const Result<Results> parallel = solve(model, pcg);
+  ASSERT_TRUE(std::holds_alternative<Results>(serial)) << error_of(serial);
+  ASSERT_TRUE(std::holds_alternative<Results>(parallel)) << error_of(parallel);
+  const auto &a = std::get<Results>(serial).cases.at(0);
+  const auto &b = std::get<Results>(parallel).cases.at(0);
+  EXPECT_GT(a.iterations, 1);
+  EXPECT_EQ(a.iterations, b.iterations);
+  EXPECT_EQ(a.energy, b.energy);
+  EXPECT_TRUE(a.potential == b.potential);
+  ASSERT_EQ(a.b.size(), b.b.size());
+  for (size_t c = 0; c < a.b.size(); ++c)
+    EXPECT_TRUE(a.b[c] == b.b[c] && a.h[c] == b.h[c]) << "cell " << c;
+#else
+  (void)model;
+  GTEST_SKIP() << "built without TBB: assembly is serial";
+#endif
+}
 class MagneticNonlinearPlanar : public ::testing::TestWithParam<int> {};
 class MagneticNonlinearSolids : public ::testing::TestWithParam<int> {};
 } // namespace
+
+// Kinds: quads (distorted, so some are nonaffine), triangles, both.
+TEST_P(MagneticNonlinearPlanar, CachedGeometryMatchesThePointwiseBasis) {
+  const auto mesh = make_mesh(nonlinear_planar(GetParam()));
+  ASSERT_TRUE(std::holds_alternative<Mesh>(mesh)) << error_of(mesh);
+  check_cached_geometry(std::get<Mesh>(mesh), GetParam() != 1);
+}
+TEST_P(MagneticNonlinearPlanar, ThreadCountDoesNotChangeTheSolution) {
+  auto model = nonlinear_planar(GetParam());
+  nonlinear_loads(model, {4000, 2500});
+  check_thread_independence(model);
+}
+// Kinds: tets, hexes, wedges, then warped hexes and wedges. The fixture's
+// warp z += .18 x y is linear over each wedge's triangles and moves its top
+// and bottom alike, so its wedges stay affine; a taper (as on the tapered
+// cells above) makes the warped hexes and wedges nonaffine.
+TEST_P(MagneticNonlinearSolids, CachedGeometryMatchesThePointwiseBasis) {
+  auto model = nonlinear_solid(GetParam());
+  if (GetParam() >= 3)
+    for (auto &[id, g] : model.nodes) {
+      (void)id;
+      g.position.head<2>() *= 1 - .15 * (g.position.z() + 1);
+    }
+  const auto mesh = make_mesh(model);
+  ASSERT_TRUE(std::holds_alternative<Mesh>(mesh)) << error_of(mesh);
+  check_cached_geometry(std::get<Mesh>(mesh), GetParam() >= 3);
+}
+TEST_P(MagneticNonlinearSolids, ThreadCountDoesNotChangeTheSolution) {
+  auto model = nonlinear_solid(GetParam());
+  nonlinear_loads(model, {100000});
+  check_thread_independence(model);
+}
 
 TEST_P(MagneticNonlinearPlanar, SaturationMutualTangentEnergyAndReversal) {
   auto model = nonlinear_planar(GetParam());

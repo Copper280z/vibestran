@@ -531,7 +531,7 @@ magnetic_lib = static_library(
         'src/magnetic/drive.cpp'),
   include_directories : [inc],
   dependencies        : solver_lib_deps,
-  cpp_args            : magnetic_args + accelerate_args + cholmod_args + hdf5_args,
+  cpp_args            : magnetic_args + accelerate_args + cholmod_args + hdf5_args + tbb_args,
   install             : false,
 )
 
@@ -616,6 +616,7 @@ unit_tests = executable(
   unit_test_sources,
   dependencies : [solver_lib_dep, gtest_dep],
   include_directories : inc,
+  cpp_args : tbb_args,
 )
 
 test('unit_tests', unit_tests,

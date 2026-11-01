@@ -135,6 +135,52 @@ private:
 };
 [[nodiscard]] std::vector<Sample> quadrature(const Mesh &mesh,
                                              const Cell &cell);
+// The curls of a cell's basis functions on its reference cell at r, before
+// its edge signs and curl_map: the reference gradients of a planar cell's
+// nodal functions, the reference curls of a solid's edge functions. They
+// depend only on the element kind and r.
+[[nodiscard]] std::vector<Vector> reference_curls(const Cell &cell,
+                                                  const Vector &r);
+// The matrix taking reference_curls to the cell's curls where its Jacobian is
+// j: J / det J for a solid's edge functions; for a planar cell's nodal
+// functions N, the curl of N n is grad N x n with grad N = J^-T g.
+[[nodiscard]] Matrix curl_map(const Cell &cell, const Matrix &j);
+// The geometry of a mesh's cells at their quadrature points, computed once
+// and reused by every assembly on the mesh: the quadrature weights, and the
+// maps that take each element kind's reference curls to a cell's curls (one
+// for an affine cell, one per point otherwise). Positions are mapped on
+// demand. It keeps no reference to the mesh, which is passed back in.
+class CellGeometry {
+public:
+  CellGeometry() = default;
+  explicit CellGeometry(const Mesh &mesh);
+  [[nodiscard]] int points(int cell) const;
+  // The reference weight times |det J|, as quadrature() gives it.
+  [[nodiscard]] double weight(int cell, int point) const;
+  // The curls of the cell's basis functions at the point, as edge_curls
+  // gives them at its position; out holds one per basis function.
+  void curls(const Mesh &mesh, int cell, int point, std::span<Vector> out) const;
+  [[nodiscard]] Vector position(const Mesh &mesh, int cell, int point) const;
+
+private:
+  struct Rule {
+    std::vector<Vector> points;
+    std::vector<double> weights;
+    std::vector<Vector> curls; // point-major, functions per point
+    int functions{0};
+  };
+  struct Entry {
+    int rule{0};
+    bool affine{false};
+    size_t map{0}, weight{0}; // first in maps_, weights_
+  };
+  std::vector<Rule> rules_;
+  std::vector<Entry> cells_;
+  std::vector<Matrix> maps_;
+  std::vector<double> weights_;
+};
+// The most basis functions of any cell (a hexahedron's twelve edges).
+inline constexpr int max_cell_functions = 12;
 [[nodiscard]] std::vector<SurfaceSample>
 face_quadrature(const Mesh &mesh, const Face &face, int order = 5);
 [[nodiscard]] std::vector<Vector> reference_vertices(const Cell &cell);

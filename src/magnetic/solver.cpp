@@ -10,11 +10,16 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numbers>
 #include <numeric>
 #include <optional>
 #include <set>
 #include <tuple>
+#ifdef HAVE_TBB
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+#endif
 
 namespace vibestran::magnetic {
 namespace {
@@ -140,7 +145,8 @@ Response response_at(const MaterialData &d, const Vector &x, const Vector &b) {
 // The air-gap element's dense block over its grids, scaled by the depth.
 // It is linear, so it is the same in every tangent.
 struct GapCoupling {
-  std::vector<int> nodes; // inner then outer circle
+  std::vector<int> nodes; // the circles' grids in increasing order, which
+                          // turning a part does not change
   Eigen::MatrixXd stiffness;
 };
 GapCoupling gap_coupling(const Mesh &mesh) {
@@ -156,15 +162,18 @@ GapCoupling gap_coupling(const Mesh &mesh) {
   for (const auto *c : {&gap.inner, &gap.outer})
     for (size_t k = 0; k < c->nodes.size(); ++k)
       entries.emplace_back(c->nodes[k], c->sign[k]);
-  std::map<int, Eigen::Index> slot;
   for (auto [node, sign] : entries)
-    if (slot.emplace(node, static_cast<Eigen::Index>(out.nodes.size())).second)
-      out.nodes.push_back(node);
+    out.nodes.push_back(node);
+  std::ranges::sort(out.nodes);
+  out.nodes.erase(std::unique(out.nodes.begin(), out.nodes.end()), out.nodes.end());
+  std::vector<Eigen::Index> slot; // of each entry's grid
+  for (auto [node, sign] : entries)
+    slot.push_back(std::ranges::lower_bound(out.nodes, node) - out.nodes.begin());
   const auto n = static_cast<Eigen::Index>(out.nodes.size());
   out.stiffness = Eigen::MatrixXd::Zero(n, n);
   for (size_t i = 0; i < entries.size(); ++i)
     for (size_t j = 0; j < entries.size(); ++j)
-      out.stiffness(slot.at(entries[i].first), slot.at(entries[j].first)) +=
+      out.stiffness(slot[i], slot[j]) +=
           entries[i].second * entries[j].second *
           unfolded(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j));
   out.stiffness /= gap.sectors;
@@ -175,80 +184,195 @@ bool on_air_gap(const Mesh &mesh, int face) {
                                    mesh.air_gap->faces.end(),
                                    face) != mesh.air_gap->faces.end();
 }
-// frozen assembles the secant (frozen-permeability) stiffness in place of
-// the tangent; the residual and fields are the same.
-Assembly assemble(const Materials &materials, const Mesh &mesh,
-                  const Gauge &gauge, const GapCoupling &gap,
-                  const Eigen::VectorXd &a, const Eigen::VectorXd &load,
-                  bool frozen = false) {
-  Assembly out;
-  out.residual = Eigen::VectorXd::Zero(gauge.size);
+// The gauged stiffness's sparsity: the cells' couplings and the air gap's
+// dense block. Where each local entry lands in it is found once, so an
+// assembly only adds values into place. It depends only on the topology, so
+// MOTION positions share it.
+struct Pattern {
+  Sparse matrix;           // the structure, with zero values
+  std::vector<size_t> local, functions; // per cell (and one past): first entry
+                                        // of its ne x ne block, of its ne
+                                        // residuals
+  std::vector<int> slots;  // value index of each local entry; -1 prescribed
+  std::vector<int> gap;    // of each gap block entry, column by column like
+                           // the matrix
+};
+Pattern make_pattern(const Mesh &mesh, const Gauge &gauge, const GapCoupling &gap) {
+  Pattern p;
   std::vector<Triplet> entries;
+  p.local.reserve(mesh.cells.size() + 1);
+  p.functions.reserve(mesh.cells.size() + 1);
+  p.local.push_back(0);
+  p.functions.push_back(0);
+  const auto couple = [&](int i, int j) {
+    const int row = gauge.equations[i], col = gauge.equations[j];
+    if (row >= 0 && col >= 0)
+      entries.emplace_back(row, col, 0.0);
+  };
   for (const auto &cell : mesh.cells) {
-    const int ne = static_cast<int>(cell.edges.size());
-    const MaterialData &material = materials.at(cell.property);
-    Eigen::MatrixXd local = Eigen::MatrixXd::Zero(ne, ne);
-    Eigen::VectorXd residual = Eigen::VectorXd::Zero(ne);
+    p.local.push_back(p.local.back() + cell.edges.size() * cell.edges.size());
+    p.functions.push_back(p.functions.back() + cell.edges.size());
+    for (int i : cell.edges)
+      for (int j : cell.edges)
+        couple(i, j);
+  }
+  for (int i : gap.nodes)
+    for (int j : gap.nodes)
+      couple(i, j);
+  p.matrix.resize(gauge.size, gauge.size);
+  p.matrix.setFromTriplets(entries.begin(), entries.end());
+  const auto slot = [&](int i, int j) {
+    const int row = gauge.equations[i], col = gauge.equations[j];
+    if (row < 0 || col < 0)
+      return -1;
+    const int *rows = p.matrix.innerIndexPtr();
+    const int *first = rows + p.matrix.outerIndexPtr()[col];
+    const int *last = rows + p.matrix.outerIndexPtr()[col + 1];
+    return static_cast<int>(std::lower_bound(first, last, row) - rows);
+  };
+  p.slots.reserve(p.local.back());
+  for (const auto &cell : mesh.cells)
+    for (int i : cell.edges)
+      for (int j : cell.edges)
+        p.slots.push_back(slot(i, j));
+  for (int j : gap.nodes)
+    for (int i : gap.nodes)
+      p.gap.push_back(slot(i, j));
+  return p;
+}
+// What solving a model needs from its geometry: built once for the model as
+// given, and again for each MOTION position's moved model.
+struct Setup {
+  Mesh mesh;
+  CellGeometry geometry;
+  Materials materials;
+  Gauge gauge;
+  GapCoupling gap;
+  std::shared_ptr<const Pattern> pattern;
+  // The gap block's entries of the gauged stiffness, aligned with
+  // pattern->gap (zero where prescribed).
+  std::vector<double> gap_values;
+  std::vector<Source> sources;
+  std::vector<CircuitDefinition> circuits;
+  // Circuit coupling g_c = sum P_i c_i / a_c, so circuit linkage is g_c . A
+  // and circuit inductance needs one tangent solve per closed circuit.
+  std::vector<Eigen::VectorXd> circuit_coupling;
+  std::optional<SpatialIndex> index;
+  // The MBC whose NORMAL faces the gauge leaves free (0 for none), and
+  // those faces.
+  int normal_boundary{0};
+  std::vector<bool> natural;
+};
+// Calls work(c) for each cell, in parallel when TBB is available.
+template <class Work> void for_each_cell(size_t count, const Work &work) {
+#ifdef HAVE_TBB
+  tbb::parallel_for(tbb::blocked_range<size_t>(0, count, 256),
+                    [&](const tbb::blocked_range<size_t> &range) {
+                      for (size_t c = range.begin(); c != range.end(); ++c)
+                        work(c);
+                    });
+#else
+  for (size_t c = 0; c < count; ++c)
+    work(c);
+#endif
+}
+// frozen assembles the secant (frozen-permeability) stiffness in place of
+// the tangent; the residual and fields are the same. The cells are
+// integrated in parallel, each into its own entries, and summed into the
+// system in cell order, so the result does not depend on the thread count.
+Assembly assemble(const Setup &setup, const Eigen::VectorXd &a,
+                  const Eigen::VectorXd &load, bool frozen = false) {
+  const Mesh &mesh = setup.mesh;
+  const Gauge &gauge = setup.gauge;
+  const Pattern &pattern = *setup.pattern;
+  const size_t count = mesh.cells.size();
+  std::vector<double> local(pattern.local.back(), 0.0),
+      residual(pattern.functions.back(), 0.0), energy(count, 0.0);
+  std::vector<char> extrapolated(count, 0);
+  Assembly out;
+  out.b.resize(count);
+  out.h.resize(count);
+  for_each_cell(count, [&](size_t index) {
+    const int c = static_cast<int>(index);
+    const Cell &cell = mesh.cells[index];
+    const auto ne = static_cast<int>(cell.edges.size());
+    const MaterialData &material = setup.materials.at(cell.property);
+    double *k = local.data() + pattern.local[index];
+    double *r = residual.data() + pattern.functions[index];
+    std::array<Vector, max_cell_functions> curl, applied;
     Vector average_b = Vector::Zero(), average_h = Vector::Zero();
-    for (const auto &s : quadrature(mesh, cell)) {
-      const auto curl = edge_curls(cell, s.position);
+    for (int q = 0; q < setup.geometry.points(c); ++q) {
+      setup.geometry.curls(mesh, c, q, curl);
+      const double w = setup.geometry.weight(c, q);
       Vector b = Vector::Zero();
       for (int e = 0; e < ne; ++e)
         b += a[cell.edges[e]] * curl[e];
-      const auto response = response_at(material, s.position, b);
-      average_b += s.weight * b;
-      average_h += s.weight * response.h;
-      const double weight = s.weight * mesh.depth;
-      out.energy += weight * response.energy;
-      out.extrapolated |= response.extrapolated;
+      // Only a curvilinear remanence frame needs the point's position.
+      const auto response = response_at(
+          material,
+          material.coordinates ? setup.geometry.position(mesh, c, q) : cell.origin,
+          b);
+      average_b += w * b;
+      average_h += w * response.h;
+      const double weight = w * mesh.depth;
+      energy[index] += weight * response.energy;
+      extrapolated[index] |= static_cast<char>(response.extrapolated);
       const Matrix &stiffness = frozen ? response.secant : response.tangent;
+      for (int j = 0; j < ne; ++j)
+        applied[j] = stiffness * curl[j];
       for (int i = 0; i < ne; ++i) {
-        residual[i] += weight * curl[i].dot(response.h);
+        r[i] += weight * curl[i].dot(response.h);
         for (int j = 0; j < ne; ++j)
-          local(i, j) += weight * curl[i].dot(stiffness * curl[j]);
+          k[i * ne + j] += weight * curl[i].dot(applied[j]);
       }
     }
-    out.b.push_back(average_b / cell.volume);
-    out.h.push_back(average_h / cell.volume);
-    for (int i = 0; i < ne; ++i) {
+    out.b[index] = average_b / cell.volume;
+    out.h[index] = average_h / cell.volume;
+  });
+  out.residual = Eigen::VectorXd::Zero(gauge.size);
+  out.stiffness = pattern.matrix;
+  double *values = out.stiffness.valuePtr();
+  for (size_t c = 0; c < count; ++c) {
+    const Cell &cell = mesh.cells[c];
+    const size_t ne = cell.edges.size();
+    out.energy += energy[c];
+    out.extrapolated |= extrapolated[c] != 0;
+    const double *k = local.data() + pattern.local[c];
+    const int *slots = pattern.slots.data() + pattern.local[c];
+    const double *r = residual.data() + pattern.functions[c];
+    for (size_t i = 0; i < ne; ++i) {
       const int row = gauge.equations[cell.edges[i]];
       if (row < 0)
         continue;
       const double si = gauge.sign[cell.edges[i]];
-      out.residual[row] += si * residual[i];
-      out.force_scale += residual[i] * residual[i];
-      for (int j = 0; j < ne; ++j) {
-        const int col = gauge.equations[cell.edges[j]];
-        if (col >= 0)
-          entries.emplace_back(row, col, si * gauge.sign[cell.edges[j]] * local(i, j));
-      }
+      out.residual[row] += si * r[i];
+      out.force_scale += r[i] * r[i];
+      for (size_t j = 0; j < ne; ++j)
+        if (slots[i * ne + j] >= 0)
+          values[slots[i * ne + j]] +=
+              si * gauge.sign[cell.edges[j]] * k[i * ne + j];
     }
   }
+  const GapCoupling &gap = setup.gap;
   if (!gap.nodes.empty()) {
-    const auto count = static_cast<Eigen::Index>(gap.nodes.size());
-    Eigen::VectorXd values(count);
-    for (Eigen::Index i = 0; i < count; ++i)
-      values[i] = a[gap.nodes[i]];
-    const Eigen::VectorXd residual = gap.stiffness * values;
-    out.energy += .5 * values.dot(residual);
-    for (Eigen::Index i = 0; i < count; ++i) {
+    const auto n = static_cast<Eigen::Index>(gap.nodes.size());
+    Eigen::VectorXd potentials(n);
+    for (Eigen::Index i = 0; i < n; ++i)
+      potentials[i] = a[gap.nodes[i]];
+    const Eigen::VectorXd gap_residual = gap.stiffness * potentials;
+    out.energy += .5 * potentials.dot(gap_residual);
+    for (Eigen::Index i = 0; i < n; ++i) {
       const int row = gauge.equations[gap.nodes[i]];
       if (row < 0)
         continue;
-      const double si = gauge.sign[gap.nodes[i]];
-      out.residual[row] += si * residual[i];
-      out.force_scale += residual[i] * residual[i];
-      for (Eigen::Index j = 0; j < count; ++j) {
-        const int col = gauge.equations[gap.nodes[j]];
-        if (col >= 0)
-          entries.emplace_back(row, col,
-                               si * gauge.sign[gap.nodes[j]] * gap.stiffness(i, j));
-      }
+      out.residual[row] += gauge.sign[gap.nodes[i]] * gap_residual[i];
+      out.force_scale += gap_residual[i] * gap_residual[i];
     }
+    for (size_t k = 0; k < pattern.gap.size(); ++k)
+      if (pattern.gap[k] >= 0)
+        values[pattern.gap[k]] += setup.gap_values[k];
   }
   out.residual -= gauge.reduce(load);
-  out.stiffness.resize(gauge.size, gauge.size);
-  out.stiffness.setFromTriplets(entries.begin(), entries.end());
   return out;
 }
 std::string face_grids(const Mesh &mesh, const Face &f) {
@@ -384,11 +508,12 @@ struct Equilibrium {
   int iterations{0};
   double residual{0};
 };
-Result<Equilibrium> equilibrium(const Model &model, const Materials &materials,
-                                const Mesh &mesh, const Gauge &gauge,
-                                const GapCoupling &gap, Tangent &tangent,
-                                Eigen::VectorXd a, const Eigen::VectorXd &load) {
-  auto state = assemble(materials, mesh, gauge, gap, a, load);
+Result<Equilibrium> equilibrium(const Model &model, const Setup &setup,
+                                Tangent &tangent, Eigen::VectorXd a,
+                                const Eigen::VectorXd &load) {
+  const Mesh &mesh = setup.mesh;
+  const Gauge &gauge = setup.gauge;
+  auto state = assemble(setup, a, load);
   double load_norm = 0;
   for (size_t e = 0; e < mesh.dofs(); ++e)
     if (gauge.equations[e] >= 0)
@@ -418,7 +543,7 @@ Result<Equilibrium> equilibrium(const Model &model, const Materials &materials,
     for (int trial = 0; trial < 30; ++trial) {
       Eigen::VectorXd candidate = a;
       gauge.expand(step, candidate, alpha);
-      auto next = assemble(materials, mesh, gauge, gap, candidate, load);
+      auto next = assemble(setup, candidate, load);
       if (next.residual.allFinite() &&
           next.residual.norm() <= (1 - 1e-4 * alpha) * norm) {
         a = std::move(candidate);
@@ -824,36 +949,29 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
   return results;
 }
 
-// What solving a model needs from its geometry: built once for the model as
-// given, and again for each MOTION position's moved model.
-struct Setup {
-  Mesh mesh;
-  Materials materials;
-  Gauge gauge;
-  GapCoupling gap;
-  std::vector<Source> sources;
-  std::vector<CircuitDefinition> circuits;
-  // Circuit coupling g_c = sum P_i c_i / a_c, so circuit linkage is g_c . A
-  // and circuit inductance needs one tangent solve per closed circuit.
-  std::vector<Eigen::VectorXd> circuit_coupling;
-  std::optional<SpatialIndex> index;
-  // The MBC whose NORMAL faces the gauge leaves free (0 for none), and
-  // those faces.
-  int normal_boundary{0};
-  std::vector<bool> natural;
-};
 // The MBC that decides a subcase's gauge: its own when it has NORMAL rows.
 int normal_boundary(const Model &model, const Subcase &subcase) {
   return subcase.boundary && !model.boundaries.at(subcase.boundary).normal.empty()
              ? subcase.boundary
              : 0;
 }
-Result<Setup> prepare(const Model &model, int normal_boundary = 0) {
+// Whether a and b's stiffness has the same pattern: the same cells on the
+// same unknowns, gauge and gap grids.
+bool same_topology(const Setup &a, const Setup &b) {
+  return a.gauge.equations == b.gauge.equations && a.gap.nodes == b.gap.nodes &&
+         std::ranges::equal(a.mesh.cells, b.mesh.cells,
+                            [](const Cell &x, const Cell &y) { return x.edges == y.edges; });
+}
+// shared, when given, is a setup of the same model moved (a MOTION
+// position's base), whose pattern this one shares when the topology agrees.
+Result<Setup> prepare(const Model &model, int normal_boundary = 0,
+                      const Setup *shared = nullptr) {
   Setup s;
   auto built = make_mesh(model);
   if (auto *e = std::get_if<Error>(&built))
     return *e;
   s.mesh = std::get<Mesh>(std::move(built));
+  s.geometry = CellGeometry(s.mesh);
   s.materials = resolve_materials(model);
   s.normal_boundary = normal_boundary;
   auto natural = natural_faces(model, s.mesh, normal_boundary);
@@ -865,6 +983,22 @@ Result<Setup> prepare(const Model &model, int normal_boundary = 0) {
     return *e;
   s.gauge = std::get<Gauge>(std::move(gauged));
   s.gap = gap_coupling(s.mesh);
+  s.pattern = shared && same_topology(*shared, s)
+                  ? shared->pattern
+                  : std::make_shared<const Pattern>(make_pattern(s.mesh, s.gauge, s.gap));
+  const auto n = s.gap.nodes.size();
+  s.gap_values.reserve(n * n);
+  for (size_t j = 0; j < n; ++j)
+    for (size_t i = 0; i < n; ++i) {
+      const int row = s.gauge.equations[s.gap.nodes[i]],
+                col = s.gauge.equations[s.gap.nodes[j]];
+      s.gap_values.push_back(row < 0 || col < 0
+                                 ? 0.0
+                                 : s.gauge.sign[s.gap.nodes[i]] *
+                                       s.gauge.sign[s.gap.nodes[j]] *
+                                       s.gap.stiffness(static_cast<Eigen::Index>(i),
+                                                       static_cast<Eigen::Index>(j)));
+    }
   auto prepared = prepare_sources(model, s.mesh);
   if (auto *e = std::get_if<Error>(&prepared))
     return *e;
@@ -929,20 +1063,17 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
     for (size_t e = 0; e < mesh.dofs(); ++e)
       if (gauge.equations[e] >= 0)
         start[e] = (*warm)[e];
-    solved = equilibrium(model, setup.materials, mesh, gauge, setup.gap, tangent,
-                         start, load);
+    solved = equilibrium(model, setup, tangent, start, load);
   }
   if (!warm || std::holds_alternative<Error>(solved))
-    solved = equilibrium(model, setup.materials, mesh, gauge, setup.gap, tangent,
-                         initial, load);
+    solved = equilibrium(model, setup, tangent, initial, load);
   if (std::holds_alternative<Error>(solved) && !model.bh_tables.empty()) {
     // Retry with fixed current continuation. Each stage must satisfy the same
     // convergence criterion; a failed stage is never returned as a solution.
     Eigen::VectorXd a = initial;
     int iterations = 0;
     for (int stage = 0; stage <= 8; ++stage) {
-      solved = equilibrium(model, setup.materials, mesh, gauge, setup.gap,
-                           tangent, a, load * (stage / 8.0));
+      solved = equilibrium(model, setup, tangent, a, load * (stage / 8.0));
       if (auto *e = std::get_if<Error>(&solved))
         return Error{std::format("continuation stage {}: {}", stage, e->message)};
       const auto &eq = std::get<Equilibrium>(solved);
@@ -1041,8 +1172,8 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
       // The secant stiffness of the converged state: the linear problem
       // whose solution with the magnets on is this state, so its response
       // to the phase currents alone is the apparent inductance.
-      const auto frozen = assemble(setup.materials, mesh, gauge, setup.gap, eq.a,
-                                   Eigen::VectorXd::Zero(mesh.dofs()), true);
+      const auto frozen =
+          assemble(setup, eq.a, Eigen::VectorXd::Zero(mesh.dofs()), true);
       const auto count = static_cast<Eigen::Index>(request->frozen.size());
       Eigen::MatrixXd reduced(gauge.size, count);
       for (Eigen::Index k = 0; k < count; ++k)
@@ -1189,7 +1320,7 @@ Result<DriveSummary> auto_alignment(const Model &model, const Setup &base,
     const Model moved = moved_model(model, motion, part, angle);
     std::optional<Setup> own;
     if (angle != 0) {
-      auto built = prepare(moved, base.normal_boundary);
+      auto built = prepare(moved, base.normal_boundary, &base);
       if (auto *e = std::get_if<Error>(&built))
         return Error{std::format("at {:.6g} degrees: {}", angle, e->message)};
       own = std::get<Setup>(std::move(built));
@@ -1439,7 +1570,7 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
         const Model moved = moved_model(model, motion, part, angle);
         std::optional<Setup> own;
         if (angle != 0) {
-          auto built = prepare(moved, gauge_key);
+          auto built = prepare(moved, gauge_key, &case_base);
           if (auto *e = std::get_if<Error>(&built))
             return Error{std::format("{}, MOTION {} at {:.6g} degrees: {}", context,
                                      motion.id, angle, e->message)};
