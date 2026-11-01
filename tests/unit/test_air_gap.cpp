@@ -42,6 +42,7 @@ AirGap direct_gap(double r1, double r2, int n_inner, int n_outer) {
     c.radius = r;
     for (int k = 0; k < n; ++k) {
       c.nodes.push_back(first + k);
+      c.sign.push_back(1);
       const double s = 2 * pi * (k + phase) / n;
       c.angles.push_back(-pi + s + .3 * std::sin(s));
     }
@@ -459,7 +460,7 @@ TEST(AirGapRegion, ErrorsNameTheGridsElementsAndRadiiThatFail) {
     auto m = model(g);
     const auto &e = m.elements[static_cast<size_t>(member - 1)];
     m.face_sets[7] = {{member, {e.nodes[0], e.nodes[1]}}};
-    m.boundaries[1] = {7, Vector::Zero()};
+    m.boundaries[1] = {7, Vector::Zero(), {}};
     m.subcases[0].boundary = 1;
     expect(error_of(solve(m)), std::format("FSET 7 references air-gap element {} "
                                            "(PAIRGAP 9)",
@@ -750,7 +751,7 @@ TEST(AirGapSolve, ExteriorBoundaryConditionSkipsTheGap) {
   g.stator_div = 80;
   auto m = model(g);
   const Vector applied(.3, -.1, 0);
-  m.boundaries[1] = {0, applied};
+  m.boundaries[1] = {0, applied, {}};
   m.subcases[0].boundary = 1;
   m.probes = {{1, Vector(.004, -.006, 0)},
               {2, Vector((g.rotor + g.gap_outer) / 2, 0, 0)}};

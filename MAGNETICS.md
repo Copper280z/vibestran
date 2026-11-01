@@ -303,15 +303,22 @@ cell. Folded, degenerate or numerically uncertifiable cells are rejected with
 an element diagnostic. Pyramid and quadratic magnetic elements are not supported. Mesh the air inside conductor holes;
 the *conductor* may be a torus but the *magnetic domain* must be filled. The
 default exterior condition is zero tangential A. Increase the air domain to
-check truncation error. Periodic, symmetry, infinite elements and multiply
-connected magnetic domains are not implemented.
+check truncation error. In 3D, periodic and symmetry boundaries, infinite
+elements and multiply connected magnetic domains are not implemented; planar
+models have [periodic sectors and flux-normal faces](#sector-models-mperiod-and-flux-normal-faces-mbc-normal).
 
-`MAGBC=SID` selects MBC. FSET=0 means the whole exterior; an explicit FSET must
-cover the whole exterior. A planar [air gap](#air-gap-pairgap) solved by
-the air-gap element is not exterior: FSET=0 leaves its circles out, and an
-FSET that selects an edge on them is an error. UNIFORM prescribes the tangential trace of
-`A = B cross x / 2`, useful for applied uniform fields and exact patch tests.
-The source perturbation still has zero tangential exterior trace.
+`MAGBC=SID` selects MBC. Its rows are `MBC,SID,FSET,TYPE,BX,BY,BZ`, and the
+rows of one SID combine: one ZERO or UNIFORM row prescribes A, and, in planar
+models, any number of NORMAL rows name faces the flux crosses normally (see
+[below](#sector-models-mperiod-and-flux-normal-faces-mbc-normal)). On the
+prescribing row FSET=0 means the rest of the exterior; an explicit FSET must
+cover it. A SID with only NORMAL rows prescribes zero on the rest. A planar
+[air gap](#air-gap-pairgap) solved by the air-gap element is not exterior:
+FSET=0 leaves its circles out, and an FSET that selects an edge on them is an
+error. Periodic sides and NORMAL faces are left out the same way. UNIFORM
+prescribes the tangential trace of `A = B cross x / 2`, useful for applied
+uniform fields and exact patch tests. The source perturbation still has zero
+tangential exterior trace.
 
 ## Planar motor cross sections
 
@@ -956,6 +963,153 @@ These checks show that the AGE torque, the linkages and the dq post-processing
 are consistent with each other. They are not a validation against an
 independent solver or a test bench; the dimensions and steel are illustrative.
 
+### Sector models (MPERIOD) and flux-normal faces (MBC NORMAL)
+
+Most machines repeat around the shaft. In a 12-slot, 14-pole motor, turning
+the cross section by 180° takes every pole to one of opposite polarity, and
+every tooth coil to a coil of the same phase wound the other way. The field
+is then anti-periodic, A(turned x) = −A(x). In a 12-slot, 8-pole motor it
+repeats every 90°. One sector carries all the information. `MPERIOD` says
+which sector the mesh is and how it repeats:
+
+```text
+MPERIOD,ID,TYPE,FSET1,FSET2,CID,SECTORS
+```
+
+| Field | Meaning |
+|---|---|
+| `ID` | Identifies the card in messages and results. A deck has at most one MPERIOD. |
+| `TYPE` | `PERIODIC`: A is the same at a grid and its image. `ANTI`: A changes sign. |
+| `FSET1`, `FSET2` | The two sides of the sector, as edges of field elements on the exterior. FSET2 must be FSET1 turned counterclockwise by 360/SECTORS degrees about the axis, grid for grid and edge for edge. |
+| `CID` | The axis is the z axis of CID through its origin (blank or 0: basic z through the basic origin). It must be parallel to the MAG2D plane normal. |
+| `SECTORS` | The number of sectors in the whole machine, at least 2; even for ANTI. |
+
+MPERIOD requires MAG2D. The sides need no particular shape: they are
+usually radial lines, but a skewed or stepped side works as long as its
+turned copy is the other side.
+
+**What the sector stands for.** The sector model is the whole machine: N
+turned copies of the sector's mesh, meshed alike at the sides, with each
+magnet's remanence and each COIL2D's turns multiplied by the period's sign
+in the odd copies of an ANTI model. Each CIRCUIT is in series with its images
+in every copy. That deck is the plain equivalent: removing MPERIOD from the
+sector deck does not give it. Without the card the sides become ordinary
+exterior, with A = 0, and the deck describes a different machine.
+
+**How it is solved.** Each grid of FSET2 is the image of a grid of FSET1,
+and its potential is the image's sign (+1 or −1) times that grid's. The
+gauge gives the pair one unknown: the image grid's rows and columns are added
+to its partner's, times the sign. The sides take no prescribed potential and
+no load of their own. A grid on both sides lies on the axis and is its own
+image: PERIODIC leaves it free, and ANTI holds it at A = 0. Grids where the
+sides meet the prescribed exterior (the stator's outer circle, say) are
+prescribed on both sides.
+
+**The air gap in a sector.** The gap elements form a sector of the annulus,
+and their arcs run from a grid of FSET1 to its image on FSET2. The AGE
+unfolds each arc around the machine: copy j of each arc grid stands at its
+angle plus j sectors, with the factor (−1)^j for ANTI. It then builds the
+whole machine's gap from these circles exactly as for a full model. The
+unfolded trace repeats, so its Fourier coefficients vanish except at
+multiples of SECTORS (PERIODIC) or odd multiples of SECTORS/2 (ANTI): the
+sector carries only the harmonics the period allows. The default NHARM is
+the whole machine's, half the unfolded coarser circle's grid count. The
+whole machine's gap stiffness is folded back onto the sector's grids, with
+the signs, and divided by SECTORS: the sector's share of the gap energy.
+
+**Results are the whole machine's.**
+
+| Quantity | In a sector model |
+|---|---|
+| Energy, coenergy | SECTORS times the sector's |
+| Circuit and source linkage, differential inductance, apparent and incremental L_dq | SECTORS times the sector's. A source is in series with its images, which carry its current times the sign and link the same flux. |
+| Air-gap torque, linkage rates (back-EMF) | From the unfolded gap: the whole machine's directly |
+| DRIVE dq quantities, THETA0 AUTO | From the whole machine's linkages and inductances |
+| B, H, potentials, VTKHDF fields | The modeled sector's |
+| MPROBE | Points in the sector's cells; in the gap, any angle (the unfolded gap's field) |
+| MFORCE | The named body in the sector, unscaled. Its surface may not reach a periodic side, which is on the mesh's exterior. Use the AGE torque for the machine. |
+
+A COIL2D region on its own, or a circuit whose turns do not balance, is
+open in an ordinary planar model: its return is unspecified, and linkage is
+unavailable (see [Planar motor cross sections](#planar-motor-cross-sections)).
+In an ANTI model its images alternate in sign, so the whole machine's
+series circuit balances, and linkage and inductance are defined. A phase of
+a half model of a 12-slot, 14-pole motor holds the go sides of its coils in
+one half and the return sides in the other; it is closed. In a PERIODIC
+model the images carry the same turns, so a circuit closes only if it
+balances within the sector.
+
+**MOTION in a sector.** Each part's sides pair within the part: the rotor's
+first side with the rotor's second, the stator's with the stator's. MOTION
+turns the rotor's sides with it, and the pairing is rebuilt at each position
+from the turned grids. A grid paired across the air gap, moving with fixed,
+is an error. DRIVE and THETA0 AUTO need nothing further: the electrical
+angle and dq quantities use the whole machine's linkages.
+
+**What is checked.** Each failure is an error that names the grid, edge,
+element or angle involved:
+
+1. Each grid of FSET1, turned by 360/SECTORS, lands within 1e-6 (of the
+   largest distance of a side grid from the axis) of a grid of FSET2. Each
+   FSET2 grid is the image of exactly one FSET1 grid, and each FSET1 edge
+   turns onto an FSET2 edge.
+2. The sides are on the exterior, share no edge, and do not touch the air
+   gap. An MBC row may not select them.
+3. A grid and its image are both on the prescribed exterior or both off it.
+   Where both are prescribed, the prescribed values agree with the period.
+   ZERO always does. UNIFORM does only when the uniform field is periodic
+   itself, as about the origin under ANTI with two sectors.
+4. The gap's arcs run from FSET1 to FSET2, span exactly one sector, and are
+   centered on the axis.
+5. Some exterior face is prescribed, unless the model is ANTI: otherwise A
+   would be fixed only up to a constant.
+
+**Flux-normal faces (MBC NORMAL).** The exterior condition is otherwise
+flux-parallel (B·n = 0, A prescribed). It is the right condition on a mirror
+line across which A is odd. Where A is even, as on the line between two
+like poles or through the middle of a magnet magnetized across it, the flux
+crosses the line normally. There n × H = 0, the natural condition of the A
+formulation: leave A free. List such edges in an FSET and add a NORMAL row
+to the subcase's MBC:
+
+```text
+MAGBC = 1
+...
+MBC,1,0,ZERO                         $ prescribe A = 0 on the rest
+MBC,1,7,NORMAL                       $ FSET 7: the mirror line, flux normal
+```
+
+NORMAL faces take no prescribed value and no boundary load, and the gauge
+leaves their grids free. Subcases whose MBCs have different NORMAL faces
+get gauges of their own. A NORMAL row needs an explicit FSET, and its
+faces must be exterior, off the air gap and off periodic sides. NORMAL is a
+boundary condition, not a statement about the rest of the domain: results
+are the modeled part's, unscaled. Its plain equivalent is the whole
+mirrored domain, and the half model's energy and linkage are half of that
+domain's.
+
+**Guarantees.** Each is a unit test in `tests/unit/test_periodic.cpp`, on
+models whose plain equivalent is built from the same grids and elements:
+
+| Sector model | Against | Measured |
+|---|---|---|
+| ANTI half (2 sectors) of a 12-slot, 14-pole surface-magnet motor, linear iron, three phase currents | The whole machine | Potential 8e-14, B 3e-14, energy and coenergy 1e-15, AGE torque 1e-14, circuit linkage 4e-15, inductance 4e-15, back-EMF per unit speed 4e-15, and gap probes in every sector 6e-15 |
+| The same, saturating steel driven to 2.1 T, MAGTOL 1e-12 | The whole machine | Potential 6e-13, B 5e-13, energy 9e-15, torque 1e-15, linkage 3e-15, inductance 4e-15 |
+| PERIODIC quarter (4 sectors) and half of a 12-slot, 8-pole motor | The whole machine | Every quantity above within 1.3e-13; torque 2e-14 |
+| ANTI half with MOTION (6 positions) and DRIVE THETA0 AUTO | The whole machine's sweep | THETA0 7e-15 degrees; torque 1e-14, dq linkages and both L_dq 3e-15, and back-EMF 5e-15 at every position |
+| Upper half of a mirror-symmetric domain (coils, iron, a magnet across the line) with MBC NORMAL on the mirror line | The whole domain | Potential 2e-15, B 6e-16, twice the energy 3e-15, twice the linkage 2e-16 |
+
+Agreement is to round-off with linear materials and to the Newton tolerance
+with B–H curves. The discrete sector problem is the whole machine's problem
+restricted to fields with the symmetry. The whole machine's discrete
+solution has that symmetry, because its mesh and sources do.
+
+**Results.** The F06 SOLUTION section gains a `Periodic` row: type,
+sectors, axis, sector angle, the number of grid pairs and axial grids, and
+which quantities are the whole machine's. In a sector model the `Air gap`
+row adds the arcs' grid counts and the harmonics that remain. The HDF5 file
+gains `MAGSTAT/periodic` (see [Results](#results-and-angle-sweeps)).
+
 Full 3D magnetic shells are a separate physical model: a thin magnetic layer or
 surface-current sheet coupled to the surrounding 3D field. Mechanical shell
 elements cannot simply be given the planar A_n equation on an arbitrary curved
@@ -1104,8 +1258,15 @@ solving. The file has two top-level groups:
   - `air_gap/` (planar models with a PAIRGAP solved by the AGE): attributes
     `property`, `inner_radius_m`, `outer_radius_m`, `harmonics`,
     `radial_deviation`;
-    `center_m`; and `inner_grids`, `outer_grids`, the grid IDs on each
-    circle in increasing angle.
+    `center_m`; `sectors` (1, or MPERIOD's SECTORS); and `inner_grids`,
+    `outer_grids`, the grid IDs on each circle in increasing angle (in a
+    sector model, each arc grid once, without the last, which is the image
+    of the first).
+  - `periodic/` (with MPERIOD): attributes `id`, `type` (`PERIODIC` or
+    `ANTI`), `sectors`, `sector_angle_deg`; `origin_m` and `axis`; and
+    `first_grids`, `second_grids` (row k pairs a grid with its image) and
+    `axial_grids`. Energies, linkages, inductances, back-EMF and the AGE
+    torque in the subcase groups are the whole machine's.
   - `subcase_ids`, and `subcases/<ID>/` per subcase, with attributes `id`,
     `iterations`, `residual`, `energy_J`, `coenergy_J`, `bh_extrapolated`,
     and `air_gap_torque_Nm` with an AGE gap.

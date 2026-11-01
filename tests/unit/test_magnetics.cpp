@@ -468,7 +468,7 @@ TEST(MagneticWire, NonmatchingTransferAndInteriorEndpointsRejected) {
 TEST(MagneticSolve, UniformFieldEnergyAndZeroNetMaxwellForce) {
   auto model = box(3);
   const Vector field(0.2, -0.3, 0.4);
-  model.boundaries[1] = {0, field};
+  model.boundaries[1] = {0, field, {}};
   model.subcases[0].boundary = 1;
   const auto mesh = std::get<Mesh>(make_mesh(model));
   // Closed surface of the interior voxel, with independent outward orientation.
@@ -919,7 +919,7 @@ TEST(MagneticForce, LoopTorqueApproachesMagneticMomentCrossUniformField) {
   for (int n : {8, 16}) {
     auto model = box(n, 1.2);
     loop(model);
-    model.boundaries[1] = {0, Vector(0, 0.001, 0)};
+    model.boundaries[1] = {0, Vector(0, 0.001, 0), {}};
     model.subcases[0].boundary = 1;
     const auto mesh = std::get<Mesh>(make_mesh(model));
     for (size_t fi = 0; fi < mesh.faces.size(); ++fi) {
@@ -1214,7 +1214,7 @@ TEST(MagneticSolids,
   const Vector field(.2, -.3, .1);
   for (int kind = 0; kind < 3; ++kind) {
     auto model = brick_box(3, kind == 1, kind == 2);
-    model.boundaries[1] = {0, field};
+    model.boundaries[1] = {0, field, {}};
     model.subcases[0].boundary = 1;
     model.probes = {{1, Vector(.12, .31, -.17)}};
     auto solved = solve(model);
@@ -1276,7 +1276,7 @@ TEST(MagneticPlanar,
       }
     }
     model.forces.push_back({1, 1});
-    model.boundaries[1] = {0, field};
+    model.boundaries[1] = {0, field, {}};
     model.subcases[0].boundary = 1;
     model.probes = {{1, Vector(.13, .24, 0)}};
     auto solved = solve(model);
@@ -1539,7 +1539,7 @@ TEST(MagneticPlanar, WindingTorqueApproachesAxialCurrentMomentInUniformField) {
     m.planar_coils = {{1, 1, 20}, {2, 2, -20}};
     m.circuits[3] = {3, 1, {{1, 1}, {2, 1}}};
     m.currents = {{1, 3, 1}};
-    m.boundaries[1] = {0, Vector(.01, 0, 0)};
+    m.boundaries[1] = {0, Vector(.01, 0, 0), {}};
     m.subcases = {{.id = 1, .load = 1, .boundary = 1}};
     const auto mesh = std::get<Mesh>(make_mesh(m));
     for (size_t i = 0; i < mesh.faces.size(); ++i) {
@@ -1609,7 +1609,7 @@ TEST(MagneticForce, SurfacesThroughCurrentCarryingVolumeAreRejected) {
   // inside it still contain the conductor, which is allowed.
   auto wire = box(8, 1.2);
   loop(wire);
-  wire.boundaries[1] = {0, Vector(0, 0.001, 0)};
+  wire.boundaries[1] = {0, Vector(0, 0.001, 0), {}};
   wire.subcases[0].boundary = 1;
   const auto wire_mesh = std::get<Mesh>(make_mesh(wire));
   wire.forces = {{1, 1}};
@@ -1762,7 +1762,7 @@ TEST(MagneticPlanar, LengthScalingPreservesDistortedQuadField) {
       g.position *= scale;
     }
     const Vector field(.2, .3, 0);
-    model.boundaries[1] = {0, field};
+    model.boundaries[1] = {0, field, {}};
     model.subcases[0].boundary = 1;
     model.probes = {{1, scale * Vector(.1, .2, 0)}};
     auto solved = solve(model);
@@ -1852,7 +1852,7 @@ TEST(MagneticWarped, HexAndWedgeFieldsEnergyAndCurvedForceSurface) {
         g.position.z() += .4 * g.position.x() * g.position.y();
     }
     const Vector field = .2 * (wedge ? Vector::UnitX() : Vector::UnitZ());
-    m.boundaries[1] = {0, field};
+    m.boundaries[1] = {0, field, {}};
     m.subcases[0].boundary = 1;
     m.forces = {{1, 1}};
     m.probes = {{1, Vector(.12, .11, .17)}};
@@ -2961,7 +2961,7 @@ TEST(MagneticForce, BodyLayersCannotAbsorbPlanarWindings) {
     m.planar_coils = {{11, 10, 1}, {12, 20, -1}};
     m.circuits[1] = {1, 1, {{11, 1}, {12, 1}}};
     m.currents = {{1, 1, 100}};
-    m.boundaries[1] = {0, Vector(.3, 0, 0)};
+    m.boundaries[1] = {0, Vector(.3, 0, 0), {}};
     m.subcases = {{.id = 1, .load = 1, .boundary = 1}};
     // A nonmagnetic body at the center feels no force. Its small contour
     // excludes the windings; growing it to +/-0.75 would add their -9 Nm
@@ -3034,7 +3034,7 @@ TEST(MagneticForce, BodyLayersCannotAbsorbSolidCoilsOrSweptWires) {
       loop(m, .5);
       m.options.wire_mesh = kind == 2 ? WireMesh::Tet : WireMesh::Hex;
     }
-    m.boundaries[1] = {0, Vector(0, .001, 0)};
+    m.boundaries[1] = {0, Vector(0, .001, 0), {}};
     m.subcases[0].boundary = 1;
     m.forces = {{7, 30, true, 0, 1}};
     auto small = solve(m);

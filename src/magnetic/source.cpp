@@ -541,7 +541,9 @@ Result<std::vector<Source>> prepare_sources(const Model &model,
       s.id = region.id;
       s.turns = region.turns;
       // A single signed region is unbalanced; its CIRCUIT decides closure.
-      s.closed = false;
+      // In an anti-periodic sector model the region is in series with its
+      // images, whose turns alternate in sign: balanced, so closed.
+      s.closed = mesh.period && mesh.period->anti;
       s.coupling = Eigen::VectorXd::Zero(mesh.dofs());
       const auto &ids = model.element_sets.at(region.elements);
       double area = 0;
@@ -681,7 +683,8 @@ resolve_circuits(const Model &model, std::span<const Source> sources) {
       absolute += std::abs(sources[i].turns);
     }
     if (!d.members.empty() && sources[d.members.front().first].mesh.planar)
-      d.closed = std::abs(turns) <= 1e-12 * absolute;
+      d.closed = std::abs(turns) <= 1e-12 * absolute ||
+                 (model.period && model.period->anti);
     out.push_back(std::move(d));
   }
   return out;

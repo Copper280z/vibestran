@@ -30,10 +30,15 @@ struct Face {
 };
 // One circle of an air gap: boundary grids on a circle about AirGap::center,
 // in increasing angle.
+// In a periodic sector model the circle is the arc of the sector unfolded
+// around the machine: each copy of an arc grid stands for its image in
+// another sector, with the factor sign (-1 in an odd sector of an
+// anti-periodic model).
 struct GapCircle {
   double radius{0};
   std::vector<int> nodes;     // mesh node indices
   std::vector<double> angles; // radians in [angles[0], angles[0] + 2 pi)
+  std::vector<double> sign;   // potential at angles[k] = sign[k] a[nodes[k]]
 };
 // The air annulus of a PAIRGAP property between a circle of boundary grids
 // on one part of the field mesh and a concentric circle on another, coupled
@@ -48,6 +53,20 @@ struct AirGap {
   double deviation{0};    // largest |distance - radius| / radius of a grid
   double inner_chord{0};  // nearest approach of the inner circle's edges
   int harmonics{0};
+  int sectors{1}; // the circles are unfolded from one of this many sectors
+};
+// The two sides of an MPERIOD on the field mesh: each grid of the first
+// side with its image on the second, turned by 2 pi / sectors
+// counterclockwise about the axis.
+struct Periodicity {
+  int id{0}, sectors{1};
+  bool anti{false};
+  Vector origin{Vector::Zero()}, axis{Vector::UnitZ()};
+  std::vector<int> faces;                // boundary faces on either side
+  std::vector<std::array<int, 2>> pairs; // node indices: first side, its image
+  std::vector<int> axial;                // grids on both sides, on the axis
+  // The factor from a grid's potential to its image's.
+  [[nodiscard]] double sign() const { return anti ? -1 : 1; }
 };
 struct Mesh {
   std::vector<Vector> nodes;
@@ -61,6 +80,7 @@ struct Mesh {
   double depth{1};
   Vector normal{Vector::UnitZ()};
   std::optional<AirGap> air_gap; // planar only
+  std::optional<Periodicity> period; // planar only
   [[nodiscard]] size_t dofs() const {
     return planar ? nodes.size() : edges.size();
   }
@@ -170,10 +190,26 @@ private:
   std::vector<int> order_;
   int build(const Mesh &mesh, int begin, int end);
 };
+// Unknown i of the field is sign[i] times equation equations[i], or
+// prescribed when equations[i] < 0: the image grid of an MPERIOD pair takes
+// its partner's equation, with sign -1 across an anti-periodic boundary.
 struct Gauge {
   std::vector<int> equations;
   std::vector<bool> boundary;
+  std::vector<double> sign;
   int size{0};
+  // The reduced vector P^T v of a vector v on the unknowns.
+  [[nodiscard]] Eigen::VectorXd reduce(const Eigen::VectorXd &v) const;
+  // v += P x for a reduced vector x.
+  void expand(const Eigen::VectorXd &x, Eigen::VectorXd &v,
+              double scale = 1) const;
 };
-[[nodiscard]] Result<Gauge> make_gauge(const Mesh &mesh);
+// natural flags the faces of the planar exterior that take n x H = 0 (MBC
+// NORMAL) instead of a prescribed potential.
+[[nodiscard]] Result<Gauge> make_gauge(const Mesh &mesh,
+                                       const std::vector<bool> &natural = {});
+// The MPERIOD sides of model on its field mesh. Errors name the grids and
+// edges whose images do not match.
+[[nodiscard]] Result<Periodicity> make_periodicity(const Model &model,
+                                                   const Mesh &mesh);
 } // namespace vibestran::magnetic

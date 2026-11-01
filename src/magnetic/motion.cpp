@@ -51,6 +51,15 @@ Result<MovingPart> moving_part(const Model &model, const Mesh &mesh,
           motion.id, mesh.node_ids[*shared], mesh.cells[mover[*shared]].id,
           motion.set, mesh.cells[ci].id)};
   }
+  if (const auto &period = mesh.period)
+    for (auto [first, second] : period->pairs)
+      if ((mover[first] >= 0) != (mover[second] >= 0))
+        return Error{std::format(
+            "MOTION {}: grid {} and its MPERIOD {} image grid {} are on different "
+            "sides of the air gap, one moving (ESET {}) and one fixed; each "
+            "part's periodic sides must pair within the part",
+            motion.id, mesh.node_ids[first], period->id, mesh.node_ids[second],
+            motion.set)};
   const auto &gap = *mesh.air_gap;
   // Every circle grid is on a field cell, so it is moving or fixed.
   auto moving_grids = [&](const GapCircle &c) {

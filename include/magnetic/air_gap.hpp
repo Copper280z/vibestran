@@ -22,7 +22,9 @@ inline constexpr double kAirGapTolerance = 1e-6;
 [[nodiscard]] Eigen::MatrixXd gap_transform(const GapCircle &c, int harmonics);
 
 // Stiffness per unit depth over [inner nodes, outer nodes]: (1/2) a^T K a is
-// the energy per unit depth of the annulus field for those nodal potentials.
+// the energy per unit depth of the annulus field for those nodal potentials,
+// each the circle's sign times its grid's potential. In a sector model that
+// is the whole machine's gap.
 [[nodiscard]] Eigen::MatrixXd air_gap_stiffness(const AirGap &gap);
 
 // Whether x (in the plane) lies in the annulus.
@@ -51,7 +53,8 @@ private:
   Eigen::VectorXd inner_, outer_; // harmonics, as gap_transform's rows
 };
 
-// Torque per unit depth on the part inside the gap, about the plane normal
+// Torque per unit depth on the part inside the gap (in a sector model, on
+// the whole machine's), about the plane normal
 // u x v: -dW/d(delta) for a rigid rotation delta of the inner part with its
 // nodal potentials held, i.e. of the inner circle's harmonics. The part
 // outside the gap takes the opposite torque. It equals the Maxwell stress

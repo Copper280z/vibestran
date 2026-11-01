@@ -155,10 +155,23 @@ struct Drive {
   std::optional<double> theta0; // degrees; empty for AUTO
   std::vector<int> phases;   // circuit IDs in phase sequence
 };
+// MBC rows of one SID. The ZERO or UNIFORM row prescribes A on faces (an
+// FSET, or 0 for the rest of the exterior): A = B x x / 2 with B = field.
+// NORMAL rows (planar only) name FSETs whose faces take the natural
+// condition n x H = 0, where the flux crosses the boundary normally.
 struct Boundary {
   int faces{0};
   Vector field{Vector::Zero()};
-}; // A = B x x / 2
+  std::vector<int> normal;
+};
+// MPERIOD: the field mesh is one of `sectors` identical sectors about the z
+// axis of coordinates, through its origin. Side second is side first turned
+// by 360 / sectors degrees counterclockwise; across it the potential repeats
+// (PERIODIC) or changes sign (ANTI).
+struct Periodic {
+  int id{0}, first{0}, second{0}, coordinates{0}, sectors{0};
+  bool anti{false};
+};
 // MPROBE: position in basic once parsed (CP is resolved like GRID CP); the
 // field is also reported in the local axes of output_coordinates (CD).
 struct Probe {
@@ -222,6 +235,7 @@ struct Model {
   std::map<int, std::string> meshed_air_gaps; // PID -> what selected MESH
   std::map<int, Motion> motions;
   std::map<int, Drive> drives;
+  std::optional<Periodic> period;
   Options options;
 };
 

@@ -586,6 +586,7 @@ unit_test_sources = files(
   'tests/unit/test_air_gap.cpp',
   'tests/unit/test_motion.cpp',
   'tests/unit/test_drive.cpp',
+    'tests/unit/test_periodic.cpp',
   'tests/unit/test_dof_map.cpp',
   'tests/unit/test_quality_checks.cpp',
   'tests/unit/test_factor_ratio_check.cpp',

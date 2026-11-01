@@ -322,6 +322,7 @@ Status expand_property_sets(Model &m,
 Result<Model> parse_lines(const std::vector<Line> &lines) {
   Model m;
   std::map<int, std::vector<int>> property_rows;
+  std::set<int> prescribed_mbc; // SIDs with a ZERO or UNIFORM row
   std::vector<int> element_dimensions;
   Subcase global, current;
   bool bulk = false, in_case = false, sol = false;
@@ -528,6 +529,23 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
                                "circuits start on the continuation"};
       drive.phases = r.list(9);
       insert_unique(m.drives, drive.id, std::move(drive), r);
+    } else if (key == "MPERIOD") {
+      Periodic period;
+      period.id = r.integer(1);
+      const auto type = upper(r.get(2));
+      if (type != "PERIODIC" && type != "ANTI")
+        return Error{r.where + ": MPERIOD TYPE must be PERIODIC or ANTI"};
+      period.anti = type == "ANTI";
+      period.first = r.integer(3);
+      period.second = r.integer(4);
+      period.coordinates = r.integer(5);
+      period.sectors = r.integer(6);
+      r.last(6);
+      if (m.period)
+        return Error{std::format("{}: MPERIOD {} after MPERIOD {}; a model is one "
+                                 "sector, with one pair of periodic sides",
+                                 r.where, period.id, m.period->id)};
+      m.period = period;
     } else if (key == "MAG2D") {
       if (m.options.planar)
         r.error = Error{r.where + ": duplicate MAG2D"};
@@ -683,16 +701,33 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       }
       insert_unique(m.combinations, id, std::move(c), r);
     } else if (key == "MBC") {
-      int id = r.integer(1);
-      Boundary bc;
-      bc.faces = r.integer(2);
-      auto kind = upper(r.get(3));
-      if (kind == "UNIFORM")
-        bc.field = r.vector(4);
-      else if (kind != "ZERO")
-        r.error = Error{r.where + ": MBC type must be ZERO or UNIFORM"};
-      r.last(6);
-      insert_unique(m.boundaries, id, bc, r);
+      // Rows of one SID combine: one ZERO or UNIFORM row, and any number
+      // of NORMAL rows.
+      const int id = r.integer(1), faces = r.integer(2);
+      const auto kind = upper(r.get(3));
+      if (id <= 0)
+        return Error{r.where + ": nonpositive MBC id " + std::to_string(id)};
+      auto &bc = m.boundaries[id];
+      if (kind == "NORMAL") {
+        if (faces == 0)
+          return Error{r.where + ": MBC NORMAL needs an FSET of the faces the "
+                                 "flux crosses normally"};
+        bc.normal.push_back(faces);
+        r.last(3);
+      } else if (kind == "ZERO" || kind == "UNIFORM") {
+        if (!prescribed_mbc.insert(id).second)
+          return Error{std::format("{}: MBC {} has a second ZERO or UNIFORM row; "
+                                   "one row prescribes A (FSET 0 for the rest "
+                                   "of the exterior), and NORMAL rows add "
+                                   "flux-normal faces",
+                                   r.where, id)};
+        bc.faces = faces;
+        if (kind == "UNIFORM")
+          bc.field = r.vector(4);
+        r.last(6);
+      } else {
+        r.error = Error{r.where + ": MBC type must be ZERO, UNIFORM or NORMAL"};
+      }
     } else if (key == "MPROBE") {
       Probe p;
       p.id = r.integer(1);
@@ -888,6 +923,17 @@ Status validate(const Model &m) {
     return Error{"MAGSTAT requires a magnetic mesh"};
   if (m.subcases.empty())
     return Error{"MAGSTAT requires at least one subcase"};
+  // Periodic sectors and NORMAL faces are planar; say so before anything
+  // else about a 3D deck that uses them.
+  if (m.period && !m.options.planar)
+    return Error{std::format("MPERIOD {} is for MAG2D models; 3D periodic "
+                             "sectors are not implemented",
+                             m.period->id)};
+  for (const auto &[id, bc] : m.boundaries)
+    if (!bc.normal.empty() && !m.options.planar)
+      return Error{std::format("MBC {} NORMAL is for MAG2D models; the 3D "
+                               "exterior takes zero tangential A",
+                               id)};
   if (m.options.max_iterations < 1 ||
       !(m.options.nonlinear_tolerance > 0 &&
         m.options.nonlinear_tolerance < 1) ||
@@ -1204,6 +1250,46 @@ Status validate(const Model &m) {
       return Error{std::format("MOTION {} needs a PAIRGAP air gap between the "
                                "moving and fixed parts",
                                id)};
+  }
+  if (const auto &period = m.period) {
+    if (period->sectors < 2)
+      return Error{std::format("MPERIOD {} requires SECTORS >= 2: the number of "
+                               "sectors in the whole machine",
+                               period->id)};
+    if (period->anti && period->sectors % 2 != 0)
+      return Error{std::format(
+          "MPERIOD {} ANTI with {} sectors: the potential would change sign "
+          "an odd number of times around the machine. Anti-periodic sectors "
+          "come in an even number",
+          period->id, period->sectors)};
+    for (int set : {period->first, period->second})
+      if (!m.face_sets.contains(set))
+        return Error{std::format("MPERIOD {} references undefined FSET {}",
+                                 period->id, set)};
+    if (period->first == period->second)
+      return Error{std::format("MPERIOD {} names FSET {} for both sides",
+                               period->id, period->first)};
+    if (period->coordinates && !m.coordinates.contains(period->coordinates))
+      return Error{std::format("MPERIOD {} references undefined coordinates {}",
+                               period->id, period->coordinates)};
+    const Vector axis =
+        period->coordinates
+            ? Vector(coordinate_axes(m.coordinates.at(period->coordinates)).col(2))
+            : Vector(Vector::UnitZ());
+    if (axis.cross(plane_normal).norm() > 1e-9)
+      return Error{std::format("MPERIOD {}: the z axis of CID {} must be parallel "
+                               "to the MAG2D plane normal, the sector axis",
+                               period->id, period->coordinates)};
+  }
+  for (const auto &[id, bc] : m.boundaries) {
+    if (const auto missing = std::ranges::find_if(
+            bc.normal, [&](int set) { return !m.face_sets.contains(set); });
+        missing != bc.normal.end())
+      return Error{std::format("MBC {} NORMAL references undefined FSET {}", id,
+                               *missing)};
+    if (bc.faces && !m.face_sets.contains(bc.faces))
+      return Error{std::format("MBC {} references undefined FSET {}", id,
+                               bc.faces)};
   }
   for (const auto &[id, drive] : m.drives) {
     const auto count = drive.phases.size();

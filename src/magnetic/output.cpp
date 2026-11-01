@@ -11,6 +11,7 @@
 #include <numbers>
 #include <optional>
 #include <numeric>
+#include <set>
 #include <utility>
 #ifdef VIBESTRAN_HAS_HDF5
 #include <hdf5.h>
@@ -957,13 +958,37 @@ Status write_hdf5(const std::string &path, const Model &model,
     h5.attribute(group.get(), "harmonics", int64_t{gap->harmonics});
     h5.attribute(group.get(), "radial_deviation", gap->deviation);
     h5.vectors(group.get(), "center_m", {gap->center});
+    h5.attribute(group.get(), "sectors", int64_t{gap->sectors});
+    // A sector model's circles are unfolded around the machine: each grid
+    // once, in angle order.
     for (const auto &[name, circle] :
          {std::pair{"inner_grids", &gap->inner}, std::pair{"outer_grids", &gap->outer}}) {
       std::vector<int64_t> grids;
+      std::set<int> seen;
       for (int n : circle->nodes)
-        grids.push_back(results.mesh.node_ids[n]);
+        if (seen.insert(n).second)
+          grids.push_back(results.mesh.node_ids[n]);
       h5.values(group.get(), name, grids);
     }
+  }
+  if (const auto &period = results.mesh.period) {
+    auto group = h5.group(magstat.get(), "periodic");
+    h5.attribute(group.get(), "id", int64_t{period->id});
+    h5.attribute(group.get(), "type", std::string(period->anti ? "ANTI" : "PERIODIC"));
+    h5.attribute(group.get(), "sectors", int64_t{period->sectors});
+    h5.attribute(group.get(), "sector_angle_deg", 360. / period->sectors);
+    h5.vectors(group.get(), "origin_m", {period->origin});
+    h5.vectors(group.get(), "axis", {period->axis});
+    std::vector<int64_t> first, second, axial;
+    for (auto [a, b] : period->pairs) {
+      first.push_back(results.mesh.node_ids[a]);
+      second.push_back(results.mesh.node_ids[b]);
+    }
+    for (int v : period->axial)
+      axial.push_back(results.mesh.node_ids[v]);
+    h5.values(group.get(), "first_grids", first);
+    h5.values(group.get(), "second_grids", second);
+    h5.values(group.get(), "axial_grids", axial);
   }
   {
     auto sources = h5.group(magstat.get(), "sources");

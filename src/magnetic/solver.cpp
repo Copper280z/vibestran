@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <numbers>
@@ -146,10 +147,27 @@ GapCoupling gap_coupling(const Mesh &mesh) {
   GapCoupling out;
   if (!mesh.air_gap)
     return out;
-  out.nodes = mesh.air_gap->inner.nodes;
-  out.nodes.insert(out.nodes.end(), mesh.air_gap->outer.nodes.begin(),
-                   mesh.air_gap->outer.nodes.end());
-  out.stiffness = mesh.depth * air_gap_stiffness(*mesh.air_gap);
+  const auto &gap = *mesh.air_gap;
+  const Eigen::MatrixXd unfolded = mesh.depth * air_gap_stiffness(gap);
+  // Each circle entry is sign times a grid's potential. In a sector model
+  // the unfolded gap is the whole machine's, and the sector's share of its
+  // energy is 1/sectors.
+  std::vector<std::pair<int, double>> entries; // grid, sign
+  for (const auto *c : {&gap.inner, &gap.outer})
+    for (size_t k = 0; k < c->nodes.size(); ++k)
+      entries.emplace_back(c->nodes[k], c->sign[k]);
+  std::map<int, Eigen::Index> slot;
+  for (auto [node, sign] : entries)
+    if (slot.emplace(node, static_cast<Eigen::Index>(out.nodes.size())).second)
+      out.nodes.push_back(node);
+  const auto n = static_cast<Eigen::Index>(out.nodes.size());
+  out.stiffness = Eigen::MatrixXd::Zero(n, n);
+  for (size_t i = 0; i < entries.size(); ++i)
+    for (size_t j = 0; j < entries.size(); ++j)
+      out.stiffness(slot.at(entries[i].first), slot.at(entries[j].first)) +=
+          entries[i].second * entries[j].second *
+          unfolded(static_cast<Eigen::Index>(i), static_cast<Eigen::Index>(j));
+  out.stiffness /= gap.sectors;
   return out;
 }
 bool on_air_gap(const Mesh &mesh, int face) {
@@ -196,12 +214,13 @@ Assembly assemble(const Materials &materials, const Mesh &mesh,
       const int row = gauge.equations[cell.edges[i]];
       if (row < 0)
         continue;
-      out.residual[row] += residual[i];
+      const double si = gauge.sign[cell.edges[i]];
+      out.residual[row] += si * residual[i];
       out.force_scale += residual[i] * residual[i];
       for (int j = 0; j < ne; ++j) {
         const int col = gauge.equations[cell.edges[j]];
         if (col >= 0)
-          entries.emplace_back(row, col, local(i, j));
+          entries.emplace_back(row, col, si * gauge.sign[cell.edges[j]] * local(i, j));
       }
     }
   }
@@ -216,18 +235,18 @@ Assembly assemble(const Materials &materials, const Mesh &mesh,
       const int row = gauge.equations[gap.nodes[i]];
       if (row < 0)
         continue;
-      out.residual[row] += residual[i];
+      const double si = gauge.sign[gap.nodes[i]];
+      out.residual[row] += si * residual[i];
       out.force_scale += residual[i] * residual[i];
       for (Eigen::Index j = 0; j < count; ++j) {
         const int col = gauge.equations[gap.nodes[j]];
         if (col >= 0)
-          entries.emplace_back(row, col, gap.stiffness(i, j));
+          entries.emplace_back(row, col,
+                               si * gauge.sign[gap.nodes[j]] * gap.stiffness(i, j));
       }
     }
   }
-  for (size_t e = 0; e < mesh.dofs(); ++e)
-    if (gauge.equations[e] >= 0)
-      out.residual[gauge.equations[e]] -= load[e];
+  out.residual -= gauge.reduce(load);
   out.stiffness.resize(gauge.size, gauge.size);
   out.stiffness.setFromTriplets(entries.begin(), entries.end());
   return out;
@@ -238,7 +257,45 @@ std::string face_grids(const Mesh &mesh, const Face &f) {
     out += (out.empty() ? "" : ",") + std::to_string(mesh.node_ids[n]);
   return out;
 }
+// The faces of the planar exterior that MBC boundary's NORMAL rows name,
+// where the flux crosses normally (n x H = 0, the natural condition).
+Result<std::vector<bool>> natural_faces(const Model &model, const Mesh &mesh,
+                                        int boundary) {
+  std::vector<bool> out(mesh.faces.size(), false);
+  if (!boundary)
+    return out;
+  for (int set : model.boundaries.at(boundary).normal) {
+    auto faces = selected_faces(model, mesh, set);
+    if (auto *e = std::get_if<Error>(&faces))
+      return Error{std::format("MBC {} NORMAL: {}", boundary, e->message)};
+    for (auto [f, sign] : std::get<std::vector<std::pair<int, int>>>(faces)) {
+      (void)sign;
+      const auto &face = mesh.faces[f];
+      const auto where = std::format("MBC {} NORMAL FSET {} selects face ({}) of "
+                                     "element {}",
+                                     boundary, set, face_grids(mesh, face),
+                                     mesh.cells[face.cells[0]].id);
+      if (face.cells[1] >= 0)
+        return Error{where + ", which is inside the field mesh"};
+      if (on_air_gap(mesh, static_cast<int>(f)))
+        return Error{where + " on the air gap, which takes no boundary condition"};
+      if (mesh.period && std::ranges::find(mesh.period->faces, f) !=
+                             mesh.period->faces.end())
+        return Error{std::format("{} on a periodic side of MPERIOD {}", where,
+                                 mesh.period->id)};
+      if (out[f])
+        return Error{where + " twice"};
+      out[f] = true;
+    }
+  }
+  return out;
+}
+// The prescribed potential of the subcase's MBC row on the exterior faces
+// that are neither natural, periodic nor on the air gap (the potential is
+// free elsewhere; only the gauge's prescribed values are used).
 Result<Eigen::VectorXd> boundary_potential(const Model &model, const Mesh &mesh,
+                                           const Gauge &gauge,
+                                           const std::vector<bool> &natural,
                                            const Subcase &subcase) {
   Eigen::VectorXd a = Eigen::VectorXd::Zero(mesh.dofs());
   if (!subcase.boundary)
@@ -248,30 +305,43 @@ Result<Eigen::VectorXd> boundary_potential(const Model &model, const Mesh &mesh,
     auto faces = selected_faces(model, mesh, bc.faces);
     if (auto *e = std::get_if<Error>(&faces))
       return *e;
-    // The air gap is part of the domain, not its exterior.
-    std::vector<bool> gap_face(mesh.faces.size(), false);
+    // The air gap is part of the domain, not its exterior; periodic faces
+    // meet their images, and NORMAL faces are free.
+    std::vector<bool> open(mesh.faces.size(), false);
     if (mesh.air_gap)
       for (int f : mesh.air_gap->faces)
-        gap_face[f] = true;
-    const auto gap_faces = static_cast<size_t>(
-        std::count(gap_face.begin(), gap_face.end(), true));
-    const auto count = static_cast<size_t>(
-        std::count_if(mesh.faces.begin(), mesh.faces.end(),
-                      [](const Face &f) { return f.cells[1] < 0; })) - gap_faces;
+        open[f] = true;
+    if (mesh.period)
+      for (int f : mesh.period->faces)
+        open[f] = true;
+    for (size_t f = 0; f < natural.size(); ++f)
+      if (natural[f])
+        open[f] = true;
+    size_t count = 0;
+    for (size_t f = 0; f < mesh.faces.size(); ++f)
+      if (mesh.faces[f].cells[1] < 0 && !open[f])
+        ++count;
     const auto &selected = std::get<std::vector<std::pair<int, int>>>(faces);
     for (auto [f, sign] : selected) {
       (void)sign;
       if (mesh.faces[f].cells[1] >= 0)
         return Error{"MBC must select exterior faces"};
-      if (gap_face[f])
+      if (open[f])
         return Error{std::format(
-            "MBC FSET selects face ({}) of element {} on the air gap; the air gap "
-            "is coupled by the air-gap element and takes no boundary condition",
-            face_grids(mesh, mesh.faces[f]), mesh.cells[mesh.faces[f].cells[0]].id)};
+            "MBC FSET selects face ({}) of element {} on the {}",
+            face_grids(mesh, mesh.faces[f]), mesh.cells[mesh.faces[f].cells[0]].id,
+            on_air_gap(mesh, f)
+                ? "air gap; the air gap is coupled by the air-gap element and "
+                  "takes no boundary condition"
+            : static_cast<size_t>(f) < natural.size() && natural[f]
+                ? "flux-normal (NORMAL) boundary, which takes no prescribed "
+                  "potential"
+                : "periodic boundary, which meets its image instead of taking "
+                  "a prescribed potential")};
     }
     if (selected.size() != count)
-      return Error{
-          "MBC FSET must cover the entire magnetic exterior (or use FSET=0)"};
+      return Error{"MBC FSET must cover the entire magnetic exterior that is not "
+                   "on the air gap, periodic or NORMAL (or use FSET=0)"};
   }
   if (mesh.planar) {
     if (std::abs(bc.field.dot(mesh.normal)) > 1e-12 * bc.field.norm())
@@ -279,6 +349,26 @@ Result<Eigen::VectorXd> boundary_potential(const Model &model, const Mesh &mesh,
     for (size_t i = 0; i < mesh.nodes.size(); ++i)
       a[i] =
           bc.field.cross(mesh.nodes[i] - mesh.nodes.front()).dot(mesh.normal);
+    if (const auto &period = mesh.period) {
+      // A prescribed grid and its prescribed image must agree with the
+      // period: a uniform field is periodic only in special cases.
+      double scale = 0;
+      for (size_t i = 0; i < mesh.nodes.size(); ++i)
+        if (gauge.equations[i] < 0)
+          scale = std::max(scale, std::abs(a[static_cast<Eigen::Index>(i)]));
+      auto pairs = period->pairs;
+      std::ranges::transform(period->axial, std::back_inserter(pairs),
+                             [](int v) { return std::array<int, 2>{v, v}; });
+      for (auto [first, second] : pairs)
+        if (gauge.equations[first] < 0 &&
+            std::abs(a[second] - period->sign() * a[first]) > 1e-9 * scale)
+          return Error{std::format(
+              "MBC {} UNIFORM prescribes A = {:.6e} at grid {} and {:.6e} at "
+              "its {} image grid {}, which MPERIOD {} requires to be {} it",
+              subcase.boundary, a[first], mesh.node_ids[first], a[second],
+              period->anti ? "anti-periodic" : "periodic", mesh.node_ids[second],
+              period->id, period->anti ? "minus" : "equal to")};
+    }
     return a;
   }
   for (size_t e = 0; e < mesh.dofs(); ++e) {
@@ -327,9 +417,7 @@ Result<Equilibrium> equilibrium(const Model &model, const Materials &materials,
     double alpha = 1;
     for (int trial = 0; trial < 30; ++trial) {
       Eigen::VectorXd candidate = a;
-      for (size_t e = 0; e < mesh.dofs(); ++e)
-        if (gauge.equations[e] >= 0)
-          candidate[e] += alpha * step[gauge.equations[e]];
+      gauge.expand(step, candidate, alpha);
       auto next = assemble(materials, mesh, gauge, gap, candidate, load);
       if (next.residual.allFinite() &&
           next.residual.norm() <= (1 - 1e-4 * alpha) * norm) {
@@ -580,6 +668,14 @@ Result<BodySurface> body_surface(const Model &model, const Mesh &mesh,
             "MFORCE {}: the surface around body ESET {} reaches the air gap at "
             "element {}; force surfaces may not touch the air gap",
             request.id, request.set, cell.id)};
+      if (other < 0 && mesh.period &&
+          std::ranges::find(mesh.period->faces, cell.faces[k]) != mesh.period->faces.end())
+        return Error{std::format(
+            "MFORCE {}: the surface around body ESET {} reaches a periodic side "
+            "of MPERIOD {} at element {}; a force surface must close within the "
+            "sector. For the machine's torque use the air-gap element's, which "
+            "is the whole machine's",
+            request.id, request.set, mesh.period->id, cell.id)};
       if (other < 0)
         return Error{std::format(
             "MFORCE {}: body ESET {} is within {} cells of the domain "
@@ -741,15 +837,30 @@ struct Setup {
   // and circuit inductance needs one tangent solve per closed circuit.
   std::vector<Eigen::VectorXd> circuit_coupling;
   std::optional<SpatialIndex> index;
+  // The MBC whose NORMAL faces the gauge leaves free (0 for none), and
+  // those faces.
+  int normal_boundary{0};
+  std::vector<bool> natural;
 };
-Result<Setup> prepare(const Model &model) {
+// The MBC that decides a subcase's gauge: its own when it has NORMAL rows.
+int normal_boundary(const Model &model, const Subcase &subcase) {
+  return subcase.boundary && !model.boundaries.at(subcase.boundary).normal.empty()
+             ? subcase.boundary
+             : 0;
+}
+Result<Setup> prepare(const Model &model, int normal_boundary = 0) {
   Setup s;
   auto built = make_mesh(model);
   if (auto *e = std::get_if<Error>(&built))
     return *e;
   s.mesh = std::get<Mesh>(std::move(built));
   s.materials = resolve_materials(model);
-  auto gauged = make_gauge(s.mesh);
+  s.normal_boundary = normal_boundary;
+  auto natural = natural_faces(model, s.mesh, normal_boundary);
+  if (auto *e = std::get_if<Error>(&natural))
+    return *e;
+  s.natural = std::get<std::vector<bool>>(std::move(natural));
+  auto gauged = make_gauge(s.mesh, s.natural);
   if (auto *e = std::get_if<Error>(&gauged))
     return *e;
   s.gauge = std::get<Gauge>(std::move(gauged));
@@ -807,7 +918,7 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
   Eigen::VectorXd load = Eigen::VectorXd::Zero(mesh.dofs());
   for (size_t i = 0; i < amps.size(); ++i)
     load += amps[i] * sources[i].coupling;
-  auto imposed = boundary_potential(model, mesh, subcase);
+  auto imposed = boundary_potential(model, mesh, gauge, setup.natural, subcase);
   if (auto *e = std::get_if<Error>(&imposed))
     return *e;
   const auto &initial = std::get<Eigen::VectorXd>(imposed);
@@ -889,13 +1000,10 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
         couplings.push_back(&setup.circuit_coupling[c]);
       }
     if (!couplings.empty()) {
-      Eigen::MatrixXd reduced = Eigen::MatrixXd::Zero(
-          gauge.size, static_cast<Eigen::Index>(couplings.size()));
+      Eigen::MatrixXd reduced(gauge.size,
+                              static_cast<Eigen::Index>(couplings.size()));
       for (size_t k = 0; k < couplings.size(); ++k)
-        for (size_t e = 0; e < mesh.dofs(); ++e)
-          if (gauge.equations[e] >= 0)
-            reduced(gauge.equations[e], static_cast<Eigen::Index>(k)) =
-                (*couplings[k])[e];
+        reduced.col(static_cast<Eigen::Index>(k)) = gauge.reduce(*couplings[k]);
       if (auto e = tangent.factor(eq.assembly.stiffness))
         return Error{std::format(
             "Differential inductance factorization failed ({})", e->message)};
@@ -921,10 +1029,7 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
         // potential's response to the circuit's current.
         const Eigen::VectorXd gradient =
             mesh.depth * air_gap_torque_gradient(*mesh.air_gap, eq.a);
-        Eigen::VectorXd reduced_gradient = Eigen::VectorXd::Zero(gauge.size);
-        for (size_t e = 0; e < mesh.dofs(); ++e)
-          if (gauge.equations[e] >= 0)
-            reduced_gradient[gauge.equations[e]] = gradient[e];
+        const Eigen::VectorXd reduced_gradient = gauge.reduce(gradient);
         const Eigen::VectorXd rates =
             std::get<Eigen::MatrixXd>(responses).transpose() * reduced_gradient;
         for (size_t c = 0; c < closed_circuits.size(); ++c)
@@ -939,12 +1044,9 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
       const auto frozen = assemble(setup.materials, mesh, gauge, setup.gap, eq.a,
                                    Eigen::VectorXd::Zero(mesh.dofs()), true);
       const auto count = static_cast<Eigen::Index>(request->frozen.size());
-      Eigen::MatrixXd reduced = Eigen::MatrixXd::Zero(gauge.size, count);
+      Eigen::MatrixXd reduced(gauge.size, count);
       for (Eigen::Index k = 0; k < count; ++k)
-        for (size_t e = 0; e < mesh.dofs(); ++e)
-          if (gauge.equations[e] >= 0)
-            reduced(gauge.equations[e], k) =
-                setup.circuit_coupling[request->frozen[k]][e];
+        reduced.col(k) = gauge.reduce(setup.circuit_coupling[request->frozen[k]]);
       if (auto e = tangent.factor(frozen.stiffness))
         return Error{std::format("Frozen-permeability factorization failed ({})",
                                  e->message)};
@@ -999,6 +1101,24 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
   output.forces = std::get<std::vector<ForceResult>>(std::move(force));
   if (mesh.air_gap)
     output.gap_torque = mesh.depth * air_gap_torque(*mesh.air_gap, eq.a);
+  if (mesh.period) {
+    // A sector stands for the whole machine: its cells' energy, and each
+    // source's linkage, are one sector's share. A source is in series with
+    // its images in the other sectors, which carry its current times the
+    // period's sign and link the same flux. The gap torque and the linkage
+    // rates come from the unfolded gap, the whole machine's already.
+    const double n = mesh.period->sectors;
+    output.energy *= n;
+    output.coenergy *= n;
+    for (auto &source : output.sources)
+      source.linkage *= n;
+    for (auto &circuit : output.circuits)
+      circuit.linkage *= n;
+    output.differential_inductance *= n;
+    output.circuit_inductance *= n;
+    if (frozen_inductance && request && !request->frozen.empty())
+      *frozen_inductance *= n;
+  }
   return output;
 }
 std::string iterations_text(int iterations) {
@@ -1069,7 +1189,7 @@ Result<DriveSummary> auto_alignment(const Model &model, const Setup &base,
     const Model moved = moved_model(model, motion, part, angle);
     std::optional<Setup> own;
     if (angle != 0) {
-      auto built = prepare(moved);
+      auto built = prepare(moved, base.normal_boundary);
       if (auto *e = std::get_if<Error>(&built))
         return Error{std::format("at {:.6g} degrees: {}", angle, e->message)};
       own = std::get<Setup>(std::move(built));
@@ -1135,6 +1255,37 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
                              g.outer.radius, shown(g.center.x()), shown(g.center.y()),
                              shown(g.center.z()), g.inner.nodes.size(),
                              g.outer.nodes.size(), g.harmonics, g.deviation));
+    if (g.sectors > 1)
+      solution.add("Air gap",
+                   std::format("the sector's arcs ({} + {} grids) unfolded around "
+                               "{} sectors{}: harmonics that are not {} vanish",
+                               g.inner.nodes.size() / g.sectors + 1,
+                               g.outer.nodes.size() / g.sectors + 1, g.sectors,
+                               mesh.period->anti ? ", changing sign in alternate sectors"
+                                                 : "",
+                               mesh.period->anti
+                                   ? std::format("odd multiples of {}", g.sectors / 2)
+                                   : std::format("multiples of {}", g.sectors)));
+  }
+  if (const auto &period = mesh.period) {
+    const auto &card = *model.period;
+    solution.add(
+        "Periodic",
+        std::format("MPERIOD {}: {} sector of {} about the z axis of CID {} through "
+                    "({:.6g}, {:.6g}, {:.6g}), {:.6g} degrees; FSET {} turns onto FSET "
+                    "{} ({} grid pairs{}). Energy, coenergy, linkage, inductance, "
+                    "back-EMF and air-gap torque are the whole machine's: {} times "
+                    "the sector's, its sources in series with their images. Fields, "
+                    "probes and MFORCE are the modeled sector's",
+                    period->id, period->anti ? "anti-periodic" : "periodic",
+                    period->sectors, card.coordinates, period->origin.x(),
+                    period->origin.y(), period->origin.z(), 360. / period->sectors,
+                    card.first, card.second, period->pairs.size(),
+                    period->axial.empty()
+                        ? std::string()
+                        : std::format(", {} on the axis{}", period->axial.size(),
+                                      period->anti ? " held at A = 0" : ""),
+                    period->sectors));
   }
   for (const auto &[pid, reason] : model.meshed_air_gaps)
     solution.add("Air gap",
@@ -1200,12 +1351,22 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
   Tangent tangent(backend);
   // THETA0 AUTO results by DRIVE, MOTION and MBC.
   std::map<std::tuple<int, int, int>, DriveSummary> alignments;
+  // The setups of MBCs with NORMAL faces, whose gauge leaves them free.
+  std::map<int, Setup> normal_bases;
   for (const auto &subcase : model.subcases) {
     Notices notices;
     const std::string context = std::format("Subcase {}", subcase.id);
+    const int gauge_key = normal_boundary(model, subcase);
+    if (gauge_key && !normal_bases.contains(gauge_key)) {
+      auto built = prepare(model, gauge_key);
+      if (auto *e = std::get_if<Error>(&built))
+        return Error{std::format("{}: {}", context, e->message)};
+      normal_bases.emplace(gauge_key, std::get<Setup>(std::move(built)));
+    }
+    const Setup &case_base = gauge_key ? normal_bases.at(gauge_key) : base;
     if (!subcase.motion) {
       bool continued = false;
-      auto state = solve_state(model, base, subcase, tangent, nullptr, continued);
+      auto state = solve_state(model, case_base, subcase, tangent, nullptr, continued);
       if (auto *e = std::get_if<Error>(&state))
         return Error{std::format("{}: {}", context, e->message)};
       auto output = std::get<CaseResults>(std::move(state));
@@ -1231,7 +1392,7 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
       output.residual = 0;
       const Drive *drive = subcase.drive ? &model.drives.at(subcase.drive) : nullptr;
       if (drive) {
-        auto indexed = phase_indices(*drive, base.circuits);
+        auto indexed = phase_indices(*drive, case_base.circuits);
         if (auto *e = std::get_if<Error>(&indexed))
           return Error{std::format("{}: {}", context, e->message)};
         const auto &phases = std::get<std::vector<int>>(indexed);
@@ -1242,7 +1403,7 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
           const std::tuple key{drive->id, motion.id, subcase.boundary};
           if (!alignments.contains(key)) {
             int iterations = 0;
-            auto aligned = auto_alignment(model, base, motion, part, *drive, phases,
+            auto aligned = auto_alignment(model, case_base, motion, part, *drive, phases,
                                           subcase, tangent, iterations);
             if (auto *e = std::get_if<Error>(&aligned))
               return Error{std::format("{}, DRIVE {} THETA0 AUTO with MOTION {}: {}",
@@ -1278,13 +1439,13 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
         const Model moved = moved_model(model, motion, part, angle);
         std::optional<Setup> own;
         if (angle != 0) {
-          auto built = prepare(moved);
+          auto built = prepare(moved, gauge_key);
           if (auto *e = std::get_if<Error>(&built))
             return Error{std::format("{}, MOTION {} at {:.6g} degrees: {}", context,
                                      motion.id, angle, e->message)};
           own = std::get<Setup>(std::move(built));
         }
-        const Setup &setup = own ? *own : base;
+        const Setup &setup = own ? *own : case_base;
         bool continued = false;
         StateRequest request;
         double theta_e = 0;
@@ -1292,7 +1453,7 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
           const auto &phases = output.drive_summary->phases;
           theta_e = electrical_angle(*drive, output.drive_summary->theta0, angle);
           const auto currents = phase_currents(*drive, theta_e);
-          request.driven.assign(base.circuits.size(), 0);
+          request.driven.assign(case_base.circuits.size(), 0);
           for (size_t j = 0; j < phases.size(); ++j)
             request.driven[phases[j]] = currents[j];
           if (subcase.apparent)

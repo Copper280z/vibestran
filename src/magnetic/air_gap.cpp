@@ -5,8 +5,9 @@
 #include <complex>
 #include <format>
 #include <map>
-#include <set>
 #include <numbers>
+#include <set>
+#include <tuple>
 #include <numeric>
 
 namespace vibestran::magnetic {
@@ -63,6 +64,67 @@ GapCircle circle(const Loop &loop, const Eigen::Vector2d &center,
   for (auto [angle, i] : order) {
     c.angles.push_back(angle);
     c.nodes.push_back(i);
+    c.sign.push_back(1);
+  }
+  return c;
+}
+
+// The arc of a sector model's gap unfolded around the machine: the chain
+// runs from a grid of the first periodic side to its image on the second,
+// and copy j of each grid (but the last, which is the first's image) stands
+// at its angle plus j times the sector angle, with sign (-1)^j when the
+// model is anti-periodic.
+Result<GapCircle> unfold(const Loop &chain, const Eigen::Vector2d &center,
+                         const std::vector<Eigen::Vector2d> &p, const Mesh &mesh,
+                         int pid, const char *which) {
+  const Periodicity &period = *mesh.period;
+  const int first = chain.nodes.front(), last = chain.nodes.back();
+  const auto paired = [&period](int a, int b) {
+    return std::ranges::find(period.pairs, std::array<int, 2>{a, b}) !=
+           period.pairs.end();
+  };
+  if (!paired(first, last) && !paired(last, first))
+    return Error{std::format(
+        "PAIRGAP {}: the {} arc of the air gap runs from grid {} to grid {}, "
+        "which are not a grid of the first side of MPERIOD {} and its image. "
+        "In a sector model the gap's arcs run from one periodic side to the "
+        "other",
+        pid, which, mesh.node_ids[first], mesh.node_ids[last], period.id)};
+  std::vector<int> nodes = chain.nodes;
+  if (!paired(first, last))
+    std::reverse(nodes.begin(), nodes.end());
+  const auto angle = [&](int i) {
+    const Eigen::Vector2d q = p[i] - center;
+    return std::atan2(q.y(), q.x());
+  };
+  std::vector<double> theta{angle(nodes[0])};
+  for (size_t t = 1; t < nodes.size(); ++t)
+    theta.push_back(theta.back() +
+                    std::remainder(angle(nodes[t]) - angle(nodes[t - 1]), 2 * pi));
+  const double sweep = theta.back() - theta.front(),
+               sector = 2 * pi / period.sectors;
+  if (std::abs(std::abs(sweep) - sector) > kAirGapTolerance * sector)
+    return Error{std::format(
+        "PAIRGAP {}: the {} arc of the air gap spans {:.9g} degrees from grid "
+        "{} to grid {}; MPERIOD {} has {} sectors of {:.9g} degrees",
+        pid, which, std::abs(sweep) * 180 / pi, mesh.node_ids[nodes.front()],
+        mesh.node_ids[nodes.back()], period.id, period.sectors, sector * 180 / pi)};
+  for (size_t t = 1; t < nodes.size(); ++t)
+    if ((theta[t] - theta[t - 1]) * sweep <= 0)
+      return Error{std::format("PAIRGAP {}: the {} arc of the air gap turns back "
+                               "at grid {}",
+                               pid, which, mesh.node_ids[nodes[t]])};
+  std::vector<std::tuple<double, int, double>> entries;
+  for (int j = 0; j < period.sectors; ++j)
+    for (size_t t = 0; t + 1 < nodes.size(); ++t)
+      entries.emplace_back(theta[t] + j * sweep, nodes[t],
+                           period.anti && j % 2 ? -1. : 1.);
+  std::sort(entries.begin(), entries.end());
+  GapCircle c;
+  for (const auto &[a, i, sign] : entries) {
+    c.angles.push_back(a);
+    c.nodes.push_back(i);
+    c.sign.push_back(sign);
   }
   return c;
 }
@@ -75,7 +137,7 @@ Harmonics coefficients(const AirGap &gap, const Eigen::VectorXd &a) {
   auto values = [&a](const GapCircle &c) {
     Eigen::VectorXd out(static_cast<Eigen::Index>(c.nodes.size()));
     for (size_t k = 0; k < c.nodes.size(); ++k)
-      out[static_cast<Eigen::Index>(k)] = a[c.nodes[k]];
+      out[static_cast<Eigen::Index>(k)] = c.sign[k] * a[c.nodes[k]];
     return out;
   };
   return {gap_transform(gap.inner, gap.harmonics) * values(gap.inner),
@@ -115,6 +177,11 @@ Result<AirGap> make_air_gap(const Mesh &mesh, const Model &model, int pid) {
                           ? mesh.face_index.end()
                           : mesh.face_index.find(NodeList{std::min(a->second, b->second),
                                                           std::max(a->second, b->second)});
+    // In a sector model the gap elements' edges on the periodic sides
+    // border nothing; the arcs between them are the gap's boundary.
+    if (mesh.period && (face == mesh.face_index.end() ||
+                        mesh.faces[face->second].cells[1] >= 0))
+      continue;
     if (face == mesh.face_index.end() || mesh.faces[face->second].cells[1] >= 0)
       return Error{std::format(
           "PAIRGAP {}: edge ({},{}) of air-gap element {} is not shared with a field "
@@ -127,15 +194,60 @@ Result<AirGap> make_air_gap(const Mesh &mesh, const Model &model, int pid) {
     boundary[edge[1]].push_back(edge[0]);
   }
   for (const auto &[grid, others] : boundary)
-    if (others.size() != 2)
+    if (others.size() > 2 || (others.size() != 2 && !mesh.period))
       return Error{std::format("PAIRGAP {}: the boundary of the air-gap elements "
                                "meets itself at grid {}",
                                pid, grid)};
+  if (mesh.period)
+    for (const auto &[edge, f] : faces)
+      if (std::ranges::find(mesh.period->faces, f) != mesh.period->faces.end())
+        return Error{std::format(
+            "PAIRGAP {}: edge ({},{}) borders the air gap and is on a periodic "
+            "side of MPERIOD {}; the periodic sides end at the gap",
+            pid, edge[0], edge[1], mesh.period->id)};
 
-  // Closed loops of boundary grids, in mesh indices.
+  // Closed loops of boundary grids, in mesh indices; in a sector model,
+  // the open arcs, walked from their ends.
   std::vector<Loop> loops;
   std::set<int> visited;
+  if (mesh.period) {
+    for (const auto &[first, others] : boundary) {
+      if (others.size() != 1 || visited.contains(first))
+        continue;
+      Loop loop;
+      int previous = -1, at = first;
+      while (true) {
+        visited.insert(at);
+        loop.nodes.push_back(mesh.node_index.at(at));
+        const auto &next = boundary.at(at);
+        if (previous >= 0 && next.size() == 1)
+          break;
+        const int step = next[0] != previous ? next[0] : next[1];
+        std::array<int, 2> edge{at, step};
+        std::sort(edge.begin(), edge.end());
+        loop.faces.push_back(faces.at(edge));
+        previous = at;
+        at = step;
+      }
+      loops.push_back(std::move(loop));
+    }
+    const auto closed = std::find_if(boundary.begin(), boundary.end(), [&](const auto &b) {
+      return !visited.contains(b.first);
+    });
+    if (closed != boundary.end() || loops.size() != 2)
+      return Error{std::format(
+          "PAIRGAP {}: in a sector model (MPERIOD {}) the air-gap elements must "
+          "form one sector of an annulus, bounded by an arc on the rotor and an "
+          "arc on the stator between the periodic sides, but their boundary has "
+          "{} open {}{}",
+          pid, mesh.period->id, loops.size(), loops.size() == 1 ? "arc" : "arcs",
+          closed != boundary.end()
+              ? std::format(" and a closed loop through grid {}", closed->first)
+              : "")};
+  }
   for (const auto &[first, others] : boundary) {
+    if (mesh.period)
+      break;
     if (visited.contains(first))
       continue;
     Loop loop;
@@ -159,7 +271,8 @@ Result<AirGap> make_air_gap(const Mesh &mesh, const Model &model, int pid) {
         "circle on the rotor and a circle on the stator, but their boundary has "
         "{} closed {}{}",
         pid, loops.size(), loops.size() == 1 ? "loop" : "loops",
-        loops.size() == 1 ? " (a sector or a disk, not a full ring)"
+        loops.size() == 1 ? " (a sector or a disk, not a full ring; a sector "
+                            "model of the machine needs MPERIOD)"
                           : " (holes, or separate pieces)")};
 
   // In-plane frame with u x v = normal, and plane coordinates of the grids.
@@ -198,8 +311,27 @@ Result<AirGap> make_air_gap(const Mesh &mesh, const Model &model, int pid) {
 
   const Eigen::Vector2d center = (inner.center + outer.center) / 2;
   gap.center = origin + center.x() * gap.u + center.y() * gap.v;
-  gap.inner = circle(inner, center, p);
-  gap.outer = circle(outer, center, p);
+  if (mesh.period) {
+    const Vector from_origin = gap.center - mesh.period->origin;
+    const double distance =
+        (from_origin - from_origin.dot(mesh.period->axis) * mesh.period->axis).norm();
+    if (distance > kAirGapTolerance * outer.radius)
+      return Error{std::format(
+          "PAIRGAP {}: the center of the air gap's arcs is {:.3e} from the "
+          "axis of MPERIOD {}; the sectors turn about the gap's center",
+          pid, distance, mesh.period->id)};
+    gap.sectors = mesh.period->sectors;
+    for (auto [loop, c, which] : {std::tuple{&inner, &gap.inner, "inner"},
+                                  std::tuple{&outer, &gap.outer, "outer"}}) {
+      auto unfolded = unfold(*loop, center, p, mesh, pid, which);
+      if (auto *e = std::get_if<Error>(&unfolded))
+        return *e;
+      *c = std::get<GapCircle>(std::move(unfolded));
+    }
+  } else {
+    gap.inner = circle(inner, center, p);
+    gap.outer = circle(outer, center, p);
+  }
   for (GapCircle *c : {&gap.inner, &gap.outer})
     c->radius = std::accumulate(c->nodes.begin(), c->nodes.end(), 0.0,
                                 [&](double sum, int i) {
@@ -385,7 +517,7 @@ Eigen::VectorXd air_gap_torque_gradient(const AirGap &gap, const Eigen::VectorXd
     const Eigen::VectorXd nodal =
         gap_transform(*circle, gap.harmonics).transpose() * *d;
     for (size_t k = 0; k < circle->nodes.size(); ++k)
-      out[circle->nodes[k]] += nodal[static_cast<Eigen::Index>(k)];
+      out[circle->nodes[k]] += circle->sign[k] * nodal[static_cast<Eigen::Index>(k)];
   }
   return out;
 }

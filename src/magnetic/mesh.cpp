@@ -1,10 +1,12 @@
 #include "magnetic/mesh.hpp"
 #include "magnetic/air_gap.hpp"
+#include <Eigen/Geometry>
 #include <Eigen/LU>
 #include <algorithm>
 #include <cmath>
 #include <format>
 #include <limits>
+#include <numbers>
 #include <numeric>
 #include <set>
 
@@ -287,6 +289,12 @@ Result<Mesh> make_mesh(const Model &model) {
              .second)
       return Error{"Duplicate magnetic element id"};
   }
+  if (model.period) {
+    auto period = make_periodicity(model, mesh);
+    if (auto *e = std::get_if<Error>(&period))
+      return *e;
+    mesh.period = std::get<Periodicity>(std::move(period));
+  }
   if (!model.air_gaps.empty()) {
     auto gap = make_air_gap(mesh, model, model.air_gaps.begin()->first);
     if (auto *e = std::get_if<Error>(&gap))
@@ -325,6 +333,120 @@ Result<Mesh> make_mesh(const Model &model) {
                     apart->id, mesh.cells.front().id)};
   }
   return mesh;
+}
+
+Result<Periodicity> make_periodicity(const Model &model, const Mesh &mesh) {
+  const Periodic &card = *model.period;
+  Periodicity out;
+  out.id = card.id;
+  out.sectors = card.sectors;
+  out.anti = card.anti;
+  if (card.coordinates) {
+    const auto &cs = model.coordinates.at(card.coordinates);
+    out.origin = cs.a;
+    out.axis = coordinate_axes(cs).col(2);
+  }
+  // The faces and grids of each side.
+  std::array<std::set<int>, 2> grids;
+  std::array<std::set<int>, 2> faces;
+  for (int side = 0; side < 2; ++side) {
+    const int set = side == 0 ? card.first : card.second;
+    auto selected = selected_faces(model, mesh, set);
+    if (auto *e = std::get_if<Error>(&selected))
+      return Error{std::format("MPERIOD {}: {}", card.id, e->message)};
+    for (auto [f, sign] : std::get<std::vector<std::pair<int, int>>>(selected)) {
+      (void)sign;
+      const Face &face = mesh.faces[f];
+      if (face.cells[1] >= 0)
+        return Error{std::format(
+            "MPERIOD {}: FSET {} selects edge ({},{}) of element {}, which is "
+            "inside the field mesh; the periodic sides are on its exterior",
+            card.id, set, mesh.node_ids[face.nodes[0]], mesh.node_ids[face.nodes[1]],
+            mesh.cells[face.cells[0]].id)};
+      faces[side].insert(f);
+      grids[side].insert(face.nodes.begin(), face.nodes.end());
+    }
+  }
+  for (int f : faces[0])
+    if (faces[1].contains(f))
+      return Error{std::format(
+          "MPERIOD {}: edge ({},{}) is in both FSET {} and FSET {}", card.id,
+          mesh.node_ids[mesh.faces[f].nodes[0]], mesh.node_ids[mesh.faces[f].nodes[1]],
+          card.first, card.second)};
+  const double angle = 360. / card.sectors;
+  const Matrix turn =
+      Eigen::AngleAxisd(2 * std::numbers::pi / card.sectors, out.axis).toRotationMatrix();
+  const auto from_axis = [&](const Vector &x) {
+    const Vector d = x - out.origin;
+    return (d - d.dot(out.axis) * out.axis).norm();
+  };
+  double scale = 0;
+  for (const auto &side : grids)
+    for (int v : side)
+      scale = std::max(scale, from_axis(mesh.nodes[v]));
+  const double tolerance = 1e-6 * scale;
+  std::vector<int> image(mesh.nodes.size(), -1), preimage(mesh.nodes.size(), -1);
+  for (int v : grids[0]) {
+    const Vector target = out.origin + turn * (mesh.nodes[v] - out.origin);
+    int nearest = -1;
+    double distance = std::numeric_limits<double>::infinity();
+    for (int w : grids[1])
+      if (const double d = (mesh.nodes[w] - target).norm(); d < distance) {
+        distance = d;
+        nearest = w;
+      }
+    if (nearest < 0 || distance > tolerance)
+      return Error{std::format(
+          "MPERIOD {}: grid {} of the first side (FSET {}) turned by {:.6g} "
+          "degrees about the axis lands at ({:.6g}, {:.6g}, {:.6g}), {:.3e} from "
+          "the nearest grid of the second side (FSET {}){}. The second side must "
+          "be the first turned counterclockwise by 360/SECTORS about the z axis "
+          "of CID {}, grid for grid",
+          card.id, mesh.node_ids[v], card.first, angle, target.x(), target.y(),
+          target.z(), distance, card.second,
+          nearest < 0 ? "" : std::format(", grid {}", mesh.node_ids[nearest]),
+          card.coordinates)};
+    if (preimage[nearest] >= 0)
+      return Error{std::format("MPERIOD {}: grids {} and {} of the first side "
+                               "both turn onto grid {}",
+                               card.id, mesh.node_ids[preimage[nearest]],
+                               mesh.node_ids[v], mesh.node_ids[nearest])};
+    image[v] = nearest;
+    preimage[nearest] = v;
+    if (nearest == v)
+      out.axial.push_back(v);
+    else
+      out.pairs.push_back({v, nearest});
+  }
+  if (const auto stray = std::ranges::find_if(grids[1], [&](int w) { return preimage[w] < 0; });
+      stray != grids[1].end())
+    return Error{std::format(
+        "MPERIOD {}: grid {} of the second side (FSET {}) is not the image of "
+        "any grid of the first side (FSET {})",
+        card.id, mesh.node_ids[*stray], card.second, card.first)};
+  // The images of the first side's edges are the second side's edges, so
+  // the sector and its turned copy meet conformingly.
+  for (int f : faces[0]) {
+    NodeList turned{image[mesh.faces[f].nodes[0]], image[mesh.faces[f].nodes[1]]};
+    std::sort(turned.begin(), turned.end());
+    const auto found = mesh.face_index.find(turned);
+    if (found == mesh.face_index.end() || !faces[1].contains(found->second))
+      return Error{std::format(
+          "MPERIOD {}: edge ({},{}) of the first side turns onto grids ({},{}), "
+          "which are not an edge of the second side; mesh both sides alike",
+          card.id, mesh.node_ids[mesh.faces[f].nodes[0]],
+          mesh.node_ids[mesh.faces[f].nodes[1]], mesh.node_ids[turned[0]],
+          mesh.node_ids[turned[1]])};
+  }
+  if (faces[0].size() != faces[1].size())
+    return Error{std::format("MPERIOD {}: FSET {} has {} edges and FSET {} has "
+                             "{}; each edge of the second side is the image of "
+                             "one of the first",
+                             card.id, card.first, faces[0].size(), card.second,
+                             faces[1].size())};
+  out.faces.assign(faces[0].begin(), faces[0].end());
+  out.faces.insert(out.faces.end(), faces[1].begin(), faces[1].end());
+  return out;
 }
 
 Result<std::vector<std::pair<int, int>>>
@@ -389,38 +511,95 @@ selected_faces(const Model &model, const Mesh &mesh, int selection) {
   return out;
 }
 
-Result<Gauge> make_gauge(const Mesh &mesh) {
+Eigen::VectorXd Gauge::reduce(const Eigen::VectorXd &v) const {
+  Eigen::VectorXd out = Eigen::VectorXd::Zero(size);
+  for (size_t e = 0; e < equations.size(); ++e)
+    if (equations[e] >= 0)
+      out[equations[e]] += sign[e] * v[static_cast<Eigen::Index>(e)];
+  return out;
+}
+
+void Gauge::expand(const Eigen::VectorXd &x, Eigen::VectorXd &v,
+                   double scale) const {
+  for (size_t e = 0; e < equations.size(); ++e)
+    if (equations[e] >= 0)
+      v[static_cast<Eigen::Index>(e)] += scale * sign[e] * x[equations[e]];
+}
+
+Result<Gauge> make_gauge(const Mesh &mesh, const std::vector<bool> &natural) {
   const int n = static_cast<int>(mesh.nodes.size());
   Disjoint connected(n), boundary(n), tree(n);
   Gauge gauge;
   if (mesh.planar) {
     gauge.equations.assign(n, -1);
     gauge.boundary.assign(n, false);
-    // Air-gap faces are coupled by the air-gap element, not prescribed, and
-    // the gap joins the parts it separates.
-    std::vector<bool> gap_face(mesh.faces.size(), false);
+    gauge.sign.assign(n, 1);
+    // Air-gap faces are coupled by the air-gap element and periodic faces
+    // by their images, NORMAL faces take the natural condition: none is
+    // prescribed. The gap joins the parts it separates.
+    std::vector<bool> open(mesh.faces.size(), false);
     if (mesh.air_gap) {
       for (int f : mesh.air_gap->faces)
-        gap_face[f] = true;
+        open[f] = true;
       connected.join(mesh.air_gap->inner.nodes.front(),
                      mesh.air_gap->outer.nodes.front());
     }
+    if (mesh.period)
+      for (int f : mesh.period->faces)
+        open[f] = true;
+    for (size_t f = 0; f < natural.size(); ++f)
+      if (natural[f])
+        open[f] = true;
     for (size_t f = 0; f < mesh.faces.size(); ++f)
-      if (mesh.faces[f].cells[1] < 0 && !gap_face[f])
+      if (mesh.faces[f].cells[1] < 0 && !open[f])
         for (int v : mesh.faces[f].nodes)
           gauge.boundary[v] = true;
+    std::vector<int> image_of(n, -1);
+    if (const auto &period = mesh.period) {
+      for (auto [first, second] : period->pairs) {
+        if (gauge.boundary[first] != gauge.boundary[second])
+          return Error{std::format(
+              "MPERIOD {}: grid {} and its image grid {} must both be on the "
+              "prescribed (ZERO or UNIFORM) exterior or both off it, but grid "
+              "{} is on it and grid {} is not. Give the faces at both ends of "
+              "the periodic sides the same boundary condition",
+              period->id, mesh.node_ids[first], mesh.node_ids[second],
+              mesh.node_ids[gauge.boundary[first] ? first : second],
+              mesh.node_ids[gauge.boundary[first] ? second : first])};
+        image_of[second] = first;
+      }
+      // An anti-periodic potential changes sign at a grid on the axis,
+      // its own image, so it is zero there.
+      if (period->anti)
+        for (int v : period->axial)
+          gauge.boundary[v] = true;
+    }
     for (const auto &e : mesh.edges)
       connected.join(e[0], e[1]);
     for (int i = 0; i < n; ++i) {
       if (connected.root(i) != connected.root(0))
         return Error{"Magnetic domain must be connected"};
-      if (!gauge.boundary[i])
+      if (!gauge.boundary[i] && image_of[i] < 0)
         gauge.equations[i] = gauge.size++;
     }
+    for (int i = 0; i < n; ++i)
+      if (image_of[i] >= 0) {
+        gauge.equations[i] = gauge.equations[image_of[i]];
+        gauge.sign[i] = mesh.period->sign();
+      }
+    // An anti-periodic potential has no free constant.
+    if (!(mesh.period && mesh.period->anti) &&
+        std::none_of(gauge.boundary.begin(), gauge.boundary.end(),
+                     [](bool b) { return b; }))
+      return Error{
+          "The planar field has no prescribed potential: every exterior face "
+          "is periodic or NORMAL, so A is known only up to a constant. Leave "
+          "part of the exterior to the ZERO or UNIFORM MBC row"};
     return gauge;
   }
   gauge.equations.assign(mesh.edges.size(), -1);
   gauge.boundary.assign(mesh.edges.size(), false);
+  gauge.sign.assign(mesh.edges.size(), 1);
   std::set<std::array<int, 2>> bedges;
   std::set<int> bnodes;
   int bf = 0;
