@@ -204,9 +204,12 @@ struct Options {
   // PARAM,MAGPCG: CG iterations per solve with an earlier tangent's factor
   // before refactoring; 0 factors every tangent.
   int tangent_reuse{0};
-  bool planar{false};
+  // MAG2D and MAGAXI are both planar: nodal potentials on a mesh in a
+  // plane. MAGAXI is axisymmetric about the z axis of plane_coordinates, the
+  // mesh in its x-z half-plane (x = r >= 0), with A = A_phi e_phi.
+  bool planar{false}, axisymmetric{false};
   int plane_coordinates{0};
-  double depth{1};
+  double depth{1}; // MAG2D only
   double wire_step{0}; // zero: automatic from section size
   WireMesh wire_mesh{WireMesh::Auto};
   std::optional<AirGapMethod> air_gap_method; // PARAM,AIRGAP overrides PAIRGAP

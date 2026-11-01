@@ -15,7 +15,11 @@ struct Cell {
   Matrix inverse{Matrix::Identity()}, jacobian{Matrix::Identity()};
   Vector origin, map_origin, minimum, maximum;
   Vector normal{Vector::UnitZ()};
-  bool planar{false}, affine{false};
+  // MAGAXI: the symmetry axis through axis_origin along axis, and the
+  // radial direction of the meridian half-plane; curl(A e_phi) adds
+  // (A / r) axis to the planar curl, normal being e_phi.
+  Vector axis_origin{Vector::Zero()}, axis{Vector::UnitZ()}, radial{Vector::UnitX()};
+  bool planar{false}, affine{false}, axisymmetric{false};
   bool polyhedral{true}; // Convex with flat faces; eligible for plane clipping.
   double volume{0};
 };
@@ -84,9 +88,10 @@ struct Mesh {
   std::vector<Face> faces;
   std::map<int, int> element_index, node_index;
   std::map<NodeList, int> face_index;
-  bool planar{false};
-  double depth{1};
+  bool planar{false}, axisymmetric{false}; // axisymmetric: MAGAXI, planar too
+  double depth{1};                         // MAG2D; 1 otherwise
   Vector normal{Vector::UnitZ()};
+  Vector axis_origin{Vector::Zero()}, axis{Vector::UnitZ()}, radial{Vector::UnitX()};
   std::optional<AirGap> air_gap; // planar only
   std::optional<Periodicity> period; // planar only
   // A planar mesh's unknowns: its nodes' potentials, then a sliding band's
@@ -117,6 +122,15 @@ make_mesh(std::vector<Vector> nodes,
                    std::vector<NodeList>(cells.begin(), cells.end()));
 }
 [[nodiscard]] Result<Mesh> make_mesh(const Model &model);
+// Distance from the symmetry axis of x in a MAGAXI cell's meridian plane.
+[[nodiscard]] inline double radius(const Cell &c, const Vector &x) {
+  return (x - c.axis_origin).dot(c.radial);
+}
+// The factor that turns an integral over the mesh's plane at x into one over
+// the field: DEPTH for MAG2D, 2 pi r for MAGAXI, 1 in 3D.
+[[nodiscard]] double out_of_plane(const Mesh &mesh, const Vector &x);
+// A MAGAXI exterior face on the symmetry axis, where A_phi = 0.
+[[nodiscard]] bool on_axis(const Mesh &mesh, const Face &face);
 // make_mesh(model) for a model whose elements and their grids are those of
 // the model base was made from, some grids moved (rigidly, as by MOTION) and
 // properties possibly changed. The topology (edges, faces, their indices)
@@ -174,6 +188,9 @@ public:
   [[nodiscard]] int points(int cell) const;
   // The reference weight times |det J|, as quadrature() gives it.
   [[nodiscard]] double weight(int cell, int point) const;
+  // out_of_plane at the point: weight times measure integrates over the
+  // field (DEPTH, 2 pi r for MAGAXI, 1 in 3D).
+  [[nodiscard]] double measure(int cell, int point) const;
   // The curls of the cell's basis functions at the point, as edge_curls
   // gives them at its position; out holds one per basis function.
   void curls(const Mesh &mesh, int cell, int point, std::span<Vector> out) const;
@@ -184,6 +201,7 @@ private:
     std::vector<Vector> points;
     std::vector<double> weights;
     std::vector<Vector> curls; // point-major, functions per point
+    std::vector<double> values; // shape values, the same layout (planar)
     int functions{0};
   };
   struct Entry {
@@ -194,7 +212,8 @@ private:
   std::vector<Rule> rules_;
   std::vector<Entry> cells_;
   std::vector<Matrix> maps_;
-  std::vector<double> weights_;
+  std::vector<double> weights_, measures_;
+  std::vector<double> inverse_radii_; // 1 / r per point of a MAGAXI mesh
 };
 // The most basis functions of any cell (a hexahedron's twelve edges).
 inline constexpr int max_cell_functions = 12;

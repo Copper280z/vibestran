@@ -243,6 +243,19 @@ std::vector<Vector> edge_curls(const Cell &c, const Vector &x) {
   auto n = reference_curls(c, r);
   for (size_t e = 0; e < n.size(); ++e)
     n[e] = (c.planar ? 1.0 : c.edge_sign[e]) * (map * n[e]);
+  if (c.axisymmetric) {
+    // curl(N e_phi) = grad N x e_phi + (N / r) e_z. On the axis A_phi = 0,
+    // so A / r is dA/dr there, which the planar term carries along e_z.
+    const double radius_x = radius(c, x);
+    if (radius_x > 1e-12 * (c.maximum - c.minimum).norm()) {
+      const auto values = reference_shape(c, r).values;
+      for (size_t e = 0; e < n.size(); ++e)
+        n[e] += values[e] / radius_x * c.axis;
+    } else {
+      for (size_t e = 0; e < n.size(); ++e)
+        n[e] += n[e].dot(c.axis) * c.axis;
+    }
+  }
   return n;
 }
 std::vector<Vector> flux_basis(const Mesh &, const Cell &c, const Vector &x) {
@@ -389,6 +402,10 @@ CellGeometry::CellGeometry(const Mesh &mesh) {
         const auto reference = reference_curls(c, s.position);
         rule.functions = static_cast<int>(reference.size());
         rule.curls.insert(rule.curls.end(), reference.begin(), reference.end());
+        if (c.planar) {
+          const auto values = reference_shape(c, s.position).values;
+          rule.values.insert(rule.values.end(), values.begin(), values.end());
+        }
       }
       rules_.push_back(std::move(rule));
     }
@@ -398,8 +415,11 @@ CellGeometry::CellGeometry(const Mesh &mesh) {
     if (c.affine)
       maps_.push_back(curl_map(c, c.jacobian));
     for (size_t q = 0; q < rule.points.size(); ++q) {
-      const Matrix j = mapping(c, rule.points[q]).second;
+      const auto [x, j] = mapping(c, rule.points[q]);
       weights_.push_back(rule.weights[q] * std::abs(j.determinant()));
+      measures_.push_back(out_of_plane(mesh, x));
+      if (c.axisymmetric)
+        inverse_radii_.push_back(1 / radius(c, x));
       if (!c.affine)
         maps_.push_back(curl_map(c, j));
     }
@@ -412,6 +432,9 @@ int CellGeometry::points(int cell) const {
 double CellGeometry::weight(int cell, int point) const {
   return weights_[cells_[static_cast<size_t>(cell)].weight + static_cast<size_t>(point)];
 }
+double CellGeometry::measure(int cell, int point) const {
+  return measures_[cells_[static_cast<size_t>(cell)].weight + static_cast<size_t>(point)];
+}
 void CellGeometry::curls(const Mesh &mesh, int cell, int point,
                          std::span<Vector> out) const {
   const Entry &entry = cells_[static_cast<size_t>(cell)];
@@ -422,6 +445,13 @@ void CellGeometry::curls(const Mesh &mesh, int cell, int point,
   const auto first = static_cast<size_t>(point) * static_cast<size_t>(rule.functions);
   for (size_t e = 0; e < static_cast<size_t>(rule.functions); ++e)
     out[e] = (c.planar ? 1.0 : c.edge_sign[e]) * (map * rule.curls[first + e]);
+  if (c.axisymmetric) {
+    // Every cell of an axisymmetric mesh is, so the radii index as weights.
+    const double inverse =
+        inverse_radii_[entry.weight + static_cast<size_t>(point)];
+    for (size_t e = 0; e < static_cast<size_t>(rule.functions); ++e)
+      out[e] += rule.values[first + e] * inverse * c.axis;
+  }
 }
 Vector CellGeometry::position(const Mesh &mesh, int cell, int point) const {
   const Entry &entry = cells_[static_cast<size_t>(cell)];

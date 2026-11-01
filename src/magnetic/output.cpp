@@ -950,6 +950,7 @@ Status write_hdf5(const std::string &path, const Model &model,
   h5.attribute(magstat.get(), "dimension",
                int64_t{results.mesh.planar ? 2 : 3});
   h5.attribute(magstat.get(), "depth_m", results.mesh.depth);
+  h5.attribute(magstat.get(), "axisymmetric", int64_t{results.mesh.axisymmetric ? 1 : 0});
   if (const auto &gap = results.mesh.air_gap) {
     auto group = h5.group(magstat.get(), "air_gap");
     h5.attribute(group.get(), "property", int64_t{gap->property});

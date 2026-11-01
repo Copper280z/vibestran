@@ -542,8 +542,9 @@ Result<std::vector<Source>> prepare_sources(const Model &model,
       s.turns = region.turns;
       // A single signed region is unbalanced; its CIRCUIT decides closure.
       // In an anti-periodic sector model the region is in series with its
-      // images, whose turns alternate in sign: balanced, so closed.
-      s.closed = mesh.period && mesh.period->anti;
+      // images, whose turns alternate in sign: balanced, so closed. A MAGAXI
+      // region is turns around the axis, each a closed loop.
+      s.closed = mesh.axisymmetric || (mesh.period && mesh.period->anti);
       s.coupling = Eigen::VectorXd::Zero(mesh.dofs());
       const auto &ids = model.element_sets.at(region.elements);
       double area = 0;
@@ -562,7 +563,8 @@ Result<std::vector<Source>> prepare_sources(const Model &model,
         for (const auto &q : quadrature(mesh, c)) {
           const auto basis = edge_basis(c, q.position);
           for (size_t i = 0; i < c.nodes.size(); ++i)
-            s.coupling[c.nodes[i]] += mesh.depth * q.weight * region.turns /
+            s.coupling[c.nodes[i]] += out_of_plane(mesh, q.position) * q.weight *
+                                      region.turns /
                                       area * basis[i].dot(mesh.normal);
         }
       }
@@ -682,7 +684,8 @@ resolve_circuits(const Model &model, std::span<const Source> sources) {
       turns += polarity * sources[i].turns;
       absolute += std::abs(sources[i].turns);
     }
-    if (!d.members.empty() && sources[d.members.front().first].mesh.planar)
+    if (!d.members.empty() && sources[d.members.front().first].mesh.planar &&
+        !model.options.axisymmetric)
       d.closed = std::abs(turns) <= 1e-12 * absolute ||
                  (model.period && model.period->anti);
     out.push_back(std::move(d));

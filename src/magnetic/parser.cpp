@@ -554,13 +554,18 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
                                  "sector, with one pair of periodic sides",
                                  r.where, period.id, m.period->id)};
       m.period = period;
-    } else if (key == "MAG2D") {
+    } else if (key == "MAG2D" || key == "MAGAXI") {
       if (m.options.planar)
-        r.error = Error{r.where + ": duplicate MAG2D"};
+        r.error = Error{r.where + ": a deck takes one MAG2D or MAGAXI card"};
       m.options.planar = true;
       m.options.plane_coordinates = r.integer(1);
-      m.options.depth = r.real(2);
-      r.last(2);
+      if (key == "MAGAXI") {
+        m.options.axisymmetric = true;
+        r.last(1);
+      } else {
+        m.options.depth = r.real(2);
+        r.last(2);
+      }
     } else if (key == "COIL2D") {
       PlanarCoil c;
       c.id = r.integer(1);
@@ -814,8 +819,8 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
   }
   for (int dimension : element_dimensions)
     if (dimension != (m.options.planar ? 2 : 3))
-      return Error{"MAG2D requires CTRIA3/CQUAD4 only; 3D MAGSTAT requires "
-                   "CTETRA4/CHEXA8/CPENTA6"};
+      return Error{"MAG2D and MAGAXI require CTRIA3/CQUAD4 only; 3D MAGSTAT "
+                   "requires CTETRA4/CHEXA8/CPENTA6"};
   if (!sol)
     return Error{"Missing SOL MAGSTAT"};
   if (in_case)
@@ -937,6 +942,20 @@ Status validate(const Model &m) {
     return Error{"MAGSTAT requires at least one subcase"};
   // Periodic sectors and NORMAL faces are planar; say so before anything
   // else about a 3D deck that uses them.
+  // The tubular air gap, axial periodicity and motion are not built yet.
+  if (m.options.axisymmetric) {
+    const auto missing = [](std::string_view what) {
+      return Error{std::format("{} is not available for MAGAXI models yet", what)};
+    };
+    if (!m.air_gaps.empty() && m.meshed_air_gaps.size() != m.air_gaps.size())
+      return missing(std::format("PAIRGAP {} (AGE or BAND)", m.air_gaps.begin()->first));
+    if (m.period)
+      return missing(std::format("MPERIOD {}", m.period->id));
+    if (!m.motions.empty())
+      return missing(std::format("MOTION {}", m.motions.begin()->first));
+    if (!m.drives.empty())
+      return missing(std::format("DRIVE {}", m.drives.begin()->first));
+  }
   if (m.period && !m.options.planar)
     return Error{std::format("MPERIOD {} is for MAG2D models; 3D periodic "
                              "sectors are not implemented",
@@ -982,11 +1001,17 @@ Status validate(const Model &m) {
                                "cannot be combined with MUR or remanence",
                                id)};
   }
-  Vector plane_normal = Vector::UnitZ();
-  if (m.options.plane_coordinates &&
-      m.coordinates.contains(m.options.plane_coordinates))
-    plane_normal = coordinate_axes(m.coordinates.at(m.options.plane_coordinates))
-                       .col(2);
+  // The plane's normal: the z axis of a MAG2D CID; the y axis of a MAGAXI
+  // CID, whose z axis is the symmetry axis.
+  const Matrix plane_axes =
+      m.options.plane_coordinates && m.coordinates.contains(m.options.plane_coordinates)
+          ? coordinate_axes(m.coordinates.at(m.options.plane_coordinates))
+          : Matrix::Identity();
+  const Vector plane_normal = plane_axes.col(m.options.axisymmetric ? 1 : 2);
+  const Vector plane_origin =
+      m.options.plane_coordinates && m.coordinates.contains(m.options.plane_coordinates)
+          ? m.coordinates.at(m.options.plane_coordinates).a
+          : Vector::Zero();
   for (const auto &[id, p] : m.properties) {
     auto mat = m.materials.find(p.material);
     if (mat == m.materials.end())
@@ -1014,6 +1039,25 @@ Status validate(const Model &m) {
     const auto *cs = p.coordinates ? &m.coordinates.at(p.coordinates) : nullptr;
     const Matrix frame = cs ? coordinate_axes(*cs) : Matrix::Identity();
     const char type = cs ? cs->type : 'R';
+    if (m.options.axisymmetric) {
+      // In the meridian plane: a rectangular axis in it, or the radial or
+      // axial direction of a cylindrical system about the symmetry axis.
+      const Vector axis = plane_axes.col(2);
+      const bool meridian =
+          type == 'R'
+              ? std::abs(frame.col(std::abs(p.axis) - 1).dot(plane_normal)) <= 1e-12
+              : type == 'C' && std::abs(p.axis) != 2 &&
+                    frame.col(2).cross(axis).norm() <= 1e-12 &&
+                    (cs->a - plane_origin).cross(axis).norm() <=
+                        1e-12 * std::max(1.0, (cs->a - plane_origin).norm());
+      if (!meridian)
+        return Error{std::format(
+            "MAGAXI remanence must lie in the meridian (x-z) plane (property "
+            "{}): use a rectangular axis in it, or AXIS 1 (radial) or 3 "
+            "(axial) of a cylindrical system about the symmetry axis",
+            id)};
+      continue;
+    }
     const bool in_plane =
         type == 'R'
             ? std::abs(frame.col(std::abs(p.axis) - 1).dot(plane_normal)) <=
@@ -1036,12 +1080,13 @@ Status validate(const Model &m) {
   if (m.options.plane_coordinates &&
       (!m.coordinates.contains(m.options.plane_coordinates) ||
        m.coordinates.at(m.options.plane_coordinates).type != 'R'))
-    return Error{"MAG2D CID must reference CORD2R"};
+    return Error{m.options.axisymmetric ? "MAGAXI CID must reference CORD2R"
+                                        : "MAG2D CID must reference CORD2R"};
   if (m.options.planar && (!m.wires.empty() || !m.coils.empty()))
-    return Error{"MAG2D uses axial COIL2D regions; CWIRE and volumetric COIL "
-                 "require 3D"};
+    return Error{"MAG2D and MAGAXI use COIL2D regions; CWIRE and volumetric "
+                 "COIL require 3D"};
   if (!m.options.planar && !m.planar_coils.empty())
-    return Error{"COIL2D requires MAG2D"};
+    return Error{"COIL2D requires MAG2D or MAGAXI"};
   if (m.air_gaps.size() > 1)
     return Error{std::format("PAIRGAP {} and {} both use the air-gap element; "
                              "one air gap per model is supported",

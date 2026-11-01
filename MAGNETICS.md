@@ -388,6 +388,58 @@ The planar motor demonstration uses the same illustrative steel/PM geometry
 as the 3D example, with signed slot regions and an air torque contour. Its
 synthetic steel and coarse mesh do not constitute engineering validation.
 
+### Axisymmetric models (MAGAXI)
+
+`MAGAXI,CID` selects the axisymmetric formulation, for solenoids, voice coils
+and tubular machines. The symmetry axis is the z axis of the CORD2R `CID`
+(basic for 0); the mesh lies in that frame's x–z half-plane with x = r ≥ 0,
+Nastran's convention for axisymmetric elements. A grid at negative radius is
+an error. CTRIA3 and CQUAD4 with `PMAG2D`, MATMAG materials and `COIL2D`
+windings work as in planar models; `MAGAXI` and `MAG2D` are exclusive.
+
+```text
+MAGAXI,0
+PMAG2D,10,1
+MATMAG,1,1.
+$ GRID,id,,r,0.,z for every grid; CQUAD4/CTRIA3 in the x-z plane
+COIL2D,21,101,88        $ 88 turns around the axis over ESET 101
+ICIRC,7,21,2.
+```
+
+The unknown is the azimuthal potential, A = A_φ e_φ, nodal on first-order
+elements (e_φ is the frame's y axis in the meridian plane), and
+
+    B = curl(A_φ e_φ) = grad A_φ × e_φ + (A_φ / r) e_z.
+
+Every integral (energy, residual, tangent, coil coupling, Maxwell stress)
+carries 2πr in place of the planar DEPTH, so results are for the whole
+body of revolution. A_φ itself, not the flux function r A_φ, is the
+unknown, so a uniform axial field (A_φ = B0 r / 2) is represented exactly by
+linear elements. Grids on the axis take A_φ = 0 from the formulation: an MBC
+does not select axis faces (neither an FSET of a ZERO or UNIFORM row nor a
+NORMAL row), and an FSET-restricted MBC covers the exterior apart from them.
+`MBC ... UNIFORM` takes an axial field only (A_φ = B0 r / 2); a radial or
+tangential uniform field is not axisymmetric. On the axis, where A_φ / r is
+0/0, probes use its limit dA_φ/dr.
+
+- **Windings.** `COIL2D` gives J_φ = N I / area over its meridian region.
+  Each turn is a closed loop around the axis, so every winding's linkage and
+  inductance are defined, a single region included (planar models need a
+  balanced circuit).
+- **Magnets.** Remanence must lie in the meridian plane: a rectangular axis in
+  the x–z plane (AXIS 3 of basic for axial magnetization), or AXIS 1 (radial)
+  or 3 (axial) of a CORD2C about the symmetry axis. Azimuthal remanence is not
+  axisymmetric and is an error.
+- **Forces.** MFORCE reports the axial force; radial stress cancels around the
+  axis and there is no torque. A FACES contour may end on the axis, where its
+  surface of revolution closes, and a BODY surface closes there by itself.
+- **Not yet available** with MAGAXI: the tubular air gap (`PAIRGAP` AGE and
+  BAND; METHOD=MESH works, as ordinary air), `MOTION`, `MPERIOD` and `DRIVE`.
+  They are the next steps toward tubular linear motors.
+
+HDF5 `/MAGSTAT` carries `axisymmetric = 1` (`dimension` is 2, `depth_m` 1),
+and the planar blocks' nodal potential is A_φ.
+
 ### Air gap (PAIRGAP)
 
 The air gap between a rotor and a stator is meshed like any other air: a band
@@ -1333,7 +1385,7 @@ solving. The file has two top-level groups:
   `B_T`, `H_A_per_m` and `element_id`; planar blocks also carry nodal
   `A_normal_Wb_per_m`. Source blocks carry `J_per_ampere_per_m2`.
 - `/MAGSTAT`: SI scalar results, ignored by ParaView. Attributes give `schema`,
-  `units`, `dimension` and `depth_m`. Definition tables, one row per item in
+  `units`, `dimension`, `depth_m` and `axisymmetric`. Definition tables, one row per item in
   ID order:
   - `sources/`: `id`, `wire`, `closed`, `conservation_error`,
     `transfer_error`, and `wire_elements` (element ID, traversal sign) with
@@ -1482,6 +1534,13 @@ integrals verify the five-point rule; arbitrary face fluxes verify cached curren
 on affine, warped, reflected and translated cells. Tet transfer is invariant to
 local vertex order and rigid motion. The spatial-loop AUTO fallback and strict
 HEX rejection are checked against the current moment.
+Axisymmetric (MAGAXI) checks: a uniform axial field is exact on graded quads
+and triangles (cell and on-axis probe B, energy); an infinitely long iron tube
+in an axial field and a thick solenoid, against their exact piecewise
+solutions, converge at second order in energy and inductance; the axial
+MFORCE on an iron ring (BODY and an axis-ended contour) matches the
+coenergy's derivative to 1%; and the card checks (meridian remanence, axial
+uniform field, axis faces, negative radius, features not yet available).
 
 The `magnetic_cli` test (`tests/e2e/test_magnetic_cli.cpp`) runs the
 `vibestran` executable on decks from the standard-library generators in

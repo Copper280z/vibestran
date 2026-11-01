@@ -263,6 +263,23 @@ Result<Mesh> make_mesh(std::vector<Vector> nodes,
   return mesh;
 }
 
+double out_of_plane(const Mesh &mesh, const Vector &x) {
+  if (mesh.axisymmetric)
+    return 2 * std::numbers::pi * (x - mesh.axis_origin).dot(mesh.radial);
+  return mesh.depth;
+}
+bool on_axis(const Mesh &mesh, const Face &face) {
+  if (!mesh.axisymmetric || face.cells[1] >= 0)
+    return false;
+  const double size = (mesh.cells[static_cast<size_t>(face.cells[0])].maximum -
+                       mesh.cells[static_cast<size_t>(face.cells[0])].minimum)
+                          .norm();
+  return std::ranges::all_of(face.nodes, [&](int v) {
+    return std::abs((mesh.nodes[static_cast<size_t>(v)] - mesh.axis_origin)
+                        .dot(mesh.radial)) <= 1e-10 * size;
+  });
+}
+
 namespace {
 // The periodicity and air gap of model on mesh, which depend on its grids'
 // positions.
@@ -321,17 +338,47 @@ Result<Mesh> make_mesh(const Model &model) {
                    [&index](int n) { return index.at(n); });
     cells.push_back(ids);
   }
-  Vector normal = Vector::UnitZ();
+  // MAG2D: the plane normal to the CID z axis. MAGAXI: the CID x-z
+  // half-plane, x = r >= 0, about the z axis; its normal y is e_phi.
+  const bool axisymmetric = model.options.axisymmetric;
+  Matrix axes = Matrix::Identity();
+  Vector origin = Vector::Zero();
   if (model.options.plane_coordinates) {
     const auto &cs = model.coordinates.at(model.options.plane_coordinates);
-    normal = (cs.b - cs.a).normalized();
+    axes = coordinate_axes(cs);
+    origin = cs.a;
+  }
+  const Vector normal = axes.col(axisymmetric ? 1 : 2);
+  if (axisymmetric) {
+    double size = 0;
+    for (const auto &x : nodes)
+      size = std::max(size, (x - origin).norm());
+    for (size_t i = 0; i < nodes.size(); ++i)
+      if ((nodes[i] - origin).dot(axes.col(0)) < -1e-10 * size)
+        return Error{std::format(
+            "MAGAXI GRID {} is at r = {:.6e}: the mesh must lie in the x >= 0 "
+            "half of the CID x-z plane, x being the radius",
+            *std::next(active.begin(), static_cast<std::ptrdiff_t>(i)),
+            (nodes[i] - origin).dot(axes.col(0)))};
   }
   auto result =
       make_mesh(std::move(nodes), cells, model.options.planar, normal);
   if (auto *e = std::get_if<Error>(&result))
     return *e;
   auto mesh = std::get<Mesh>(std::move(result));
-  mesh.depth = model.options.planar ? model.options.depth : 1;
+  mesh.depth = model.options.planar && !axisymmetric ? model.options.depth : 1;
+  if (axisymmetric) {
+    mesh.axisymmetric = true;
+    mesh.axis_origin = origin;
+    mesh.axis = axes.col(2);
+    mesh.radial = axes.col(0);
+    for (auto &c : mesh.cells) {
+      c.axisymmetric = true;
+      c.axis_origin = origin;
+      c.axis = mesh.axis;
+      c.radial = mesh.radial;
+    }
+  }
   mesh.node_index = index;
   mesh.node_ids.assign(active.begin(), active.end());
   for (size_t i = 0; i < mesh.cells.size(); ++i) {

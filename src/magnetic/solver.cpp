@@ -332,7 +332,7 @@ Assembly assemble(const Setup &setup, const Eigen::VectorXd &a,
           b);
       average_b += w * b;
       average_h += w * response.h;
-      const double weight = w * mesh.depth;
+      const double weight = w * setup.geometry.measure(c, q);
       energy[index] += weight * response.energy;
       extrapolated[index] |= static_cast<char>(response.extrapolated);
       const Matrix &stiffness = frozen ? response.secant : response.tangent;
@@ -421,6 +421,8 @@ Result<std::vector<bool>> natural_faces(const Model &model, const Mesh &mesh,
         return Error{where + ", which is inside the field mesh"};
       if (on_air_gap(mesh, static_cast<int>(f)))
         return Error{where + " on the air gap, which takes no boundary condition"};
+      if (on_axis(mesh, face))
+        return Error{where + " on the symmetry axis, where A_phi = 0"};
       if (mesh.period && std::ranges::find(mesh.period->faces, f) !=
                              mesh.period->faces.end())
         return Error{std::format("{} on a periodic side of MPERIOD {}", where,
@@ -459,6 +461,10 @@ Result<Eigen::VectorXd> boundary_potential(const Model &model, const Mesh &mesh,
     for (size_t f = 0; f < natural.size(); ++f)
       if (natural[f])
         open[f] = true;
+    // The axis takes A_phi = 0 from the formulation, not from an MBC.
+    for (size_t f = 0; f < mesh.faces.size(); ++f)
+      if (on_axis(mesh, mesh.faces[f]))
+        open[f] = true;
     size_t count = 0;
     for (size_t f = 0; f < mesh.faces.size(); ++f)
       if (mesh.faces[f].cells[1] < 0 && !open[f])
@@ -475,6 +481,8 @@ Result<Eigen::VectorXd> boundary_potential(const Model &model, const Mesh &mesh,
             on_air_gap(mesh, f)
                 ? "air gap; the air gap is coupled by the air-gap element and "
                   "takes no boundary condition"
+            : on_axis(mesh, mesh.faces[f])
+                ? "symmetry axis, where A_phi = 0 without an MBC"
             : static_cast<size_t>(f) < natural.size() && natural[f]
                 ? "flux-normal (NORMAL) boundary, which takes no prescribed "
                   "potential"
@@ -483,7 +491,21 @@ Result<Eigen::VectorXd> boundary_potential(const Model &model, const Mesh &mesh,
     }
     if (selected.size() != count)
       return Error{"MBC FSET must cover the entire magnetic exterior that is not "
-                   "on the air gap, periodic or NORMAL (or use FSET=0)"};
+                   "on the air gap, periodic, NORMAL or the symmetry axis (or "
+                   "use FSET=0)"};
+  }
+  if (mesh.axisymmetric) {
+    // A uniform axial field B0: A_phi = B0 r / 2.
+    if ((bc.field - mesh.axis * mesh.axis.dot(bc.field)).norm() >
+        1e-12 * bc.field.norm())
+      return Error{std::format("MAGAXI MBC {} field must be along the symmetry "
+                               "axis; a radial or tangential uniform field is "
+                               "not axisymmetric",
+                               subcase.boundary)};
+    for (size_t i = 0; i < mesh.nodes.size(); ++i)
+      a[static_cast<Eigen::Index>(i)] =
+          mesh.axis.dot(bc.field) / 2 * (mesh.nodes[i] - mesh.axis_origin).dot(mesh.radial);
+    return a;
   }
   if (mesh.planar) {
     if (std::abs(bc.field.dot(mesh.normal)) > 1e-12 * bc.field.norm())
@@ -826,6 +848,10 @@ Result<BodySurface> body_surface(const Model &model, const Mesh &mesh,
     for (size_t k = 0; k < cell.faces.size(); ++k) {
       const auto &f = mesh.faces[cell.faces[k]];
       const int other = f.cells[0] == ci ? f.cells[1] : f.cells[0];
+      // A surface of revolution closes on the axis: its faces there take no
+      // stress (r = 0).
+      if (other < 0 && on_axis(mesh, f))
+        continue;
       if (other < 0 && on_air_gap(mesh, cell.faces[k]))
         return Error{std::format(
             "MFORCE {}: the surface around body ESET {} reaches the air gap at "
@@ -895,7 +921,16 @@ Status explicit_surface(const Mesh &mesh,
     }
   }
   for (const auto &[edge, count] : boundary) {
-    (void)edge;
+    // A MAGAXI contour may end on the axis, where its surface of
+    // revolution closes.
+    const auto on_axis_grid = [&](int v) {
+      return std::abs((mesh.nodes[static_cast<size_t>(v)] - mesh.axis_origin)
+                          .dot(mesh.radial)) <= 1e-10 * (mesh.cells.front().maximum -
+                                                          mesh.cells.front().minimum)
+                                                             .norm();
+    };
+    if (mesh.axisymmetric && count.first == 1 && on_axis_grid(edge[0]))
+      continue;
     if (count.first != 2 || count.second != 0)
       return Error{mesh.planar ? "MFORCE planar FSET must be a closed, "
                                  "consistently oriented contour"
@@ -907,7 +942,7 @@ Status explicit_surface(const Mesh &mesh,
   double volume = 0;
   for (auto [fi, sign] : selected)
     for (const auto &q : face_quadrature(mesh, mesh.faces[fi]))
-      volume += sign * q.weight * q.normal.dot(q.position) /
+      volume += sign * q.weight * q.normal.dot(q.position - mesh.axis_origin) /
                 (mesh.planar ? 2 : 3);
   if (!(volume > 0))
     return Error{"MFORCE normals must point outward"};
@@ -970,10 +1005,13 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
         const Vector b =
             .5 * (field_at(mesh.cells[f.cells[0]], potential, q.position) +
                   field_at(mesh.cells[f.cells[1]], potential, q.position));
-        const Vector force =
-            q.weight * mesh.depth / mu0 *
-            (b * b.dot(normal) - .5 * b.squaredNorm() * normal);
-        const Vector torque = (q.position - origin).cross(force);
+        Vector force = q.weight * out_of_plane(mesh, q.position) / mu0 *
+                       (b * b.dot(normal) - .5 * b.squaredNorm() * normal);
+        // Around the axis the radial stress cancels, and there is no torque.
+        if (mesh.axisymmetric)
+          force = mesh.axis * mesh.axis.dot(force);
+        const Vector torque = mesh.axisymmetric ? Vector::Zero().eval()
+                                                : (q.position - origin).cross(force);
         result.force += force;
         result.torque += torque;
         if (!component.empty()) {
@@ -1425,7 +1463,10 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
   auto &solution = result.summary.solution;
   solution.add("Solution", "SOL MAGSTAT magnetostatics, SI units");
   solution.add("Formulation",
-               mesh.planar
+               mesh.axisymmetric
+                   ? std::string("axisymmetric (MAGAXI), nodal A_phi on "
+                                 "first-order elements, r-weighted")
+               : mesh.planar
                    ? std::format("planar, nodal vector potential on first-order "
                                  "elements, depth {:.6g} m",
                                  mesh.depth)
