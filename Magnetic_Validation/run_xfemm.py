@@ -7,7 +7,9 @@ and meshes it with its own mesher. The two discretizations are independent;
 only the geometry, materials, sources and boundary conditions are shared.
 Both are solved at two mesh levels (sizes scaled by 1 and 1/2), so each
 solver's own refinement change can be set beside the difference between
-the solvers.
+the solvers. The motor has a third level, graded: quadrilaterals for
+vibestran, fine at the gap (MOTOR_LEVELS), and FEMM's triangles from the
+same size field. --airgap AGE BAND solves vibestran's motor both ways.
 
 Cases:
 
@@ -38,8 +40,10 @@ import dataclasses
 import json
 import math
 import pathlib
+import hashlib
 import subprocess
 import sys
+import time
 
 import gmsh
 import h5py
@@ -50,6 +54,11 @@ import magnetic_motor_example as motor  # noqa: E402
 
 MU0 = 4e-7 * math.pi
 LEVELS = {"coarse": 1.0, "fine": 0.5}
+# The motor's levels: motor_geometry's arguments. graded is the mesh study's
+# fq:1.5/0.35 (README.md, "Motor mesh efficiency"): quadrilaterals for
+# vibestran, fine at the gap; FEMM meshes the same size field in triangles.
+MOTOR_LEVELS = {"coarse": {"scale": 1.0}, "fine": {"scale": 0.5},
+                "graded": {"scale": 1.5, "near": 0.35, "quads": "full"}}
 
 
 def steel_curve():
@@ -91,6 +100,7 @@ class Geometry:
     arcs: list           # (key a, key b, angle deg, radius, mid (x, y), kind), counterclockwise a -> b
     labels: list         # (x, y, role, mesh size)
     side_edges: list     # half model: (side, node a, node b) mesh edges on the periodic sides
+    size: object = None  # size(x, y): the target element size the mesh was built with
 
 
 class Builder:
@@ -179,6 +189,7 @@ def build(entities, size, half=False, quads=False):
         cells = [(roles[s], cell) for s in roles for cell in by_surface[s]]
         geometry = drawing(roles, by_surface, nodes, size[0], on_cut)
         geometry.nodes, geometry.cells, geometry.side_edges = nodes, cells, []
+        geometry.size = size[0]
         return geometry
     gmsh.model.mesh.generate(2)
     tags, coords, _ = gmsh.model.mesh.getNodes()
@@ -204,6 +215,7 @@ def build(entities, size, half=False, quads=False):
                 side_edges.append((side, a, b))
     geometry = drawing(roles, by_surface, nodes, size[0], on_cut)
     geometry.nodes, geometry.cells, geometry.side_edges = nodes, cells, side_edges
+    geometry.size = size[0]
     return geometry
 
 
@@ -546,8 +558,10 @@ def vibestran_deck(g, control, bulk, motion_sets=False, period=None):
 
 
 def run_vibestran(deck_path, executable):
+    start = time.perf_counter()
     subprocess.run([executable, deck_path.name], check=True, cwd=deck_path.parent,
                    stdout=subprocess.DEVNULL)
+    (deck_path.parent / "seconds.txt").write_text(f"{time.perf_counter() - start:.2f}\n")
     return h5py.File(deck_path.with_suffix(".mag.vtkhdf"), "r")
 
 
@@ -678,21 +692,31 @@ end
 
 def run_femm(lua, workdir, args):
     """Runs the script with femmcli on the remote host; returns the parsed
-    results.txt: name -> list of rows of numbers."""
-    remote = f"~/xfemm-validation/{workdir.name}"
-    (workdir / "case.lua").write_text("\n".join(lua) + "\n")
-    subprocess.run(["ssh", args.femm_host, f"mkdir -p {remote}"], check=True)
-    subprocess.run(["scp", "-q", str(workdir / "case.lua"), f"{args.femm_host}:{remote}/"], check=True)
-    subprocess.run(["ssh", args.femm_host,
-                    f"cd {remote} && rm -f results.txt && {args.femmcli} -q --lua-script=case.lua > femm.log 2>&1"],
-                   check=True)
-    subprocess.run(["scp", "-q", f"{args.femm_host}:{remote}/results.txt", str(workdir / "femm_results.txt")],
-                   check=True)
+    results.txt (name -> list of rows of numbers) and femmcli's wall time in
+    seconds. A script solved before, in any case of OUTPUT, is not solved
+    again: OUTPUT/femm_cache holds each script's results and time."""
+    text = "\n".join(lua) + "\n"
+    (workdir / "case.lua").write_text(text)
+    cache = workdir.parent / "femm_cache" / hashlib.sha256(text.encode()).hexdigest()[:16]
+    if not (cache / "results.txt").exists():
+        remote = f"~/xfemm-validation/{workdir.name}"
+        subprocess.run(["ssh", args.femm_host, f"mkdir -p {remote}"], check=True)
+        subprocess.run(["scp", "-q", str(workdir / "case.lua"), f"{args.femm_host}:{remote}/"], check=True)
+        # femmcli's own wall time, measured on the host.
+        subprocess.run(["ssh", args.femm_host,
+                        f"cd {remote} && rm -f results.txt && s=$(date +%s.%N) && "
+                        f"{args.femmcli} -q --lua-script=case.lua > femm.log 2>&1 && "
+                        f"echo \"$(date +%s.%N) - $s\" | bc > seconds.txt"], check=True)
+        cache.mkdir(parents=True, exist_ok=True)
+        for name in ("results.txt", "seconds.txt"):
+            subprocess.run(["scp", "-q", f"{args.femm_host}:{remote}/{name}", str(cache / name)], check=True)
+    (workdir / "femm_results.txt").write_text((cache / "results.txt").read_text())
+    seconds = float((cache / "seconds.txt").read_text())
     out = {}
     for line in (workdir / "femm_results.txt").read_text().splitlines():
         name, *values = line.split()
         out.setdefault(name, []).append([float(v) for v in values])
-    return out
+    return out, seconds
 
 
 # --------------------------------------------------------------------------
@@ -752,7 +776,7 @@ def core_case(name, level, out, args):
                     f'put("state", {current:.17g}, flux, fx, fy, b1, b2, w, mo_numelements())',
                     "mo_close()"]
         lua += ["closefile(results)", "quit()"]
-        for row in run_femm(lua, workdir, args)["state"]:
+        for row in run_femm(lua, workdir, args)[0]["state"]:
             current, linkage, fx, fy, b1, b2, energy, elements = row
             results["femm"].append({"material": material, "current": current, "linkage": linkage,
                                     "force_x": fx, "force_y": fy, "b_gap": math.hypot(b1, b2),
@@ -827,24 +851,31 @@ def motor_results(h5, angles, half):
 
 
 def motor_case(variant, level, out, args):
+    """vibestran with each air-gap method of --airgap (AGE: "vibestran",
+    BAND: "vibestran_band") and FEMM with its AGE, on the level's mesh."""
     half = variant == "half"
-    scale = LEVELS[level]
     workdir = out / f"motor_{variant}_{level}"
     workdir.mkdir(parents=True, exist_ok=True)
-    g = motor_geometry(scale, half)
+    g = motor_geometry(half=half, **MOTOR_LEVELS[level])
     deck, angles = motor_deck(g, half)
-    path = workdir / "motor.bdf"
-    path.write_text(deck)
-    with run_vibestran(path, args.vibestran) as h5:
-        vib = motor_results(h5, angles, half)
+    result = {}
+    for method in args.airgap:
+        rundir = workdir if method == "AGE" else workdir / method.lower()
+        rundir.mkdir(exist_ok=True)
+        path = rundir / "motor.bdf"
+        path.write_text(deck if method == "AGE" else
+                        deck.replace("BEGIN BULK\n", f"BEGIN BULK\nPARAM,AIRGAP,{method}\n", 1))
+        with run_vibestran(path, args.vibestran) as h5:
+            vib = motor_results(h5, angles, half)
+        vib["cells"] = len(g.cells)
+        vib["quads"] = sum(len(c) == 4 for _, c in g.cells)
+        vib["seconds"] = float((rundir / "seconds.txt").read_text())
+        result["vibestran" if method == "AGE" else f"vibestran_{method.lower()}"] = vib
 
     def whole_circle(br):
         return np.concatenate([br, -br]) if half else br
     radius = GAP_RADIUS
-    vib["cells"] = len(g.cells)
-
-    def size(x, y):
-        return scale * min(1.4e-3, 3.2e-4 + 0.12 * abs(math.hypot(x, y) - motor.R_BORE))
+    size = g.size
     lua = femm_drawing(femm_age_band(g, motor.R_MAGNET, motor.R_BORE, half, size), motor.DEPTH, half, size)
     lua.append(LUA_PRELUDE)
     for name, (step, count, peak) in SWEEPS.items():
@@ -863,8 +894,8 @@ def motor_case(variant, level, out, args):
                             f'put("{name}_gap", {a:g}, b1, b2)']
             lua.append("mo_close()")
     lua += ["closefile(results)", "quit()"]
-    femm_raw = run_femm(lua, workdir, args)
-    femm = {"cells": int(femm_raw["rated"][0][5])}
+    femm_raw, seconds = run_femm(lua, workdir, args)
+    femm = {"cells": int(femm_raw["rated"][0][5]), "seconds": seconds}
     for name in SWEEPS:
         rows = np.array(femm_raw[name])
         femm[name] = {"positions": rows[:, 0].tolist(), "torque": rows[:, 1].tolist(),
@@ -873,7 +904,7 @@ def motor_case(variant, level, out, args):
             rows = np.array(femm_raw[f"{name}_gap"])
             t = np.radians(rows[:, 0])
             femm[name]["gap_br"] = whole_circle(rows[:, 1] * np.cos(t) + rows[:, 2] * np.sin(t)).tolist()
-    return {"vibestran": vib, "femm": femm}
+    return {**result, "femm": femm}
 
 
 # --------------------------------------------------------------------------
@@ -948,9 +979,17 @@ def motor_metrics(r, half_femm_scale=1.0):
     return out
 
 
+def vibestran_runs(r):
+    """The vibestran results of one motor case: (label, results), the AGE's
+    first."""
+    return [(k.replace("vibestran_", "").upper() if k != "vibestran" else "AGE", v)
+            for k, v in sorted(r.items(), key=lambda kv: kv[0] != "vibestran")
+            if k.startswith("vibestran")]
+
+
 def motor_report(data):
     lines = []
-    keys = [k for k in (f"motor_{v}_{lvl}" for v in ("whole", "half") for lvl in LEVELS) if k in data]
+    keys = [k for k in (f"motor_{v}_{lvl}" for v in ("whole", "half") for lvl in MOTOR_LEVELS) if k in data]
     if not keys:
         return lines
     table = {}
@@ -960,12 +999,29 @@ def motor_report(data):
         table[key] = (motor_metrics(r["vibestran"]), motor_metrics(r["femm"], 2.0 if half else 1.0),
                       r["vibestran"]["cells"], r["femm"]["cells"])
     names = list(next(iter(table.values()))[0])
-    lines += ["| case | triangles (vib / FEMM) | " + " | ".join(f"{n}: vibestran / FEMM / diff %" for n in names)
-              + " |", "|---|---:|" + "---:|" * len(names)]
-    for key, (v, f, cv, cf) in table.items():
-        cells = [f"{v[n]:.5g} / {f[n]:.5g} / {rel(v[n], f[n]):+.2f}" for n in names]
-        lines.append(f"| {key[6:]} | {cv} / {cf} | " + " | ".join(cells) + " |")
+    lines += ["vibestran's cells are triangles, or quadrilaterals at the graded level; FEMM's are "
+              "triangles.", "",
+              "| case | vibestran gap | cells (vib / FEMM) | " + " | ".join(f"{n}: vibestran / FEMM / diff %" for n in names)
+              + " |", "|---|---|---:|" + "---:|" * len(names)]
+    for key in keys:
+        r, f = data[key], table[key][1]
+        for method, run in vibestran_runs(r):
+            v = motor_metrics(run)
+            cells = [f"{v[n]:.5g} / {f[n]:.5g} / {rel(v[n], f[n]):+.2f}" for n in names]
+            lines.append(f"| {key[6:]} | {method} | {run['cells']} / {r['femm']['cells']} | "
+                         + " | ".join(cells) + " |")
     lines.append("")
+    timed = [k for k in keys if "seconds" in data[k]["femm"]]
+    if timed:
+        lines += ["Wall time of the 78 positions (s): vibestran on the machine running this script, "
+                  "femmcli (single-threaded; each position remeshes, solves, writes and reloads its "
+                  "solution) on --femm-host:", "",
+                  "| case | " + " | ".join(f"vibestran {m}" for m, _ in vibestran_runs(data[timed[0]]))
+                  + " | FEMM |", "|---|" + "---:|" * (len(vibestran_runs(data[timed[0]])) + 1)]
+        for key in timed:
+            lines.append(f"| {key[6:]} | " + " | ".join(f"{run['seconds']:.1f}" for _, run in vibestran_runs(data[key]))
+                         + f" | {data[key]['femm']['seconds']:.1f} |")
+        lines.append("")
     # Pointwise curve differences, as a fraction of the curve's scale.
     lines += ["Largest pointwise difference between the solvers, as a percentage of the FEMM curve's "
               "largest magnitude:", "",
@@ -985,7 +1041,7 @@ def motor_report(data):
                      f"{worst(v['noload']['gap_br'], f['noload']['gap_br'])} |")
     lines.append("")
     # Each solver's half model against its whole model.
-    pairs = [lvl for lvl in LEVELS if f"motor_whole_{lvl}" in table and f"motor_half_{lvl}" in table]
+    pairs = [lvl for lvl in MOTOR_LEVELS if f"motor_whole_{lvl}" in table and f"motor_half_{lvl}" in table]
     if pairs:
         lines += ["Half model against the whole model, each solver (%):", "",
                   "| level | " + " | ".join(f"{n}: vibestran / FEMM" for n in names) + " |",
@@ -1052,7 +1108,7 @@ def plots(data, out):
         fig.savefig(out / "core.png", dpi=150)
         written.append("core.png")
         plt.close(fig)
-    key = next((k for k in (f"motor_whole_{lvl}" for lvl in ("fine", "coarse")) if k in data), None)
+    key = next((k for k in (f"motor_whole_{lvl}" for lvl in ("graded", "fine", "coarse")) if k in data), None)
     if key:
         r = data[key]
         fig = plt.figure(figsize=(9, 6.4), facecolor=SURFACE)
@@ -1109,7 +1165,10 @@ def main():
     parser.add_argument("--report-only", action="store_true",
                         help="rewrite summary.md and the plots from OUTPUT/results.json")
     parser.add_argument("--cases", nargs="+", default=["core", "magnet", "motor"])
-    parser.add_argument("--levels", nargs="+", default=list(LEVELS))
+    parser.add_argument("--levels", nargs="+", default=list(MOTOR_LEVELS),
+                        help="mesh levels; graded is the motor's only (the core cases skip it)")
+    parser.add_argument("--airgap", nargs="+", default=["AGE"], choices=["AGE", "BAND"],
+                        help="vibestran's motor air-gap methods (FEMM always uses its AGE)")
     parser.add_argument("--vibestran", default=str(pathlib.Path("build/vibestran").resolve()))
     parser.add_argument("--femm-host", default="bob@bob-desktop.local")
     parser.add_argument("--femmcli", default="~/xfemm-patched/cfemm/bin/femmcli")
@@ -1129,7 +1188,7 @@ def main():
                     print(f"motor {variant} {level}", flush=True)
                     data[f"motor_{variant}_{level}"] = motor_case(variant, level, args.output, args)
                     store.write_text(json.dumps(data, indent=1))
-            else:
+            elif level in LEVELS:
                 print(f"{case} {level}", flush=True)
                 data[f"{case}_{level}"] = core_case(case, level, args.output, args)
                 store.write_text(json.dumps(data, indent=1))

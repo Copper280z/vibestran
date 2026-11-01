@@ -225,6 +225,52 @@ for the whole motor. Differences are vibestran against FEMM.
   so its linkage is doubled for the comparison. vibestran's sector results are
   already the whole machine's.
 
+#### Graded quadrilateral mesh (2026-11-01)
+
+`--levels graded` solves the motor on the mesh study's graded full-quad mesh
+(fq:1.5/0.35, below): 33,548 quadrilaterals for vibestran, and FEMM's
+triangles from the same size field (46,166). `--airgap AGE BAND` solves
+vibestran both ways against one FEMM run. Differences against FEMM:
+
+| case | vibestran gap | mean torque | rated linkage | no-load linkage | cogging p-p | no-load gap B_r |
+|---|---|---:|---:|---:|---:|---:|
+| whole | AGE | -0.05% | +0.02% | -0.04% | +1.11% | +0.08% |
+| whole | BAND | -0.05% | +0.01% | -0.04% | -0.24% | +0.04% |
+| half | AGE | -0.05% | -0.01% | -0.05% | +3.39% | +0.07% |
+| half | BAND | -0.05% | -0.01% | -0.05% | +0.12% | +0.03% |
+
+FEMM's half model is 2.1% below its whole in cogging. vibestran's half is
+0.15% above its whole with the AGE and 1.7% below with the band. The half is
+its own mesh (844 and 1,732 grids unfolded, against 842 and 1,730) with its
+own band (1,754 points against 1,733), and the band's cogging moves by about
+that much with its point count: 0.0586 and 0.0574 N m at 839 and 841 points
+on one mesh in the mesh study. Against FEMM's whole machine the half AGE is
++1.3%.
+
+Wall time of the whole motor's 78 positions on one machine (Ryzen 7 5700,
+TITAN V; vibestran pinned to 8 threads; femmcli single-threaded, remeshing,
+writing and reloading its solution at every position):
+
+| solver | time | against FEMM |
+|---|---:|---:|
+| FEMM (its AGE) | 380 s | |
+| vibestran BAND, cuDSS | 38.8 s | 9.8x |
+| vibestran BAND, CHOLMOD | 56.9 s | 6.7x |
+| vibestran AGE, cuDSS | 104.9 s | 3.6x |
+| vibestran AGE, CHOLMOD | 177.5 s | 2.1x |
+
+On the M-series Mac (Accelerate) vibestran takes 24.6 s with the band and
+100.8 s with the AGE. The AGE's dense block, one row and column per grid on
+the gap's circles (2,572 here), dominates its time on this mesh, whose
+circles are finer than the triangle levels'.
+
+This level found an AGE defect, fixed on 2026-11-01: the AGE's sum was cut
+at the coarser circle's resolution (NHARM's old blank), which left the finer
+circle's shorter wavelengths with no gap stiffness. On this mesh (842 and
+1,730 grids on the circles) the AGE's cogging was 5.5% above FEMM's (7.7% in
+the half model). Each circle's self terms now run to its own resolution
+(MAGNETICS.md, "METHOD=AGE").
+
 These are planar comparisons of the same 2D problem. They do not cover end
 effects or the 3D formulation.
 
@@ -261,6 +307,10 @@ Errors against the reference, wall time on an M-series Mac (Accelerate):
 | **fq:1.5/0.35** | 33,626 | 12–165° (24) | 20.2 s | 0.014% | 0.52% | 0.89% | 0.009 / 0.048% | 0.08% |
 
 Reference: mean torque 4.8886 N m, ripple 0.0343, cogging 0.0527 N m.
+The gap B_r column predates the 2026-11-01 AGE fix, which also changed the
+reported gap field: each circle's harmonics now run to its own resolution,
+not the coarser circle's. On the graded mesh that moved the band's gap B_r
+against FEMM from +0.14% to +0.04%; the other columns are unchanged.
 fq:1.5/0.35 also took 53.0 s with CHOLMOD and 35.5 s with cuDSS on the Linux
 box, against tri:0.5's 69.1 and 47.8 s (8 threads, TITAN V).
 
