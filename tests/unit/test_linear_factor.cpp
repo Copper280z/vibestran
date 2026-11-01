@@ -250,6 +250,39 @@ TEST(LinearFactor, DenseBlockOrdersWithMinimumDegree) {
         EXPECT_EQ(dense->ordering(), "amd");
 }
 
+TEST(LinearFactor, MinimumDegreeOrdersAPlanarMeshWithAmd) {
+    // A planar 5-point mesh (no dense block): minimum_degree orders it with
+    // AMD where Accelerate defaults to METIS, and keeps AMD when a new
+    // pattern needs a new analysis (a sliding band's next position).
+    const Eigen::MatrixXd A = test::gap_like(50, 0);
+    const System s = system_for(A, 2);
+    EigenSolverBackend backend;
+    auto plain = take(backend.factor(to_csr(A), {.require_spd = true}));
+    auto amd = take(backend.factor(to_csr(A), {.require_spd = true, .minimum_degree = true}));
+    ASSERT_TRUE(plain && amd);
+    if (std::getenv("VIBESTRAN_ACCELERATE_ORDER") == nullptr) {
+#if defined(HAVE_ACCELERATE)
+        EXPECT_EQ(plain->ordering(), "metis");
+#endif
+#if defined(HAVE_ACCELERATE) || defined(EIGEN_CHOLMOD_SUPPORT)
+        EXPECT_EQ(amd->ordering(), "amd");
+#endif
+    }
+    EXPECT_LT(relative_error(solved(plain->solve(columns(s.B), 2)), s.X), 1e-11);
+    EXPECT_LT(relative_error(solved(amd->solve(columns(s.B), 2)), s.X), 1e-11);
+
+    Eigen::MatrixXd A2 = A;
+    A2(0, A.rows() - 1) = A2(A.rows() - 1, 0) = -0.5;
+    const System s2 = system_for(A2, 1);
+    ASSERT_FALSE(amd->refactor(to_csr(A2)));
+    EXPECT_EQ(amd->stats().symbolic_analyses, 2);
+    EXPECT_LT(relative_error(solved(amd->solve(columns(s2.B), 1)), s2.X), 1e-11);
+#if defined(HAVE_ACCELERATE) || defined(EIGEN_CHOLMOD_SUPPORT)
+    if (std::getenv("VIBESTRAN_ACCELERATE_ORDER") == nullptr)
+        EXPECT_EQ(amd->ordering(), "amd");
+#endif
+}
+
 TEST(LinearFactor, FailedRefactorCannotReturnTheOldSolution) {
     const Eigen::MatrixXd A = tridiagonal(20, 0.0);
     const System s = system_for(A, 1);

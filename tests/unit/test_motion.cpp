@@ -398,6 +398,76 @@ TEST(Motion, CoggingRepeatsWithTheStatorSymmetry) {
   EXPECT_GT(high - low, 1e-3);
 }
 
+TEST(Motion, MovedMeshIsTheMeshOfTheMovedModel) {
+  // Each MOTION position's mesh is the base mesh with its moving cells and
+  // faces placed again, not a rebuilt topology. It must be exactly the mesh
+  // make_mesh builds from the moved model, with the AGE and with a band.
+  for (const char *gap : {"PAIRGAP,9\n", "PAIRGAP,9,BAND\n"}) {
+    SCOPED_TRACE(gap);
+    Machine g;
+    g.rotor_property = 2;
+    g.stator_property = 3;
+    g.gap = gap;
+    g.cards = magnetized_rotor(1.0, .2) + stator_iron(false) + rotor_motion(0, 30, 2);
+    const auto m = model(g);
+    const auto base = mesh_of(m);
+    auto found = moving_part(m, base, m.motions.at(1));
+    ASSERT_TRUE(std::holds_alternative<MovingPart>(found)) << error_of(found);
+    const auto moved = moved_model(m, m.motions.at(1), std::get<MovingPart>(found), 37.5);
+    const auto fresh = mesh_of(moved);
+    auto built = make_mesh(moved, base);
+    ASSERT_TRUE(std::holds_alternative<Mesh>(built)) << error_of(built);
+    const auto &reused = std::get<Mesh>(built);
+    EXPECT_EQ(reused.nodes, fresh.nodes);
+    EXPECT_EQ(reused.edges, fresh.edges);
+    ASSERT_EQ(reused.cells.size(), fresh.cells.size());
+    for (size_t i = 0; i < fresh.cells.size(); ++i) {
+      const auto &a = reused.cells[i], &b = fresh.cells[i];
+      EXPECT_EQ(a.id, b.id);
+      EXPECT_EQ(a.property, b.property) << "element " << b.id;
+      EXPECT_EQ(a.material, b.material);
+      EXPECT_EQ(a.points, b.points) << "element " << b.id;
+      EXPECT_EQ(a.jacobian, b.jacobian);
+      EXPECT_EQ(a.inverse, b.inverse);
+      EXPECT_EQ(a.map_origin, b.map_origin);
+      EXPECT_EQ(a.minimum, b.minimum);
+      EXPECT_EQ(a.maximum, b.maximum);
+      EXPECT_EQ(a.volume, b.volume);
+      EXPECT_EQ(a.affine, b.affine);
+      EXPECT_EQ(a.polyhedral, b.polyhedral);
+      EXPECT_EQ(a.faces, b.faces);
+      EXPECT_EQ(a.face_sign, b.face_sign);
+    }
+    ASSERT_EQ(reused.faces.size(), fresh.faces.size());
+    for (size_t f = 0; f < fresh.faces.size(); ++f) {
+      const auto &a = reused.faces[f], &b = fresh.faces[f];
+      EXPECT_EQ(a.nodes, b.nodes);
+      EXPECT_EQ(a.cells, b.cells);
+      EXPECT_EQ(a.center, b.center);
+      EXPECT_EQ(a.normal, b.normal);
+      EXPECT_EQ(a.area, b.area);
+    }
+    ASSERT_TRUE(reused.air_gap && fresh.air_gap);
+    for (auto circle : {&AirGap::inner, &AirGap::outer}) {
+      EXPECT_EQ(((*reused.air_gap).*circle).nodes, ((*fresh.air_gap).*circle).nodes);
+      EXPECT_EQ(((*reused.air_gap).*circle).angles, ((*fresh.air_gap).*circle).angles);
+    }
+    EXPECT_EQ(reused.air_gap->band_points, fresh.air_gap->band_points);
+    EXPECT_EQ(reused.band_unknowns, fresh.band_unknowns);
+    EXPECT_EQ(reused.dofs(), fresh.dofs());
+  }
+  // A model with other elements is not a moved copy.
+  Machine g;
+  g.rotor_property = 2;
+  g.cards = magnetized_rotor(1.0);
+  const auto m = model(g);
+  const auto base = mesh_of(m);
+  auto fewer = m;
+  fewer.elements.pop_back();
+  const auto refused = make_mesh(fewer, base);
+  EXPECT_NE(error_of(refused).find("field cells"), std::string::npos) << error_of(refused);
+}
+
 TEST(Motion, MovedModelTurnsTheMovingMagnetsFramesAndNothingFixed) {
   // The rotor magnet (PID 2, CORD2R 1) shares its property with a fixed
   // magnet patch in the stator. At 30 degrees the rotor grids and the

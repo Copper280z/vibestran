@@ -166,6 +166,23 @@ TEST_F(CudaFactorTest, DenseBlockOrdersWithMinimumDegree) {
     EXPECT_EQ(dense->stats().symbolic_analyses, 1);
 }
 
+TEST_F(CudaFactorTest, MinimumDegreeKeepsNestedDissectionOnTheGpu) {
+    // minimum_degree is for the CPU backends; cuDSS's GPU factorization
+    // needs nested dissection's wide elimination tree.
+    const Eigen::MatrixXd A = test::gap_like(50, 0);
+    const Eigen::MatrixXd X = solution(A.rows(), 2);
+    auto amd = take(backend_->factor(to_csr(A), {.require_spd = true, .minimum_degree = true}));
+    ASSERT_TRUE(amd);
+    EXPECT_EQ(amd->ordering(), "nested dissection");
+    EXPECT_LT(relative_error(solved(amd->solve(columns(A * X), 2)), X), 1e-11);
+    // A new pattern is analyzed again.
+    Eigen::MatrixXd A2 = A;
+    A2(0, A.rows() - 1) = A2(A.rows() - 1, 0) = -0.5;
+    ASSERT_FALSE(amd->refactor(to_csr(A2)));
+    EXPECT_EQ(amd->stats().symbolic_analyses, 2);
+    EXPECT_LT(relative_error(solved(amd->solve(columns(A2 * X), 2)), X), 1e-11);
+}
+
 TEST_F(CudaFactorTest, RequireSpdFailureIsReportedAndRecoverable) {
     // cuDSS reports a failed Cholesky only through CUDSS_DATA_INFO, which then
     // stays set: without a reset, the next factorization of SPD values does

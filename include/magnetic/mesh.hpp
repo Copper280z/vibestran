@@ -117,6 +117,12 @@ make_mesh(std::vector<Vector> nodes,
                    std::vector<NodeList>(cells.begin(), cells.end()));
 }
 [[nodiscard]] Result<Mesh> make_mesh(const Model &model);
+// make_mesh(model) for a model whose elements and their grids are those of
+// the model base was made from, some grids moved (rigidly, as by MOTION) and
+// properties possibly changed. The topology (edges, faces, their indices)
+// is base's, so only the cells and faces with a moved grid, the
+// periodicity and the air gap are recomputed.
+[[nodiscard]] Result<Mesh> make_mesh(const Model &model, const Mesh &base);
 // Tetrahedral barycentric coordinates.
 [[nodiscard]] std::array<double, 4> barycentric(const Cell &cell,
                                                 const Vector &x);

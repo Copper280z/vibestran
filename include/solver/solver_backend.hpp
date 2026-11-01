@@ -40,6 +40,14 @@ struct FactorOptions {
     /// estimates AMD's fill as if every such row filled across all columns
     /// and falls back to METIS.
     bool dense_block{false};
+    /// CPU direct backends order with minimum degree (AMD) instead of METIS.
+    /// For planar meshes of up to about 10^5 unknowns AMD's fill is within
+    /// about 15% of nested dissection's and it orders several times faster,
+    /// which matters when the pattern changes often (a sliding band at every
+    /// MOTION position). cuDSS keeps nested dissection: AMD's deep, narrow
+    /// elimination tree leaves its GPU factorization little to do in
+    /// parallel (1.5x slower on a planar motor sweep).
+    bool minimum_degree{false};
 };
 
 /// Work done by a LinearFactor since it was created.

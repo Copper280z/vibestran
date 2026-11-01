@@ -123,13 +123,13 @@ struct AccelerateOrderConfig {
   const char *label;
 };
 
-// VIBESTRAN_ACCELERATE_ORDER, when set, overrides the choice for a dense
-// block (FactorOptions::dense_block).
-AccelerateOrderConfig accelerate_order_config(bool dense_block = false) {
+// VIBESTRAN_ACCELERATE_ORDER, when set, overrides the choice of minimum
+// degree (FactorOptions::dense_block or minimum_degree).
+AccelerateOrderConfig accelerate_order_config(bool minimum_degree = false) {
   const char *env = std::getenv("VIBESTRAN_ACCELERATE_ORDER");
   if (env == nullptr || env[0] == '\0')
-    return dense_block ? AccelerateOrderConfig{SparseOrderAMD, "amd"}
-                       : AccelerateOrderConfig{SparseOrderMetis, "metis"};
+    return minimum_degree ? AccelerateOrderConfig{SparseOrderAMD, "amd"}
+                          : AccelerateOrderConfig{SparseOrderMetis, "metis"};
   if (std::strcmp(env, "default") == 0)
     return {SparseOrderDefault, "default"};
   if (std::strcmp(env, "amd") == 0)
@@ -184,15 +184,24 @@ public:
     if (options.factor_ratio_policy != nullptr)
       policy_ = *options.factor_ratio_policy;
 #if defined(HAVE_ACCELERATE)
-    const auto order = accelerate_order_config(options.dense_block);
+    const auto order =
+        accelerate_order_config(options.dense_block || options.minimum_degree);
     order_ = order.order;
     order_label_ = order.label;
     llt_.setOrder(order_);
 #elif defined(EIGEN_CHOLMOD_SUPPORT)
-    if constexpr (kCholmod)
+    if constexpr (kCholmod) {
+      auto &common = llt_.cholmod();
+      if (options.minimum_degree) {
+        // Only AMD: by default CHOLMOD also tries METIS when AMD's fill
+        // looks high.
+        common.nmethods = 1;
+        common.method[0].ordering = CHOLMOD_AMD;
+      }
       if (options.dense_block)
-        for (auto &method : llt_.cholmod().method)
+        for (auto &method : common.method)
           method.prune_dense = -1;
+    }
 #endif
   }
 

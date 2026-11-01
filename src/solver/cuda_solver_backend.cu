@@ -829,7 +829,9 @@ template <typename Scalar> class CudssSystem {
 public:
   CudssSystem(cudssHandle_t handle, const FactorOptions &options, Notices &notices)
       : handle_(handle), require_spd_(options.require_spd),
-        // ALG_3 is approximate minimum degree; the default is nested dissection.
+        // ALG_3 is approximate minimum degree; the default is nested
+        // dissection, kept for FactorOptions::minimum_degree: its wide
+        // elimination tree is what the GPU factorization parallelizes.
         reorder_alg_(options.dense_block ? CUDSS_ALG_3 : CUDSS_ALG_DEFAULT),
         notices_(notices) {}
 

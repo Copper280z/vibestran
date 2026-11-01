@@ -14,6 +14,7 @@ namespace vibestran::test {
 /// node to every other. With ring > 10 sqrt(nx^2), CHOLMOD's AMD sets the
 /// ring aside as dense rows, and its fill estimate (each set-aside row
 /// filling every column) passes the ratio at which CHOLMOD switches to METIS.
+/// With ring = 0 it is a plain planar mesh.
 inline Eigen::MatrixXd gap_like(int nx, int ring) {
   const int n = nx * nx;
   Eigen::MatrixXd A = Eigen::MatrixXd::Zero(n, n);

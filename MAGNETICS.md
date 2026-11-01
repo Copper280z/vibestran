@@ -666,10 +666,14 @@ coupling term changes. Solving the turned deck is
 therefore the same as holding the mesh still and rotating each harmonic's
 coupling by nφ. Building the turned model makes this hold by construction,
 with no second implementation of the AGE to keep consistent. Every position
-has the same elements and connectivity, so the same sparsity pattern. The
-tangent keeps the pattern and only refactors at a new position, so the
-factorization's symbolic analysis runs once per run (the F06
-`Tangent reuse` row counts it).
+has the same elements and connectivity, so each position's mesh is the first
+one's with only the cells and faces on moved grids, and the air gap, placed
+again; windings that do not move keep their source couplings. With the AGE
+the sparsity pattern is the same too: the tangent only refactors at a new
+position, and the factorization's symbolic analysis runs once per run (the
+F06 `Tangent reuse` row counts it). A sliding band's pattern changes with the
+position, so each position has its own analysis, which the CPU backends
+order with minimum degree (AMD) in a few milliseconds.
 
 **Where Newton starts, and what it means for the result.** Each position
 starts Newton from the previous position's potential. Neighbouring
@@ -1176,7 +1180,11 @@ One factorization serves the whole run: its symbolic analysis is done once
 per sparsity pattern, and Newton steps, continuation stages, subcases and the
 differential inductances only refactor values. The pattern holds across
 MOTION positions with the AGE; a sliding band couples each grid to the band
-points under it, so the pattern, and the analysis, change at every position. Each subcase's inductances are a single
+points under it, so the pattern, and the analysis, change at every position.
+The CPU backends order planar tangents with minimum degree (AMD): at their
+sizes its fill is within about 15% of nested dissection's and it orders
+several times faster. cuDSS keeps nested dissection, which its GPU
+factorization needs. Each subcase's inductances are a single
 solve with one right-hand side per closed source and circuit. Every
 factorization must be positive definite: a failed Cholesky is an error, never
 an LU fallback. `--backend=cuda` (cuDSS) reuses its analysis the same way; in
@@ -1295,15 +1303,16 @@ comparison with `PARAM,AIRGAP,BAND` (MAGTOL 1e-10, 78 positions):
 
 | model, backend | factor every tangent | MAGPCG,20 |
 |---|---:|---:|
-| coarse (n = 12,509), Accelerate (M-series Mac) | 12.4 s | 14.3 s |
-| coarse, CHOLMOD (Ryzen 7 5700, 8 threads) | 20.1 s | 19.0 s |
-| coarse, cuDSS (TITAN V) | 19.0 s | 20.6 s |
-| fine (n = 46,901), CHOLMOD | 96.1 s | 101.1 s |
-| fine, cuDSS | 78.5 s | 83.3 s |
+| coarse (n = 12,509), Accelerate (M-series Mac) | 6.1 s | 8.3 s |
+| coarse, CHOLMOD (Ryzen 7 5700, 8 threads) | 15.0 s | 13.7 s |
+| coarse, cuDSS (TITAN V) | 13.5 s | 15.0 s |
+| fine (n = 46,901), CHOLMOD | 64.4 s | 69.1 s |
+| fine, cuDSS | 47.0 s | 51.7 s |
 
 The torques agree to 1e-10 (relative). On the fine model 352 steps were solved
 by CG in 4,540 iterations, 13 each, and 80 more stopped CG and refactored;
 factorizations fell from 586 to 284.
+
 It is meant for models where factoring dominates: 3D MAGSTAT, whose factors
 fill much more than planar ones, and, through the same interface, future
 geometric nonlinear structural solves.

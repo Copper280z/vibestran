@@ -34,12 +34,13 @@ using Triplet = Eigen::Triplet<double>;
 // reused across tangents as a CG preconditioner (TangentSolver).
 class Tangent {
 public:
+  // planar: order with minimum degree (FactorOptions::minimum_degree).
   // dense_block: the model has an air gap, whose harmonic coupling is a
   // dense block in every tangent (FactorOptions::dense_block). reuse: CG
   // iterations with an earlier tangent's factor before refactoring; 0
   // factors every tangent.
-  Tangent(SolverBackend &backend, bool dense_block, int reuse)
-      : solver_(backend, options(dense_block, reuse)), reuse_(reuse > 0) {}
+  Tangent(SolverBackend &backend, bool planar, bool dense_block, int reuse)
+      : solver_(backend, options(planar, dense_block, reuse)), reuse_(reuse > 0) {}
   Status update(const Sparse &stiffness) {
     const Eigen::SparseMatrix<double, Eigen::RowMajor> lower =
         stiffness.triangularView<Eigen::Lower>();
@@ -89,9 +90,10 @@ public:
   }
 
 private:
-  static TangentSolverOptions options(bool dense_block, int reuse) {
+  static TangentSolverOptions options(bool planar, bool dense_block, int reuse) {
     TangentSolverOptions o;
     o.factor.require_spd = true;
+    o.factor.minimum_degree = planar;
     o.factor.dense_block = dense_block;
     o.reuse_factor = reuse > 0;
     o.max_iterations = std::max(reuse, 1);
@@ -1004,11 +1006,12 @@ bool same_topology(const Setup &a, const Setup &b) {
                             [](const Cell &x, const Cell &y) { return x.edges == y.edges; });
 }
 // shared, when given, is a setup of the same model moved (a MOTION
-// position's base), whose pattern this one shares when the topology agrees.
+// position's base): the mesh keeps its topology, and the pattern is shared
+// when the gauge and the air gap's couplings agree too.
 Result<Setup> prepare(const Model &model, int normal_boundary = 0,
                       const Setup *shared = nullptr) {
   Setup s;
-  auto built = make_mesh(model);
+  auto built = shared ? make_mesh(model, shared->mesh) : make_mesh(model);
   if (auto *e = std::get_if<Error>(&built))
     return *e;
   s.mesh = std::get<Mesh>(std::move(built));
@@ -1038,10 +1041,22 @@ Result<Setup> prepare(const Model &model, int normal_boundary = 0,
                                  ? 0.0
                                  : s.gauge.sign[ni] * s.gauge.sign[nj] * it.value());
     }
-  auto prepared = prepare_sources(model, s.mesh);
-  if (auto *e = std::get_if<Error>(&prepared))
-    return *e;
-  s.sources = std::get<std::vector<Source>>(std::move(prepared));
+  // Planar windings that did not move keep their sources: the same cells in
+  // the same places give the same coupling.
+  const auto fixed = [&](const PlanarCoil &coil) {
+    return std::ranges::all_of(model.element_sets.at(coil.elements), [&](int id) {
+      const auto i = static_cast<size_t>(s.mesh.element_index.at(id));
+      return s.mesh.cells[i].points == shared->mesh.cells[i].points;
+    });
+  };
+  if (shared && s.mesh.planar && std::ranges::all_of(model.planar_coils, fixed)) {
+    s.sources = shared->sources;
+  } else {
+    auto prepared = prepare_sources(model, s.mesh);
+    if (auto *e = std::get_if<Error>(&prepared))
+      return *e;
+    s.sources = std::get<std::vector<Source>>(std::move(prepared));
+  }
   auto resolved = resolve_circuits(model, s.sources);
   if (auto *e = std::get_if<Error>(&resolved))
     return *e;
@@ -1537,7 +1552,8 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
   result.summary.solver.set("Indefinite fallback",
                             "none, positive definite required");
   // Only the AGE's gap is a dense block; a sliding band's is sparse.
-  Tangent tangent(backend, base.mesh.air_gap && base.mesh.air_gap->band_points == 0,
+  Tangent tangent(backend, base.mesh.planar,
+                  base.mesh.air_gap && base.mesh.air_gap->band_points == 0,
                   model.options.tangent_reuse);
   // THETA0 AUTO results by DRIVE, MOTION and MBC.
   std::map<std::tuple<int, int, int>, DriveSummary> alignments;

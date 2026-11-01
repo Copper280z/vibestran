@@ -43,6 +43,111 @@ std::array<Sample, 4> tetra_quadrature(const std::array<Vector, 4> &p,
   }
   return out;
 }
+// A cell's size, Jacobian sign and centroid of its corners, for the checks
+// on its faces.
+struct CellShape {
+  double length{0}, determinant{0};
+  Vector center{Vector::Zero()};
+};
+// The geometry of c from its nodes' positions in mesh: corner points, bounds,
+// mapping and volume. Errors for a degenerate or folded cell, or a planar one
+// out of the plane.
+Result<CellShape> place_cell(const Mesh &mesh, Cell &c) {
+  const size_t n = c.nodes.size();
+  c.points.clear();
+  c.volume = 0;
+  c.origin = mesh.nodes[c.nodes[0]];
+  c.minimum = c.maximum = c.origin;
+  CellShape shape;
+  for (int v : c.nodes) {
+    c.points.push_back(mesh.nodes[v]);
+    c.minimum = c.minimum.cwiseMin(mesh.nodes[v]);
+    c.maximum = c.maximum.cwiseMax(mesh.nodes[v]);
+    shape.center += mesh.nodes[v];
+  }
+  shape.center /= static_cast<double>(n);
+  const double length = shape.length = (c.maximum - c.minimum).norm();
+  if (!(length > 0))
+    return Error{"Degenerate magnetic element"};
+  if (c.planar)
+    for (const auto &x : c.points)
+      if (std::abs(c.normal.dot(x - mesh.nodes.front())) > 1e-10 * length)
+        return Error{"MAG2D elements must lie in a common plane normal to "
+                     "the specified CID z axis"};
+  initialize_mapping(c);
+  const auto [mapped, jac] = mapping(c, Vector::Zero());
+  c.map_origin = mapped;
+  c.jacobian = jac;
+  c.inverse = jac.inverse();
+  c.affine = true;
+  const double determinant = shape.determinant = jac.determinant();
+  const double min_det = 1e-14 * std::pow(length, c.planar ? 2 : 3);
+  if (!jac.allFinite() || std::abs(determinant) <= min_det)
+    return Error{std::format("Degenerate magnetic element {}", c.id)};
+  for (const auto &q : reference_quadrature(c)) {
+    const auto [x, j] = mapping(c, q.position);
+    if (!j.allFinite() ||
+        j.determinant() * std::copysign(1., determinant) <= min_det)
+      return Error{std::format("Folded or degenerate magnetic element {}", c.id)};
+    c.volume += q.weight * std::abs(j.determinant());
+    c.affine &= (j - jac).norm() <=
+                1e-12 * (c.planar ? jac.leftCols<2>().norm() : jac.norm());
+  }
+  if (!valid_mapping(c, min_det))
+    return Error{std::format("Magnetic element {} has a folded, degenerate "
+                             "or uncertifiable Jacobian",
+                             c.id)};
+  return shape;
+}
+// A tetrahedron's shape-function gradients and edge curls (c.edge_sign set).
+void tetra_derivatives(Cell &c) {
+  c.gradient.clear();
+  c.curl.clear();
+  const auto topology = cell_edges(c);
+  auto shape = reference_shape(c, Vector::Zero());
+  for (const auto &g : shape.gradients)
+    c.gradient.push_back(c.inverse.transpose() * g);
+  for (size_t e = 0; e < topology.size(); ++e)
+    c.curl.push_back(2.0 * c.edge_sign[e] *
+                     c.gradient[topology[e][0]].cross(c.gradient[topology[e][1]]));
+}
+// The center, unit normal, area and flatness of f from its nodes' positions
+// in mesh; length is the size of a cell it bounds.
+Status place_face(const Mesh &mesh, Face &f, double length) {
+  const auto &face = f.nodes;
+  f.center = f.normal = Vector::Zero();
+  f.flat = true;
+  for (int v : face)
+    f.center += mesh.nodes[v];
+  f.center /= static_cast<double>(face.size());
+  if (mesh.planar) {
+    f.normal = (mesh.nodes[face[1]] - mesh.nodes[face[0]]).cross(mesh.normal);
+  } else {
+    for (size_t i = 0; i < face.size(); ++i)
+      f.normal += (mesh.nodes[face[i]] - f.center)
+                      .cross(mesh.nodes[face[(i + 1) % face.size()]] - f.center) /
+                  2;
+  }
+  f.area = f.normal.norm();
+  if (f.area <= 1e-14 * std::pow(length, mesh.planar ? 1 : 2))
+    return Error{"Degenerate magnetic face"};
+  f.normal.normalize();
+  for (int v : face)
+    if (std::abs(f.normal.dot(mesh.nodes[v] - f.center)) > 1e-10 * length)
+      f.flat = false;
+  if (!f.flat) {
+    double previous_area = 0;
+    for (int order : {5, 9, 13}) {
+      f.area = 0;
+      for (const auto &q : face_quadrature(mesh, f, order))
+        f.area += q.weight;
+      if (std::abs(f.area - previous_area) <= 1e-12 * f.area)
+        break;
+      previous_area = f.area;
+    }
+  }
+  return std::nullopt;
+}
 } // namespace
 
 Result<Mesh> make_mesh(std::vector<Vector> nodes,
@@ -69,48 +174,10 @@ Result<Mesh> make_mesh(std::vector<Vector> nodes,
         !unique.insert(key).second)
       return Error{
           std::format("Invalid or duplicate magnetic element {}", c.id)};
-    c.origin = mesh.nodes[indices[0]];
-    c.minimum = c.maximum = c.origin;
-    Vector center = Vector::Zero();
-    for (int v : indices) {
-      c.points.push_back(mesh.nodes[v]);
-      c.minimum = c.minimum.cwiseMin(mesh.nodes[v]);
-      c.maximum = c.maximum.cwiseMax(mesh.nodes[v]);
-      center += mesh.nodes[v];
-    }
-    center /= static_cast<double>(n);
-    const double length = (c.maximum - c.minimum).norm();
-    if (!(length > 0))
-      return Error{"Degenerate magnetic element"};
-    if (planar)
-      for (const auto &x : c.points)
-        if (std::abs(normal.dot(x - mesh.nodes.front())) > 1e-10 * length)
-          return Error{"MAG2D elements must lie in a common plane normal to "
-                       "the specified CID z axis"};
-    initialize_mapping(c);
-    const auto [mapped, jac] = mapping(c, Vector::Zero());
-    c.map_origin = mapped;
-    c.jacobian = jac;
-    c.inverse = jac.inverse();
-    c.affine = true;
-    const double determinant = jac.determinant();
-    const double min_det = 1e-14 * std::pow(length, planar ? 2 : 3);
-    if (!jac.allFinite() || std::abs(determinant) <= min_det)
-      return Error{std::format("Degenerate magnetic element {}", c.id)};
-    for (const auto &q : reference_quadrature(c)) {
-      const auto [x, j] = mapping(c, q.position);
-      if (!j.allFinite() ||
-          j.determinant() * std::copysign(1., determinant) <= min_det)
-        return Error{
-            std::format("Folded or degenerate magnetic element {}", c.id)};
-      c.volume += q.weight * std::abs(j.determinant());
-      c.affine &= (j - jac).norm() <=
-                  1e-12 * (planar ? jac.leftCols<2>().norm() : jac.norm());
-    }
-    if (!valid_mapping(c, min_det))
-      return Error{std::format("Magnetic element {} has a folded, degenerate "
-                               "or uncertifiable Jacobian",
-                               c.id)};
+    auto placed = place_cell(mesh, c);
+    if (auto *e = std::get_if<Error>(&placed))
+      return *e;
+    const auto [length, determinant, center] = std::get<CellShape>(placed);
     const auto reference = reference_vertices(c);
     Vector reference_center = Vector::Zero();
     for (const auto &r : reference)
@@ -128,15 +195,8 @@ Result<Mesh> make_mesh(std::vector<Vector> nodes,
     }
     if (planar)
       c.edges = indices; // scalar A_normal nodal degrees of freedom
-    if (!planar && n == 4) {
-      auto shape = reference_shape(c, Vector::Zero());
-      for (const auto &g : shape.gradients)
-        c.gradient.push_back(c.inverse.transpose() * g);
-      for (size_t e = 0; e < topology.size(); ++e)
-        c.curl.push_back(
-            2.0 * c.edge_sign[e] *
-            c.gradient[topology[e][0]].cross(c.gradient[topology[e][1]]));
-    }
+    if (!planar && n == 4)
+      tetra_derivatives(c);
     for (auto face : cell_faces(c)) {
       for (int &v : face)
         v = indices[v];
@@ -152,25 +212,8 @@ Result<Mesh> make_mesh(std::vector<Vector> nodes,
           mesh.face_index.emplace(sorted, static_cast<int>(mesh.faces.size()));
       Face candidate;
       candidate.nodes = face;
-      for (int v : face)
-        candidate.center += mesh.nodes[v];
-      candidate.center /= static_cast<double>(face.size());
-      if (planar) {
-        candidate.normal =
-            (mesh.nodes[face[1]] - mesh.nodes[face[0]]).cross(normal);
-        candidate.area = candidate.normal.norm();
-      } else {
-        for (size_t i = 0; i < face.size(); ++i)
-          candidate.normal +=
-              (mesh.nodes[face[i]] - candidate.center)
-                  .cross(mesh.nodes[face[(i + 1) % face.size()]] -
-                         candidate.center) /
-              2;
-        candidate.area = candidate.normal.norm();
-      }
-      if (candidate.area <= 1e-14 * std::pow(length, planar ? 1 : 2))
-        return Error{"Degenerate magnetic face"};
-      candidate.normal.normalize();
+      if (auto e = place_face(mesh, candidate, length))
+        return *e;
       int sign = candidate.normal.dot(candidate.center - center) > 0 ? 1 : -1;
       if (!planar) {
         std::vector<Vector> r;
@@ -184,23 +227,7 @@ Result<Mesh> make_mesh(std::vector<Vector> nodes,
           area += (r[i] - mid).cross(r[(i + 1) % r.size()] - mid);
         sign = area.dot(mid - reference_center) * determinant > 0 ? 1 : -1;
       }
-      for (int v : face)
-        if (std::abs(candidate.normal.dot(mesh.nodes[v] - candidate.center)) >
-            1e-10 * length)
-          candidate.flat = false;
       c.polyhedral &= candidate.flat;
-      if (!candidate.flat) {
-        double previous_area = 0;
-        for (int order : {5, 9, 13}) {
-          candidate.area = 0;
-          for (const auto &q : face_quadrature(mesh, candidate, order))
-            candidate.area += q.weight;
-          if (std::abs(candidate.area - previous_area) <=
-              1e-12 * candidate.area)
-            break;
-          previous_area = candidate.area;
-        }
-      }
       for (const auto &x : c.points)
         if (sign * candidate.normal.dot(x - candidate.center) >
             1e-10 * length) {
@@ -235,6 +262,35 @@ Result<Mesh> make_mesh(std::vector<Vector> nodes,
     return Error{"Magnetic mesh contains no elements"};
   return mesh;
 }
+
+namespace {
+// The periodicity and air gap of model on mesh, which depend on its grids'
+// positions.
+Status attach_boundaries(Mesh &mesh, const Model &model) {
+  mesh.period.reset();
+  mesh.air_gap.reset();
+  mesh.band_unknowns = 0;
+  if (model.period) {
+    auto period = make_periodicity(model, mesh);
+    if (auto *e = std::get_if<Error>(&period))
+      return *e;
+    mesh.period = std::get<Periodicity>(std::move(period));
+  }
+  if (!model.air_gaps.empty()) {
+    auto gap = make_air_gap(mesh, model, model.air_gaps.begin()->first);
+    if (auto *e = std::get_if<Error>(&gap))
+      return *e;
+    mesh.air_gap = std::get<AirGap>(std::move(gap));
+    AirGap &g = *mesh.air_gap;
+    if (g.band_points > 0) {
+      g.band_first = static_cast<int>(mesh.nodes.size());
+      mesh.band_unknowns =
+          static_cast<size_t>((g.band_layers - 1) * (g.band_points / g.sectors));
+    }
+  }
+  return std::nullopt;
+}
+} // namespace
 
 Result<Mesh> make_mesh(const Model &model) {
   // Elements of an AGE air gap (PAIRGAP) are not field cells: the air-gap
@@ -289,24 +345,8 @@ Result<Mesh> make_mesh(const Model &model) {
              .second)
       return Error{"Duplicate magnetic element id"};
   }
-  if (model.period) {
-    auto period = make_periodicity(model, mesh);
-    if (auto *e = std::get_if<Error>(&period))
-      return *e;
-    mesh.period = std::get<Periodicity>(std::move(period));
-  }
-  if (!model.air_gaps.empty()) {
-    auto gap = make_air_gap(mesh, model, model.air_gaps.begin()->first);
-    if (auto *e = std::get_if<Error>(&gap))
-      return *e;
-    mesh.air_gap = std::get<AirGap>(std::move(gap));
-    AirGap &g = *mesh.air_gap;
-    if (g.band_points > 0) {
-      g.band_first = static_cast<int>(mesh.nodes.size());
-      mesh.band_unknowns =
-          static_cast<size_t>((g.band_layers - 1) * (g.band_points / g.sectors));
-    }
-  }
+  if (auto e = attach_boundaries(mesh, model))
+    return *e;
   if (mesh.planar) {
     // A planar field mesh must be one piece, or two pieces joined by the
     // air gap; name an element that is cut off.
@@ -338,6 +378,67 @@ Result<Mesh> make_mesh(const Model &model) {
                     "PAIRGAP property, or join the parts",
                     apart->id, mesh.cells.front().id)};
   }
+  return mesh;
+}
+
+Result<Mesh> make_mesh(const Model &model, const Mesh &base) {
+  Mesh mesh = base;
+  std::vector<bool> moved(mesh.nodes.size(), false);
+  for (size_t i = 0; i < mesh.nodes.size(); ++i) {
+    const auto it = model.nodes.find(mesh.node_ids[i]);
+    if (it == model.nodes.end())
+      return Error{std::format("Undefined GRID {}", mesh.node_ids[i])};
+    if (it->second.position != mesh.nodes[i]) {
+      mesh.nodes[i] = it->second.position;
+      moved[i] = true;
+    }
+  }
+  // The field cells in the order make_mesh(model) gives them, with the
+  // moved model's properties (moved_model splits a magnetized property).
+  size_t k = 0;
+  for (const auto &element : model.elements) {
+    if (model.air_gaps.contains(element.property))
+      continue;
+    if (k == mesh.cells.size() || mesh.cells[k].id != element.id)
+      return Error{std::format(
+          "Element {} is not field cell {} of the mesh being moved; a moved "
+          "model must have the elements of the model its mesh was made from",
+          element.id, k + 1)};
+    const auto prop = model.properties.find(element.property);
+    if (prop == model.properties.end())
+      return Error{"Magnetic element references undefined property"};
+    mesh.cells[k].property = prop->first;
+    mesh.cells[k].material = prop->second.material;
+    ++k;
+  }
+  if (k != mesh.cells.size())
+    return Error{std::format("The moved model has {} field cells, the mesh "
+                             "being moved {}",
+                             k, mesh.cells.size())};
+  auto touched = [&](const NodeList &nodes) {
+    return std::any_of(nodes.begin(), nodes.end(),
+                       [&](int v) { return moved[static_cast<size_t>(v)]; });
+  };
+  std::vector<double> length(mesh.cells.size(), 0);
+  for (size_t i = 0; i < mesh.cells.size(); ++i) {
+    auto &c = mesh.cells[i];
+    if (!touched(c.nodes))
+      continue;
+    auto placed = place_cell(mesh, c);
+    if (auto *e = std::get_if<Error>(&placed))
+      return *e;
+    length[i] = std::get<CellShape>(placed).length;
+    if (!mesh.planar && c.nodes.size() == 4)
+      tetra_derivatives(c);
+  }
+  // A face with a moved grid bounds only cells with that grid, which were
+  // placed above.
+  for (auto &f : mesh.faces)
+    if (touched(f.nodes))
+      if (auto e = place_face(mesh, f, length[static_cast<size_t>(f.cells[0])]))
+        return *e;
+  if (auto e = attach_boundaries(mesh, model))
+    return *e;
   return mesh;
 }
 
