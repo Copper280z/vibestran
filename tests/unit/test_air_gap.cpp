@@ -875,8 +875,10 @@ TEST(AirGapSolve, BandMatchesTheAnalyticMagnetizedRotorAtSecondOrder) {
     const auto results = solved(m);
     ASSERT_EQ(results.cases.size(), 1U);
     ASSERT_TRUE(results.mesh.air_gap);
-    // NBAND blank: the finer circle's grid count.
-    EXPECT_EQ(results.mesh.air_gap->band_points, div * 3 / 2);
+    // NBAND blank: the smallest prime count of at least the finer circle's
+    // grid count.
+    const int band = std::map<int, int>{{24, 37}, {48, 73}, {96, 149}}.at(div);
+    EXPECT_EQ(results.mesh.air_gap->band_points, band);
     const auto &c = results.cases[0];
     double gap_error = 0;
     for (size_t i = 0; i < in_gap.size(); ++i) {
@@ -897,7 +899,7 @@ TEST(AirGapSolve, BandMatchesTheAnalyticMagnetizedRotorAtSecondOrder) {
               std::string::npos)
         << rows[0];
     EXPECT_NE(rows[0].find(std::format("{} + {} grids, {} band points", div, div * 3 / 2,
-                                       div * 3 / 2)),
+                                       band)),
               std::string::npos)
         << rows[0];
   }

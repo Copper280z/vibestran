@@ -346,16 +346,21 @@ TEST(Periodic, AntiPeriodicHalfIsTheWholeMachine) {
 TEST(Periodic, BandHalfIsTheWholeMachine) {
   // The anti-periodic half with PARAM,AIRGAP,BAND: the band's points are a
   // multiple of the sectors, so each sector samples its traces at the same
-  // points and the half's unfolded band is the whole machine's.
+  // points and the half's unfolded band is the whole machine's with the same
+  // NBAND. The blanks differ: the half's is twice the smallest prime of at
+  // least half the finer circle's 72 grids (2 x 37), the whole machine's the
+  // smallest prime of at least 72, so the whole deck states the half's.
   Design d;
   d.cards = "ICIRC,5,1,8.\nICIRC,5,2,-3.\nICIRC,5,3,-5.\nPARAM,AIRGAP,BAND\n" + gap_probes();
   d.control = "LOAD = 5\n";
-  const auto half = solved(model_of(d)), full = solved(model_of(whole(d)));
+  auto whole_model = model_of(whole(d));
+  whole_model.air_gaps.at(9).band_points = 74;
+  const auto half = solved(model_of(d)), full = solved(whole_model);
   ASSERT_EQ(half.cases.size(), 1U);
   ASSERT_EQ(full.cases.size(), 1U);
   ASSERT_TRUE(half.mesh.air_gap && full.mesh.air_gap);
-  EXPECT_EQ(half.mesh.air_gap->band_points, full.mesh.air_gap->band_points);
-  EXPECT_GT(half.mesh.air_gap->band_points, 0);
+  EXPECT_EQ(half.mesh.air_gap->band_points, 74);
+  EXPECT_EQ(full.mesh.air_gap->band_points, 74);
   const auto diff = compare(half.mesh, half.cases[0], full.mesh, full.cases[0]);
   for (double x : {diff.potential, diff.b, diff.energy, diff.linkage, diff.inductance,
                    diff.rate, diff.probe})

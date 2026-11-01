@@ -12,10 +12,12 @@
 #include "../common/hdf5_results.hpp"
 #endif
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <ranges>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -213,6 +215,48 @@ TEST(Motion, BandTorqueIsTheDerivativeOfTheCoenergy) {
                   (saturating ? 2e-5 : 1e-6) * std::abs(s[1].torque));
     }
   }
+}
+
+TEST(Motion, BandErrorCancelsOverThePolesWithTheBlankBandCount) {
+  // A four-pole rotor of radial magnets on an iron hub, turning in a
+  // slotless iron stator: no torque at any position, exactly. What a
+  // sweep shows is discretization error, mostly the band's, which repeats
+  // with the band's point spacing. With NBAND a multiple of the poles,
+  // every pole sits at the same phase of it and their errors add; the
+  // blank NBAND (the smallest prime count of at least the finer circle's
+  // 72 grids, 73) spreads the poles over its phases and they cancel.
+  std::vector<double> ripple;
+  for (const char *gap : {"PAIRGAP,9,BAND,,72\n", "PAIRGAP,9,BAND\n"}) {
+    SCOPED_TRACE(gap);
+    Machine g;
+    g.stator_div = 72;
+    g.rotor_property = 2;
+    g.stator_property = 3;
+    g.gap = gap;
+    // Positions every sixth of a band spacing, over two spacings.
+    g.cards = "CORD2C,100,,0.,0.,0.,0.,0.,1.\n,1.,0.,0.\nMATMAG,2,1.,,1.1\n"
+              "PMAG2D,2,2,100,1\nPMAG2D,4,2,100,-1\nMATMAG,5,800.\nPMAG2D,5,5\n" +
+              stator_iron(false) + rotor_motion(0, 5. / 6, 13);
+    auto m = model(g);
+    auto &moving = m.element_sets[20];
+    moving.clear();
+    for (auto &e : m.elements) {
+      if (e.property != 2)
+        continue;
+      const Vector c = centroid(m, e);
+      e.property = c.norm() < .013 ? 5 : std::cos(2 * std::atan2(c.y(), c.x())) > 0 ? 2 : 4;
+      moving.push_back(e.id);
+    }
+    m.subcases = {subcase(1, 0, 1)};
+    const auto r = solved(m);
+    ASSERT_EQ(r.mesh.air_gap->band_points, std::string(gap).find("72") != std::string::npos ? 72 : 73);
+    const auto &s = r.cases[0].steps;
+    ASSERT_EQ(s.size(), 13U);
+    auto [low, high] = std::ranges::minmax(s | std::views::transform(&CaseResults::torque));
+    ripple.push_back(high - low);
+  }
+  // Measured 0.44 and 0.0036 N m.
+  EXPECT_LT(ripple[1], ripple[0] / 20) << ripple[0] << " N m against " << ripple[1];
 }
 
 TEST(Motion, ReusedFactorSweepMatchesFactoringEveryTangent) {

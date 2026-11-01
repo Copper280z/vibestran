@@ -133,6 +133,16 @@ Result<GapCircle> unfold(const Loop &chain, const Eigen::Vector2d &center,
 struct Harmonics {
   Eigen::VectorXd inner, outer;
 };
+int prime_at_least(int n) {
+  for (;; ++n) {
+    bool prime = n >= 2;
+    for (int d = 2; prime && d * d <= n; ++d)
+      prime = n % d != 0;
+    if (prime)
+      return n;
+  }
+}
+
 Harmonics coefficients(const AirGap &gap, const Eigen::VectorXd &a) {
   auto values = [&a](const GapCircle &c) {
     Eigen::VectorXd out(static_cast<Eigen::Index>(c.nodes.size()));
@@ -354,7 +364,16 @@ Result<AirGap> make_air_gap(const Mesh &mesh, const Model &model, int pid) {
              fine = std::max(gap.inner.nodes.size(), gap.outer.nodes.size());
   const AirGapProperty &property = model.air_gaps.at(pid);
   if (model.options.air_gap_method.value_or(property.method) == AirGapMethod::Band) {
-    gap.band_points = property.band_points > 0 ? property.band_points : static_cast<int>(fine);
+    // Blank NBAND: per sector, the smallest prime count of at least the
+    // finer circle's. The band's error repeats with its point spacing, and
+    // a count with a factor in common with the poles of a turning part
+    // puts every pole at the same phase of it, so their errors add instead
+    // of cancelling (a motor's cogging grew threefold on a symmetric mesh
+    // whose finer circle had a multiple of the 14 poles).
+    gap.band_points = property.band_points > 0
+                          ? property.band_points
+                          : gap.sectors * prime_at_least(static_cast<int>(
+                                              (fine + gap.sectors - 1) / gap.sectors));
     // Blank NLAYER: about square elements, the layer's thickness in ln r
     // no more than an element's angle.
     const double thickness = std::log(gap.outer.radius / gap.inner.radius);

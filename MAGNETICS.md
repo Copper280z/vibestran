@@ -456,7 +456,7 @@ PAIRGAP,PID,METHOD,NHARM,NBAND,NLAYER
 | `PID` | Property ID of the gap elements. It must not also be a PSOLID, PMAG or PMAG2D ID, and at least one element must use it. |
 | `METHOD` | `AGE` (blank is AGE): replace the gap elements by the air-gap element. `BAND`: replace them by a sliding band of elements (sparse; see below). `MESH`: solve them as ordinary meshed air. |
 | `NHARM` | AGE harmonics, and the harmonics of the gap field reported for AGE and BAND. Blank uses half the grid count of the coarser circle; at most half the grid count of the finer one. Ignored by MESH. |
-| `NBAND` | BAND: points around the band, at least 3 and a multiple of a sector model's sectors. Blank uses the finer circle's grid count (unfolded in a sector model). Ignored otherwise. |
+| `NBAND` | BAND: points around the band, at least 3 and a multiple of a sector model's sectors. Blank uses the smallest prime count of at least the finer circle's grid count, per sector in a sector model (the sectors times the smallest prime of at least the unfolded count over the sectors). Avoid a count with a factor in common with the poles of the turning part (see below). Ignored otherwise. |
 | `NLAYER` | BAND: rings of band elements across the gap, at least 1. Blank makes the elements about square: ⌈NBAND ln(r₂/r₁) / 2π⌉. Ignored otherwise. |
 
 There is no material field: a gap is air (relative permeability 1, no
@@ -553,6 +553,25 @@ the AGE's 0.052. The blank NLAYER, about square elements, is the guard
 against this. When a part turns, the averaged traces move under the band
 and the band's couplings change, so each MOTION position is a new symbolic
 analysis; the factorization is cheap enough that this costs little.
+
+The band's error also repeats with its point spacing as a part turns under
+it: a spurious torque ripple at the band pitch. Its sum over the poles of
+the turning part cancels when the poles fall at different phases of the
+band grid, and adds when NBAND has a factor in common with the number of
+poles, which puts every pole (or every group of poles) at the same phase.
+Symmetric meshes make that easy to hit with a count taken from a circle:
+in the 12-slot, 14-pole motor, an NBAND of 840 (60 per pole) gave a
+cogging torque of 0.158 N m peak to peak, a sawtooth at the band pitch,
+where 839 or 841 gave 0.057 (the converged value is 0.053), and an NBAND of
+616 raised the 0.054 of 624 to 0.100. The blank NBAND is prime, which
+shares no factor with any pole count below it; an explicit NBAND should be
+prime too, or at least coprime with the number of poles. In a sector model
+the sectors are identical by construction, so only the poles within a sector
+need to fall at different phases: NBAND over the sectors coprime with the
+poles in a sector. `BandErrorCancelsOverThePolesWithTheBlankBandCount`
+(tests/unit/test_motion.cpp) checks a slotless four-pole machine, which
+has no torque at any position: an NBAND of 72 gives a ripple of 0.44 N m,
+the blank 73 gives 0.0036.
 
 Fields at points in the gap (probes, drawn gap cells) are, as with the
 AGE, the annulus field of the solved traces up to NHARM harmonics: the
@@ -1108,6 +1127,12 @@ sector carries only the harmonics the period allows. The default NHARM is
 the whole machine's, half the unfolded coarser circle's grid count. The
 whole machine's gap stiffness is folded back onto the sector's grids, with
 the signs, and divided by SECTORS: the sector's share of the gap energy.
+With METHOD=BAND the unfolded band repeats in every sector, and the blank
+NBAND is SECTORS times the smallest prime of at least the unfolded finer
+circle's grid count over SECTORS. The whole machine's blank is the smallest
+prime of at least that count, a different band, so the plain equivalent of a
+BAND sector deck states the sector's NBAND on its PAIRGAP (the F06 `Air gap`
+row gives it).
 
 **Results are the whole machine's.**
 
