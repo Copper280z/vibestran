@@ -41,8 +41,9 @@ layers and axial slices separately for finite-conductor quantities.
 | [FEMM](https://www.femm.info/doku/doku.php?id=MagneticsTutorial) | Planar or axisymmetric reductions | FEMM is 2D/axisymmetric; account for extrusion depth/end effects. It is not a reference for an arbitrary finite 3D motor. |
 | [TEAM 20](https://www.compumag.org/wp/wp-content/uploads/2018/06/problem20.pdf) | Nonlinear 3D static force | Use the published geometry, excitation cases and steel data; compare fields as well as force. |
 
-GetDP/Elmer/FEMM adapters and TEAM benchmark decks are **not yet provided**.
-The table is the next validation work, not a claim that those comparisons ran.
+GetDP/Elmer adapters and TEAM benchmark decks are **not yet provided**. The
+table is the next validation work, not a claim that those comparisons ran. The
+planar FEMM comparison has run: see [Planar comparison with xfemm](#planar-comparison-with-xfemm-2026-10-31).
 TEAM 13 is also a suitable nonlinear field benchmark once its published geometry
 and data are independently transcribed and reviewed.
 
@@ -113,14 +114,8 @@ validate finite-section self-inductance, nonlinear materials or force. Source
 transfer took more work for mapped round-wire hexes; fewer preprocessing cells
 do not imply a universal speedup.
 
-For the planar formulation, [FEMM's magnetostatic tutorial](https://www.femm.info/doku/doku.php?id=MagneticsTutorial)
-is a useful independent comparison workflow. Generate a planar winding or motor
-with `tools/magnetic_planar_examples.py`, reproduce the same in-plane geometry,
-MATMAG/TABLEBH data, axial depth, signed turns and exterior A=0 condition in FEMM,
-and compare B probes, energy, circuit linkage and torque. Start with the air
-winding case, then add steel and PMs. Refine both meshes and enlarge the exterior
-before accepting agreement. There is not yet an automated FEMM adapter or a
-claimed independent validation of planar motor torque.
+For the planar formulation, `run_xfemm.py` compares against FEMM's solver; see
+[Planar comparison with xfemm](#planar-comparison-with-xfemm-2026-10-31) below.
 
 For native 3D hex/wedge comparisons with GetDP or Elmer, use
 `tools/magnetic_examples.py uniform --element hex` (with an output path), then
@@ -131,3 +126,104 @@ faces. The internal tests now exercise these mapped geometries, curved-face
 stress integration, matched coils and independent CWIRE transfer. There is not
 yet a completed third-party comparison specifically for warped background
 meshes; the Magpylib result above used the earlier background geometry.
+
+## Planar comparison with xfemm (2026-10-31)
+
+`run_xfemm.py` compares planar SOL MAGSTAT with [xfemm](https://github.com/crobarcro/xfemm),
+the FEMM 4.2 solver, at commit `34ac6cc`. Each case is built once with gmsh.
+vibestran solves the gmsh mesh. xfemm gets the same geometry as FEMM nodes,
+segments, arcs and block labels and meshes it with its own mesher. Only the
+geometry, materials, sources and boundary conditions are shared, so the two
+discretizations are independent. Both solvers run at two mesh levels (target
+sizes scaled by 1 and 1/2). Each solver's coarse-to-fine change shows how far
+its result is from converged. The steel curve is a smooth saturating
+B-H curve (J_s = 1.8 T, initial mu_r = 5000) sampled at 70 points so that the
+interpolants differ little; the exterior is A = 0 on a box or circle.
+
+| case | what is compared |
+|---|---|
+| core | U-core and armature, a 200-turn coil on the yoke: linear iron at 2 A and steel from 0.5 A into deep saturation at 16 A. Coil linkage, armature force, \|B\| in the gap, energy. |
+| magnet | the core with a magnet (B_r 1.2 T) in the yoke, steel, coil at -4, 0, +4 A |
+| motor | the 12-slot, 14-pole motor of `tools/magnetic_motor_example.py`: rated torque and phase linkage over an electrical period (DRIVE), no-load linkage and gap B_r, cogging over a cogging period. The whole machine (PAIRGAP; FEMM periodic AGE) and its anti-periodic half (MPERIOD ANTI; FEMM anti-periodic boundaries and AGE). |
+
+```sh
+.venv/bin/python Magnetic_Validation/run_xfemm.py /tmp/xfemm-comparison \
+  --femm-host user@host --femmcli ~/xfemm-patched/cfemm/bin/femmcli
+.venv/bin/python Magnetic_Validation/run_xfemm.py /tmp/xfemm-comparison --report-only
+```
+
+The Python side needs gmsh, h5py, numpy and matplotlib; femmcli runs over ssh on
+`--femm-host`. The run writes `results.json`, `summary.md` (every state, both
+levels, each solver's refinement change) and `core.png` / `motor.png`. Most
+of the run time is FEMM's 312 nonlinear motor solves.
+
+### xfemm needs `xfemm-validation.patch`
+
+The run uses xfemm with the two fixes in `xfemm-validation.patch`:
+
+- `CMMaterialProp`'s constructor leaves `MuMax` uninitialized, and its copy
+  constructor drops it. The post-processor reads `MuMax > 0` as "incremental
+  permeability", so `mi_loadsolution` segfaults or uses the wrong
+  permeability, depending on what the memory held.
+- `mo_getgapb` pushes B_r and B_t but returns 1, so Lua gets only B_t.
+
+`mo_getgapb` also returns the air-gap field scaled by 1/100, while
+`mo_gapintegral` torque is right. That is not patched; the runner does not use
+`mo_getgapb`.
+
+Drawing the FEMM motor also has a requirement. FEMM's air-gap element assumes
+equally spaced nodes on both circles, the same number on each, and it gives
+every AGE arc one side length. A circle made of arcs of unequal span (magnet
+faces and interpoles, or tooth faces and slot openings) breaks that
+assumption. The two rings then misregister: no-load torque came out at 1.7 N m
+where it should be zero. The FEMM drawing therefore meshes air rings over the
+outer and inner thirds of the gap and puts the AGE between two whole circles.
+This is the usual FEMM practice, and the field problem is unchanged. vibestran
+keeps its air-gap element over the whole gap. Gap B_r is sampled in the middle
+of the stator-side ring (r = 30.33 mm) in both solvers.
+
+### Results
+
+Fine mesh: vibestran 68.7k / FEMM 29.7k triangles for the core, 90.7k / 62.3k
+for the whole motor. Differences are vibestran against FEMM.
+
+| case | quantity | vibestran | FEMM | difference | coarse to fine, vibestran / FEMM |
+|---|---|---:|---:|---:|---:|
+| core, linear, 2 A | linkage (Wb-turn) | 0.074061 | 0.07388 | +0.24% | +0.34% / +0.50% |
+| | armature F_y (N) | -31.333 | -31.338 | +0.01% | -0.37% / -0.39% |
+| core, steel, 8 A | armature F_y (N) | -557.9 | -557.96 | +0.01% | -0.29% / -0.33% |
+| core, steel, 16 A | linkage (Wb-turn) | 0.53655 | 0.53696 | -0.08% | +0.36% / +0.92% |
+| | armature F_y (N) | -1659.5 | -1671.3 | +0.71% | -0.48% / -1.54% |
+| | gap \|B\| (T) | 1.1367 | 1.1405 | -0.33% | +0.19% / +0.74% |
+| magnet, 0 A | linkage (Wb-turn) | 0.27378 | 0.27403 | -0.09% | -0.69% / -0.30% |
+| | armature F_y (N) | -420.12 | -422.37 | +0.53% | +1.57% / +1.06% |
+| magnet, -4 A | armature F_y (N) | -312.01 | -314.28 | +0.72% | +2.54% / +1.56% |
+| motor, whole | rated mean torque (N m) | 4.8888 | 4.8893 | -0.01% | -0.08% / -0.07% |
+| | rated phase A linkage, fundamental (Wb-turn) | 0.050404 | 0.050402 | +0.00% | +0.10% / +0.05% |
+| | no-load phase A linkage, fundamental (Wb-turn) | 0.047373 | 0.047378 | -0.01% | -0.04% / -0.05% |
+| | no-load gap B_r, 7th harmonic (T) | 0.96697 | 0.9659 | +0.11% | +0.09% / +0.20% |
+| | cogging torque, peak to peak (N m) | 0.052199 | 0.053057 | -1.62% | -16.2% / -7.3% |
+
+- The core and motor agree to a few tenths of a percent or better. The
+  difference is about the size of each solver's own coarse-to-fine change, and
+  the difference shrinks with refinement. In the motor, the largest pointwise
+  difference over the sweeps is 0.13% of the rated torque and 0.03% of the
+  linkage at the fine level.
+- The 16 A point in deep saturation differs by 0.7% in force, while FEMM moves
+  1.5% between levels.
+- The magnet case's mesh refines only near the air gap, not at the magnet's
+  corners. Its force changes 1.6-2.5% between levels in vibestran and 1.1-1.6%
+  in FEMM, and the two differ by 0.4-0.7% at the fine level.
+- Cogging torque is the least converged quantity. At the coarse level the two
+  solvers differ by 9%; at the fine level by 1.6%. vibestran's value moves 16%
+  between levels, against FEMM's 7%, so vibestran's coarse mesh overestimates
+  cogging more.
+- Sector models agree with the whole machine in each solver, on their own
+  meshes. vibestran's half model against its whole: torque, linkage and gap
+  B_r within 0.002%, cogging 0.1%. FEMM's: within 0.006%, cogging 1%.
+- FEMM's half-model circuits hold only the modeled half of each phase's coils,
+  so its linkage is doubled for the comparison. vibestran's sector results are
+  already the whole machine's.
+
+These are planar comparisons of the same 2D problem. They do not cover end
+effects or the 3D formulation.

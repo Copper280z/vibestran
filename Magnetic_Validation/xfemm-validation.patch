@@ -1,0 +1,36 @@
+diff --git a/cfemm/femmcli/LuaMagneticsCommands.cpp b/cfemm/femmcli/LuaMagneticsCommands.cpp
+index 6ccb3d8..7ef9e81 100644
+--- a/cfemm/femmcli/LuaMagneticsCommands.cpp
++++ b/cfemm/femmcli/LuaMagneticsCommands.cpp
+@@ -2683,7 +2683,7 @@ int femmcli::LuaMagneticsCommands::luaGetGapB(lua_State *L)
+     lua_pushnumber(L,br);
+     lua_pushnumber(L,bt);
+ 
+-	return 1;
++	return 2;
+ 
+ }
+ 
+diff --git a/cfemm/libfemm/CMaterialProp.cpp b/cfemm/libfemm/CMaterialProp.cpp
+index 9aeaa03..07ca627 100644
+--- a/cfemm/libfemm/CMaterialProp.cpp
++++ b/cfemm/libfemm/CMaterialProp.cpp
+@@ -85,6 +85,7 @@ CMMaterialProp::CMMaterialProp()
+     , WireD(0)
+     , mu_fdx()
+     , mu_fdy()
++    , MuMax(0.)
+     , Frequency(0.)
+ {
+ }
+@@ -118,6 +119,10 @@ CMMaterialProp::CMMaterialProp( const CMMaterialProp& other )
+     WireD = other.WireD;
+     LamFill = other.LamFill;            // lamination fill factor;
+     LamType = other.LamType;            // type of lamination;
++    MuMax = other.MuMax;
++    Frequency = other.Frequency;
++    mu_fdx = other.mu_fdx;
++    mu_fdy = other.mu_fdy;
+ }
+ 
+ void CMMaterialProp::clearSlopes()
