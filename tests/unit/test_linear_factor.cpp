@@ -1,13 +1,16 @@
 // tests/unit/test_linear_factor.cpp
 // SolverBackend::factor(): factor/solve separation, multiple right-hand
-// sides, symbolic reuse across refactor(), the require_spd guarantee, and the
-// default adapter for backends without a reusable factorization.
+// sides, symbolic reuse across refactor(), the require_spd guarantee, the
+// dense_block ordering, and the default adapter for backends without a
+// reusable factorization.
 
 #include <gtest/gtest.h>
 #include "core/exceptions.hpp"
 #include "solver/solver_backend.hpp"
+#include "dense_block_system.hpp"
 #include <Eigen/Dense>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 
 using namespace vibestran;
@@ -211,6 +214,40 @@ TEST(LinearFactor, RequireSpdRejectsIndefiniteMatricesWithoutFallback) {
     EXPECT_TRUE(method.find("ldlt") != std::string_view::npos || method == "cholmod")
         << method;
     EXPECT_LT(relative_error(solved(factor->solve(columns(s.B), 1)), s.X), 1e-10);
+}
+
+TEST(LinearFactor, DenseBlockOrdersWithMinimumDegree) {
+    // 2500 unknowns, 600 of them coupled densely: above CHOLMOD's dense-row
+    // threshold 10 sqrt(n) = 500, where its AMD fill estimate (600 rows x
+    // 2500 columns) sends the default analysis to METIS.
+    const Eigen::MatrixXd A = test::gap_like(50, 600);
+    const System s = system_for(A, 2);
+    EigenSolverBackend backend;
+
+    auto plain = take(backend.factor(to_csr(A), {.require_spd = true}));
+    auto dense = take(backend.factor(to_csr(A), {.require_spd = true, .dense_block = true}));
+    ASSERT_TRUE(plain && dense);
+    // Accelerate defaults to METIS, and CHOLMOD picks it here on the
+    // misjudged estimate; with dense_block both order with AMD. A set
+    // VIBESTRAN_ACCELERATE_ORDER overrides either choice.
+    if (std::getenv("VIBESTRAN_ACCELERATE_ORDER") == nullptr) {
+#if defined(HAVE_ACCELERATE) || defined(EIGEN_CHOLMOD_SUPPORT)
+        EXPECT_EQ(plain->ordering(), "metis");
+#endif
+        EXPECT_EQ(dense->ordering(), "amd");
+    }
+    // cond(A) is about 87, so either ordering solves to ~1e-14.
+    EXPECT_LT(relative_error(solved(plain->solve(columns(s.B), 2)), s.X), 1e-11);
+    EXPECT_LT(relative_error(solved(dense->solve(columns(s.B), 2)), s.X), 1e-11);
+
+    // The ordering is part of the analysis that new values reuse.
+    const Eigen::MatrixXd A2 = 2.0 * A + Eigen::MatrixXd::Identity(A.rows(), A.cols());
+    const System s2 = system_for(A2, 1);
+    ASSERT_FALSE(dense->refactor(to_csr(A2)));
+    EXPECT_LT(relative_error(solved(dense->solve(columns(s2.B), 1)), s2.X), 1e-11);
+    EXPECT_EQ(dense->stats().symbolic_analyses, 1);
+    if (std::getenv("VIBESTRAN_ACCELERATE_ORDER") == nullptr)
+        EXPECT_EQ(dense->ordering(), "amd");
 }
 
 TEST(LinearFactor, FailedRefactorCannotReturnTheOldSolution) {

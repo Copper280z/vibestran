@@ -1,11 +1,12 @@
 // tests/unit/test_cuda_factor.cpp
 // CudaSolverBackend::factor(): cuDSS analysis reuse, multiple right-hand
-// sides, require_spd, recovery after a failed factorization, the LU
-// fallback, fp32 refinement with its switch to fp64, and MAGSTAT on cuDSS.
+// sides, require_spd, recovery after a failed factorization, the dense_block
+// ordering, the LU fallback, fp32 refinement with its switch to fp64, and MAGSTAT on cuDSS.
 
 #include <gtest/gtest.h>
 #include "solver/solver_backend.hpp"
 #include "hilbert_system.hpp"
+#include "dense_block_system.hpp"
 #ifdef HAVE_CUDA
 #include "solver/cuda_solver_backend.hpp"
 #include "magnetic/solver.hpp"
@@ -143,6 +144,26 @@ TEST_F(CudaFactorTest, RefactorReusesTheAnalysisAndUsesTheNewValues) {
     ASSERT_FALSE(factor->refactor(to_csr(A3)));
     EXPECT_LT(relative_error(solved(factor->solve(columns(A3 * X), 2)), X), 1e-12);
     EXPECT_EQ(factor->stats().symbolic_analyses, 3);
+}
+
+TEST_F(CudaFactorTest, DenseBlockOrdersWithMinimumDegree) {
+    const Eigen::MatrixXd A = test::gap_like(50, 600);
+    const Eigen::MatrixXd X = solution(A.rows(), 2);
+    const Eigen::MatrixXd B = A * X;
+    auto plain = take(backend_->factor(to_csr(A), {.require_spd = true}));
+    auto dense = take(backend_->factor(to_csr(A), {.require_spd = true, .dense_block = true}));
+    ASSERT_TRUE(plain && dense);
+    EXPECT_EQ(plain->ordering(), "nested dissection");
+    EXPECT_EQ(dense->ordering(), "amd");
+    // cond(A) is about 87.
+    EXPECT_LT(relative_error(solved(plain->solve(columns(B), 2)), X), 1e-11);
+    EXPECT_LT(relative_error(solved(dense->solve(columns(B), 2)), X), 1e-11);
+    // New values reuse the AMD analysis.
+    const Eigen::MatrixXd A2 = 2.0 * A + Eigen::MatrixXd::Identity(A.rows(), A.cols());
+    const Eigen::MatrixXd B2 = A2 * X;
+    ASSERT_FALSE(dense->refactor(to_csr(A2)));
+    EXPECT_LT(relative_error(solved(dense->solve(columns(B2), 2)), X), 1e-11);
+    EXPECT_EQ(dense->stats().symbolic_analyses, 1);
 }
 
 TEST_F(CudaFactorTest, RequireSpdFailureIsReportedAndRecoverable) {

@@ -32,6 +32,14 @@ struct FactorOptions {
     /// PARAM,MAXRATIO check of the factor diagonal, applied where the backend
     /// can inspect it. Copied by factor(); it need not outlive the call.
     const FactorRatioCheckPolicy* factor_ratio_policy{nullptr};
+    /// The matrix holds a dense block, rows coupled to thousands of others
+    /// (an air gap's harmonic coupling), so direct backends order with
+    /// minimum degree, which eliminates the block last. Nested dissection
+    /// (METIS) cuts through the sparse rest and roughly triples the factor's
+    /// work. CHOLMOD also stops setting dense rows aside in AMD: it then
+    /// estimates AMD's fill as if every such row filled across all columns
+    /// and falls back to METIS.
+    bool dense_block{false};
 };
 
 /// Work done by a LinearFactor since it was created.
@@ -66,6 +74,10 @@ public:
 
     /// The factorization in use, e.g. "accelerate-llt" or "simplicial-ldlt".
     [[nodiscard]] virtual std::string_view method() const noexcept = 0;
+
+    /// The fill-reducing ordering of the last symbolic analysis, e.g. "amd"
+    /// or "metis"; empty where the factor does not order (an adapter).
+    [[nodiscard]] virtual std::string_view ordering() const noexcept { return {}; }
 
     [[nodiscard]] virtual FactorStats stats() const noexcept = 0;
 };

@@ -210,6 +210,14 @@ On macOS, the Accelerate sparse ordering can be selected with:
 VIBESTRAN_ACCELERATE_ORDER=metis vibestran --backend=cpu model.bdf
 ```
 
+The default is METIS, except for a MAGSTAT model with an air-gap element
+(PAIRGAP AGE), whose dense block every direct backend orders with minimum
+degree (AMD): nested dissection cuts through the sparse rest and roughly
+triples the factorization's work. CHOLMOD also stops setting the block's
+dense rows aside in AMD, which otherwise inflates AMD's fill estimate and
+makes CHOLMOD pick METIS; cuDSS uses its AMD reordering. The F06 header's
+Ordering row reports the ordering a MAGSTAT solve used.
+
 ### CPU — PCG
 
 Eigen Preconditioned Conjugate Gradient with Incomplete Cholesky preconditioning.

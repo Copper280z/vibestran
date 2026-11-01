@@ -32,7 +32,10 @@ using Triplet = Eigen::Triplet<double>;
 // a gauge, mesh or material error, never a reason to fall back to LDLT.
 class Tangent {
 public:
-  explicit Tangent(SolverBackend &backend) : backend_(backend) {}
+  // dense_block: the model has an air gap, whose harmonic coupling is a
+  // dense block in every tangent (FactorOptions::dense_block).
+  Tangent(SolverBackend &backend, bool dense_block)
+      : backend_(backend), dense_block_(dense_block) {}
   Status factor(const Sparse &stiffness) {
     const Eigen::SparseMatrix<double, Eigen::RowMajor> lower =
         stiffness.triangularView<Eigen::Lower>();
@@ -55,10 +58,12 @@ public:
     ++analyses_;
     FactorOptions options;
     options.require_spd = true;
+    options.dense_block = dense_block_;
     auto made = backend_.factor(csr, options);
     if (auto *e = std::get_if<Error>(&made))
       return *e;
     factor_ = std::get<std::unique_ptr<LinearFactor>>(std::move(made));
+    ordering_ = factor_->ordering();
     return {};
   }
   // Solves for every column of rhs with the last factorization.
@@ -77,6 +82,8 @@ public:
     return out;
   }
 
+  // The last analysis's fill-reducing ordering; empty for an adapter.
+  [[nodiscard]] const std::string &ordering() const { return ordering_; }
   // Work done so far, for the F06 header.
   [[nodiscard]] std::string usage() const {
     return std::format("{} symbolic {}, {} numeric {}, {} right-hand {}",
@@ -88,8 +95,10 @@ public:
 
 private:
   SolverBackend &backend_;
+  bool dense_block_;
   std::unique_ptr<LinearFactor> factor_;
   std::vector<int> row_ptr_, col_ind_; // pattern of factor_
+  std::string ordering_;
   int analyses_{0}, factorizations_{0}, right_hand_sides_{0};
 };
 struct Assembly {
@@ -1479,7 +1488,7 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
   result.summary.solver = solver_section(backend);
   result.summary.solver.set("Indefinite fallback",
                             "none, positive definite required");
-  Tangent tangent(backend);
+  Tangent tangent(backend, !base.gap.nodes.empty());
   // THETA0 AUTO results by DRIVE, MOTION and MBC.
   std::map<std::tuple<int, int, int>, DriveSummary> alignments;
   // The setups of MBCs with NORMAL faces, whose gauge leaves them free.
@@ -1653,6 +1662,8 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
     collect_notices(result.summary, notices.take(), context);
   }
   result.summary.solver.add("Tangent reuse", tangent.usage());
+  if (!tangent.ordering().empty())
+    result.summary.solver.set("Ordering", tangent.ordering());
   auto &owned = std::get<Setup>(prepared);
   result.mesh = std::move(owned.mesh);
   result.sources = std::move(owned.sources);

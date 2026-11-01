@@ -669,14 +669,13 @@ public:
 
   CudssProblem(cudssHandle_t handle, const CsrData &storage,
                cudssMatrixType_t mtype, cudssMatrixViewType_t mview,
-               std::string label)
+               cudssAlgType_t reorder_alg, std::string label)
       : handle_(handle), data_(handle), n_(storage.n), nnz_(storage.nnz),
         label_(std::move(label)), row_ptr_(static_cast<std::size_t>(n_) + 1),
         col_ind_(static_cast<std::size_t>(nnz_)),
         values_(static_cast<std::size_t>(nnz_)) {
     row_ptr_.upload(storage.row_ptr.data(), static_cast<std::size_t>(n_) + 1);
     col_ind_.upload(storage.col_ind.data(), static_cast<std::size_t>(nnz_));
-    cudssAlgType_t reorder_alg = CUDSS_ALG_DEFAULT;
     cudssConfigSet(cfg_.cfg, CUDSS_CONFIG_REORDERING_ALG, &reorder_alg,
                    sizeof(reorder_alg));
     check_cudss(cudssMatrixCreateCsr(&A_.mat, n_, n_, nnz_, row_ptr_.ptr,
@@ -828,8 +827,11 @@ private:
 /// while the sparsity pattern is unchanged.
 template <typename Scalar> class CudssSystem {
 public:
-  CudssSystem(cudssHandle_t handle, bool require_spd, Notices &notices)
-      : handle_(handle), require_spd_(require_spd), notices_(notices) {}
+  CudssSystem(cudssHandle_t handle, const FactorOptions &options, Notices &notices)
+      : handle_(handle), require_spd_(options.require_spd),
+        // ALG_3 is approximate minimum degree; the default is nested dissection.
+        reorder_alg_(options.dense_block ? CUDSS_ALG_3 : CUDSS_ALG_DEFAULT),
+        notices_(notices) {}
 
   [[nodiscard]] Status factor(const CsrData &K, FactorStats &stats) {
     if (!same_pattern(K)) {
@@ -849,7 +851,8 @@ public:
     const bool analyze_spd = !spd_;
     if (analyze_spd)
       spd_ = std::make_unique<CudssProblem<Scalar>>(
-          handle_, *lower, CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER, "Cholesky" + suffix());
+          handle_, *lower, CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER, reorder_alg_,
+          "Cholesky" + suffix());
     spd_->load(lower->values);
     if (analyze_spd) {
       spd_->analyze();
@@ -875,7 +878,8 @@ public:
     const bool analyze_lu = !lu_;
     if (analyze_lu)
       lu_ = std::make_unique<CudssProblem<Scalar>>(
-          handle_, *full, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, "LU" + suffix());
+          handle_, *full, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, reorder_alg_,
+          "LU" + suffix());
     lu_->load(full->values);
     if (analyze_lu) {
       lu_->analyze();
@@ -917,6 +921,7 @@ private:
 
   cudssHandle_t handle_;
   bool require_spd_;
+  cudssAlgType_t reorder_alg_;
   Notices &notices_;
   int n_{0};
   bool lower_only_{false};
@@ -927,19 +932,24 @@ private:
 
 class CudaFactor final : public LinearFactor {
 public:
-  CudaFactor(cudssHandle_t handle, CudaSolverPrecision precision, bool require_spd,
-             Notices &notices)
-      : handle_(handle), require_spd_(require_spd), notices_(notices) {
+  CudaFactor(cudssHandle_t handle, CudaSolverPrecision precision,
+             const FactorOptions &options, Notices &notices)
+      : handle_(handle), require_spd_(options.require_spd), notices_(notices) {
+    system_options_.require_spd = options.require_spd;
+    system_options_.dense_block = options.dense_block;
     if (precision == CudaSolverPrecision::Float32)
-      fp32_ = std::make_unique<CudssSystem<float>>(handle, require_spd, notices);
+      fp32_ = std::make_unique<CudssSystem<float>>(handle, system_options_, notices);
     else
-      fp64_ = std::make_unique<CudssSystem<double>>(handle, require_spd, notices);
+      fp64_ = std::make_unique<CudssSystem<double>>(handle, system_options_, notices);
   }
 
   [[nodiscard]] int size() const noexcept override { return n_; }
   [[nodiscard]] FactorStats stats() const noexcept override { return stats_; }
   [[nodiscard]] std::string_view method() const noexcept override {
     return fp32_ ? fp32_->method() : fp64_->method();
+  }
+  [[nodiscard]] std::string_view ordering() const noexcept override {
+    return system_options_.dense_block ? "amd" : "nested dissection";
   }
 
   [[nodiscard]] Status refactor(const CsrData &K) override {
@@ -975,7 +985,8 @@ public:
       }
       if (!status) {
         ready_ = true;
-        vibestran::log_debug("[cuda] factor: " + std::string(method()) +
+        vibestran::log_debug("[cuda] factor: " + std::string(method()) + ", order=" +
+                             std::string(ordering()) +
                              ", n=" + std::to_string(K.n) + ", nnz=" +
                              std::to_string(K.nnz) + ", symbolic analyses " +
                              std::to_string(stats_.symbolic_analyses));
@@ -1022,7 +1033,7 @@ public:
 
 private:
   void switch_to_fp64() {
-    fp64_ = std::make_unique<CudssSystem<double>>(handle_, require_spd_, notices_);
+    fp64_ = std::make_unique<CudssSystem<double>>(handle_, system_options_, notices_);
     fp32_.reset();
     K_ = CsrData{};
   }
@@ -1053,6 +1064,7 @@ private:
 
   cudssHandle_t handle_;
   bool require_spd_;
+  FactorOptions system_options_; // without the MAXRATIO policy, which cuDSS skips
   Notices &notices_;
   int n_{0};
   bool ready_{false};
@@ -1069,8 +1081,8 @@ CudaSolverBackend::factor(const SparseMatrixBuilder::CsrData &K,
                           const FactorOptions &options) {
   if (options.factor_ratio_policy != nullptr)
     vibestran::log_debug("[cuda] factor(): MAXRATIO is not checked by the cuDSS factor");
-  auto factor = std::make_unique<CudaFactor>(ctx_->cudss, ctx_->precision,
-                                             options.require_spd, notices());
+  auto factor = std::make_unique<CudaFactor>(ctx_->cudss, ctx_->precision, options,
+                                             notices());
   if (auto e = factor->refactor(K))
     return *e;
   return std::unique_ptr<LinearFactor>(std::move(factor));

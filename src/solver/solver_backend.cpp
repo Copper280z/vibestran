@@ -123,10 +123,13 @@ struct AccelerateOrderConfig {
   const char *label;
 };
 
-AccelerateOrderConfig accelerate_order_config() {
+// VIBESTRAN_ACCELERATE_ORDER, when set, overrides the choice for a dense
+// block (FactorOptions::dense_block).
+AccelerateOrderConfig accelerate_order_config(bool dense_block = false) {
   const char *env = std::getenv("VIBESTRAN_ACCELERATE_ORDER");
   if (env == nullptr || env[0] == '\0')
-    return {SparseOrderMetis, "metis"};
+    return dense_block ? AccelerateOrderConfig{SparseOrderAMD, "amd"}
+                       : AccelerateOrderConfig{SparseOrderMetis, "metis"};
   if (std::strcmp(env, "default") == 0)
     return {SparseOrderDefault, "default"};
   if (std::strcmp(env, "amd") == 0)
@@ -144,6 +147,28 @@ using DirectLDLT = Eigen::AccelerateLDLT<ESM>;
 constexpr const char *kLdltLabel = "accelerate-ldlt";
 #else
 using DirectLDLT = Eigen::SimplicialLDLT<ESM>;
+#if defined(EIGEN_CHOLMOD_SUPPORT)
+const char *cholmod_order_label(int ordering) {
+  switch (ordering) {
+  case CHOLMOD_NATURAL:
+    return "natural";
+  case CHOLMOD_GIVEN:
+    return "given";
+  case CHOLMOD_AMD:
+    return "amd";
+  case CHOLMOD_METIS:
+    return "metis";
+  case CHOLMOD_NESDIS:
+    return "nesdis";
+  case CHOLMOD_COLAMD:
+    return "colamd";
+  case CHOLMOD_POSTORDERED:
+    return "postordered";
+  default:
+    return "unknown";
+  }
+}
+#endif
 constexpr const char *kLdltLabel = "simplicial-ldlt";
 #endif
 
@@ -159,15 +184,31 @@ public:
     if (options.factor_ratio_policy != nullptr)
       policy_ = *options.factor_ratio_policy;
 #if defined(HAVE_ACCELERATE)
-    const auto order = accelerate_order_config();
+    const auto order = accelerate_order_config(options.dense_block);
     order_ = order.order;
     order_label_ = order.label;
     llt_.setOrder(order_);
+#elif defined(EIGEN_CHOLMOD_SUPPORT)
+    if constexpr (kCholmod)
+      if (options.dense_block)
+        for (auto &method : llt_.cholmod().method)
+          method.prune_dense = -1;
 #endif
   }
 
   [[nodiscard]] int size() const noexcept override { return n_; }
   [[nodiscard]] std::string_view method() const noexcept override { return label_; }
+  [[nodiscard]] std::string_view ordering() const noexcept override {
+#if defined(HAVE_ACCELERATE)
+    return order_label_;
+#elif defined(EIGEN_CHOLMOD_SUPPORT)
+    if constexpr (kCholmod)
+      return order_label_;
+    return "amd"; // Eigen's simplicial default, AMDOrdering
+#else
+    return "amd";
+#endif
+  }
   [[nodiscard]] FactorStats stats() const noexcept override { return stats_; }
 
   [[nodiscard]] Status refactor(const CsrData &K) override {
@@ -195,6 +236,14 @@ public:
       llt_.analyzePattern(A);
       ++stats_.symbolic_analyses;
       llt_analyzed_ = llt_.info() == Eigen::Success;
+#if defined(EIGEN_CHOLMOD_SUPPORT) && !defined(HAVE_ACCELERATE)
+      if constexpr (kCholmod) {
+        const auto &common = llt_.cholmod();
+        order_label_ = common.selected >= 0
+                           ? cholmod_order_label(common.method[common.selected].ordering)
+                           : "unknown";
+      }
+#endif
     }
     bool factored = false;
     if (llt_analyzed_) {
@@ -313,11 +362,7 @@ private:
   }
 
   [[nodiscard]] std::string order_text() const {
-#if defined(HAVE_ACCELERATE)
-    return std::format("order={}, ", order_label_);
-#else
-    return {};
-#endif
+    return std::format("order={}, ", ordering());
   }
 
   bool require_spd_;
@@ -328,6 +373,10 @@ private:
 #if defined(HAVE_ACCELERATE)
   SparseOrder_t order_{SparseOrderMetis};
   const char *order_label_{"metis"};
+#elif defined(EIGEN_CHOLMOD_SUPPORT)
+  static constexpr bool kCholmod =
+      std::is_base_of_v<Eigen::CholmodBase<ESM, Eigen::Lower, Primary>, Primary>;
+  const char *order_label_{"unknown"}; // CHOLMOD's choice at the last analysis
 #endif
   int n_{0};
   bool lower_only_{false};
