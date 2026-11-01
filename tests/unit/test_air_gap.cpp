@@ -161,6 +161,34 @@ TEST(AirGapStiffness, UniformFieldEnergyAndGapFieldConvergeAtSecondOrder) {
   EXPECT_LT(previous_field, 4e-3);
 }
 
+TEST(AirGapStiffness, FinerCircleKeepsTheStiffnessOfWavelengthsTheCoarserCannotResolve) {
+  // The outer circle carries harmonic 40, which it resolves (1024 grids)
+  // and inner circles of 16 to 64 grids cannot; the inner trace is zero.
+  // With the inner circle held at zero the annulus energy is the outer
+  // self term alone, pi n / (2 mu0) coth(n L) per unit amplitude squared,
+  // whatever the inner circle's grid count. Cutting the sum at the coarser
+  // circle's resolution (half its grid count, NHARM's old blank) gave the
+  // outer circle no stiffness at all at this wavelength, and a motor mesh
+  // graded toward the stator 5.5% too much cogging.
+  const double r1 = .02, r2 = .021, l = std::log(r2 / r1);
+  const int n = 40;
+  const double exact = pi * n / (2 * mu0) / std::tanh(n * l);
+  std::vector<double> energies;
+  for (int inner : {16, 32, 64}) {
+    SCOPED_TRACE(inner);
+    const AirGap g = direct_gap(r1, r2, inner, 1024);
+    ASSERT_GT(2 * n, inner);
+    const Eigen::VectorXd a = sample(g, [&](const Vector &x) {
+      return x.head<2>().norm() < (r1 + r2) / 2 ? 0. : std::cos(n * std::atan2(x.y(), x.x()));
+    });
+    energies.push_back(.5 * a.dot(air_gap_stiffness(g) * a));
+    // The piecewise-linear trace of cos(40 t) on 1024 graded grids is 1.1%
+    // short of the exact energy.
+    EXPECT_NEAR(energies.back(), exact, 2e-2 * exact);
+    EXPECT_NEAR(energies.back(), energies.front(), 1e-12 * exact);
+  }
+}
+
 TEST(AirGapStiffness, PotentialIsTheSeriesWhoseCurlIsTheGapField) {
   // A harmonic potential with a mean (log) term, a growing and a decaying
   // harmonic: A = b0 [r1 ln(r/r1) + (x^2 - y^2) / (2 r1) + r1^2 y / r^2].
@@ -471,7 +499,8 @@ TEST(AirGapRegion, BuildsTheAnnulusFromThePairgapElements) {
   EXPECT_EQ(gap.inner.nodes.size(), 48U);
   EXPECT_EQ(gap.outer.nodes.size(), 72U);
   EXPECT_EQ(gap.faces.size(), 120U);
-  EXPECT_EQ(gap.harmonics, 24);
+  // Blank NHARM: half the finer circle's grid count.
+  EXPECT_EQ(gap.harmonics, 36);
   EXPECT_LT(gap.deviation, 1e-12);
   // The polygon of the rotor's edges comes no closer to the center than
   // the midpoint of its widest chord.
@@ -833,8 +862,9 @@ TEST(AirGapSolve, MagnetizedRotorMatchesTheAnalyticFieldAtSecondOrder) {
                                        div * 5 / 2)),
               std::string::npos)
         << rows[0];
-    EXPECT_NE(rows[0].find(std::format("{} + {} grids, {} harmonics", div, div * 3 / 2,
-                                       div / 2)),
+    EXPECT_NE(rows[0].find(std::format("{} + {} grids, {} coupled harmonics, {} on the "
+                                       "finer circle",
+                                       div, div * 3 / 2, div / 2, div * 3 / 4)),
               std::string::npos)
         << rows[0];
   }
@@ -1163,7 +1193,7 @@ TEST(AirGapSolve, ResultsRecordTheGap) {
               g.rotor, 1e-15);
   EXPECT_NEAR(vibestran::test::h5_attribute(file, "/MAGSTAT/air_gap", "outer_radius_m"),
               g.gap_outer, 1e-15);
-  EXPECT_EQ(vibestran::test::h5_attribute(file, "/MAGSTAT/air_gap", "harmonics"), 20);
+  EXPECT_EQ(vibestran::test::h5_attribute(file, "/MAGSTAT/air_gap", "harmonics"), 30);
   // Grid IDs in angle order: the deck's own IDs, so a user can find them.
   const auto inner = vibestran::test::h5_table(file, "/MAGSTAT/air_gap/inner_grids");
   const auto outer = vibestran::test::h5_table(file, "/MAGSTAT/air_gap/outer_grids");
@@ -1179,7 +1209,8 @@ TEST(AirGapSolve, ResultsRecordTheGap) {
   EXPECT_NE(f06.str().find("   Air gap .................. PAIRGAP 9, air-gap element (AGE) "
                            "in place of its 100 elements: radius 0.02 to 0.021 m about "
                            "(0, 0, 0),\n"
-                           "                              40 + 60 grids, 20 harmonics"),
+                           "                              40 + 60 grids, 20 coupled harmonics, "
+                           "30 on the finer circle"),
             std::string::npos)
       << f06.str();
   std::filesystem::remove_all(directory);

@@ -194,7 +194,7 @@ enum class WireMesh { Auto, Hex, Tet };
 enum class AirGapMethod { Age, Band, Mesh };
 struct AirGapProperty {
   AirGapMethod method{AirGapMethod::Age};
-  int harmonics{0}; // NHARM; 0 for half the coarser circle's grid count
+  int harmonics{0}; // NHARM, the reported gap field's; 0 for half the finer circle's grid count
   int band_points{0}; // NBAND; 0 for the finer circle's grid count
   int band_layers{0}; // NLAYER; 0 for about square band elements
 };

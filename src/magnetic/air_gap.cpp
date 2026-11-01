@@ -143,17 +143,23 @@ int prime_at_least(int n) {
   }
 }
 
-Harmonics coefficients(const AirGap &gap, const Eigen::VectorXd &a) {
+Harmonics coefficients(const AirGap &gap, const Eigen::VectorXd &a, int harmonics) {
   auto values = [&a](const GapCircle &c) {
     Eigen::VectorXd out(static_cast<Eigen::Index>(c.nodes.size()));
     for (size_t k = 0; k < c.nodes.size(); ++k)
       out[static_cast<Eigen::Index>(k)] = c.sign[k] * a[c.nodes[k]];
     return out;
   };
-  return {gap_transform(gap.inner, gap.harmonics) * values(gap.inner),
-          gap_transform(gap.outer, gap.harmonics) * values(gap.outer)};
+  return {gap_transform(gap.inner, harmonics) * values(gap.inner),
+          gap_transform(gap.outer, harmonics) * values(gap.outer)};
 }
 } // namespace
+
+int own_harmonics(const GapCircle &c) { return static_cast<int>(c.nodes.size() / 2); }
+
+int coupled_harmonics(const AirGap &gap) {
+  return std::min(own_harmonics(gap.inner), own_harmonics(gap.outer));
+}
 
 Result<AirGap> make_air_gap(const Mesh &mesh, const Model &model, int pid) {
   AirGap gap;
@@ -360,8 +366,7 @@ Result<AirGap> make_air_gap(const Mesh &mesh, const Model &model, int pid) {
                                   gap.inner.angles[k]);
   gap.inner_chord = gap.inner.radius * std::cos(std::min(widest, pi) / 2);
 
-  const auto coarse = std::min(gap.inner.nodes.size(), gap.outer.nodes.size()),
-             fine = std::max(gap.inner.nodes.size(), gap.outer.nodes.size());
+  const auto fine = std::max(gap.inner.nodes.size(), gap.outer.nodes.size());
   const AirGapProperty &property = model.air_gaps.at(pid);
   if (model.options.air_gap_method.value_or(property.method) == AirGapMethod::Band) {
     // Blank NBAND: per sector, the smallest prime count of at least the
@@ -397,7 +402,7 @@ Result<AirGap> make_air_gap(const Mesh &mesh, const Model &model, int pid) {
         "PAIRGAP {}: NHARM {} exceeds half the grid count of the finer circle "
         "({} grids), beyond which neither circle resolves a harmonic",
         pid, requested, fine)};
-  gap.harmonics = requested > 0 ? requested : static_cast<int>(coarse / 2);
+  gap.harmonics = requested > 0 ? requested : static_cast<int>(fine / 2);
   return gap;
 }
 
@@ -430,14 +435,25 @@ Eigen::MatrixXd gap_transform(const GapCircle &c, int harmonics) {
 }
 
 Eigen::MatrixXd air_gap_stiffness(const AirGap &gap) {
-  const int h = gap.harmonics;
-  const Eigen::MatrixXd ti = gap_transform(gap.inner, h),
-                        to = gap_transform(gap.outer, h);
+  // Each circle's self terms run to the harmonics its own trace resolves;
+  // the coupling runs to the coarser circle's. A self term |alpha_m|^2 is
+  // the same at any turn of its circle, but the coarser circle's content
+  // above its own resolution is an alias (harmonic n - m of a trace of n
+  // grids turns as m, not n - m), and coupling it would make a round rotor
+  // cog at its mesh pitch. Cutting the finer circle's self terms at the
+  // coarser circle's resolution instead (NHARM's old blank) left its
+  // shorter wavelengths with no gap stiffness, as if the gap were a free
+  // boundary to them: on a motor mesh graded toward the stator that raised
+  // the cogging torque 5.5%.
+  const int hi = own_harmonics(gap.inner), ho = own_harmonics(gap.outer),
+            hc = coupled_harmonics(gap), h = std::max(hi, ho);
+  const Eigen::MatrixXd ti = gap_transform(gap.inner, hi),
+                        to = gap_transform(gap.outer, ho);
   // Energy per unit depth of each harmonic (cos or sin) with amplitudes
   // alpha inside and beta outside is (1/2) [alpha beta] S [alpha beta]^T.
   // The mean term is ln-radial: S = 2 pi / (mu0 L) [1 -1; -1 1].
   const double log_ratio = std::log(gap.inner.radius / gap.outer.radius); // ln rho < 0
-  Eigen::VectorXd self(1 + 2 * h), mutual(1 + 2 * h);
+  Eigen::VectorXd self(1 + 2 * h), mutual(1 + 2 * hc);
   self[0] = -2 * pi / (mu0 * log_ratio);
   mutual[0] = -self[0];
   for (int m = 1; m <= h; ++m) {
@@ -445,15 +461,17 @@ Eigen::MatrixXd air_gap_stiffness(const AirGap &gap) {
         denominator = -std::expm1(2 * m * log_ratio), scale = pi * m / mu0;
     for (int row : {2 * m - 1, 2 * m}) {
       self[row] = scale * (1 + q * q) / denominator;
-      mutual[row] = -scale * 2 * q / denominator;
+      if (m <= hc)
+        mutual[row] = -scale * 2 * q / denominator;
     }
   }
-  const auto ni = ti.cols(), no = to.cols();
+  const Eigen::Index ni = ti.cols(), no = to.cols(), rc = 1 + 2 * hc;
   Eigen::MatrixXd k(ni + no, ni + no);
-  k.topLeftCorner(ni, ni) = ti.transpose() * self.asDiagonal() * ti;
-  k.topRightCorner(ni, no) = ti.transpose() * mutual.asDiagonal() * to;
+  k.topLeftCorner(ni, ni) = ti.transpose() * self.head(ti.rows()).asDiagonal() * ti;
+  k.topRightCorner(ni, no) =
+      ti.topRows(rc).transpose() * mutual.asDiagonal() * to.topRows(rc);
   k.bottomLeftCorner(no, ni) = k.topRightCorner(ni, no).transpose();
-  k.bottomRightCorner(no, no) = to.transpose() * self.asDiagonal() * to;
+  k.bottomRightCorner(no, no) = to.transpose() * self.head(to.rows()).asDiagonal() * to;
   return k;
 }
 
@@ -466,7 +484,12 @@ bool in_air_gap(const AirGap &gap, const Vector &x) {
 }
 
 AirGapSeries::AirGapSeries(const AirGap &gap, const Eigen::VectorXd &a) : gap_(&gap) {
-  auto [inner, outer] = coefficients(gap, a);
+  // Each circle's harmonics to its own resolution, at most NHARM: the
+  // stiffness's (above the coarser circle's, only the finer circle has any).
+  const int h = std::max(own_harmonics(gap.inner), own_harmonics(gap.outer));
+  auto [inner, outer] = coefficients(gap, a, h);
+  for (auto [c, values] : {std::pair{&gap.inner, &inner}, std::pair{&gap.outer, &outer}})
+    values->tail(2 * (h - std::min(own_harmonics(*c), gap.harmonics))).setZero();
   inner_ = std::move(inner);
   outer_ = std::move(outer);
 }
@@ -485,7 +508,7 @@ AirGapSeries::Point AirGapSeries::evaluate(const Vector &x) const {
                from_outer = total - from_inner;
   p.a = inner_[0] + (outer_[0] - inner_[0]) * from_inner / total;
   p.da_dr = (outer_[0] - inner_[0]) / (p.r * total);
-  for (int m = 1; m <= gap_->harmonics; ++m) {
+  for (int m = 1; 2 * m < inner_.size(); ++m) {
     // sinh(m y)/sinh(m L) and cosh(m y)/sinh(m L), y = from_outer, and the
     // same with from_inner, written to stay finite for large m L.
     const double den = -std::expm1(-2 * m * total),
@@ -521,10 +544,11 @@ double air_gap_torque(const AirGap &gap, const Eigen::VectorXd &a) {
   // m at rate (-m s, m c). Only the mutual term of W changes, by
   // m M_m (alpha_c beta_s - alpha_s beta_c) per radian, with M_m the mutual
   // coefficient of air_gap_stiffness.
-  const auto [alpha, beta] = coefficients(gap, a);
+  const int h = coupled_harmonics(gap);
+  const auto [alpha, beta] = coefficients(gap, a, h);
   const double log_ratio = std::log(gap.inner.radius / gap.outer.radius);
   double torque = 0;
-  for (int m = 1; m <= gap.harmonics; ++m) {
+  for (int m = 1; m <= h; ++m) {
     const double q = std::exp(m * log_ratio),
                  mutual = -pi * m / mu0 * 2 * q / -std::expm1(2 * m * log_ratio);
     torque -= m * mutual *
@@ -537,11 +561,12 @@ Eigen::VectorXd air_gap_torque_gradient(const AirGap &gap, const Eigen::VectorXd
   // The torque is bilinear in the two circles' harmonics: its derivative
   // with respect to alpha is linear in beta and the reverse, mapped back to
   // the grids through each circle's transform.
-  const auto [alpha, beta] = coefficients(gap, a);
+  const int h = coupled_harmonics(gap);
+  const auto [alpha, beta] = coefficients(gap, a, h);
   const double log_ratio = std::log(gap.inner.radius / gap.outer.radius);
   Eigen::VectorXd d_alpha = Eigen::VectorXd::Zero(alpha.size()),
                   d_beta = Eigen::VectorXd::Zero(beta.size());
-  for (int m = 1; m <= gap.harmonics; ++m) {
+  for (int m = 1; m <= h; ++m) {
     const double q = std::exp(m * log_ratio),
                  rate = -m * (-pi * m / mu0 * 2 * q / -std::expm1(2 * m * log_ratio));
     const int c = 2 * m - 1, s = 2 * m;
@@ -554,7 +579,7 @@ Eigen::VectorXd air_gap_torque_gradient(const AirGap &gap, const Eigen::VectorXd
   for (const auto &[circle, d] :
        {std::pair{&gap.inner, &d_alpha}, std::pair{&gap.outer, &d_beta}}) {
     const Eigen::VectorXd nodal =
-        gap_transform(*circle, gap.harmonics).transpose() * *d;
+        gap_transform(*circle, h).transpose() * *d;
     for (size_t k = 0; k < circle->nodes.size(); ++k)
       out[circle->nodes[k]] += circle->sign[k] * nodal[static_cast<Eigen::Index>(k)];
   }

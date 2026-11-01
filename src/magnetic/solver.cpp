@@ -1492,7 +1492,16 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
                              g.outer.nodes.size(),
                              band ? std::format("{} band points in {} layer{}", g.band_points,
                                                 g.band_layers, g.band_layers == 1 ? "" : "s")
-                                  : std::format("{} harmonics", g.harmonics),
+                                  : std::format("{} coupled harmonics, {} on the finer "
+                                                "circle{}",
+                                                coupled_harmonics(g),
+                                                std::max(own_harmonics(g.inner),
+                                                         own_harmonics(g.outer)),
+                                                g.harmonics < std::max(own_harmonics(g.inner),
+                                                                       own_harmonics(g.outer))
+                                                    ? std::format(", the gap field's to {}",
+                                                                  g.harmonics)
+                                                    : ""),
                              g.deviation));
     if (g.sectors > 1)
       solution.add("Air gap",

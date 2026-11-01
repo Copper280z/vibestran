@@ -455,7 +455,7 @@ PAIRGAP,PID,METHOD,NHARM,NBAND,NLAYER
 |---|---|
 | `PID` | Property ID of the gap elements. It must not also be a PSOLID, PMAG or PMAG2D ID, and at least one element must use it. |
 | `METHOD` | `AGE` (blank is AGE): replace the gap elements by the air-gap element. `BAND`: replace them by a sliding band of elements (sparse; see below). `MESH`: solve them as ordinary meshed air. |
-| `NHARM` | AGE harmonics, and the harmonics of the gap field reported for AGE and BAND. Blank uses half the grid count of the coarser circle; at most half the grid count of the finer one. Ignored by MESH. |
+| `NHARM` | The harmonics of the gap field reported for AGE and BAND (probes in the gap, drawn gap cells): each circle's harmonics up to its own resolution, at most NHARM. Blank uses half the grid count of the finer circle, all of them; at most that. It does not change the solution: the AGE's energy always sums every harmonic the circles resolve (see below). Ignored by MESH. |
 | `NBAND` | BAND: points around the band, at least 3 and a multiple of a sector model's sectors. Blank uses the smallest prime count of at least the finer circle's grid count, per sector in a sector model (the sectors times the smallest prime of at least the unfolded count over the sectors). Avoid a count with a factor in common with the poles of the turning part (see below). Ignored otherwise. |
 | `NLAYER` | BAND: rings of band elements across the gap, at least 1. Blank makes the elements about square: ⌈NBAND ln(r₂/r₁) / 2π⌉. Ignored otherwise. |
 
@@ -482,7 +482,7 @@ permeability 1) by PAIRGAP METHOD=MESH` (or `by PARAM,AIRGAP,MESH`).
 **METHOD=AGE** removes the gap elements from the field mesh and couples the
 two circles that bound them with an air-gap element: the exact Laplace field
 of an air annulus that matches the potential on both circles, expanded in
-harmonics up to NHARM. The gap elements only mark the region. Their shape,
+the harmonics the circles resolve. The gap elements only mark the region. Their shape,
 their number of layers and the grids inside the band do not enter the
 solution; one layer of triangles between two different grid counts is enough.
 The region is validated, and each failure is an error naming the PAIRGAP
@@ -521,12 +521,28 @@ separates by harmonic, with ρ = r₁/r₂ < 1:
 The first bracket is each circle's self energy. It depends only on each
 circle's amplitude in that harmonic, √(α_c² + α_s²), not its phase. The
 second is the inner-to-outer coupling, which depends on the two circles'
-relative phase. Summed to NHARM and mapped back through the transforms,
-these terms form a dense, symmetric stiffness block on the circle grids. It
-is linear, so it adds the same term to every Newton tangent. The energy is
-exact for the gap given the traces, so discretization error stays in the
-meshed regions. The torque on the inner part is −dW/dδ for a rigid turn δ of
-its trace, which acts only on the coupling term (see Results below).
+relative phase. Each circle's self terms run to half its own grid count,
+every harmonic its trace resolves, and the coupling runs to half the
+coarser circle's. Mapped back through the transforms, these terms form a
+dense, symmetric stiffness block on the circle grids. It is linear, so it
+adds the same term to every Newton tangent. The energy is exact for the gap
+given the traces, so discretization error stays in the meshed regions. The
+torque on the inner part is −dW/dδ for a rigid turn δ of its trace, which
+acts only on the coupling term (see Results below).
+
+The two limits differ for a reason. A self term depends only on its
+circle's amplitude, the same at any turn, so the finer circle keeps all of
+its own. The coarser circle's content above its own resolution is an alias:
+harmonic n − m of a trace of n grids turns with the part as harmonic m
+does, not as n − m. Coupling it would make a round rotor cog at its mesh
+pitch. Cutting the finer circle's self terms at the coarser circle's
+resolution instead, as NHARM's blank did before 2026-11-01, leaves the finer
+circle's shorter wavelengths with no gap stiffness, as if the gap were a
+free boundary to them. On the xfemm comparison's motor meshed finer at the
+bore than at the magnets (842 and 1,730 grids on the circles), that put the
+cogging torque 5.5% above FEMM's; the full self terms put it 1.1% above
+(`FinerCircleKeepsTheStiffnessOfWavelengthsTheCoarserCannotResolve` in
+tests/unit/test_air_gap.cpp).
 
 **METHOD=BAND** removes the gap elements like the AGE and couples the two
 circles through a sliding band instead: NLAYER rings of NBAND elements on a
@@ -574,7 +590,8 @@ has no torque at any position: an NBAND of 72 gives a ripple of 0.44 N m,
 the blank 73 gives 0.0036.
 
 Fields at points in the gap (probes, drawn gap cells) are, as with the
-AGE, the annulus field of the solved traces up to NHARM harmonics: the
+AGE, the annulus field of the solved traces (each circle's harmonics to its
+own resolution, at most NHARM): the
 band's own bilinear field is only first-order accurate. The air-gap torque
 is the derivative of the band's energy for a turn of the inner part's
 traces with the band held, so it is the derivative of the coenergy that the
@@ -641,8 +658,9 @@ $ PARAM,AIRGAP,MESH  $ uncomment to solve the same band as meshed air
 **Results.** Probes in the annulus report the analytic gap field (H = B/μ0),
 including probes between the rotor's outermost element edges and its circle.
 The F06 SOLUTION section has an `Air gap` row: the PAIRGAP ID, the number of
-gap elements replaced, the radii, center, grid counts, harmonics and worst
-radial deviation. The HDF5 results have an `air_gap` group.
+gap elements replaced, the radii, center, grid counts, the coupled
+harmonics and those on the finer circle (and NHARM when it limits the
+reported field), and worst radial deviation. The HDF5 results have an `air_gap` group.
 
 Each subcase reports the **air-gap torque**: the torque on the part inside
 the gap about the plane normal through the gap's center, N m including
@@ -1123,8 +1141,8 @@ angle plus j sectors, with the factor (−1)^j for ANTI. It then builds the
 whole machine's gap from these circles exactly as for a full model. The
 unfolded trace repeats, so its Fourier coefficients vanish except at
 multiples of SECTORS (PERIODIC) or odd multiples of SECTORS/2 (ANTI): the
-sector carries only the harmonics the period allows. The default NHARM is
-the whole machine's, half the unfolded coarser circle's grid count. The
+sector carries only the harmonics the period allows. The harmonic limits
+are the whole machine's, from the unfolded circles' grid counts. The
 whole machine's gap stiffness is folded back onto the sector's grids, with
 the signs, and divided by SECTORS: the sector's share of the gap energy.
 With METHOD=BAND the unfolded band repeats in every sector, and the blank
@@ -1419,7 +1437,8 @@ solving. The file has two top-level groups:
     polarity) with `member_offsets`.
   - `forces/`: `id`, `body`, `cid`. `probes/`: `id`, `cd`, `position_m`.
   - `air_gap/` (planar models with a PAIRGAP solved by the AGE or BAND):
-    attributes `property`, `inner_radius_m`, `outer_radius_m`, `harmonics`,
+    attributes `property`, `inner_radius_m`, `outer_radius_m`, `harmonics`
+    (NHARM, the reported field's),
     `band_points` and `band_layers` (0 for the AGE), `radial_deviation`;
     `center_m`; `sectors` (1, or MPERIOD's SECTORS); and `inner_grids`,
     `outer_grids`, the grid IDs on each circle in increasing angle (in a

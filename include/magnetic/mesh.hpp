@@ -56,7 +56,7 @@ struct AirGap {
   std::vector<int> faces; // boundary faces on either circle
   double deviation{0};    // largest |distance - radius| / radius of a grid
   double inner_chord{0};  // nearest approach of the inner circle's edges
-  int harmonics{0};
+  int harmonics{0}; // the gap field series' (NHARM); the AGE's energy sums all the circles resolve
   int band_points{0}; // METHOD=BAND: the sliding band's grid; 0 for the AGE
   int band_layers{1}; // the band's element rings, between M + 1 point rings
   // The band's interior point rings (1..M-1) are unknowns after the mesh's

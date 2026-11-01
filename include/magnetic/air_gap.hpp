@@ -21,10 +21,18 @@ inline constexpr double kAirGapTolerance = 1e-6;
 // harmonic 1..harmonics, so that f(t) = c0 + sum c_n cos(nt) + s_n sin(nt).
 [[nodiscard]] Eigen::MatrixXd gap_transform(const GapCircle &c, int harmonics);
 
+// Harmonics a circle's trace resolves: half its grid count (unfolded in a
+// sector model).
+[[nodiscard]] int own_harmonics(const GapCircle &c);
+// Harmonics the two circles couple through, and the AGE's torque sums: the
+// coarser circle's own_harmonics.
+[[nodiscard]] int coupled_harmonics(const AirGap &gap);
+
 // Stiffness per unit depth over [inner nodes, outer nodes]: (1/2) a^T K a is
 // the energy per unit depth of the annulus field for those nodal potentials,
-// each the circle's sign times its grid's potential. In a sector model that
-// is the whole machine's gap.
+// each the circle's sign times its grid's potential: each circle's self
+// terms to its own_harmonics and the coupling to coupled_harmonics, whatever
+// NHARM. In a sector model that is the whole machine's gap.
 [[nodiscard]] Eigen::MatrixXd air_gap_stiffness(const AirGap &gap);
 
 // Whether x (in the plane) lies in the annulus.
