@@ -85,7 +85,7 @@ class Role:
 @dataclasses.dataclass
 class Geometry:
     nodes: dict          # gmsh node tag -> (x, y)
-    cells: list          # (role, [node tags]) triangles
+    cells: list          # (role, [node tags]) triangles, or quadrilaterals with quads
     points: dict         # FEMM nodes: key -> (x, y)
     segments: list       # (key a, key b, kind) kind: exterior, age, gapside, inner, side1, side2
     arcs: list           # (key a, key b, angle deg, radius, mid (x, y), kind), counterclockwise a -> b
@@ -112,10 +112,15 @@ class Builder:
         return self.occ.addRectangle(x0, y0, 0, x1 - x0, y1 - y0)
 
 
-def build(entities, size, half=False):
+def build(entities, size, half=False, quads=False):
     """entities: [(surface tag, priority, Role)]; size(x, y) and its gmsh
     MathEval expression in x, y: the target element size. half keeps
-    y >= 0 and meshes the two halves of the cut periodically."""
+    y >= 0 and meshes the two halves of the cut periodically. quads
+    recombines the triangles into quadrilaterals (Frontal-Delaunay for
+    quads, Blossom matching), leaving a triangle only where a surface
+    needs one; quads="full" recombines into quadrilaterals only (Blossom
+    full-quad); quads="quadmesh" meshes every surface all-quad with
+    WebMesh's quadmesh instead (see quadmesh_surfaces)."""
     occ = gmsh.model.occ
     if half:
         box = occ.addRectangle(-1, 0, 0, 2, 1)
@@ -146,7 +151,10 @@ def build(entities, size, half=False):
     for opt in ("Mesh.MeshSizeExtendFromBoundary", "Mesh.MeshSizeFromPoints",
                 "Mesh.MeshSizeFromCurvature"):
         gmsh.option.setNumber(opt, 0)
-    gmsh.option.setNumber("Mesh.Algorithm", 6)
+    gmsh.option.setNumber("Mesh.Algorithm", 8 if quads else 6)
+    if quads:
+        gmsh.option.setNumber("Mesh.RecombineAll", 1)
+        gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 3 if quads == "full" else 1)
     curves = [c for _, c in gmsh.model.getEntities(1)]
     on_cut = {}
     if half:
@@ -165,6 +173,13 @@ def build(entities, size, half=False):
                      if d not in first and np.allclose(sorted(p[0] for p in e), image, atol=1e-12)]
             assert len(match) == 1, (c, on_cut[c])
             gmsh.model.mesh.setPeriodic(1, [match[0]], [c], rotation)
+    if quads == "quadmesh":
+        assert not half, "quadmesh meshes whole models only"
+        nodes, by_surface = quadmesh_surfaces(roles, size[0])
+        cells = [(roles[s], cell) for s in roles for cell in by_surface[s]]
+        geometry = drawing(roles, by_surface, nodes, size[0], on_cut)
+        geometry.nodes, geometry.cells, geometry.side_edges = nodes, cells, []
+        return geometry
     gmsh.model.mesh.generate(2)
     tags, coords, _ = gmsh.model.mesh.getNodes()
     nodes = dict(zip(tags.astype(int), coords.reshape(-1, 3)[:, :2]))
@@ -172,10 +187,10 @@ def build(entities, size, half=False):
     for s, role in roles.items():
         types, _, conn = gmsh.model.mesh.getElements(2, s)
         for t, c in zip(types, conn):
-            assert t == 2, "triangles only"
-            for tri in c.reshape(-1, 3).astype(int):
-                cells.append((role, list(tri)))
-                by_surface.setdefault(s, []).append(list(tri))
+            assert t in (2, 3), "triangles and quadrilaterals only"
+            for cell in c.reshape(-1, 3 if t == 2 else 4).astype(int):
+                cells.append((role, list(cell)))
+                by_surface.setdefault(s, []).append(list(cell))
     # Mesh edges on the periodic sides.
     side_edges = []
     for c, ends in on_cut.items():
@@ -283,9 +298,127 @@ def core_geometry(scale, magnet):
     return g
 
 
-def motor_geometry(scale, half):
+QUADMESH = pathlib.Path.home() / "Documents" / "WebMesh-Editor"
+
+
+def quadmesh_surfaces(roles, size):
+    """Every surface meshed all-quad by quadmesh (WebMesh-Editor's
+    meshers/quadmesh: its constrained recombination path, with smoothing),
+    inside gmsh's nodes on its boundary curves, fixed, so that neighbouring
+    surfaces conform. An all-quad surface needs an even number of boundary
+    edges: curves gain a node, in the middle of their longest edge, along a
+    tree from the exterior to each surface with an odd count (a curve's node
+    changes the count of both its surfaces). Returns the nodes and each
+    surface's quadrilaterals."""
+    sys.path.insert(0, str(QUADMESH / "meshers" / "quadmesh" / "bindings" / "python"))
+    from quadmesh import Mesher
+    mesher = Mesher(QUADMESH / "zig-out" / "lib" / "libquadmesh_capi.dylib")
+    gmsh.model.mesh.generate(1)
+    tags, coords, _ = gmsh.model.mesh.getNodes()
+    nodes = dict(zip(tags.astype(int), coords.reshape(-1, 3)[:, :2]))
+    # Each curve's nodes and parameters, first to last.
+    curve = {}
+    for _, c in gmsh.model.getEntities(1):
+        inner, _, t = gmsh.model.mesh.getNodes(1, c, returnParametricCoord=True)
+        ends = [gmsh.model.mesh.getNodes(0, p)[0][0] for _, p in gmsh.model.getBoundary([(1, c)])]
+        if len(ends) == 0:  # a whole circle: its seam point is its only vertex
+            ends = [gmsh.model.mesh.getNodes(0, gmsh.model.getAdjacencies(1, c)[1][0])[0][0]] * 2
+        lo, hi = gmsh.model.getParametrizationBounds(1, c)
+        # The vertex at the parametrization's start first.
+        start = np.array(gmsh.model.getValue(1, c, [lo[0]])[:2])
+        if np.linalg.norm(nodes[int(ends[0])] - start) > np.linalg.norm(nodes[int(ends[-1])] - start):
+            ends = ends[::-1]
+        order = np.argsort(t)
+        curve[c] = ([int(ends[0])] + [int(inner[k]) for k in order] + [int(ends[-1])],
+                    [lo[0]] + [float(t[k]) for k in order] + [hi[0]])
+    boundary = {s: [(1 if c > 0 else -1, abs(c)) for _, c in
+                    gmsh.model.getBoundary([(2, s)], combined=False, oriented=False)] for s in roles}
+    # Parity: a tree from the exterior over curves shared with neighbours.
+    odd = {s: sum(len(curve[c][0]) - 1 for _, c in boundary[s]) % 2 == 1 for s in roles}
+    beside = {}
+    for c in curve:
+        up = [s for s in gmsh.model.getAdjacencies(1, c)[0] if s in roles]
+        for s in up:
+            beside.setdefault(s, []).append((c, next((u for u in up if u != s), None)))
+    parent, order, frontier = {}, [], [s for s in roles if any(o is None for _, o in beside[s])]
+    for s in frontier:
+        parent[s] = (next(c for c, o in beside[s] if o is None), None)
+    while frontier:
+        s = frontier.pop(0)
+        order.append(s)
+        for c, o in beside[s]:
+            if o is not None and o not in parent:
+                parent[o] = (c, s)
+                frontier.append(o)
+    assert len(order) == len(roles)
+    next_tag = max(nodes) + 1
+    for s in reversed(order):
+        if not odd[s]:
+            continue
+        c, up = parent[s]
+        ids, ts = curve[c]
+        k = max(range(len(ids) - 1), key=lambda k: np.linalg.norm(nodes[ids[k + 1]] - nodes[ids[k]]))
+        t = (ts[k] + ts[k + 1]) / 2
+        nodes[next_tag] = np.array(gmsh.model.getValue(1, c, [t])[:2])
+        curve[c] = (ids[:k + 1] + [next_tag] + ids[k + 1:], ts[:k + 1] + [t] + ts[k + 1:])
+        next_tag += 1
+        odd[s] = False
+        if up is not None:
+            odd[up] = not odd[up]
+    by_surface = {}
+    for s in roles:
+        # Chain the curves into closed loops of node tags (oriented below).
+        chains = [list(curve[c][0]) for _, c in boundary[s]]
+        loops = []
+        while chains:
+            loop = chains.pop(0)
+            while loop[0] != loop[-1]:
+                k = next(k for k, ch in enumerate(chains) if loop[-1] in (ch[0], ch[-1]))
+                ch = chains.pop(k)
+                loop += (ch if ch[0] == loop[-1] else ch[::-1])[1:]
+            loops.append(loop[:-1])
+        def signed_area(loop):
+            p = np.array([nodes[n] for n in loop])
+            return 0.5 * np.sum(p[:, 0] * np.roll(p[:, 1], -1) - np.roll(p[:, 0], -1) * p[:, 1])
+        loops.sort(key=lambda loop: -abs(signed_area(loop)))
+        loops = [loop if (signed_area(loop) > 0) == (k == 0) else loop[::-1] for k, loop in enumerate(loops)]
+        # In millimetres: quadmesh's tolerances suit unit-sized coordinates.
+        target = 1e3 * max(size(*nodes[n]) for loop in loops for n in loop)
+        def mesh(jitter):
+            rng = np.random.default_rng(s)
+            spec = []
+            for k, loop in enumerate(loops):
+                points = [tuple(1e3 * nodes[n] + jitter * rng.standard_normal(2)) for n in loop]
+                spec.append({"points": points, "role": "outer" if k == 0 else "hole",
+                             "fixed_runs": [{"nodes": points, "closed": True}]})
+            return mesher.mesh(spec, target_size=target, finite_element_sizing=1, enable_smoothing=1)
+        try:
+            r = mesh(0)
+        except ValueError:
+            # quadmesh's constrained triangulation can fail to recover an
+            # edge between cocircular nodes ("cannot recover boundary edge"),
+            # and meshes the same loops moved by 1e-9 mm. The boundary nodes
+            # keep their exact positions below, through the fixed-node map.
+            r = mesh(1e-9)
+        assert r["valid"], (s, roles[s], r["issues"])
+        tag = {}
+        for b in r["boundary_nodes"]:
+            tag[b["node"]] = loops[b["loop"]][b["fixed_node"]]
+        for k, p in enumerate(r["nodes"]):
+            if k not in tag:
+                nodes[next_tag] = np.array(p) * 1e-3
+                tag[k] = next_tag
+                next_tag += 1
+        by_surface[s] = [[tag[n] for n in q] for q in r["quads"]]
+    return nodes, by_surface
+
+
+def motor_geometry(scale, half, quads=False, near=None):
     """tools/magnetic_motor_example.py's motor, with the PAIRGAP annulus
-    between the magnets' outer radius and the bore."""
+    between the magnets' outer radius and the bore. The element size is
+    scale times min(1.4 mm, 0.32 mm + 0.12 |r - R_BORE|); with near, it is
+    min(scale 1.4 mm, near 0.32 mm + 0.12 |r - R_BORE|) instead: the gap's
+    size set apart from the far field's."""
     gmsh.initialize()
     gmsh.option.setNumber("General.Verbosity", 2)
     gmsh.model.add("motor")
@@ -298,6 +431,12 @@ def motor_geometry(scale, half):
                                    (motor.R_BORE, Role("gap", "gap"), 2),
                                    (motor.R_OUTER, Role("steel", "stator"), 1)]:
         e.append((occ.addDisk(0, 0, 0, radius, radius), priority, role))
+    if quads == "quadmesh":
+        # The stator in two surfaces, teeth and yoke, split at the slot
+        # bottoms: quadmesh inverts quadrilaterals at the reflex corners
+        # where a slot's bottom meets its sides.
+        e.append((occ.addDisk(0, 0, 0, motor.R_SLOT_BOTTOM, motor.R_SLOT_BOTTOM), 1.5,
+                  Role("steel", "stator")))
     pitch = math.pi / motor.POLE_PAIRS
     for j in range(2 * motor.POLE_PAIRS):
         a0, a1 = (j - motor.MAGNET_ARC / 2) * pitch, (j + motor.MAGNET_ARC / 2) * pitch
@@ -314,11 +453,17 @@ def motor_geometry(scale, half):
             phase, polarity = layout[tooth]
             e.append((b.surface(outline), 8, Role("air", f"coil{slot}{'ab'[side < 0]}", "ABC"[phase],
                                                   side * polarity * motor.TURNS)))
-    expr = f"{scale} * Min(1.4e-3, 3.2e-4 + 0.12 * Abs(Sqrt(x*x + y*y) - {motor.R_BORE}))"
+    if near is None:
+        expr = f"{scale} * Min(1.4e-3, 3.2e-4 + 0.12 * Abs(Sqrt(x*x + y*y) - {motor.R_BORE}))"
 
-    def size(x, y):
-        return scale * min(1.4e-3, 3.2e-4 + 0.12 * abs(math.hypot(x, y) - motor.R_BORE))
-    g = build(e, (size, expr), half=half)
+        def size(x, y):
+            return scale * min(1.4e-3, 3.2e-4 + 0.12 * abs(math.hypot(x, y) - motor.R_BORE))
+    else:
+        expr = f"Min({scale * 1.4e-3}, {near * 3.2e-4} + 0.12 * Abs(Sqrt(x*x + y*y) - {motor.R_BORE}))"
+
+        def size(x, y):
+            return min(scale * 1.4e-3, near * 3.2e-4 + 0.12 * abs(math.hypot(x, y) - motor.R_BORE))
+    g = build(e, (size, expr), half=half, quads=quads)
     gmsh.finalize()
     return g
 
@@ -336,7 +481,7 @@ def table_cards(tid):
 
 
 def vibestran_deck(g, control, bulk, motion_sets=False, period=None):
-    """The deck for geometry g: grids and triangles, a PID per material and
+    """The deck for geometry g: grids and elements, a PID per material and
     magnetization, ESETs of coils, the body and the moving cells, COIL2D and
     CIRCUIT cards. Returns the text and the element IDs of each region."""
     pids, lines = {}, []
@@ -366,8 +511,9 @@ def vibestran_deck(g, control, bulk, motion_sets=False, period=None):
     for n in used:
         x, y = g.nodes[n]
         text.append(f"GRID,{n},,{x:.17g},{y:.17g},0.")
-    for eid, (role, tri) in enumerate(cells, start=1):
-        text.append(f"CTRIA3,{eid},{pids[(role.material, role.magnet)]},{tri[0]},{tri[1]},{tri[2]}")
+    for eid, (role, cell) in enumerate(cells, start=1):
+        card = "CTRIA3" if len(cell) == 3 else "CQUAD4"
+        text.append(f"{card},{eid},{pids[(role.material, role.magnet)]}," + ",".join(map(str, cell)))
     circuits = {}
     set_id = 1000
     for role in {c[0] for c in cells}:
@@ -389,9 +535,9 @@ def vibestran_deck(g, control, bulk, motion_sets=False, period=None):
     if period:
         # Each side edge with an element that owns it.
         owner = {}
-        for eid, (_, tri) in enumerate(cells, start=1):
-            for k in range(3):
-                owner[frozenset((tri[k], tri[(k + 1) % 3]))] = eid
+        for eid, (_, cell) in enumerate(cells, start=1):
+            for k in range(len(cell)):
+                owner[frozenset((cell[k], cell[(k + 1) % len(cell)]))] = eid
         for side, a, b in g.side_edges:
             text.append(f"FSET,{30 + side},{owner[frozenset((a, b))]},{a},{b}")
         text.append("MPERIOD,1,ANTI,31,32,0,2")
@@ -642,13 +788,10 @@ def phase_currents(position, peak):
     return [-peak * math.sin(theta - 2 * math.pi * k / 3) for k in range(3)]
 
 
-def motor_case(variant, level, out, args):
-    half = variant == "half"
-    scale = LEVELS[level]
-    workdir = out / f"motor_{variant}_{level}"
-    workdir.mkdir(parents=True, exist_ok=True)
-    g = motor_geometry(scale, half)
-    radius = GAP_RADIUS
+def motor_deck(g, half):
+    """The motor deck for geometry g: the SWEEPS as MOTION subcases (DRIVE
+    for the loaded ones) and gap probes at GAP_RADIUS. Returns the deck and
+    the probe angles."""
     control, bulk = [], ["PARAM,MAGTOL,1e-10"]
     for k, (name, (step, count, peak)) in enumerate(SWEEPS.items(), start=1):
         control += [f"SUBCASE {k}", f"  LABEL = {name.upper()}", f"  MOTION = {k}", "  MSTEP = ALL",
@@ -659,28 +802,47 @@ def motor_case(variant, level, out, args):
             bulk += [f"DRIVE,{k},SINE,{motor.POLE_PAIRS},{peak:.17g},0.,{THETA0:.17g}", ",1,2,3"]
     # A half model is sampled over its half and extended anti-periodically.
     angles = GAP_ANGLES[GAP_ANGLES < 180] if half else GAP_ANGLES
-
-    def whole_circle(br):
-        return np.concatenate([br, -br]) if half else br
     for k, angle in enumerate(angles, start=1):
-        x, y = radius * math.cos(math.radians(angle)), radius * math.sin(math.radians(angle))
+        x, y = GAP_RADIUS * math.cos(math.radians(angle)), GAP_RADIUS * math.sin(math.radians(angle))
         bulk.append(f"MPROBE,{k},0,{x:.17g},{y:.17g},0.")
     deck, circuit_ids = vibestran_deck(g, control, bulk, motion_sets=True, period=half)
     assert circuit_ids == {"A": 1, "B": 2, "C": 3}
-    path = workdir / "motor.bdf"
-    path.write_text(deck.replace("{depth}", str(motor.DEPTH)))
+    return deck.replace("{depth}", str(motor.DEPTH)), angles
+
+
+def motor_results(h5, angles, half):
+    """Torque, phase linkage and the gap's radial B of each sweep."""
     vib = {}
+    for k, name in enumerate(SWEEPS, start=1):
+        s = h5[f"MAGSTAT/subcases/{k}"]
+        vib[name] = {"positions": s["positions_deg"][()].tolist(),
+                     "torque": s["motion/torque_Nm"][()].tolist(),
+                     "linkage": s["circuits/linkage_Wb_turn"][()].tolist()}
+        if "probes/B_T" in s:
+            b = s["probes/B_T"][()][0]
+            t = np.radians(angles)
+            br = b[:, 0] * np.cos(t) + b[:, 1] * np.sin(t)
+            vib[name]["gap_br"] = (np.concatenate([br, -br]) if half else br).tolist()
+    return vib
+
+
+def motor_case(variant, level, out, args):
+    half = variant == "half"
+    scale = LEVELS[level]
+    workdir = out / f"motor_{variant}_{level}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    g = motor_geometry(scale, half)
+    deck, angles = motor_deck(g, half)
+    path = workdir / "motor.bdf"
+    path.write_text(deck)
     with run_vibestran(path, args.vibestran) as h5:
-        for k, name in enumerate(SWEEPS, start=1):
-            s = h5[f"MAGSTAT/subcases/{k}"]
-            vib[name] = {"positions": s["positions_deg"][()].tolist(),
-                         "torque": s["motion/torque_Nm"][()].tolist(),
-                         "linkage": s["circuits/linkage_Wb_turn"][()].tolist()}
-            if "probes/B_T" in s:
-                b = s["probes/B_T"][()][0]
-                t = np.radians(angles)
-                vib[name]["gap_br"] = whole_circle(b[:, 0] * np.cos(t) + b[:, 1] * np.sin(t)).tolist()
+        vib = motor_results(h5, angles, half)
+
+    def whole_circle(br):
+        return np.concatenate([br, -br]) if half else br
+    radius = GAP_RADIUS
     vib["cells"] = len(g.cells)
+
     def size(x, y):
         return scale * min(1.4e-3, 3.2e-4 + 0.12 * abs(math.hypot(x, y) - motor.R_BORE))
     lua = femm_drawing(femm_age_band(g, motor.R_MAGNET, motor.R_BORE, half, size), motor.DEPTH, half, size)

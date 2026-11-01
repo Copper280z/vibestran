@@ -227,3 +227,62 @@ for the whole motor. Differences are vibestran against FEMM.
 
 These are planar comparisons of the same 2D problem. They do not cover end
 effects or the 3D formulation.
+
+## Motor mesh efficiency (2026-11-01)
+
+`mesh_study.py` meshes the xfemm comparison's whole motor several ways,
+solves each with vibestran alone (`PARAM,AIRGAP,BAND`, the comparison's 78
+positions) and compares it with a triangle mesh at a quarter of the coarse
+size (177k grids). Kinds: `tri` (gmsh triangles), `quad` (gmsh
+recombination, a few triangles left), `fq` (gmsh full-quad recombination)
+and `qm` (all-quad from WebMesh's quadmesh, `run_xfemm.quadmesh_surfaces`).
+A spec `kind:scale` scales the whole size field; `kind:scale/near` caps the
+far field at scale × 1.4 mm and sets the gap size to near × 0.32 mm.
+
+```sh
+.venv/bin/python Magnetic_Validation/mesh_study.py decks OUT --mesh tri:0.25 tri:0.5 fq:1.5/0.35
+# solve each OUT/<mesh>/motor.bdf with vibestran; write its wall seconds to OUT/<mesh>/motor.time
+.venv/bin/python Magnetic_Validation/mesh_study.py report OUT --reference tri:0.25
+.venv/bin/python Magnetic_Validation/mesh_study.py plot OUT/fq_1.5-0.35 mesh.png
+```
+
+Errors against the reference, wall time on an M-series Mac (Accelerate):
+
+| mesh | grids | corner angles (cells < 20°) | wall | mean torque | ripple p-p | cogging p-p | linkage, no load / rated | gap B_r |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| tri:1 (coarse level) | 12,077 | 12–104° (48) | 6.4 s | 0.092% | 22.1% | 14.0% | 0.085 / 0.086% | 1.39% |
+| quad:1 | 10,985 | 12–179° (49) | 6.5 s | 0.065% | 22.3% | 13.7% | 0.067 / 0.061% | 1.32% |
+| qm:1 | 13,123 | 6–174° (144) | 6.2 s | 0.046% | 21.2% | 14.7% | 0.067 / 0.091% | 1.33% |
+| tri:0.5 (fine level) | 45,528 | 12–111° (48) | 32.0 s | 0.017% | 0.16% | 1.54% | 0.014 / 0.032% | 0.10% |
+| quad:0.5 | 40,297 | 12–179° (48) | 24.3 s | 0.009% | 1.9% | 2.5% | 0.004 / 0.031% | 0.08% |
+| tri:1/0.35 | 34,874 | 12–107° (48) | 24.3 s | 0.018% | 2.7% | 1.9% | 0.026 / 0.050% | 0.11% |
+| quad:1/0.35 | 30,900 | 12–179° (48) | 19.1 s | 0.008% | 1.2% | 1.4% | 0.014 / 0.043% | 0.08% |
+| qm:1/0.35 | 28,153 | 6–173° (274) | 16.7 s | 0.052% | 3.9% | 2.0% | 0.003 / 0.140% | 0.08% |
+| **fq:1.5/0.35** | 33,626 | 12–165° (24) | 20.2 s | 0.014% | 0.52% | 0.89% | 0.009 / 0.048% | 0.08% |
+
+Reference: mean torque 4.8886 N m, ripple 0.0343, cogging 0.0527 N m.
+fq:1.5/0.35 also took 53.0 s with CHOLMOD and 35.5 s with cuDSS on the Linux
+box, against tri:0.5's 69.1 and 47.8 s (8 threads, TITAN V).
+
+- **fq:1.5/0.35 replaces the fine triangles** (tri:0.5): every figure as
+  close to the reference or closer, except ripple (0.5% against 0.16%; every
+  other mesh at this size is 1-4%, so tri:0.5's ripple looks like a lucky
+  cancellation) and rated linkage (0.048% against 0.032%). It has 26% fewer
+  grids, all quadrilaterals, and is 1.6× faster on the Mac and 1.3-1.35× on
+  Linux. The smaller gain on Linux is the band: its finer gap circles give
+  1,733 band points against 1,213, and the band is a new analysis at every
+  position.
+- **The element type matters little; the spacing at the gap matters most.**
+  Quadrilaterals beat triangles of the same grid count on the smooth figures
+  (bilinear and linear elements converge at the same rate, the quad with a
+  better constant), but ripple and cogging follow the size at the air gap and
+  slot openings for every kind. Refining only there (near 0.35, far field
+  unchanged or coarser) gets the uniform fine mesh's ripple and cogging with
+  fewer grids.
+- **quadmesh** (qm) meshes the motor all-quad, but leaves 6° corners at the
+  slot openings' 12° corners and needs two workarounds (see WebMesh's
+  `meshers/quadmesh/webmesh_faces/motor/README.md`). gmsh's full-quad
+  recombination gives better angles here.
+- **NBAND and symmetric meshes.** Before the blank NBAND became prime, quad:0.75
+  (840 band points, a multiple of the 14 poles) had a cogging sawtooth three
+  times the true value; see the NBAND row and the band section of MAGNETICS.md.
