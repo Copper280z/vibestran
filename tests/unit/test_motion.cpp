@@ -215,6 +215,83 @@ TEST(Motion, BandTorqueIsTheDerivativeOfTheCoenergy) {
   }
 }
 
+TEST(Motion, ReusedFactorSweepMatchesFactoringEveryTangent) {
+  // PARAM,MAGPCG solves each Newton step by CG preconditioned with an
+  // earlier tangent's factor, to an inexact (forcing-term) tolerance; the
+  // inductances and linkage rates stay direct. A sweep of a saturating
+  // machine must give the results of factoring every tangent to Newton's
+  // tolerance, with fewer factorizations.
+  Machine g;
+  g.stator_div = 72;
+  g.rotor_property = 2;
+  g.stator_property = 3;
+  g.gap = "PAIRGAP,9,BAND\n";
+  g.cards = magnetized_rotor(1.1) + stator_iron(true) + probes() +
+            rotor_motion(0, 1.5, 6);
+  auto direct_model = model(g);
+  wind(direct_model, 40, .3);
+  direct_model.subcases[0].motion = 1;
+  Machine with_param = g;
+  with_param.cards += "PARAM,MAGPCG,20\n";
+  auto reused_model = model(with_param);
+  wind(reused_model, 40, .3);
+  reused_model.subcases[0].motion = 1;
+  EXPECT_EQ(direct_model.options.tangent_reuse, 0);
+  EXPECT_EQ(reused_model.options.tangent_reuse, 20);
+  for (const char *bad : {"PARAM,MAGPCG,-1\n", "PARAM,MAGPCG,1001\n"}) {
+    Machine wrong = g;
+    wrong.cards += bad;
+    EXPECT_NE(error_of(parse(wrong, geometry(wrong))).find("PARAM,MAGPCG"),
+              std::string::npos)
+        << bad;
+  }
+  const auto direct = solved(direct_model);
+  const auto reused = solved(reused_model);
+  ASSERT_EQ(direct.cases.size(), 1U);
+  ASSERT_EQ(reused.cases.size(), 1U);
+  ASSERT_EQ(reused.cases[0].steps.size(), 6U);
+  for (size_t k = 0; k < 6; ++k) {
+    SCOPED_TRACE(std::format("position {}", k));
+    const auto &a = reused.cases[0].steps[k];
+    const auto &b = direct.cases[0].steps[k];
+    EXPECT_LE(a.residual, 1e-8);
+    EXPECT_LT(relative(a.energy, b.energy, std::abs(b.energy)), 1e-7);
+    EXPECT_LT(relative(a.circuits[0].linkage, b.circuits[0].linkage,
+                       std::abs(b.circuits[0].linkage)),
+              1e-7);
+    EXPECT_LT(relative(a.torque, b.torque, std::abs(b.torque)), 1e-6);
+    // The response solves see the same converged state to Newton's
+    // tolerance.
+    EXPECT_LT(relative(a.circuit_inductance(0, 0), b.circuit_inductance(0, 0),
+                       b.circuit_inductance(0, 0)),
+              1e-6);
+    EXPECT_LT(relative(a.linkage_rate[0], b.linkage_rate[0],
+                       std::abs(b.linkage_rate[0])),
+              1e-5);
+    for (size_t p = 0; p < 3; ++p)
+      EXPECT_LT((a.probe_b[p] - b.probe_b[p]).norm(), 1e-6 * b.probe_b[p].norm());
+  }
+  // "N symbolic analyses, M numeric factorizations, R right-hand sides[, C
+  // by CG ...]" in the F06 SOLVER block.
+  auto usage = [](const Results &r) {
+    for (const auto &[label, text] : r.summary.solver.rows)
+      if (label == "Tangent reuse")
+        return text;
+    ADD_FAILURE() << "no Tangent reuse row";
+    return std::string();
+  };
+  auto factorizations = [](const std::string &text) {
+    const auto at = text.find(" numeric");
+    const auto start = text.rfind(' ', at - 1) + 1;
+    return std::stoi(text.substr(start, at - start));
+  };
+  const std::string direct_usage = usage(direct), reused_usage = usage(reused);
+  EXPECT_EQ(direct_usage.find("by CG"), std::string::npos) << direct_usage;
+  EXPECT_NE(reused_usage.find("by CG"), std::string::npos) << reused_usage;
+  EXPECT_LT(2 * factorizations(reused_usage), factorizations(direct_usage))
+      << reused_usage << " | " << direct_usage;
+}
+
 TEST(Motion, BandMagnetInAUniformFieldFollowsTheAnalyticTorque) {
   // The magnet in a uniform field of the test above, across METHOD=BAND:
   // T = -(Br / mu0) B0 S d sin(phi) at every position of a full turn, to

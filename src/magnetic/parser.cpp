@@ -776,6 +776,8 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
         m.options.nonlinear_tolerance = r.real(2);
       else if (option == "MAGITER")
         m.options.max_iterations = r.integer(2);
+      else if (option == "MAGPCG")
+        m.options.tangent_reuse = r.integer(2);
       else if (option == "WIRESIDE")
         m.options.wire_sides = r.integer(2);
       else if (option == "WIRELAY")
@@ -944,6 +946,10 @@ Status validate(const Model &m) {
       return Error{std::format("MBC {} NORMAL is for MAG2D models; the 3D "
                                "exterior takes zero tangential A",
                                id)};
+  if (m.options.tangent_reuse < 0 || m.options.tangent_reuse > 1000)
+    return Error{std::format("PARAM,MAGPCG,{} must be from 0 (factor every "
+                             "tangent) to 1000 CG iterations",
+                             m.options.tangent_reuse)};
   if (m.options.max_iterations < 1 ||
       !(m.options.nonlinear_tolerance > 0 &&
         m.options.nonlinear_tolerance < 1) ||

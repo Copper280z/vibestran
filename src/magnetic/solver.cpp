@@ -4,6 +4,7 @@
 #include "magnetic/drive.hpp"
 #include "magnetic/motion.hpp"
 #include "solver/solver_backend.hpp"
+#include "solver/tangent_solver.hpp"
 #include <algorithm>
 #include <cmath>
 #include <format>
@@ -25,18 +26,21 @@ namespace vibestran::magnetic {
 namespace {
 using Sparse = Eigen::SparseMatrix<double>;
 using Triplet = Eigen::Triplet<double>;
-// The gauged tangent factored by the solver backend. Newton iterations,
-// continuation stages, subcases and inductances all assemble the same
-// pattern, so one factor serves the whole solve and its symbolic analysis is
-// done once. Every factorization must be positive definite: a failure means
-// a gauge, mesh or material error, never a reason to fall back to LDLT.
+// The gauged tangent, solved with the backend's factorization. Newton
+// iterations, continuation stages, subcases and inductances all assemble the
+// same pattern, so its symbolic analysis is done once. Every factorization
+// must be positive definite: a failure means a gauge, mesh or material
+// error, never a reason to fall back to LDLT. With PARAM,MAGPCG the factor is
+// reused across tangents as a CG preconditioner (TangentSolver).
 class Tangent {
 public:
   // dense_block: the model has an air gap, whose harmonic coupling is a
-  // dense block in every tangent (FactorOptions::dense_block).
-  Tangent(SolverBackend &backend, bool dense_block)
-      : backend_(backend), dense_block_(dense_block) {}
-  Status factor(const Sparse &stiffness) {
+  // dense block in every tangent (FactorOptions::dense_block). reuse: CG
+  // iterations with an earlier tangent's factor before refactoring; 0
+  // factors every tangent.
+  Tangent(SolverBackend &backend, bool dense_block, int reuse)
+      : solver_(backend, options(dense_block, reuse)), reuse_(reuse > 0) {}
+  Status update(const Sparse &stiffness) {
     const Eigen::SparseMatrix<double, Eigen::RowMajor> lower =
         stiffness.triangularView<Eigen::Lower>();
     SparseMatrixBuilder::CsrData csr;
@@ -46,31 +50,13 @@ public:
     csr.col_ind.assign(lower.innerIndexPtr(), lower.innerIndexPtr() + csr.nnz);
     csr.values.assign(lower.valuePtr(), lower.valuePtr() + csr.nnz);
     csr.symmetry = SymmetryStorage::Lower;
-    ++factorizations_;
-    // MOTION positions keep the pattern: the same cells, and the air gap's
-    // dense block on the same grids. A different pattern needs a new
-    // analysis.
-    if (factor_ && csr.row_ptr == row_ptr_ && csr.col_ind == col_ind_)
-      return factor_->refactor(csr);
-    factor_.reset();
-    row_ptr_ = csr.row_ptr;
-    col_ind_ = csr.col_ind;
-    ++analyses_;
-    FactorOptions options;
-    options.require_spd = true;
-    options.dense_block = dense_block_;
-    auto made = backend_.factor(csr, options);
-    if (auto *e = std::get_if<Error>(&made))
-      return *e;
-    factor_ = std::get<std::unique_ptr<LinearFactor>>(std::move(made));
-    ordering_ = factor_->ordering();
-    return {};
+    return solver_.update(std::move(csr));
   }
-  // Solves for every column of rhs with the last factorization.
-  Result<Eigen::MatrixXd> solve(const Eigen::MatrixXd &rhs) {
-    right_hand_sides_ += static_cast<int>(rhs.cols());
-    auto x = factor_->solve({rhs.data(), static_cast<size_t>(rhs.size())},
-                            static_cast<int>(rhs.cols()));
+  // Solves for every column of rhs with the last update()'s tangent, each to
+  // a relative residual of tolerance (0: a direct solve).
+  Result<Eigen::MatrixXd> solve(const Eigen::MatrixXd &rhs, double tolerance) {
+    auto x = solver_.solve({rhs.data(), static_cast<size_t>(rhs.size())},
+                           static_cast<int>(rhs.cols()), tolerance);
     if (auto *e = std::get_if<Error>(&x))
       return *e;
     const auto &values = std::get<std::vector<double>>(x);
@@ -81,25 +67,38 @@ public:
       return Error{"Magnetic linear solve produced a nonfinite solution"};
     return out;
   }
+  // Whether solves may be inexact (PARAM,MAGPCG).
+  [[nodiscard]] bool reuses() const { return reuse_; }
 
   // The last analysis's fill-reducing ordering; empty for an adapter.
-  [[nodiscard]] const std::string &ordering() const { return ordering_; }
+  [[nodiscard]] std::string_view ordering() const { return solver_.ordering(); }
   // Work done so far, for the F06 header.
   [[nodiscard]] std::string usage() const {
-    return std::format("{} symbolic {}, {} numeric {}, {} right-hand {}",
-                       analyses_, analyses_ == 1 ? "analysis" : "analyses",
-                       factorizations_,
-                       factorizations_ == 1 ? "factorization" : "factorizations",
-                       right_hand_sides_, right_hand_sides_ == 1 ? "side" : "sides");
+    const auto &s = solver_.stats();
+    auto text = std::format(
+        "{} symbolic {}, {} numeric {}, {} right-hand {}", s.symbolic_analyses,
+        s.symbolic_analyses == 1 ? "analysis" : "analyses",
+        s.numeric_factorizations,
+        s.numeric_factorizations == 1 ? "factorization" : "factorizations",
+        s.right_hand_sides, s.right_hand_sides == 1 ? "side" : "sides");
+    if (reuse_)
+      text += std::format(", {} by CG with an earlier factor in {} iterations "
+                          "({} more stopped CG and refactored)",
+                          s.iterative_solves, s.iterations, s.failed_iterative);
+    return text;
   }
 
 private:
-  SolverBackend &backend_;
-  bool dense_block_;
-  std::unique_ptr<LinearFactor> factor_;
-  std::vector<int> row_ptr_, col_ind_; // pattern of factor_
-  std::string ordering_;
-  int analyses_{0}, factorizations_{0}, right_hand_sides_{0};
+  static TangentSolverOptions options(bool dense_block, int reuse) {
+    TangentSolverOptions o;
+    o.factor.require_spd = true;
+    o.factor.dense_block = dense_block;
+    o.reuse_factor = reuse > 0;
+    o.max_iterations = std::max(reuse, 1);
+    return o;
+  }
+  TangentSolver solver_;
+  bool reuse_;
 };
 struct Assembly {
   Sparse stiffness;
@@ -519,6 +518,9 @@ Result<Eigen::VectorXd> boundary_potential(const Model &model, const Mesh &mesh,
   }
   return a;
 }
+// The loosest relative residual of a Newton step's linear solve with a
+// reused factor.
+constexpr double kMaxForcing = 0.1;
 struct Equilibrium {
   Eigen::VectorXd a;
   Assembly assembly;
@@ -538,6 +540,13 @@ Result<Equilibrium> equilibrium(const Model &model, const Setup &setup,
   const double reference =
       std::max({std::sqrt(load_norm), std::sqrt(state.force_scale),
                 state.residual.norm(), 1e-30});
+  const double target = model.options.nonlinear_tolerance * reference;
+  // With a reused factor each step is inexact (Eisenstat and Walker's second
+  // forcing term): solved to a relative residual eta, loose while Newton is
+  // far from converging and tightening with the residual's decrease, so it
+  // keeps Newton superlinear. It is never tighter than half the remaining
+  // distance to the target, which no step needs to beat.
+  double eta = kMaxForcing, previous = 0;
   int iteration = 0;
   for (; iteration <= model.options.max_iterations; ++iteration) {
     const double norm = state.residual.norm();
@@ -547,11 +556,21 @@ Result<Equilibrium> equilibrium(const Model &model, const Setup &setup,
                          norm / reference};
     if (iteration == model.options.max_iterations)
       break;
-    if (auto e = tangent.factor(state.stiffness))
+    if (iteration > 0) {
+      const double ratio = norm / previous;
+      const double safeguard = 0.9 * eta * eta;
+      eta = 0.9 * ratio * ratio;
+      if (safeguard > 0.1)
+        eta = std::max(eta, safeguard);
+      eta = std::min(eta, kMaxForcing);
+    }
+    eta = std::max(eta, 0.5 * target / norm);
+    previous = norm;
+    if (auto e = tangent.update(state.stiffness))
       return Error{std::format("Magnetic tangent factorization failed ({}); "
                                "check mesh, gauge and material data",
                                e->message)};
-    auto solved = tangent.solve(-state.residual);
+    auto solved = tangent.solve(-state.residual, tangent.reuses() ? eta : 0);
     if (auto *e = std::get_if<Error>(&solved))
       return Error{std::format("Magnetic linear solve failed ({})", e->message)};
     const Eigen::VectorXd step = std::get<Eigen::MatrixXd>(std::move(solved));
@@ -1155,10 +1174,12 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
                               static_cast<Eigen::Index>(couplings.size()));
       for (size_t k = 0; k < couplings.size(); ++k)
         reduced.col(static_cast<Eigen::Index>(k)) = gauge.reduce(*couplings[k]);
-      if (auto e = tangent.factor(eq.assembly.stiffness))
+      // Direct, also with a reused factor: CG to the accuracy these need
+      // costs more than refactoring.
+      if (auto e = tangent.update(eq.assembly.stiffness))
         return Error{std::format(
             "Differential inductance factorization failed ({})", e->message)};
-      auto responses = tangent.solve(reduced);
+      auto responses = tangent.solve(reduced, 0);
       if (auto *e = std::get_if<Error>(&responses))
         return Error{std::format("Differential inductance solve failed ({})",
                                  e->message)};
@@ -1200,10 +1221,10 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
       Eigen::MatrixXd reduced(gauge.size, count);
       for (Eigen::Index k = 0; k < count; ++k)
         reduced.col(k) = gauge.reduce(setup.circuit_coupling[request->frozen[k]]);
-      if (auto e = tangent.factor(frozen.stiffness))
+      if (auto e = tangent.update(frozen.stiffness))
         return Error{std::format("Frozen-permeability factorization failed ({})",
                                  e->message)};
-      auto responses = tangent.solve(reduced);
+      auto responses = tangent.solve(reduced, 0);
       if (auto *e = std::get_if<Error>(&responses))
         return Error{std::format("Frozen-permeability solve failed ({})",
                                  e->message)};
@@ -1516,7 +1537,8 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
   result.summary.solver.set("Indefinite fallback",
                             "none, positive definite required");
   // Only the AGE's gap is a dense block; a sliding band's is sparse.
-  Tangent tangent(backend, base.mesh.air_gap && base.mesh.air_gap->band_points == 0);
+  Tangent tangent(backend, base.mesh.air_gap && base.mesh.air_gap->band_points == 0,
+                  model.options.tangent_reuse);
   // THETA0 AUTO results by DRIVE, MOTION and MBC.
   std::map<std::tuple<int, int, int>, DriveSummary> alignments;
   // The setups of MBCs with NORMAL faces, whose gauge leaves them free.
@@ -1691,7 +1713,7 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
   }
   result.summary.solver.add("Tangent reuse", tangent.usage());
   if (!tangent.ordering().empty())
-    result.summary.solver.set("Ordering", tangent.ordering());
+    result.summary.solver.set("Ordering", std::string(tangent.ordering()));
   auto &owned = std::get<Setup>(prepared);
   result.mesh = std::move(owned.mesh);
   result.sources = std::move(owned.sources);

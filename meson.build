@@ -416,6 +416,7 @@ solver_sources = files(
   'src/io/csv_writer.cpp',
   # Solver
   'src/solver/solver_backend.cpp',
+  'src/solver/tangent_solver.cpp',
   'src/solver/analysis_support.cpp',
   'src/solver/linear_static.cpp',
   'src/solver/linear_static_pressure.cpp',
@@ -609,6 +610,7 @@ unit_test_sources = files(
   'tests/unit/test_inp_parser.cpp',
   'tests/unit/test_numbers.cpp',
   'tests/unit/test_linear_factor.cpp',
+  'tests/unit/test_tangent_solver.cpp',
 )
 
 unit_tests = executable(

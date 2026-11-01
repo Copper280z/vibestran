@@ -201,6 +201,9 @@ struct AirGapProperty {
 struct Options {
   double length_scale{1}, nonlinear_tolerance{1e-8};
   int max_iterations{80}, wire_sides{16}, wire_layers{2};
+  // PARAM,MAGPCG: CG iterations per solve with an earlier tangent's factor
+  // before refactoring; 0 factors every tangent.
+  int tangent_reuse{0};
   bool planar{false};
   int plane_coordinates{0};
   double depth{1};

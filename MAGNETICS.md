@@ -245,6 +245,7 @@ twisting paths need shorter segments and a section-refinement study.
 | `MAGLEN` | 1 | Deck length to meters |
 | `MAGTOL` | 1e-8 | Relative equilibrium residual |
 | `MAGITER` | 80 | Newton iteration limit per continuation stage |
+| `MAGPCG` | 0 | CG iterations per Newton step with an earlier tangent's factor before refactoring (0–1000); 0 factors every tangent. See [Reusing a factor](#reusing-a-factor-parammagpcg) |
 | `WIREMESH` | AUTO | Internal CWIRE mesh: AUTO (hex with geometric tet fallback), HEX (required), TET (required) |
 | `WIRESIDE` | 16 | Requested round sides (8–256), rounded up to a multiple of four |
 | `WIRELAY` | 2 | Annular layers outside the square core, or rectangular subdivisions (1–32) |
@@ -1171,9 +1172,11 @@ eight-increment current continuation retry. Failure to meet the requested
 residual is an error, not a partial result.
 
 The tangent systems go through the structural solver backend (`--backend`).
-One factorization serves the whole run: its symbolic analysis is done once,
-and Newton steps, continuation stages, subcases and the differential
-inductances only refactor values. Each subcase's inductances are a single
+One factorization serves the whole run: its symbolic analysis is done once
+per sparsity pattern, and Newton steps, continuation stages, subcases and the
+differential inductances only refactor values. The pattern holds across
+MOTION positions with the AGE; a sliding band couples each grid to the band
+points under it, so the pattern, and the analysis, change at every position. Each subcase's inductances are a single
 solve with one right-hand side per closed source and circuit. Every
 factorization must be positive definite: a failed Cholesky is an error, never
 an LU fallback. `--backend=cuda` (cuDSS) reuses its analysis the same way; in
@@ -1265,6 +1268,45 @@ element and source named. Keep the surface clear of material interfaces. The
 field is averaged from its two adjacent cells before stress evaluation. Vary
 the surface and refine the mesh: force and torque generally converge more
 slowly than field values. Thin air gaps need several element layers.
+
+### Reusing a factor (PARAM,MAGPCG)
+
+`PARAM,MAGPCG,N` solves a Newton step whose tangent has the pattern of the
+factored one by conjugate gradients, preconditioned with that factor, instead
+of factoring it (`TangentSolver`, `include/solver/tangent_solver.hpp`). A
+step is inexact: CG stops at a relative residual eta, the second forcing term
+of Eisenstat and Walker, at most 0.1 and tightening with the residual's
+decrease so that Newton stays superlinear, but never tighter than half the
+remaining distance to `MAGTOL`. Newton's convergence test is unchanged, so
+the results are those of factoring every tangent to `MAGTOL`. A step whose CG
+does not converge in N iterations (or breaks down) refactors with its own
+tangent and solves directly; a new pattern is always factored. The
+differential inductances and linkage rates stay direct solves. The F06
+`Tangent reuse` row counts the CG solves, their iterations and the steps
+that stopped CG and refactored.
+
+It pays only where a numeric refactorization costs many solves with the
+factor. On planar models it hardly does: a stale factor needs about 10 CG
+iterations per step (saturation changes the reluctivity of many cells from
+one step to the next, which is not a low-rank change), each a solve and a
+product with the tangent, while a refactorization with the analysis reused
+costs 2 (Accelerate) to 12 (CHOLMOD) solves. The whole motor of the xfemm
+comparison with `PARAM,AIRGAP,BAND` (MAGTOL 1e-10, 78 positions):
+
+| model, backend | factor every tangent | MAGPCG,20 |
+|---|---:|---:|
+| coarse (n = 12,509), Accelerate (M-series Mac) | 12.4 s | 14.3 s |
+| coarse, CHOLMOD (Ryzen 7 5700, 8 threads) | 20.1 s | 19.0 s |
+| coarse, cuDSS (TITAN V) | 19.0 s | 20.6 s |
+| fine (n = 46,901), CHOLMOD | 96.1 s | 101.1 s |
+| fine, cuDSS | 78.5 s | 83.3 s |
+
+The torques agree to 1e-10 (relative). On the fine model 352 steps were solved
+by CG in 4,540 iterations, 13 each, and 80 more stopped CG and refactored;
+factorizations fell from 586 to 284.
+It is meant for models where factoring dominates: 3D MAGSTAT, whose factors
+fill much more than planar ones, and, through the same interface, future
+geometric nonlinear structural solves.
 
 ## Results and angle sweeps
 

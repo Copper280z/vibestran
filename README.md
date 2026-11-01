@@ -294,6 +294,10 @@ vibestran --backend=cuda-pcg model.bdf
 
 Requires CUDA toolkit ≥ 11 with cuBLAS and cuSPARSE (both included in the standard toolkit).
 
+[CUDA_PCG_PERFORMANCE.md](CUDA_PCG_PERFORMANCE.md) profiles this backend
+against the direct ones: the IC0 triangular solves dominate, and each solve
+rebuilds the preconditioner.
+
 ### Vulkan - Experimental
 
 PCG iterative solver using Vulkan compute shaders. Requires Vulkan SDK, `glslc`, and `xxd`. Unfortunately performance is terrible right now, it's orders of magnitude slower than the base Eigen Cholesky CPU solver.
