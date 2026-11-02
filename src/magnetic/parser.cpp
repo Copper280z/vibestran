@@ -548,7 +548,8 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       period.second = r.integer(4);
       period.coordinates = r.integer(5);
       period.sectors = r.integer(6);
-      r.last(6);
+      period.shift = r.real(7);
+      r.last(7);
       if (m.period)
         return Error{std::format("{}: MPERIOD {} after MPERIOD {}; a model is one "
                                  "sector, with one pair of periodic sides",
@@ -942,22 +943,20 @@ Status validate(const Model &m) {
     return Error{"MAGSTAT requires at least one subcase"};
   // Periodic sectors and NORMAL faces are planar; say so before anything
   // else about a 3D deck that uses them.
-  // The tubular air gap, axial periodicity and motion are not built yet.
+  // The tubular air gap and motion are not built yet.
   if (m.options.axisymmetric) {
     const auto missing = [](std::string_view what) {
       return Error{std::format("{} is not available for MAGAXI models yet", what)};
     };
     if (!m.air_gaps.empty() && m.meshed_air_gaps.size() != m.air_gaps.size())
       return missing(std::format("PAIRGAP {} (AGE or BAND)", m.air_gaps.begin()->first));
-    if (m.period)
-      return missing(std::format("MPERIOD {}", m.period->id));
     if (!m.motions.empty())
       return missing(std::format("MOTION {}", m.motions.begin()->first));
     if (!m.drives.empty())
       return missing(std::format("DRIVE {}", m.drives.begin()->first));
   }
   if (m.period && !m.options.planar)
-    return Error{std::format("MPERIOD {} is for MAG2D models; 3D periodic "
+    return Error{std::format("MPERIOD {} is for MAG2D and MAGAXI models; 3D periodic "
                              "sectors are not implemented",
                              m.period->id)};
   for (const auto &[id, bc] : m.boundaries)
@@ -1313,11 +1312,21 @@ Status validate(const Model &m) {
                                id)};
   }
   if (const auto &period = m.period) {
-    if (period->sectors < 2)
+    const bool translation = period->shift != 0;
+    if (m.options.axisymmetric && !translation)
+      return Error{std::format(
+          "MPERIOD {} in a MAGAXI model needs SHIFT: the field is already the "
+          "same at every angle about the axis, and repeats only along it",
+          period->id)};
+    if (translation && period->sectors < 1)
+      return Error{std::format("MPERIOD {} requires SECTORS >= 1: the number of "
+                               "pitches the results stand for",
+                               period->id)};
+    if (!translation && period->sectors < 2)
       return Error{std::format("MPERIOD {} requires SECTORS >= 2: the number of "
                                "sectors in the whole machine",
                                period->id)};
-    if (period->anti && period->sectors % 2 != 0)
+    if (!translation && period->anti && period->sectors % 2 != 0)
       return Error{std::format(
           "MPERIOD {} ANTI with {} sectors: the potential would change sign "
           "an odd number of times around the machine. Anti-periodic sectors "
@@ -1333,14 +1342,34 @@ Status validate(const Model &m) {
     if (period->coordinates && !m.coordinates.contains(period->coordinates))
       return Error{std::format("MPERIOD {} references undefined coordinates {}",
                                period->id, period->coordinates)};
-    const Vector axis =
-        period->coordinates
-            ? Vector(coordinate_axes(m.coordinates.at(period->coordinates)).col(2))
-            : Vector(Vector::UnitZ());
-    if (axis.cross(plane_normal).norm() > 1e-9)
+    const Matrix axes = period->coordinates
+                            ? coordinate_axes(m.coordinates.at(period->coordinates))
+                            : Matrix::Identity();
+    if (m.options.axisymmetric && axes.col(2).cross(plane_axes.col(2)).norm() > 1e-9)
+      return Error{std::format("MPERIOD {}: the z axis of CID {} must be parallel "
+                               "to the MAGAXI symmetry axis, along which the "
+                               "model repeats",
+                               period->id, period->coordinates)};
+    if (!m.options.axisymmetric && translation &&
+        std::abs(axes.col(0).dot(plane_normal)) > 1e-9)
+      return Error{std::format("MPERIOD {}: the x axis of CID {} must lie in the "
+                               "MAG2D plane, along which the model repeats",
+                               period->id, period->coordinates)};
+    if (!translation && axes.col(2).cross(plane_normal).norm() > 1e-9)
       return Error{std::format("MPERIOD {}: the z axis of CID {} must be parallel "
                                "to the MAG2D plane normal, the sector axis",
                                period->id, period->coordinates)};
+    // The air gaps that slide along a line are not built yet.
+    if (translation && m.air_gaps.size() != m.meshed_air_gaps.size())
+      return Error{std::format(
+          "MPERIOD {} with SHIFT: PAIRGAP {} (AGE or BAND) is not available in "
+          "a model that repeats along a line yet; METHOD=MESH solves the gap as "
+          "air",
+          period->id, m.air_gaps.begin()->first)};
+    if (translation && !m.motions.empty())
+      return Error{std::format("MPERIOD {} with SHIFT: MOTION {} is not available "
+                               "in a model that repeats along a line yet",
+                               period->id, m.motions.begin()->first)};
   }
   for (const auto &[id, bc] : m.boundaries) {
     if (const auto missing = std::ranges::find_if(

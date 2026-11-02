@@ -306,7 +306,8 @@ the *conductor* may be a torus but the *magnetic domain* must be filled. The
 default exterior condition is zero tangential A. Increase the air domain to
 check truncation error. In 3D, periodic and symmetry boundaries, infinite
 elements and multiply connected magnetic domains are not implemented; planar
-models have [periodic sectors and flux-normal faces](#sector-models-mperiod-and-flux-normal-faces-mbc-normal).
+models have [periodic sectors and flux-normal faces](#sector-models-mperiod-and-flux-normal-faces-mbc-normal),
+and planar and axisymmetric models [periodicity along a line](#models-that-repeat-along-a-line-mperiod-shift).
 
 `MAGBC=SID` selects MBC. Its rows are `MBC,SID,FSET,TYPE,BX,BY,BZ`, and the
 rows of one SID combine: one ZERO or UNIFORM row prescribes A, and, in planar
@@ -433,9 +434,11 @@ tangential uniform field is not axisymmetric. On the axis, where A_φ / r is
 - **Forces.** MFORCE reports the axial force; radial stress cancels around the
   axis and there is no torque. A FACES contour may end on the axis, where its
   surface of revolution closes, and a BODY surface closes there by itself.
+- **Periodicity.** A stack that repeats along the axis is one pitch with
+  `MPERIOD ... SHIFT` (see [Models that repeat along a line](#models-that-repeat-along-a-line-mperiod-shift)).
 - **Not yet available** with MAGAXI: the tubular air gap (`PAIRGAP` AGE and
-  BAND; METHOD=MESH works, as ordinary air), `MOTION`, `MPERIOD` and `DRIVE`.
-  They are the next steps toward tubular linear motors.
+  BAND; METHOD=MESH works, as ordinary air), `MOTION` and `DRIVE`. They are
+  the next steps toward tubular linear motors.
 
 HDF5 `/MAGSTAT` carries `axisymmetric = 1` (`dimension` is 2, `depth_m` 1),
 and the planar blocks' nodal potential is A_φ.
@@ -698,7 +701,7 @@ MOTION,ID,ESET,CID,TYPE,START,STEP,COUNT
 | `ID` | Referenced by the case control `MOTION = ID`. |
 | `ESET` | The moving elements: the rotor, or the stator of an outer-rotor machine. `ESET,SID,PROP,PID...` suits meshes exported by physical group. It may not hold air-gap elements. |
 | `CID` | The axis is the z axis of CID through its origin; 0 is basic z through the basic origin. It must be parallel to the MAG2D plane normal, in either direction. |
-| `TYPE` | `ROTATE`. `TRANSLATE` is reserved for linear motion along the CID x axis and is an error for now (see below). |
+| `TYPE` | `ROTATE`. `TRANSLATE` is reserved for linear motion (along the CID x axis in MAG2D, the symmetry axis in MAGAXI) and is an error for now (see below). |
 | `START`, `STEP`, `COUNT` | Positions `START + k*STEP` degrees for k = 0 … COUNT−1, relative to the mesh as given. Positive angles turn counterclockwise looking down the CID z axis. COUNT ≥ 1 (blank is 1); STEP must be nonzero when COUNT > 1. |
 | `SPEED` | Optional rotor speed in rpm, positive toward increasing positions. It only converts the back-EMF per unit speed into volts (see Back-EMF below); every position is still a static solve. |
 
@@ -1102,7 +1105,7 @@ repeats every 90°. One sector carries all the information. `MPERIOD` says
 which sector the mesh is and how it repeats:
 
 ```text
-MPERIOD,ID,TYPE,FSET1,FSET2,CID,SECTORS
+MPERIOD,ID,TYPE,FSET1,FSET2,CID,SECTORS,SHIFT
 ```
 
 | Field | Meaning |
@@ -1112,10 +1115,11 @@ MPERIOD,ID,TYPE,FSET1,FSET2,CID,SECTORS
 | `FSET1`, `FSET2` | The two sides of the sector, as edges of field elements on the exterior. FSET2 must be FSET1 turned counterclockwise by 360/SECTORS degrees about the axis, grid for grid and edge for edge. |
 | `CID` | The axis is the z axis of CID through its origin (blank or 0: basic z through the basic origin). It must be parallel to the MAG2D plane normal. |
 | `SECTORS` | The number of sectors in the whole machine, at least 2; even for ANTI. |
+| `SHIFT` | Blank for a sector. A length makes the model one pitch of a machine that repeats along a line: see [Models that repeat along a line](#models-that-repeat-along-a-line-mperiod-shift). |
 
-MPERIOD requires MAG2D. The sides need no particular shape: they are
-usually radial lines, but a skewed or stepped side works as long as its
-turned copy is the other side.
+MPERIOD requires MAG2D for sectors. The sides need no particular shape:
+they are usually radial lines, but a skewed or stepped side works as long as
+its turned copy is the other side.
 
 **What the sector stands for.** The sector model is the whole machine: N
 turned copies of the sector's mesh, meshed alike at the sides, with each
@@ -1162,7 +1166,7 @@ row gives it).
 | DRIVE dq quantities, THETA0 AUTO | From the whole machine's linkages and inductances |
 | B, H, potentials, VTKHDF fields | The modeled sector's |
 | MPROBE | Points in the sector's cells; in the gap, any angle (the unfolded gap's field) |
-| MFORCE | The named body in the sector, unscaled. Its surface may not reach a periodic side, which is on the mesh's exterior. Use the AGE torque for the machine. |
+| MFORCE | The named body in the sector, unscaled. Its surface may not reach a periodic side: the copies across the sides are turned, so a surface crossing them would sum tractions of parts of different bodies. Use the AGE torque for the machine. |
 
 A COIL2D region on its own, or a circuit whose turns do not balance, is
 open in an ordinary planar model: its return is unspecified, and linkage is
@@ -1244,6 +1248,78 @@ sectors, axis, sector angle, the number of grid pairs and axial grids, and
 which quantities are the whole machine's. In a sector model the `Air gap`
 row adds the arcs' grid counts and the harmonics that remain. The HDF5 file
 gains `MAGSTAT/periodic` (see [Results](#results-and-angle-sweeps)).
+
+### Models that repeat along a line (MPERIOD SHIFT)
+
+A tubular stack of alternating magnets inside a three-phase winding repeats
+along its axis: moving it by a pole pitch takes every magnet to one of
+opposite polarity and every coil to a coil of the same phase wound the
+other way, so A(z + pitch) = −A(z). A flat linear machine repeats the same
+way along its travel. With `SHIFT` the MPERIOD card makes the mesh one
+pitch of such a machine:
+
+```text
+MPERIOD,1,ANTI,1,2,0,6,.02    $ one 20 mm pole pitch standing for six
+```
+
+- **The sides.** FSET2 is FSET1 moved by SHIFT: along the symmetry axis (the
+  z axis of CID, which must be parallel to MAGAXI's) in MAGAXI, and along
+  the x axis of CID, which must lie in the plane, in MAG2D. A negative SHIFT
+  moves the other way. The sides need no particular shape. In MAGAXI the
+  field is the same at every angle already, so an MPERIOD there must have a
+  SHIFT.
+- **SECTORS** is the number of pitches the results stand for, at least 1,
+  odd or even for ANTI: a line has no ring to close.
+- **Everything else is as for sectors**: pairing, gauge, checks 1 to 3 and
+  5 above (the tolerance follows the sides' extent and SHIFT), the
+  whole-machine results (SECTORS times the pitch's energy, coenergy,
+  linkage and inductance), circuits that close through their images under
+  ANTI, and the `Periodic` row (`anti-periodic pitch of 6 along the z axis of
+  CID 0, 0.02 long`). HDF5 `MAGSTAT/periodic` gives `shift_m` instead of
+  `sector_angle_deg`, `origin_m` and `axis`.
+- **Not yet with SHIFT**: the air-gap element and band (`PAIRGAP` AGE or
+  BAND; METHOD=MESH works) and MOTION. A gap that slides along a line needs
+  the strip or tubular air-gap element.
+
+**What a pitch stands for.** The pitch model is a machine of SECTORS
+pitches whose ends join: SECTORS copies of the pitch's mesh, each moved by
+SHIFT from the last, the last joined to the first, with each magnet's
+remanence and each COIL2D's turns times the period's sign in the odd copies
+of an ANTI model. A real machine of that many pitches has ends; the pitch
+model leaves them out, as a sector model does nothing else. Its plain
+equivalents are therefore of two kinds:
+
+- a model of several pitches, meshed as copies of the one, with an MPERIOD
+  that joins its ends (PERIODIC for an even number of ANTI pitches) and
+  stands for as many pitches in all: the same field to round-off;
+- at a position where the machine is symmetric, the plain deck of half a
+  pitch with A = 0 on the plane the field is odd about and MBC NORMAL on the
+  one it is even about (a junction between magnets and a magnet's middle,
+  with no current): the same field, and half the pitch's energy.
+
+**MFORCE across the sides.** A mover that spans the pitch, as a tubular
+stack's magnets do, has no force surface that closes inside it. With SHIFT a
+BODY surface continues across the sides into the neighbouring pitches: the
+layers grow across them (a grid's neighbours include its image's), a face
+on a side bounds the region when the cell across it, the image cell in the
+next pitch, is outside it, and B on such a face is the average of its own
+cell's and the image cell's times the period's sign. The surface is then
+that of the unfolded body, one pitch of it, and the force is the modeled
+pitch's, unscaled like every MFORCE. For a body that spans the pitch, the
+faces on the sides drop out and the surface is the cylinder (or strip)
+around it. FACES surfaces must still close inside the model.
+
+**Guarantees.** Unit tests in `tests/unit/test_axisymmetric.cpp` (tubular
+stack: N35-like magnets, a tube, a 1 mm gap, three-phase coils and a steel
+sleeve, 20 mm pitch) and `tests/unit/test_periodic.cpp` (a flat strip):
+
+| Pitch model | Against | Agreement |
+|---|---|---|
+| One ANTI pitch, with current | Two PERIODIC pitches standing for the same machine | Potential, energy, coenergy and linkage 1e-10; MFORCE twice the one pitch's, 1e-9 |
+| One ANTI pitch at a symmetric position, saturating sleeve (1.8 T) | The plain half pitch, A = 0 at the junction and NORMAL at the magnet's middle | Potential and energy to MAGTOL (1e-8); the pitch finds A = 0 on its sides |
+| MFORCE on a mover spanning the pitch, with current | The derivative of the pitch's coenergy as the mover moves (the gap sheared) | 3e-4 |
+| MFORCE whose surface lies on the bottom or the top side | The same stack meshed from z one coil further on, where those faces are inside the pitch | 1e-9 |
+| A flat strip: one ANTI pitch | Two PERIODIC pitches | Potential, energy 1e-10; force 1e-9 |
 
 Full 3D magnetic shells are a separate physical model: a thin magnetic layer or
 surface-current sheet coupled to the surrounding 3D field. Mechanical shell
@@ -1445,7 +1521,8 @@ solving. The file has two top-level groups:
     sector model, each arc grid once, without the last, which is the image
     of the first).
   - `periodic/` (with MPERIOD): attributes `id`, `type` (`PERIODIC` or
-    `ANTI`), `sectors`, `sector_angle_deg`; `origin_m` and `axis`; and
+    `ANTI`), `sectors`, and `sector_angle_deg` with `origin_m` and `axis`
+    for a sector or `shift_m` for a pitch; and
     `first_grids`, `second_grids` (row k pairs a grid with its image) and
     `axial_grids`. Energies, linkages, inductances, back-EMF and the AGE
     torque in the subcase groups are the whole machine's.

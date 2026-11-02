@@ -495,11 +495,20 @@ Result<Periodicity> make_periodicity(const Model &model, const Mesh &mesh) {
   out.id = card.id;
   out.sectors = card.sectors;
   out.anti = card.anti;
-  if (card.coordinates) {
-    const auto &cs = model.coordinates.at(card.coordinates);
-    out.origin = cs.a;
-    out.axis = coordinate_axes(cs).col(2);
-  }
+  out.translation = card.shift != 0;
+  const Matrix axes = card.coordinates
+                          ? coordinate_axes(model.coordinates.at(card.coordinates))
+                          : Matrix::Identity();
+  if (card.coordinates)
+    out.origin = model.coordinates.at(card.coordinates).a;
+  out.axis = axes.col(2);
+  // A translation runs along the symmetry axis in MAGAXI and along the x
+  // axis in MAG2D, whose z axis is the plane normal.
+  if (out.translation)
+    out.shift = card.shift * axes.col(mesh.axisymmetric ? 2 : 0);
+  else
+    out.turn = Eigen::AngleAxisd(2 * std::numbers::pi / card.sectors, out.axis)
+                   .toRotationMatrix();
   // The faces and grids of each side.
   std::array<std::set<int>, 2> grids;
   std::array<std::set<int>, 2> faces;
@@ -527,21 +536,28 @@ Result<Periodicity> make_periodicity(const Model &model, const Mesh &mesh) {
           "MPERIOD {}: edge ({},{}) is in both FSET {} and FSET {}", card.id,
           mesh.node_ids[mesh.faces[f].nodes[0]], mesh.node_ids[mesh.faces[f].nodes[1]],
           card.first, card.second)};
-  const double angle = 360. / card.sectors;
-  const Matrix turn =
-      Eigen::AngleAxisd(2 * std::numbers::pi / card.sectors, out.axis).toRotationMatrix();
+  // The tolerance follows the sides' size: their extent and, for a
+  // rotation, their distance from the axis.
   const auto from_axis = [&](const Vector &x) {
     const Vector d = x - out.origin;
     return (d - d.dot(out.axis) * out.axis).norm();
   };
-  double scale = 0;
-  for (const auto &side : grids)
-    for (int v : side)
-      scale = std::max(scale, from_axis(mesh.nodes[v]));
+  double scale = out.shift.norm();
+  for (const auto &side : grids) {
+    Vector lo = Vector::Constant(std::numeric_limits<double>::infinity()), hi = -lo;
+    for (int v : side) {
+      lo = lo.cwiseMin(mesh.nodes[v]);
+      hi = hi.cwiseMax(mesh.nodes[v]);
+      if (!out.translation)
+        scale = std::max(scale, from_axis(mesh.nodes[v]));
+    }
+    if (!side.empty())
+      scale = std::max(scale, (hi - lo).norm());
+  }
   const double tolerance = 1e-6 * scale;
   std::vector<int> image(mesh.nodes.size(), -1), preimage(mesh.nodes.size(), -1);
   for (int v : grids[0]) {
-    const Vector target = out.origin + turn * (mesh.nodes[v] - out.origin);
+    const Vector target = out.image(mesh.nodes[v]);
     int nearest = -1;
     double distance = std::numeric_limits<double>::infinity();
     for (int w : grids[1])
@@ -551,15 +567,21 @@ Result<Periodicity> make_periodicity(const Model &model, const Mesh &mesh) {
       }
     if (nearest < 0 || distance > tolerance)
       return Error{std::format(
-          "MPERIOD {}: grid {} of the first side (FSET {}) turned by {:.6g} "
-          "degrees about the axis lands at ({:.6g}, {:.6g}, {:.6g}), {:.3e} from "
-          "the nearest grid of the second side (FSET {}){}. The second side must "
-          "be the first turned counterclockwise by 360/SECTORS about the z axis "
-          "of CID {}, grid for grid",
-          card.id, mesh.node_ids[v], card.first, angle, target.x(), target.y(),
-          target.z(), distance, card.second,
+          "MPERIOD {}: grid {} of the first side (FSET {}) {} lands at ({:.6g}, "
+          "{:.6g}, {:.6g}), {:.3e} from the nearest grid of the second side (FSET "
+          "{}){}. The second side must be the first {}, grid for grid",
+          card.id, mesh.node_ids[v], card.first,
+          out.translation ? std::format("moved by {:.6g}", card.shift)
+                          : std::format("turned by {:.6g} degrees about the axis",
+                                        360. / card.sectors),
+          target.x(), target.y(), target.z(), distance, card.second,
           nearest < 0 ? "" : std::format(", grid {}", mesh.node_ids[nearest]),
-          card.coordinates)};
+          out.translation
+              ? std::format("moved by SHIFT along the {} axis of CID {}",
+                            mesh.axisymmetric ? "z" : "x", card.coordinates)
+              : std::format("turned counterclockwise by 360/SECTORS about the z "
+                            "axis of CID {}",
+                            card.coordinates))};
     if (preimage[nearest] >= 0)
       return Error{std::format("MPERIOD {}: grids {} and {} of the first side "
                                "both turn onto grid {}",
@@ -586,11 +608,12 @@ Result<Periodicity> make_periodicity(const Model &model, const Mesh &mesh) {
     const auto found = mesh.face_index.find(turned);
     if (found == mesh.face_index.end() || !faces[1].contains(found->second))
       return Error{std::format(
-          "MPERIOD {}: edge ({},{}) of the first side turns onto grids ({},{}), "
+          "MPERIOD {}: edge ({},{}) of the first side maps onto grids ({},{}), "
           "which are not an edge of the second side; mesh both sides alike",
           card.id, mesh.node_ids[mesh.faces[f].nodes[0]],
           mesh.node_ids[mesh.faces[f].nodes[1]], mesh.node_ids[turned[0]],
           mesh.node_ids[turned[1]])};
+    out.face_pairs.push_back({f, found->second});
   }
   if (faces[0].size() != faces[1].size())
     return Error{std::format("MPERIOD {}: FSET {} has {} edges and FSET {} has "

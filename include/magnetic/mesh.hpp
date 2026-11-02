@@ -69,16 +69,26 @@ struct AirGap {
 };
 // The two sides of an MPERIOD on the field mesh: each grid of the first
 // side with its image on the second, turned by 2 pi / sectors
-// counterclockwise about the axis.
+// counterclockwise about the axis, or moved by shift (a translation).
 struct Periodicity {
   int id{0}, sectors{1};
-  bool anti{false};
+  bool anti{false}, translation{false};
   Vector origin{Vector::Zero()}, axis{Vector::UnitZ()};
+  Vector shift{Vector::Zero()}; // a translation's step
+  Matrix turn{Matrix::Identity()}; // a rotation's
   std::vector<int> faces;                // boundary faces on either side
   std::vector<std::array<int, 2>> pairs; // node indices: first side, its image
+  std::vector<std::array<int, 2>> face_pairs; // faces: first side, its image
   std::vector<int> axial;                // grids on both sides, on the axis
   // The factor from a grid's potential to its image's.
   [[nodiscard]] double sign() const { return anti ? -1 : 1; }
+  // The image of a point of the first side's copy on the second's, and back.
+  [[nodiscard]] Vector image(const Vector &x) const {
+    return origin + turn * (x - origin) + shift;
+  }
+  [[nodiscard]] Vector preimage(const Vector &x) const {
+    return origin + turn.transpose() * (x - shift - origin);
+  }
 };
 struct Mesh {
   std::vector<Vector> nodes;

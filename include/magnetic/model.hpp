@@ -165,11 +165,15 @@ struct Boundary {
   std::vector<int> normal;
 };
 // MPERIOD: the field mesh is one of `sectors` identical sectors about the z
-// axis of coordinates, through its origin. Side second is side first turned
-// by 360 / sectors degrees counterclockwise; across it the potential repeats
-// (PERIODIC) or changes sign (ANTI).
+// axis of coordinates, through its origin, and side second is side first
+// turned by 360 / sectors degrees counterclockwise. With a nonzero shift it
+// is one of `sectors` pitches of a machine that repeats along a line, and
+// side second is side first moved by shift: along the z axis of coordinates
+// in MAGAXI (the symmetry axis), its x axis in MAG2D. Across the sides the
+// potential repeats (PERIODIC) or changes sign (ANTI).
 struct Periodic {
   int id{0}, first{0}, second{0}, coordinates{0}, sectors{0};
+  double shift{0};
   bool anti{false};
 };
 // MPROBE: position in basic once parsed (CP is resolved like GRID CP); the

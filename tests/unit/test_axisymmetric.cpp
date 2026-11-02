@@ -11,10 +11,12 @@
 #include "magnetic/solver.hpp"
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <format>
 #include <functional>
 #include <map>
+#include <set>
 #include <numbers>
 #include <string>
 #include <vector>
@@ -51,6 +53,9 @@ std::vector<double> lines(double start, std::vector<std::pair<double, int>> segm
 struct Axi {
   std::vector<double> r, z;
   std::function<int(double, double)> property = [](double, double) { return 1; };
+  // Grid (r, z) is written at z + dz(r, z); properties follow the unmoved
+  // cell centers.
+  std::function<double(double, double)> dz = [](double, double) { return 0.; };
   bool triangles{false};
   std::string control; // case control after CEND
   std::string cards;   // bulk data
@@ -61,7 +66,8 @@ std::string deck(const Axi &g) {
   std::string out = "SOL MAGSTAT\nCEND\n" + g.control + "BEGIN BULK\nMAGAXI,0\n" + g.cards;
   for (int j = 0; j < nz; ++j)
     for (int i = 0; i < nr; ++i)
-      out += std::format("GRID,{},,{:.17g},0.,{:.17g}\n", grid(i, j), g.r[i], g.z[j]);
+      out += std::format("GRID,{},,{:.17g},0.,{:.17g}\n", grid(i, j), g.r[i],
+                         g.z[j] + g.dz(g.r[i], g.z[j]));
   std::map<int, std::vector<int>> by_property;
   int id = 1;
   for (int j = 0; j + 1 < nz; ++j)
@@ -363,4 +369,268 @@ TEST(Axisymmetric, CardsAndChecks) {
   // Not yet: the tubular air gap, motion, axial periodicity and DRIVE.
   EXPECT_NE(error("MOTION,1,101,0,ROTATE,0.,1.,2\n").find("not available for MAGAXI"),
             std::string::npos);
+}
+
+namespace {
+// A tubular stack that repeats along the axis with a 20 mm pole pitch:
+// axial magnets (r < 6 mm) alternating +z and -z, a +z magnet starting at z
+// = offset (each magnet `spacer` rows shorter than the pitch, centred in
+// it, with air between); a nonmagnetic tube to 6.75 mm; a 1 mm gap; coils
+// 6.67 mm long (7.75 to 12.5 mm) in the sequence A, -C, B, -A, C, -B; a
+// steel sleeve to 14 mm (13 mm, saturating, with a B-H curve); and air to
+// 20 mm, held at A = 0. The deck is `pitches` pitches of the stack from z =
+// window (in rows), meshed from z = 0, with an MPERIOD that moves the
+// bottom (FSET 1) onto the top (FSET 2) and stands for `machine` pitches,
+// ANTI for an odd count; or, with half, the plain deck of the first half
+// pitch, the top NORMAL. MFORCE 1 is on the magnets (and the tube, with
+// tube_in_body) through `layers` layers. Grid IDs depend only on the
+// grid's ring and row, so the decks' grids correspond.
+constexpr double pitch = .02;
+struct Tube {
+  int pitches{1}, machine{4}, rows{48}; // rows: per pitch
+  int offset{0}, window{0}, spacer{0};  // in rows
+  bool saturating{false}, half{false}, tube_in_body{true};
+  int layers{2};
+  double current{0}; // phase A; B and C carry -current / 2
+  double move{0};    // the mover (r < 6.75 mm) moved along z, the gap sheared
+};
+Axi tube(const Tube &t) {
+  Axi g;
+  const double sleeve = t.saturating ? .013 : .014, row = pitch / t.rows;
+  g.r = lines(0, {{.006, 6}, {.00675, 1}, {.00775, 4}, {.0125, 5}, {sleeve, 2}, {.02, 3}});
+  const int rows = t.half ? t.rows / 2 : t.rows * t.pitches;
+  g.z = lines(0, {{rows * row, rows}});
+  const double start = t.offset * row, shift = t.window * row, gap = t.spacer * row / 2;
+  g.property = [=](double r, double z) {
+    const double at = z + shift; // in the stack
+    if (r < .006) {
+      const double within = std::fmod(at - start + 4 * pitch, pitch);
+      if (within < gap || within > pitch - gap)
+        return 7;
+      return std::fmod(at - start + 4 * pitch, 2 * pitch) < pitch ? 4 : 6;
+    }
+    if (r < .00775)
+      return r < .00675 ? 5 : 1;
+    if (r < .0125)
+      return 10 + static_cast<int>(std::floor(at / (pitch / 3))); // coil k
+    return r < sleeve ? 2 : 1;
+  };
+  g.dz = [move = t.move](double r, double) {
+    return move * std::clamp((.00775 - r) / .001, 0., 1.);
+  };
+  std::set<int> present;
+  for (size_t j = 0; j + 1 < g.z.size(); ++j)
+    for (size_t i = 0; i + 1 < g.r.size(); ++i)
+      present.insert(g.property((g.r[i] + g.r[i + 1]) / 2, (g.z[j] + g.z[j + 1]) / 2));
+  g.cards = "PARAM,MAGTOL,1e-11\nMATMAG,1,1.\nPMAG2D,1,1\nPMAG2D,5,1\nPMAG2D,7,1\n"
+            "MATMAG,3,1.05,,1.2\nPMAG2D,4,3,0,3\nPMAG2D,6,3,0,-3\nMBC,1,0,ZERO\n";
+  g.cards += t.saturating ? "MATMAG,2,,1\nPMAG2D,2,2\nTABLEBH,1\n,0.,0.,.5,60.,1.,120.,1.3,250.\n"
+                            ",1.5,800.,1.6,1800.,1.7,4500.,1.8,10000.\n,1.9,20000.,2.,40000.,"
+                            "2.1,80000.,ENDT\n"
+                          : "MATMAG,2,1000.\nPMAG2D,2,2\n";
+  // Coil k is phase A, C, B (circuits 1, 3, 2) for k mod 3 = 0, 1, 2, wound
+  // +, -, + in even pitches and the other way in odd ones.
+  std::array<std::string, 3> circuits;
+  for (int k = 0; k < 6 * (t.pitches + 1); ++k) {
+    if (!present.contains(10 + k))
+      continue;
+    const int sign = (k % 3 == 1 ? -1 : 1) * (k / 3 % 2 ? -1 : 1);
+    g.cards += std::format("PMAG2D,{},1\nCOIL2D,{},{},{}\n", 10 + k, 200 + k, 110 + k, 88 * sign);
+    circuits[static_cast<size_t>(std::array{0, 2, 1}[k % 3])] += std::format(",{},1", 200 + k);
+  }
+  for (size_t k = 0; k < 3; ++k)
+    if (!circuits[k].empty())
+      g.cards += std::format("CIRCUIT,{},1{}\n", k + 1, circuits[k]);
+  g.control = "MAGBC = 1\n";
+  if (t.current != 0) {
+    g.control += "LOAD = 5\n";
+    g.cards += std::format("ICIRC,5,1,{0:.17g}\nICIRC,5,2,{1:.17g}\nICIRC,5,3,{1:.17g}\n",
+                           t.current, -t.current / 2);
+  }
+  if (t.half) {
+    g.cards += "MBC,1,2,NORMAL\n";
+    return g;
+  }
+  std::string body;
+  for (int pid : {4, 5, 6})
+    if (present.contains(pid) && (pid != 5 || t.tube_in_body))
+      body += std::format(",{}", pid);
+  g.cards += std::format("MPERIOD,1,{},1,2,0,{},{:.17g}\nESET,30,PROP{}\nMFORCE,1,BODY,30,0,{}\n",
+                         t.pitches % 2 ? "ANTI" : "PERIODIC", t.machine / t.pitches,
+                         t.pitches * pitch, body, t.layers);
+  return g;
+}
+// The largest difference of the two results' potentials at the grids of a
+// (whose IDs b shares), each of b's taken times sign.
+double potential_difference(const Results &a, const Results &b, double sign = 1) {
+  double out = 0;
+  for (size_t i = 0; i < a.mesh.node_ids.size(); ++i)
+    out = std::max(out, std::abs(a.cases[0].potential[static_cast<Eigen::Index>(i)] -
+                                 sign * b.cases[0].potential[b.mesh.node_index.at(
+                                            a.mesh.node_ids[i])]));
+  return out;
+}
+} // namespace
+
+TEST(AxialPeriod, OneAntiPeriodicPitchIsTwoPeriodicPitches) {
+  // One pitch, ANTI, standing for four, and two pitches, PERIODIC, standing
+  // for the same four, meshed alike: the same field to round-off, and the
+  // same whole-machine energy and phase linkages. MFORCE is the modeled
+  // part's, so the two-pitch mover's force is twice the one-pitch mover's;
+  // each mover spans its model, and its force surface closes across the
+  // periodic sides.
+  Tube one{.offset = 5, .current = 3};
+  Tube two = one;
+  two.pitches = 2;
+  const auto a = solved(parsed(tube(one))), b = solved(parsed(tube(two)));
+  ASSERT_EQ(a.cases.size(), 1U);
+  ASSERT_EQ(b.cases.size(), 1U);
+  const auto &x = a.cases[0], &y = b.cases[0];
+  const double scale = y.potential.cwiseAbs().maxCoeff();
+  EXPECT_LT(potential_difference(a, b), 1e-10 * scale);
+  // The second pitch is the first with A changed in sign.
+  const int nr = 22, rows = 48;
+  double second = 0;
+  for (int j = 0; j <= rows; ++j)
+    for (int i = 0; i < nr; ++i)
+      second = std::max(second, std::abs(y.potential[b.mesh.node_index.at(1 + i + nr * j)] +
+                                         y.potential[b.mesh.node_index.at(1 + i + nr * (j + rows))]));
+  EXPECT_LT(second, 1e-10 * scale);
+  EXPECT_LT(relative(x.energy, y.energy), 1e-10);
+  EXPECT_LT(relative(x.coenergy, y.coenergy), 1e-10);
+  ASSERT_EQ(x.circuits.size(), 3U);
+  for (size_t k = 0; k < 3; ++k)
+    EXPECT_NEAR(x.circuits[k].linkage, y.circuits[k].linkage,
+                1e-10 * std::abs(y.circuits[0].linkage));
+  ASSERT_EQ(x.forces.size(), 1U);
+  ASSERT_EQ(y.forces.size(), 1U);
+  EXPECT_GT(std::abs(x.forces[0].force.z()), 1.);
+  EXPECT_NEAR(2 * x.forces[0].force.z(), y.forces[0].force.z(),
+              1e-9 * std::abs(y.forces[0].force.z()));
+}
+
+TEST(AxialPeriod, AntiPeriodicPitchIsTheMirroredHalfPitch) {
+  // With a magnet junction at z = 0 and no current, the stack is odd about
+  // every junction (A = 0 there) and even about every magnet's middle (the
+  // flux crosses it normally). The plain deck of the first half pitch, A =
+  // 0 at the bottom and NORMAL at the top, is then the periodic pitch's
+  // first half: the same potential at its grids, and half the pitch's
+  // energy, which the periodic deck reports times the four pitches it
+  // stands for. The sleeve saturates, so the two agree to MAGTOL rather
+  // than round-off.
+  Tube periodic{.saturating = true};
+  Tube half = periodic;
+  half.half = true;
+  const auto p = solved(parsed(tube(periodic))), h = solved(parsed(tube(half)));
+  ASSERT_EQ(p.cases.size(), 1U);
+  ASSERT_EQ(h.cases.size(), 1U);
+  const double scale = p.cases[0].potential.cwiseAbs().maxCoeff();
+  EXPECT_LT(potential_difference(h, p), 1e-8 * scale);
+  // The periodic pitch finds A = 0 on its sides, which pair with sign -1.
+  const int nr = 22;
+  double side = 0;
+  for (int i = 0; i < nr; ++i)
+    side = std::max(side, std::abs(p.cases[0].potential[p.mesh.node_index.at(1 + i)]));
+  EXPECT_LT(side, 1e-8 * scale);
+  EXPECT_LT(relative(p.cases[0].energy, 2 * periodic.machine * h.cases[0].energy), 1e-8);
+  // The sleeve saturates: its largest |B| is past the curve's knee.
+  double sleeve = 0;
+  for (size_t c = 0; c < p.mesh.cells.size(); ++c)
+    if (p.mesh.cells[c].material == 2)
+      sleeve = std::max(sleeve, p.cases[0].b[c].norm());
+  EXPECT_GT(sleeve, 1.5);
+}
+
+TEST(AxialPeriod, ForceAcrossTheSidesIsTheDerivativeOfTheCoenergy) {
+  // The mover spans the pitch, so its MFORCE surface (two gap layers out)
+  // ends on both periodic sides and closes through the next pitch. Its
+  // axial force must be the derivative of the pitch's coenergy (a quarter
+  // of the whole machine's) as the mover moves at fixed current, here by a
+  // central difference over decks with the mover moved by +-dz, the gap
+  // sheared. The two agree to the discretization: 3e-4 at this mesh.
+  constexpr double dz = 1e-5;
+  Tube t{.offset = 5, .current = 3};
+  std::vector<double> coenergy;
+  double force = 0;
+  for (int shift : {-1, 0, 1}) {
+    t.move = shift * dz;
+    const auto r = solved(parsed(tube(t)));
+    ASSERT_EQ(r.cases.size(), 1U);
+    coenergy.push_back(r.cases[0].coenergy / t.machine);
+    if (shift == 0)
+      force = r.cases[0].forces[0].force.z();
+  }
+  const double derivative = (coenergy[2] - coenergy[0]) / (2 * dz);
+  EXPECT_GT(std::abs(derivative), 1.);
+  EXPECT_NEAR(force, derivative, .002 * std::abs(derivative));
+}
+
+TEST(AxialPeriod, ForceSurfaceOnASideTakesTheFieldAcrossIt) {
+  // Magnets 44 rows long with 4 rows of air between them, MFORCE on the
+  // magnets through one layer: the surface ends 1 row beyond each magnet.
+  // The same stack is cut into a pitch two ways, one coil (16 rows) apart,
+  // so no coil is cut. In the first window the magnet's surface lies on the
+  // bottom side (offset -1) or the top (offset 1), and its stress there
+  // takes B across the side from the image cell on the other side, mapped
+  // over; in the second window those faces are inside the pitch. Both
+  // windows unfold to the same discrete problem, so the force agrees to
+  // round-off.
+  for (int offset : {-1, 1}) {
+    Tube first{.offset = offset, .spacer = 4, .tube_in_body = false, .layers = 1, .current = 3};
+    Tube second = first;
+    second.window = 16;
+    const auto a = solved(parsed(tube(first))), b = solved(parsed(tube(second)));
+    ASSERT_EQ(a.cases.size(), 1U);
+    ASSERT_EQ(b.cases.size(), 1U);
+    EXPECT_LT(relative(a.cases[0].energy, b.cases[0].energy), 1e-10) << offset;
+    ASSERT_EQ(a.cases[0].forces.size(), 1U);
+    const double force = b.cases[0].forces[0].force.z();
+    EXPECT_GT(std::abs(force), .1) << offset;
+    EXPECT_NEAR(a.cases[0].forces[0].force.z(), force, 1e-9 * std::abs(force)) << offset;
+  }
+}
+
+TEST(AxialPeriod, CardsAndChecks) {
+  const auto error = [](Axi g, const std::string &from, const std::string &to) {
+    const auto at = g.cards.find(from);
+    EXPECT_NE(at, std::string::npos) << from;
+    g.cards.replace(at, from.size(), to);
+    auto m = parse_string(deck(g));
+    if (const auto *e = std::get_if<vibestran::Error>(&m))
+      return e->message;
+    return error_of(solve(std::get<Model>(m)));
+  };
+  const auto g = tube({});
+  EXPECT_NE(error(g, "MPERIOD,1,ANTI,1,2,0,4,0.02", "MPERIOD,1,ANTI,1,2,0,4")
+                .find("MPERIOD 1 in a MAGAXI model needs SHIFT"),
+            std::string::npos);
+  EXPECT_NE(error(g, "MPERIOD,1,ANTI,1,2,0,4,0.02", "MPERIOD,1,ANTI,1,2,0,0,0.02")
+                .find("requires SECTORS >= 1"),
+            std::string::npos);
+  EXPECT_NE(error(g, "MPERIOD,1,ANTI,1,2,0,4,0.02", "MPERIOD,1,ANTI,1,2,0,4,0.01")
+                .find("moved by 0.01 lands at"),
+            std::string::npos);
+  EXPECT_NE(error(g, "MPERIOD,1,ANTI,1,2,0,4,0.02",
+                  "MPERIOD,1,ANTI,1,2,7,4,0.02\nCORD2R,7,,0.,0.,0.,1.,0.,0.\n,0.,0.,1.")
+                .find("must be parallel to the MAGAXI symmetry axis"),
+            std::string::npos);
+  // A uniform axial field, A = B0 r / 2, is the same at every z: periodic,
+  // but not anti-periodic.
+  EXPECT_NE(error(g, "MBC,1,0,ZERO", "MBC,1,0,UNIFORM,0.,0.,.1")
+                .find("which MPERIOD 1 requires to be minus it"),
+            std::string::npos);
+  Tube two{.pitches = 2};
+  EXPECT_EQ(error(tube(two), "MBC,1,0,ZERO", "MBC,1,0,UNIFORM,0.,0.,.1"), "");
+  // An odd pitch count is fine for ANTI: a translation has no ring to close.
+  Tube three{.machine = 3};
+  const auto r = solved(parsed(tube(three)));
+  std::string rows;
+  for (const auto &[label, text] : r.summary.solution.rows)
+    if (label == "Periodic")
+      rows += text;
+  EXPECT_NE(rows.find("MPERIOD 1: anti-periodic pitch of 3 along the z axis of CID 0, 0.02 "
+                      "long; FSET 1 moves onto FSET 2 (22 grid pairs)"),
+            std::string::npos)
+      << rows;
+  EXPECT_NE(rows.find("the whole machine's: 3 times the pitch's"), std::string::npos) << rows;
 }

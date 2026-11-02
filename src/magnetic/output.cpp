@@ -979,9 +979,13 @@ Status write_hdf5(const std::string &path, const Model &model,
     h5.attribute(group.get(), "id", int64_t{period->id});
     h5.attribute(group.get(), "type", std::string(period->anti ? "ANTI" : "PERIODIC"));
     h5.attribute(group.get(), "sectors", int64_t{period->sectors});
-    h5.attribute(group.get(), "sector_angle_deg", 360. / period->sectors);
-    h5.vectors(group.get(), "origin_m", {period->origin});
-    h5.vectors(group.get(), "axis", {period->axis});
+    if (period->translation) {
+      h5.vectors(group.get(), "shift_m", {period->shift});
+    } else {
+      h5.attribute(group.get(), "sector_angle_deg", 360. / period->sectors);
+      h5.vectors(group.get(), "origin_m", {period->origin});
+      h5.vectors(group.get(), "axis", {period->axis});
+    }
     std::vector<int64_t> first, second, axial;
     for (auto [a, b] : period->pairs) {
       first.push_back(results.mesh.node_ids[a]);

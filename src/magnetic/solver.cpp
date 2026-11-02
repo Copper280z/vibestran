@@ -494,25 +494,24 @@ Result<Eigen::VectorXd> boundary_potential(const Model &model, const Mesh &mesh,
                    "on the air gap, periodic, NORMAL or the symmetry axis (or "
                    "use FSET=0)"};
   }
-  if (mesh.axisymmetric) {
-    // A uniform axial field B0: A_phi = B0 r / 2.
-    if ((bc.field - mesh.axis * mesh.axis.dot(bc.field)).norm() >
-        1e-12 * bc.field.norm())
-      return Error{std::format("MAGAXI MBC {} field must be along the symmetry "
-                               "axis; a radial or tangential uniform field is "
-                               "not axisymmetric",
-                               subcase.boundary)};
-    for (size_t i = 0; i < mesh.nodes.size(); ++i)
-      a[static_cast<Eigen::Index>(i)] =
-          mesh.axis.dot(bc.field) / 2 * (mesh.nodes[i] - mesh.axis_origin).dot(mesh.radial);
-    return a;
-  }
   if (mesh.planar) {
-    if (std::abs(bc.field.dot(mesh.normal)) > 1e-12 * bc.field.norm())
-      return Error{"MAG2D MBC field must lie in the simulation plane"};
-    for (size_t i = 0; i < mesh.nodes.size(); ++i)
-      a[i] =
-          bc.field.cross(mesh.nodes[i] - mesh.nodes.front()).dot(mesh.normal);
+    if (mesh.axisymmetric) {
+      // A uniform axial field B0: A_phi = B0 r / 2.
+      if ((bc.field - mesh.axis * mesh.axis.dot(bc.field)).norm() >
+          1e-12 * bc.field.norm())
+        return Error{std::format("MAGAXI MBC {} field must be along the symmetry "
+                                 "axis; a radial or tangential uniform field is "
+                                 "not axisymmetric",
+                                 subcase.boundary)};
+      for (size_t i = 0; i < mesh.nodes.size(); ++i)
+        a[static_cast<Eigen::Index>(i)] = mesh.axis.dot(bc.field) / 2 *
+                                          (mesh.nodes[i] - mesh.axis_origin).dot(mesh.radial);
+    } else {
+      if (std::abs(bc.field.dot(mesh.normal)) > 1e-12 * bc.field.norm())
+        return Error{"MAG2D MBC field must lie in the simulation plane"};
+      for (size_t i = 0; i < mesh.nodes.size(); ++i)
+        a[i] = bc.field.cross(mesh.nodes[i] - mesh.nodes.front()).dot(mesh.normal);
+    }
     if (const auto &period = mesh.period) {
       // A prescribed grid and its prescribed image must agree with the
       // period: a uniform field is periodic only in special cases.
@@ -729,14 +728,50 @@ Status current_free(const Mesh &mesh, const Face &f, int request,
 bool magnetic(const Material &m) {
   return m.mur != 1 || m.bh_table != 0 || m.br != 0;
 }
+// The cell across face f on a periodic side of a translation, in the
+// neighbouring pitch: the cell on f's image (f on the first side) or
+// preimage (on the second). first says which.
+struct Across {
+  int cell{-1};
+  bool first{true};
+};
+std::optional<Across> across_period(const Mesh &mesh, int f) {
+  if (!mesh.period)
+    return std::nullopt;
+  for (auto [a, b] : mesh.period->face_pairs) {
+    if (a == f)
+      return Across{mesh.faces[b].cells[0], true};
+    if (b == f)
+      return Across{mesh.faces[a].cells[0], false};
+  }
+  return std::nullopt;
+}
+// B at x on a periodic side's face, from the cell across it: that cell is
+// the image (or preimage) of the copy across the side, whose potential is
+// the period's sign times its own.
+Vector field_across(const Mesh &mesh, const Across &across,
+                    const Eigen::VectorXd &potential, const Vector &x) {
+  const auto &period = *mesh.period;
+  const auto &cell = mesh.cells[across.cell];
+  return period.sign() *
+         field_at(cell, potential, across.first ? period.image(x) : period.preimage(x));
+}
 // A MFORCE BODY surface: every face with exactly one side in R, the body
 // plus `layers` grid-adjacent layers of nonmagnetic, current-free cells,
 // oriented out of R. Only the selected body may contain current sources.
 // It includes cavity walls, so an annular body excludes what it surrounds.
-// component[k] is the connected piece of R that face k bounds.
+// component[k] is the connected piece of R that face k bounds. In a model
+// that repeats along a line (MPERIOD with SHIFT) R continues across the
+// periodic sides into the neighbouring pitches (grids are adjacent to their
+// images), and a face on a side bounds R when the cell across it,
+// across[k], is outside R; the surface is then the unfolded body's, one
+// pitch of it. In a sector model the copies across the sides are turned, so
+// a surface that crossed them would sum tractions of pieces of different
+// bodies: it must close within the sector.
 struct BodySurface {
   std::vector<std::pair<int, int>> faces;
   std::vector<int> component;
+  std::vector<std::optional<Across>> across;
   int components{0};
 };
 Result<BodySurface> body_surface(const Model &model, const Mesh &mesh,
@@ -857,14 +892,31 @@ Result<BodySurface> body_surface(const Model &model, const Mesh &mesh,
             "MFORCE {}: the surface around body ESET {} reaches the air gap at "
             "element {}; force surfaces may not touch the air gap",
             request.id, request.set, cell.id)};
-      if (other < 0 && mesh.period &&
+      if (other < 0 && mesh.period && !mesh.period->translation &&
           std::ranges::find(mesh.period->faces, cell.faces[k]) != mesh.period->faces.end())
         return Error{std::format(
             "MFORCE {}: the surface around body ESET {} reaches a periodic side "
-            "of MPERIOD {} at element {}; a force surface must close within the "
-            "sector. For the machine's torque use the air-gap element's, which "
-            "is the whole machine's",
+            "of MPERIOD {} at element {}; in a sector model a force surface must "
+            "close within the sector, since across the sides it would hold parts "
+            "of turned copies. For the machine's torque use the air-gap "
+            "element's, which is the whole machine's",
             request.id, request.set, mesh.period->id, cell.id)};
+      if (other < 0)
+        if (const auto across = across_period(mesh, cell.faces[k])) {
+          if (layer[across->cell] >= 0)
+            continue;
+          if (is_magnetic(across->cell))
+            return Error{std::format(
+                "MFORCE {}: magnetic element {}, across periodic side of MPERIOD "
+                "{}, lies within {} layers of body ESET {}; use a smaller LAYER "
+                "or more air layers",
+                request.id, mesh.cells[across->cell].id, mesh.period->id,
+                request.layers + 1, request.set)};
+          out.faces.emplace_back(cell.faces[k], cell.face_sign[k]);
+          out.component.push_back(piece[ci]);
+          out.across.push_back(across);
+          continue;
+        }
       if (other < 0)
         return Error{std::format(
             "MFORCE {}: body ESET {} is within {} cells of the domain "
@@ -880,6 +932,7 @@ Result<BodySurface> body_surface(const Model &model, const Mesh &mesh,
             request.set)};
       out.faces.emplace_back(cell.faces[k], cell.face_sign[k]);
       out.component.push_back(piece[ci]);
+      out.across.emplace_back();
     }
   }
   return out;
@@ -963,9 +1016,18 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
   for (size_t ci = 0; ci < mesh.cells.size(); ++ci)
     for (int n : mesh.cells[ci].nodes)
       incident[n].push_back(static_cast<int>(ci));
+  // Across the periodic sides of a translation a grid's neighbours include
+  // its image's.
+  if (mesh.period && mesh.period->translation)
+    for (auto [a, b] : mesh.period->pairs) {
+      auto both = incident[a];
+      both.insert(both.end(), incident[b].begin(), incident[b].end());
+      incident[a] = incident[b] = std::move(both);
+    }
   for (const auto &request : model.forces) {
     std::vector<std::pair<int, int>> faces;
     std::vector<int> component;
+    std::vector<std::optional<Across>> across;
     ForceResult result;
     result.id = request.id;
     if (request.body) {
@@ -976,6 +1038,7 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
       auto &surface = std::get<BodySurface>(derived);
       faces = std::move(surface.faces);
       component = std::move(surface.component);
+      across = std::move(surface.across);
       result.components.resize(surface.components);
     } else {
       auto selected = selected_faces(model, mesh, request.set);
@@ -991,20 +1054,29 @@ Result<std::vector<ForceResult>> forces(const Model &model, const Mesh &mesh,
     for (size_t k = 0; k < faces.size(); ++k) {
       const auto [fi, sign] = faces[k];
       const auto &f = mesh.faces[fi];
-      for (int ci : f.cells)
+      // A face on a periodic side has its other side in the next copy.
+      const auto side = k < across.size() ? across[k] : std::nullopt;
+      const std::array<int, 2> cells{f.cells[0], side ? side->cell : f.cells[1]};
+      for (int ci : cells)
         if (magnetic(model.materials.at(mesh.cells[ci].material)))
           return Error{std::format(
               "MFORCE {}: surface face ({}) touches magnetic element {}; "
               "both sides of every face must be mu_r=1 without remanence",
               request.id, face_grids(mesh, f), mesh.cells[ci].id)};
+      if (side && windings.contains(cells[0]) && windings.contains(cells[1]))
+        return Error{std::format(
+            "MFORCE {}: surface face ({}) on a periodic side lies inside current "
+            "source {}; move the surface clear of the winding or enclose it",
+            request.id, face_grids(mesh, f), windings.at(cells[0]))};
       if (auto e = current_free(mesh, f, request.id, windings, sources,
                                 wire_indexes))
         return *e;
       for (const auto &q : face_quadrature(mesh, f)) {
         const Vector normal = sign * q.normal;
         const Vector b =
-            .5 * (field_at(mesh.cells[f.cells[0]], potential, q.position) +
-                  field_at(mesh.cells[f.cells[1]], potential, q.position));
+            .5 * (field_at(mesh.cells[cells[0]], potential, q.position) +
+                  (side ? field_across(mesh, *side, potential, q.position)
+                        : field_at(mesh.cells[cells[1]], potential, q.position)));
         Vector force = q.weight * out_of_plane(mesh, q.position) / mu0 *
                        (b * b.dot(normal) - .5 * b.squaredNorm() * normal);
         // Around the axis the radial stress cancels, and there is no torque.
@@ -1522,23 +1594,33 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
   }
   if (const auto &period = mesh.period) {
     const auto &card = *model.period;
+    const std::string kind =
+        period->translation
+            ? std::format("{} pitch of {} along the {} axis of CID {}, {:.6g} long; "
+                          "FSET {} moves onto FSET {}",
+                          period->anti ? "anti-periodic" : "periodic", period->sectors,
+                          mesh.axisymmetric ? "z" : "x", card.coordinates, card.shift,
+                          card.first, card.second)
+            : std::format("{} sector of {} about the z axis of CID {} through "
+                          "({:.6g}, {:.6g}, {:.6g}), {:.6g} degrees; FSET {} turns onto "
+                          "FSET {}",
+                          period->anti ? "anti-periodic" : "periodic", period->sectors,
+                          card.coordinates, period->origin.x(), period->origin.y(),
+                          period->origin.z(), 360. / period->sectors, card.first,
+                          card.second);
+    const std::string part = period->translation ? "pitch" : "sector";
     solution.add(
         "Periodic",
-        std::format("MPERIOD {}: {} sector of {} about the z axis of CID {} through "
-                    "({:.6g}, {:.6g}, {:.6g}), {:.6g} degrees; FSET {} turns onto FSET "
-                    "{} ({} grid pairs{}). Energy, coenergy, linkage, inductance, "
-                    "back-EMF and air-gap torque are the whole machine's: {} times "
-                    "the sector's, its sources in series with their images. Fields, "
-                    "probes and MFORCE are the modeled sector's",
-                    period->id, period->anti ? "anti-periodic" : "periodic",
-                    period->sectors, card.coordinates, period->origin.x(),
-                    period->origin.y(), period->origin.z(), 360. / period->sectors,
-                    card.first, card.second, period->pairs.size(),
+        std::format("MPERIOD {}: {} ({} grid pairs{}). Energy, coenergy, linkage, "
+                    "inductance, back-EMF and air-gap torque are the whole "
+                    "machine's: {} times the {}'s, its sources in series with their "
+                    "images. Fields, probes and MFORCE are the modeled {}'s",
+                    period->id, kind, period->pairs.size(),
                     period->axial.empty()
                         ? std::string()
                         : std::format(", {} on the axis{}", period->axial.size(),
                                       period->anti ? " held at A = 0" : ""),
-                    period->sectors));
+                    period->sectors, part, part));
   }
   for (const auto &[pid, reason] : model.meshed_air_gaps)
     solution.add("Air gap",

@@ -8,14 +8,17 @@
 #ifdef VIBESTRAN_HAS_HDF5
 #include "../common/hdf5_results.hpp"
 #endif
+#include <Eigen/Geometry>
 #include <gtest/gtest.h>
 #include <array>
 #include <cmath>
 #include <filesystem>
 #include <format>
+#include <functional>
 #include <limits>
 #include <map>
 #include <numeric>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -645,5 +648,231 @@ TEST(Periodic, SidesMustMatchAndBoundariesAgree) {
   auto planar = parse_string(base);
   auto &m = std::get<Model>(planar);
   m.options.planar = false;
-  EXPECT_NE(error_of(solve(m)).find("MPERIOD 1 is for MAG2D models"), std::string::npos);
+  EXPECT_NE(error_of(solve(m)).find("MPERIOD 1 is for MAG2D and MAGAXI models"),
+            std::string::npos);
+}
+
+namespace {
+// Structured planar decks whose force surfaces end on the periodic sides.
+// Cell (band, j) between grid rows `band` and `band + 1` and grid columns j
+// and j + 1 takes property pid(band, j); grid (band, j) is 1 + j + 1000
+// band and cell (band, j) is 1 + j + 1000 band too. The sides are FSET 31
+// (column 0) and FSET 32 (the last column), and the exterior rows are A =
+// 0. MFORCE 1 is on ESET 30 through one layer.
+struct Strip {
+  std::vector<double> rows; // band edges: radii (sector) or y (strip)
+  int columns{0};
+  std::function<Vector(double, int)> at; // grid position of (row edge, column)
+  std::function<int(int, int)> pid;      // property of cell (band, column)
+  std::string cards, control;
+};
+std::string strip_deck(const Strip &s) {
+  std::string out = "SOL MAGSTAT\nCEND\nMAGBC = 1\n" + s.control + "BEGIN BULK\n" + s.cards +
+                    "MBC,1,0,ZERO\nMFORCE,1,BODY,30,0,1\n";
+  for (size_t b = 0; b < s.rows.size(); ++b)
+    for (int j = 0; j <= s.columns; ++j) {
+      const Vector x = s.at(s.rows[b], j);
+      out += std::format("GRID,{},,{:.17g},{:.17g},0.\n", 1 + j + 1000 * b, x.x(), x.y());
+    }
+  std::map<int, std::vector<int>> sets;
+  for (int b = 0; b + 1 < static_cast<int>(s.rows.size()); ++b)
+    for (int j = 0; j < s.columns; ++j) {
+      const int id = 1 + j + 1000 * b, pid = s.pid(b, j);
+      const int a = 1 + j + 1000 * b, c = a + 1000;
+      out += std::format("CQUAD4,{},{},{},{},{},{}\n", id, pid, a, a + 1, c + 1, c);
+      sets[pid].push_back(id);
+      if (j == 0)
+        out += std::format("FSET,31,{},{},{}\n", id, a, c);
+      if (j + 1 == s.columns)
+        out += std::format("FSET,32,{},{},{}\n", id, a + 1, c + 1);
+    }
+  for (const auto &[pid, ids] : sets) {
+    out += std::format("ESET,{}", 100 + pid);
+    for (int id : ids)
+      out += std::format(",{}", id);
+    out += '\n';
+  }
+  return out + "ENDDATA\n";
+}
+// Coils in the sequence A, -C, B, -A, C, -B by index k (PID 10 + k), as
+// COIL2D 200 + k on ESET 110 + k, and the three phase circuits; a pitch's
+// coils change sign in the next pitch when anti (k / 3 odd).
+std::string coils(const std::set<int> &present, bool anti) {
+  std::string out;
+  std::array<std::string, 3> circuits;
+  for (int pid : present) {
+    if (pid < 10)
+      continue;
+    const int k = pid - 10;
+    const int sign = (k % 3 == 1 ? -1 : 1) * (anti && k / 3 % 2 ? -1 : 1);
+    out += std::format("PMAG2D,{},1\nCOIL2D,{},{},{}\n", pid, 200 + k, 110 + k, 40 * sign);
+    circuits[static_cast<size_t>(std::array{0, 2, 1}[k % 3])] += std::format(",{},1", 200 + k);
+  }
+  for (size_t k = 0; k < 3; ++k)
+    if (!circuits[k].empty())
+      out += std::format("CIRCUIT,{},1{}\n", k + 1, circuits[k]);
+  return out + "ICIRC,5,1,3.\nICIRC,5,2,-1.5\nICIRC,5,3,-1.5\n";
+}
+std::set<int> properties(const Strip &s) {
+  std::set<int> out;
+  for (int b = 0; b + 1 < static_cast<int>(s.rows.size()); ++b)
+    for (int j = 0; j < s.columns; ++j)
+      out.insert(s.pid(b, j));
+  return out;
+}
+constexpr char magnet_cards[] = "MATMAG,1,1.\nPMAG2D,1,1\nMATMAG,2,1000.\nPMAG2D,2,2\n"
+                                "MATMAG,3,1.05,,1.2\n";
+
+// A quarter (90 degrees, MPERIOD PERIODIC of 4) of an 8-pole rotor of
+// radial magnets in air, 40 degrees each with 5 degrees of air on either
+// side, inside six 15 degree coils per quarter on air and a steel yoke,
+// in an annulus from r = 2 to 26 mm held at A = 0 on both circles; 2.5
+// degree columns. The machine is turned so that the mesh starts `window`
+// columns into it, and its first outward magnet starts at column `start`
+// + 1 of the machine. MFORCE 1 is on the outward magnets (PID 4).
+Strip quarter(int start, int window) {
+  Strip s;
+  s.rows = {.002, .004, .006, .008, .010, .011, .012, .014, .016, .018, .020, .022, .024, .026};
+  s.columns = 36;
+  s.at = [](double r, int j) {
+    const double t = pi / 2 * j / 36;
+    return Vector(r * std::cos(t), r * std::sin(t), 0);
+  };
+  s.pid = [=](int b, int j) {
+    const int column = j + window;
+    if (b >= 2 && b < 4) {
+      const int d = ((column - start) % 36 + 36) % 36;
+      return d >= 1 && d < 17 ? 4 : d >= 19 && d < 35 ? 6 : 1;
+    }
+    if (b >= 7 && b < 9)
+      return 10 + column / 6; // coil k
+    return b >= 9 && b < 11 ? 2 : 1;
+  };
+  s.control = "LOAD = 5\n";
+  s.cards = std::string(magnet_cards) +
+            "CORD2C,10,,0.,0.,0.,0.,0.,1.\n,1.,0.,0.\nPMAG2D,4,3,10,1\nPMAG2D,6,3,10,-1\n"
+            "MAG2D,0,.05\nMPERIOD,1,PERIODIC,31,32,0,4\nESET,30,PROP,4\n" +
+            coils(properties(s), false);
+  return s;
+}
+// `pitches` 20 mm pitches of a flat strip along x: magnets magnetized +-y
+// (y 4 to 8 mm) alternating every pitch, 1.67 mm of air either side of
+// each, coils A, -C, B, -A, C, -B (y 10 to 14 mm) and steel (14 to 18 mm),
+// A = 0 at y = 0 and 18 mm; 24 columns per pitch. MPERIOD 1 moves the left
+// side onto the right and stands for 4 pitches. MFORCE 1 is on the magnets.
+Strip flat(int pitches) {
+  Strip s;
+  s.rows = {0., .001, .002, .003, .004, .006, .008, .009, .010, .012, .014, .016, .018};
+  s.columns = 24 * pitches;
+  s.at = [](double y, int j) { return Vector(.02 * j / 24, y, 0); };
+  s.pid = [](int b, int j) {
+    if (b >= 4 && b < 6) {
+      const int d = j % 24;
+      return d < 2 || d >= 22 ? 1 : j / 24 % 2 ? 6 : 4;
+    }
+    if (b >= 8 && b < 10)
+      return 10 + j / 8;
+    return b >= 10 ? 2 : 1;
+  };
+  s.control = "LOAD = 5\n";
+  const bool anti = pitches % 2 == 1;
+  s.cards = std::string(magnet_cards) +
+            "PMAG2D,4,3,0,2\nPMAG2D,6,3,0,-2\nMAG2D,0,.05\n" +
+            std::format("MPERIOD,1,{},31,32,0,{},{:.17g}\nESET,30,PROP,4{}\n",
+                        anti ? "ANTI" : "PERIODIC", 4 / pitches, .02 * pitches,
+                        pitches > 1 ? ",6" : "") +
+            coils(properties(s), true);
+  return s;
+}
+Results run(const std::string &deck) {
+  auto m = parse_string(deck);
+  EXPECT_TRUE(std::holds_alternative<Model>(m)) << error_of(m);
+  return std::holds_alternative<Model>(m) ? solved(std::get<Model>(m)) : Results{};
+}
+} // namespace
+
+TEST(Periodic, SectorForceSurfacesCloseWithinTheSector) {
+  // A magnet of the quarter machine whose force surface, one column beyond
+  // it, lies on a periodic side: across a sector's side the next copy is
+  // turned, so the surface would sum tractions of parts of two magnets.
+  // Moved one column into the sector (meshed from a different angle), the
+  // surface closes inside it.
+  for (int start : {0, 18}) {
+    auto m = parse_string(strip_deck(quarter(start, 0)));
+    ASSERT_TRUE(std::holds_alternative<Model>(m)) << error_of(m);
+    EXPECT_NE(error_of(solve(std::get<Model>(m)))
+                  .find("in a sector model a force surface must close within the sector"),
+              std::string::npos)
+        << start;
+  }
+  const auto inside = run(strip_deck(quarter(1, 0)));
+  ASSERT_EQ(inside.cases.size(), 1U);
+  EXPECT_EQ(inside.cases[0].forces.size(), 1U);
+}
+
+TEST(Periodic, OneAntiPeriodicPitchOfAStripIsTwoPeriodicPitches) {
+  // MAG2D MPERIOD with SHIFT moves the left side onto the right along the x
+  // axis. One pitch, ANTI, and two, PERIODIC, both standing for four and
+  // meshed alike, are the same field to round-off with the same
+  // whole-machine energy; the two-pitch magnets' force is twice the
+  // one-pitch magnet's (MFORCE is the modeled part's).
+  const auto one = run(strip_deck(flat(1))), two = run(strip_deck(flat(2)));
+  ASSERT_EQ(one.cases.size(), 1U);
+  ASSERT_EQ(two.cases.size(), 1U);
+  const auto &x = one.cases[0], &y = two.cases[0];
+  double potential = 0;
+  for (size_t i = 0; i < one.mesh.node_ids.size(); ++i)
+    potential = std::max(potential,
+                         std::abs(x.potential[static_cast<Eigen::Index>(i)] -
+                                  y.potential[two.mesh.node_index.at(one.mesh.node_ids[i])]));
+  EXPECT_LT(potential, 1e-10 * y.potential.cwiseAbs().maxCoeff());
+  EXPECT_LT(relative(x.energy, y.energy, y.energy), 1e-10);
+  ASSERT_EQ(x.forces.size(), 1U);
+  const Vector force = y.forces[0].force;
+  EXPECT_GT(force.norm(), .1);
+  EXPECT_LT((2 * x.forces[0].force - force).norm(), 1e-9 * force.norm());
+  std::string rows;
+  for (const auto &[label, text] : one.summary.solution.rows)
+    if (label == "Periodic")
+      rows += text;
+  EXPECT_NE(rows.find("MPERIOD 1: anti-periodic pitch of 4 along the x axis of CID 0, 0.02 "
+                      "long; FSET 31 moves onto FSET 32 (13 grid pairs)"),
+            std::string::npos)
+      << rows;
+#ifdef VIBESTRAN_HAS_HDF5
+  using namespace vibestran::test;
+  const auto directory = std::filesystem::temp_directory_path() / "vibestran_periodic";
+  std::filesystem::create_directories(directory);
+  auto m = parse_string(strip_deck(flat(1)));
+  ASSERT_FALSE(write_results(std::get<Model>(m), one, directory / "strip.F06").has_value());
+  const auto file = directory / "strip.mag.vtkhdf";
+  EXPECT_EQ(h5_attribute(file, "/MAGSTAT/periodic", "sectors"), 4);
+  EXPECT_EQ(h5_table(file, "/MAGSTAT/periodic/shift_m").values,
+            (std::vector<double>{.02, 0, 0}));
+#endif
+  // The strip's checks: the shift must take the left side onto the right,
+  // the CID x axis must lie in the plane, and a uniform field across the
+  // strip (A linear in x) is not periodic along it.
+  const auto fails = [](const std::string &deck) {
+    auto m = parse_string(deck);
+    if (const auto *e = std::get_if<Error>(&m))
+      return e->message;
+    return error_of(solve(std::get<Model>(m)));
+  };
+  const auto with = [](std::string deck, const std::string &from, const std::string &to) {
+    const auto at = deck.find(from);
+    EXPECT_NE(at, std::string::npos) << from;
+    return deck.replace(at, from.size(), to);
+  };
+  const auto deck = strip_deck(flat(1));
+  EXPECT_NE(fails(with(deck, "MPERIOD,1,ANTI,31,32,0,4,0.02", "MPERIOD,1,ANTI,31,32,0,4,0.03"))
+                .find("moved by 0.03 lands at"),
+            std::string::npos);
+  EXPECT_NE(fails(with(deck, "MPERIOD,1,ANTI,31,32,0,4,0.02",
+                       "MPERIOD,1,ANTI,31,32,7,4,0.02\nCORD2R,7,,0.,0.,0.,1.,0.,0.\n,0.,0.,1."))
+                .find("the x axis of CID 7 must lie in the MAG2D plane"),
+            std::string::npos);
+  EXPECT_NE(fails(with(deck, "MBC,1,0,ZERO", "MBC,1,0,UNIFORM,0.,.1,0."))
+                .find("which MPERIOD 1 requires to be minus it"),
+            std::string::npos);
 }
