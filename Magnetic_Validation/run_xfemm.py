@@ -29,6 +29,9 @@ Cases:
   FEMM axi): axial force on the mover, phase linkages, back-EMF and energy
   at 21 static mover offsets over a pole pitch, without and with current,
   B along the gap, and a field map at offset 0 (tubular_field.png).
+- tubular_pitch: the same stack continued without end, as one
+  anti-periodic pitch (vibestran MPERIOD SHIFT, FEMM anti-periodic
+  boundaries), per pitch.
 
 vibestran runs locally; femmcli runs on --femm-host over ssh. Results go to
 OUTPUT/results.json, OUTPUT/summary.md and plots. femmcli must be built with
@@ -126,18 +129,20 @@ class Builder:
         return self.occ.addRectangle(x0, y0, 0, x1 - x0, y1 - y0)
 
 
-def build(entities, size, half=False, quads=False):
+def build(entities, size, half=False, quads=False, pitch=None):
     """entities: [(surface tag, priority, Role)]; size(x, y) and its gmsh
     MathEval expression in x, y: the target element size. half keeps
-    y >= 0 and meshes the two halves of the cut periodically. quads
+    y >= 0 and meshes the two halves of the cut periodically. pitch = (y0,
+    length) keeps y0 <= y <= y0 + length and meshes the line y0 + length
+    as y0 moved up (side 2 the image of side 1). quads
     recombines the triangles into quadrilaterals (Frontal-Delaunay for
     quads, Blossom matching), leaving a triangle only where a surface
     needs one; quads="full" recombines into quadrilaterals only (Blossom
     full-quad); quads="quadmesh" meshes every surface all-quad with
     WebMesh's quadmesh instead (see quadmesh_surfaces)."""
     occ = gmsh.model.occ
-    if half:
-        box = occ.addRectangle(-1, 0, 0, 2, 1)
+    if half or pitch:
+        box = occ.addRectangle(-1, 0, 0, 2, 1) if half else occ.addRectangle(-1, pitch[0], 0, 2, pitch[1])
         cut = []
         for tag, priority, role in entities:
             out, _ = occ.intersect([(2, tag)], [(2, box)], removeObject=True, removeTool=False)
@@ -170,23 +175,32 @@ def build(entities, size, half=False, quads=False):
         gmsh.option.setNumber("Mesh.RecombineAll", 1)
         gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 3 if quads == "full" else 1)
     curves = [c for _, c in gmsh.model.getEntities(1)]
-    on_cut = {}
-    if half:
+    on_cut = {}  # curve -> (its ends, its side: 1 or 2)
+    if half or pitch:
+        lines = [0.0] if half else [pitch[0], pitch[0] + pitch[1]]
         for c in curves:
             lo, hi = gmsh.model.getParametrizationBounds(1, c)
             ends = [gmsh.model.getValue(1, c, [t]) for t in (lo[0], hi[0])]
             middle = gmsh.model.getValue(1, c, [(lo[0] + hi[0]) / 2])
-            # On the cut: both ends and the middle (the half circles end on it too).
-            if all(abs(p[1]) < 1e-12 for p in ends + [middle]):
-                on_cut[c] = ends
-        first = [c for c, e in on_cut.items() if min(p[0] for p in e) > -1e-12]
-        rotation = [-1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+            # On a cut: both ends and the middle (the half circles end on it too).
+            for k, y in enumerate(lines):
+                if all(abs(p[1] - y) < 1e-12 for p in ends + [middle]):
+                    side = (1 if min(p[0] for p in ends) > -1e-12 else 2) if half else k + 1
+                    on_cut[c] = (ends, side)
+        first = [c for c, (_, side) in on_cut.items() if side == 1]
+        # The map from side 1 to side 2: half a turn, or the pitch up.
+        if half:
+            transform = [-1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+            image_of = lambda ends: sorted(-p[0] for p in ends)  # noqa: E731
+        else:
+            transform = [1, 0, 0, 0, 0, 1, 0, pitch[1], 0, 0, 1, 0, 0, 0, 0, 1]
+            image_of = lambda ends: sorted(p[0] for p in ends)  # noqa: E731
         for c in first:
-            image = sorted(-p[0] for p in on_cut[c])
-            match = [d for d, e in on_cut.items()
-                     if d not in first and np.allclose(sorted(p[0] for p in e), image, atol=1e-12)]
+            image = image_of(on_cut[c][0])
+            match = [d for d, (e, side) in on_cut.items()
+                     if side == 2 and np.allclose(sorted(p[0] for p in e), image, atol=1e-12)]
             assert len(match) == 1, (c, on_cut[c])
-            gmsh.model.mesh.setPeriodic(1, [match[0]], [c], rotation)
+            gmsh.model.mesh.setPeriodic(1, [match[0]], [c], transform)
     if quads == "quadmesh":
         assert not half, "quadmesh meshes whole models only"
         nodes, by_surface = quadmesh_surfaces(roles, size[0])
@@ -208,11 +222,10 @@ def build(entities, size, half=False, quads=False):
                 by_surface.setdefault(s, []).append(list(cell))
     # Mesh edges on the periodic sides.
     side_edges = []
-    for c, ends in on_cut.items():
+    for c, (_, side) in on_cut.items():
         upward = gmsh.model.getAdjacencies(1, c)[0]
         if any(roles[s].material == "gap" for s in upward):
             continue
-        side = 1 if min(p[0] for p in ends) > -1e-12 else 2
         types, _, conn = gmsh.model.mesh.getElements(1, c)
         for t, e in zip(types, conn):
             for a, b in e.reshape(-1, 2).astype(int):
@@ -239,8 +252,7 @@ def drawing(roles, by_surface, nodes, size, on_cut):
         upward = list(gmsh.model.getAdjacencies(1, c)[0])
         kinds = [roles[s].material for s in upward]
         if c in on_cut:
-            kind = "gapside" if "gap" in kinds else (
-                "side1" if min(p[0] for p in on_cut[c]) > -1e-12 else "side2")
+            kind = "gapside" if "gap" in kinds else f"side{on_cut[c][1]}"
         elif "gap" in kinds:
             kind = "age" if len(upward) == 2 else "gapside"
         elif len(upward) == 1:
@@ -500,7 +512,8 @@ def vibestran_deck(g, control, bulk, motion_sets=False, period=None, axisymmetri
     """The deck for geometry g: grids and elements, a PID per material and
     magnetization, ESETs of coils, the body and the moving cells, COIL2D and
     CIRCUIT cards. axisymmetric: MAGAXI, g's x and y being r and z (grids at
-    (r, 0, z)). Returns the text and the element IDs of each region."""
+    (r, 0, z)). period: the MPERIOD card on FSETs 31 and 32, g's sides.
+    Returns the text and the element IDs of each region."""
     pids, lines = {}, []
     materials = {"air": "MATMAG,1,1.", "iron": "MATMAG,2,1000.", "steel": "MATMAG,3,,1",
                  "magnet": f"MATMAG,4,1.05,,{motor.BR}"}
@@ -561,7 +574,7 @@ def vibestran_deck(g, control, bulk, motion_sets=False, period=None, axisymmetri
                 owner[frozenset((cell[k], cell[(k + 1) % len(cell)]))] = eid
         for side, a, b in g.side_edges:
             text.append(f"FSET,{30 + side},{owner[frozenset((a, b))]},{a},{b}")
-        text.append("MPERIOD,1,ANTI,31,32,0,2")
+        text.append(period)
     text.append("ENDDATA")
     return "\n".join(text) + "\n", {name: k for k, name in enumerate(names, start=1)}
 
@@ -618,9 +631,11 @@ def femm_age_band(g, r_in, r_out, half, size):
     return dataclasses.replace(g, points=points, segments=segments, arcs=arcs, labels=labels)
 
 
-def femm_drawing(g, depth, half, size, axisymmetric=False):
+def femm_drawing(g, depth, half, size, axisymmetric=False, pitch=False):
     """Lua that draws g, with its materials, circuits and boundaries.
-    axisymmetric: FEMM's axi problem, g's x and y being r and z."""
+    axisymmetric: FEMM's axi problem, g's x and y being r and z. half: g is
+    the half above y = 0, anti-periodic across the cut; pitch: g's side 2
+    is side 1 moved along y, anti-periodic."""
     # Only the materials in use.
     used = {lab[2].material for lab in g.labels}
     definitions = {
@@ -641,14 +656,15 @@ def femm_drawing(g, depth, half, size, axisymmetric=False):
     for x, y in g.points.values():
         out.append(f"mi_addnode({x:.17g}, {y:.17g})")
     pairs = []
-    if half:
-        # Each segment of the first side (x > 0 on y = 0) with its image
-        # turned by 180 degrees: an anti-periodic boundary of its own.
+    if half or pitch:
+        # Each segment of the first side (x > 0 on y = 0, or the bottom)
+        # with its image turned by 180 degrees (or moved up): an
+        # anti-periodic boundary of its own.
         def span(seg):
             return sorted(round(g.points[k][0], 9) for k in seg[:2])
         firsts = [t for t in g.segments if t[2] == "side1"]
         for k, s in enumerate(firsts):
-            image = sorted(-x for x in span(s))
+            image = sorted(-x for x in span(s)) if half else span(s)
             match = [t for t in g.segments if t[2] == "side2" and span(t) == image]
             assert len(match) == 1, s
             out.append(f'mi_addboundprop("ap{k}", 0, 0, 0, 0, 0, 0, 0, 0, 5)')
@@ -837,7 +853,15 @@ def tubular_size(x, y, scale):
     return scale * min(2.5e-3, 2.5e-4 + 0.15 * max(0.0, 6e-3 - x, x - 7.75e-3))
 
 
-def tubular_geometry(scale, offset):
+# The pitch model: the same stack continued without end, one pole pitch
+# from z = -10 mm (a coil boundary, so every coil is whole: -A, C, -B) to
+# 10 mm, anti-periodic (MPERIOD SHIFT, FEMM anti-periodic boundaries).
+TUBE_PITCH_START = -TUBE_POLE / 2
+TUBE_PITCH_PROBE_Z = np.arange(-9.5e-3, 9.6e-3, 1e-3)  # off the sides
+
+
+def tubular_geometry(scale, offset, pitch=False):
+    """The static stack, or with pitch one pitch of the endless stack."""
     gmsh.initialize()
     gmsh.option.setNumber("General.Verbosity", 2)
     gmsh.model.add("tubular")
@@ -853,31 +877,36 @@ def tubular_geometry(scale, offset):
                   Role("air", f"coil{k}", phase, sign * TUBE_TURNS)))
     e.append((b.rectangle(6 * mm, -1.5 * TUBE_POLE + offset, 6.75 * mm, 1.5 * TUBE_POLE + offset), 4,
               Role("air", "tube", moving=True, body=True)))
-    for j in range(3):
+    for j in range(-1, 4) if pitch else range(3):
         z0 = -1.5 * TUBE_POLE + j * TUBE_POLE + offset
         e.append((b.rectangle(0, z0, 6 * mm, z0 + TUBE_POLE), 5,
                   Role("magnet", f"magnet{j}", magnet="axial+" if j % 2 == 0 else "axial-",
                        moving=True, body=True)))
     expr = f"{scale} * Min(2.5e-3, 2.5e-4 + 0.15 * Max(0, Max(6e-3 - x, x - 7.75e-3)))"
-    g = build(e, (lambda x, y: tubular_size(x, y, scale), expr))
+    g = build(e, (lambda x, y: tubular_size(x, y, scale), expr),
+              pitch=(TUBE_PITCH_START, TUBE_POLE) if pitch else None)
     gmsh.finalize()
     return g
 
 
-def tubular_case(level, out, args):
+def tubular_case(level, out, args, pitch=False):
     """At each mover offset, no load and TUBE_CURRENTS: axial force on the
-    mover, phase linkages, energy and B along the gap, from both solvers."""
+    mover, phase linkages, energy and B along the gap, from both solvers.
+    pitch: one anti-periodic pitch of the endless stack, per pitch (MPERIOD
+    SECTORS 1), FEMM's force also as a stress line integral along the gap."""
     scale = LEVELS[level]
+    probes = TUBE_PITCH_PROBE_Z if pitch else TUBE_PROBE_Z
     results = {"vibestran": [], "femm": [], "offsets": TUBE_OFFSETS}
     for offset in TUBE_OFFSETS:
-        g = tubular_geometry(scale, offset)
-        workdir = out / f"tubular_{level}_{round(offset * 1e3):02d}mm"
+        g = tubular_geometry(scale, offset, pitch)
+        workdir = out / f"tubular{'_pitch' if pitch else ''}_{level}_{round(offset * 1e3):02d}mm"
         workdir.mkdir(parents=True, exist_ok=True)
         control = ["MPROBE = ALL"]
         bulk = ["PARAM,MAGTOL,1e-10", f"MFORCE,1,BODY,30,0,{TUBE_FORCE_LAYER}",
                 *(f"MPROBE,{k},0,{TUBE_PROBE_R:.17g},0.,{z:.17g}"
-                  for k, z in enumerate(TUBE_PROBE_Z, start=1))]
-        deck, circuit_ids = vibestran_deck(g, control, bulk, axisymmetric=True)
+                  for k, z in enumerate(probes, start=1))]
+        period = f"MPERIOD,1,ANTI,31,32,0,1,{TUBE_POLE:.17g}" if pitch else None
+        deck, circuit_ids = vibestran_deck(g, control, bulk, period=period, axisymmetric=True)
         loads = [f"ICIRC,1,{circuit_ids[c]},{i:.17g}" for c, i in TUBE_CURRENTS.items()]
         deck = deck.replace("MPROBE = ALL\n", "MPROBE = ALL\nSUBCASE 1\n  LABEL = NOLOAD\n"
                             "SUBCASE 2\n  LABEL = LOADED\n  LOAD = 1\n", 1)
@@ -896,7 +925,8 @@ def tubular_case(level, out, args):
                     "energy": float(sub.attrs["energy_J"]),
                     "br": b[:, 0].tolist(), "bz": b[:, 2].tolist(), "cells": len(g.cells),
                     "seconds": float((workdir / "seconds.txt").read_text())})
-        lua = femm_drawing(g, 0, False, lambda x, y: tubular_size(x, y, scale), axisymmetric=True)
+        lua = femm_drawing(g, 0, False, lambda x, y: tubular_size(x, y, scale), axisymmetric=True,
+                           pitch=pitch)
         lua.append(LUA_PRELUDE)
         for state, currents in (("noload", {c: 0.0 for c in "ABC"}), ("loaded", TUBE_CURRENTS)):
             lua += [f'mi_modifycircprop("{c}", 1, {i:.17g})' for c, i in currents.items()]
@@ -905,10 +935,17 @@ def tubular_case(level, out, args):
                     "mo_groupselectblock(1)", "fz = mo_blockintegral(19)", "mo_clearblock()",
                     "mo_groupselectblock()", "w = mo_blockintegral(2)", "mo_clearblock()",
                     f'put("{state}", fz, fa, fb, fc, w, mo_numelements())']
-            for z in TUBE_PROBE_Z:
+            if pitch:
+                # Maxwell stress along the middle of the gap, side to side.
+                z0, z1 = TUBE_PITCH_START, TUBE_PITCH_START + TUBE_POLE
+                lua += [f"mo_addcontour({TUBE_PROBE_R:.17g}, {z0:.17g})",
+                        f"mo_addcontour({TUBE_PROBE_R:.17g}, {z1:.17g})",
+                        "l1, l2 = mo_lineintegral(3)", "mo_clearcontour()",
+                        f'put("{state}_line", l1, l2)']
+            for z in probes:
                 lua += [f"a, b1, b2 = mo_getpointvalues({TUBE_PROBE_R:.17g}, {z:.17g})",
                         f'put("{state}_gap", b1, b2)']
-            if offset == 0:
+            if offset == 0 and not pitch:
                 lua += [f"for i = 0, {len(TUBE_MAP_R) - 1} do",
                         f"  for j = 0, {len(TUBE_MAP_Z) - 1} do",
                         f"    a, b1, b2 = mo_getpointvalues({TUBE_MAP_R[0]:.17g} + i * {1e-4:.17g}, "
@@ -917,7 +954,7 @@ def tubular_case(level, out, args):
             lua.append("mo_close()")
         lua += ["closefile(results)", "quit()"]
         raw, seconds = run_femm(lua, workdir, args)
-        if offset == 0:
+        if offset == 0 and not pitch:
             # (r, z, [A_phi, B_r, B_z]) for tubular_field_plot. FEMM's axi
             # potential is the flux through the circle, 2 pi r A_phi.
             maps = {state: np.array(raw.pop(f"{state}_map")).reshape(len(TUBE_MAP_R), len(TUBE_MAP_Z), 3)
@@ -934,6 +971,9 @@ def tubular_case(level, out, args):
                                     "linkage": {"A": fa, "B": fb, "C": fc}, "energy": w,
                                     "br": gap[:, 0].tolist(), "bz": gap[:, 1].tolist(),
                                     "cells": int(elements), "seconds": seconds})
+            if pitch:
+                # The contour's normal points out of the mover: the force on it is minus.
+                results["femm"][-1]["force_line"] = -raw[f"{state}_line"][0][1]
     return results
 
 
@@ -977,7 +1017,8 @@ def motor_deck(g, half):
     for k, angle in enumerate(angles, start=1):
         x, y = GAP_RADIUS * math.cos(math.radians(angle)), GAP_RADIUS * math.sin(math.radians(angle))
         bulk.append(f"MPROBE,{k},0,{x:.17g},{y:.17g},0.")
-    deck, circuit_ids = vibestran_deck(g, control, bulk, motion_sets=True, period=half)
+    deck, circuit_ids = vibestran_deck(g, control, bulk, motion_sets=True,
+                                       period="MPERIOD,1,ANTI,31,32,0,2" if half else None)
     assert circuit_ids == {"A": 1, "B": 2, "C": 3}
     return deck.replace("{depth}", str(motor.DEPTH)), angles
 
@@ -1116,11 +1157,12 @@ def tubular_back_emf(d):
                 for c in "ABC"} for s in ("vibestran", "femm")}
 
 
-def tubular_report(data):
+def tubular_report(data, case="tubular"):
     lines = []
-    levels = [lvl for lvl in LEVELS if f"tubular_{lvl}" in data]
+    probes = TUBE_PITCH_PROBE_Z if case == "tubular_pitch" else TUBE_PROBE_Z
+    levels = [lvl for lvl in LEVELS if f"{case}_{lvl}" in data]
     for level in levels:
-        d = data[f"tubular_{level}"]
+        d = data[f"{case}_{level}"]
         v0, f0 = d["vibestran"][0], d["femm"][0]
         lines += [f"### {level} mesh ({v0['cells']} vibestran / {f0['cells']} FEMM triangles at offset 0)", "",
                   "| offset (mm) | state | force F_z (N): vibestran / FEMM / diff % | "
@@ -1135,7 +1177,7 @@ def tubular_report(data):
                          + " | ".join(cell(v["linkage"][c], f["linkage"][c]) for c in "ABC")
                          + f" | {cell(v['energy'], f['energy'])} |")
         lines += ["", f"Every fourth of the {len(d['offsets'])} offsets; the ranges below and in "
-                  "tubular.png cover all of them.", ""]
+                  f"{case}.png cover all of them.", ""]
         forces = {s: {state: np.array([r["force_z"] for r in d[s] if r["state"] == state])
                       for state in ("noload", "loaded")} for s in ("vibestran", "femm")}
         # Both forces cross zero, so differences are against each state's largest |F|.
@@ -1144,6 +1186,11 @@ def tubular_report(data):
             peak = np.abs(forces["femm"][state]).max()
             lines.append(f"{name} force: largest difference {diff.max():.3f} N, {100 * diff.max() / peak:.2f}% "
                          f"of FEMM's largest |F_z| ({peak:.3f} N).")
+            if "force_line" in d["femm"][0]:
+                line = np.array([r["force_line"] for r in d["femm"] if r["state"] == state])
+                lines.append(f"  Against FEMM's stress line integral along the middle of the gap, side "
+                             f"to side: {np.abs(forces['vibestran'][state] - line).max():.3f} N; FEMM's "
+                             f"two forces differ by up to {np.abs(forces['femm'][state] - line).max():.3f} N.")
         lines.append("")
         emf = tubular_back_emf(d)
         lines += ["No-load back-EMF per unit speed, -d lambda / dz from the linkages at the offsets "
@@ -1162,7 +1209,8 @@ def tubular_report(data):
                                   + (np.array(v["bz"]) - np.array(f["bz"])) ** 2))
                   / np.sqrt(np.mean(np.array(f["br"]) ** 2 + np.array(f["bz"]) ** 2))
                   for v, f in zip(d["vibestran"], d["femm"]))
-        lines += [f"B along the gap (r = {TUBE_PROBE_R * 1e3:g} mm, |z| <= 40 mm, 41 points): "
+        lines += [f"B along the gap (r = {TUBE_PROBE_R * 1e3:g} mm, z {probes[0] * 1e3:g} to "
+                  f"{probes[-1] * 1e3:g} mm, {len(probes)} points): "
                   f"largest RMS difference over the states {100 * rms:.2f}% of FEMM's RMS |B|; largest "
                   f"pointwise difference of B_r or B_z {100 * worst:.2f}% of FEMM's largest, at the "
                   "magnet junctions, where pointwise B of first-order elements is least accurate.", ""]
@@ -1174,8 +1222,8 @@ def tubular_report(data):
                           for name in ("map", "gap", "sleeve")) + ". FEMM's B is smoothed between "
                       "elements, vibestran's is each cell's.", ""]
         # Each solver's refinement change, for the force.
-        if level == "fine" and "tubular_coarse" in data:
-            c = data["tubular_coarse"]
+        if level == "fine" and f"{case}_coarse" in data:
+            c = data[f"{case}_coarse"]
             ce = tubular_back_emf(c)
             change = {s: max(np.abs(emf[s][p] - ce[s][p]).max() / np.abs(emf[s][p]).max()
                              for p in "ABC") for s in ("vibestran", "femm")}
@@ -1421,9 +1469,13 @@ def plots(data, out):
         fig.savefig(out / "core.png", dpi=150)
         written.append("core.png")
         plt.close(fig)
-    tube_level = next((lvl for lvl in ("fine", "coarse") if f"tubular_{lvl}" in data), None)
-    tube = data[f"tubular_{tube_level}"] if tube_level else None
-    if tube:
+    for case, title, probes in (("tubular", "Tubular stack", TUBE_PROBE_Z),
+                                ("tubular_pitch", "One anti-periodic pitch of the endless tubular stack",
+                                 TUBE_PITCH_PROBE_Z)):
+        tube_level = next((lvl for lvl in ("fine", "coarse") if f"{case}_{lvl}" in data), None)
+        tube = data[f"{case}_{tube_level}"] if tube_level else None
+        if not tube:
+            continue
         fig = plt.figure(figsize=(9, 6.6), facecolor=SURFACE)
         axes = styled_axes(fig, 2, 2)
         offsets = np.array(tube["offsets"]) * 1e3
@@ -1435,7 +1487,7 @@ def plots(data, out):
         axes[0, 0].set_xlabel("mover offset (mm)")
         axes[0, 0].legend(fontsize=7)
         for solver, name in (("vibestran", "vibestran"), ("femm", "FEMM")):
-            series(axes[0, 1], TUBE_PROBE_Z * 1e3, tube[solver][0]["br"], name)
+            series(axes[0, 1], probes * 1e3, tube[solver][0]["br"], name)
         axes[0, 1].set_title(f"B_r at r = {TUBE_PROBE_R * 1e3:g} mm, offset 0, no current (T)", loc="left")
         axes[0, 1].set_xlabel("z (mm)")
         # Back-EMF: colour is the phase, line style the solver.
@@ -1456,12 +1508,12 @@ def plots(data, out):
         axes[1, 1].legend(fontsize=7, title="phase", title_fontsize=7)
         for ax in axes[1]:
             ax.set_xlabel("mover offset (mm)")
-        fig.suptitle(f"Tubular stack, {tube_level} mesh", x=0.01, ha="left", color=INK)
+        fig.suptitle(f"{title}, {tube_level} mesh", x=0.01, ha="left", color=INK)
         fig.tight_layout(rect=(0, 0, 1, 0.97))
-        fig.savefig(out / "tubular.png", dpi=150)
-        written.append("tubular.png")
+        fig.savefig(out / f"{case}.png", dpi=150)
+        written.append(f"{case}.png")
         plt.close(fig)
-        workdir = out / f"tubular_{tube_level}_00mm"
+        workdir = out / f"{case}_{tube_level}_00mm"
         if (workdir / "femm_map.npz").exists():
             tubular_field_plot(workdir, tube_level, out / "tubular_field.png")
             written.append("tubular_field.png")
@@ -1511,6 +1563,15 @@ def report(data, out):
                   "tube, nine three-phase coils and a saturating steel sleeve, at static mover "
                   "offsets 1 mm apart over a pole pitch, without current and with A = 3 A, B = C = -1.5 A. Force "
                   "is the axial force on the mover (magnets and tube).", "", *body]
+    body = tubular_report(data, "tubular_pitch")
+    if body:
+        lines += ["## One pitch of the endless tubular stack (MPERIOD SHIFT)", "",
+                  "The same stack continued without end, modeled as one anti-periodic pole pitch "
+                  "(z -10 to 10 mm, cut at coil boundaries: coils -A, C, -B): vibestran MPERIOD ANTI "
+                  "with SHIFT 20 mm and SECTORS 1, FEMM anti-periodic boundaries. Every quantity is "
+                  "one pitch's. vibestran's MFORCE surface closes across the periodic sides; FEMM's "
+                  "force is its weighted stress tensor, and also a stress line integral along the "
+                  "middle of the gap from side to side.", "", *body]
     body = motor_report(data)
     if body:
         lines += ["## 12-slot, 14-pole motor", "",
@@ -1528,7 +1589,7 @@ def main():
     parser.add_argument("output", type=pathlib.Path)
     parser.add_argument("--report-only", action="store_true",
                         help="rewrite summary.md and the plots from OUTPUT/results.json")
-    parser.add_argument("--cases", nargs="+", default=["core", "magnet", "motor", "tubular"])
+    parser.add_argument("--cases", nargs="+", default=["core", "magnet", "motor", "tubular", "tubular_pitch"])
     parser.add_argument("--levels", nargs="+", default=list(MOTOR_LEVELS),
                         help="mesh levels; graded is the motor's only (the core cases skip it)")
     parser.add_argument("--airgap", nargs="+", default=["AGE"], choices=["AGE", "BAND"],
@@ -1554,9 +1615,11 @@ def main():
                     store.write_text(json.dumps(data, indent=1))
             elif level in LEVELS:
                 print(f"{case} {level}", flush=True)
-                run = tubular_case if case == "tubular" else core_case
-                data[f"{case}_{level}"] = run(case, level, args.output, args) if run is core_case \
-                    else run(level, args.output, args)
+                if case.startswith("tubular"):
+                    data[f"{case}_{level}"] = tubular_case(level, args.output, args,
+                                                           pitch=case == "tubular_pitch")
+                else:
+                    data[f"{case}_{level}"] = core_case(case, level, args.output, args)
                 store.write_text(json.dumps(data, indent=1))
     report(data, args.output)
     print("wrote", store, "and", args.output / "summary.md")

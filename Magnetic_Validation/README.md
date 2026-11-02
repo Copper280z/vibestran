@@ -145,6 +145,7 @@ interpolants differ little; the exterior is A = 0 on a box or circle.
 | core | U-core and armature, a 200-turn coil on the yoke: linear iron at 2 A and steel from 0.5 A into deep saturation at 16 A. Coil linkage, armature force, \|B\| in the gap, energy. |
 | magnet | the core with a magnet (B_r 1.2 T) in the yoke, steel, coil at -4, 0, +4 A |
 | tubular | the static tubular stack (MAGAXI against FEMM axi): axial force on the mover, phase linkages, back-EMF, energy and gap B at 21 mover offsets over a pole pitch, without and with current, and a field map at offset 0. |
+| tubular_pitch | one anti-periodic pitch of the endless tubular stack (MPERIOD SHIFT against FEMM anti-periodic boundaries): the same quantities, per pitch. |
 | motor | the 12-slot, 14-pole motor of `tools/magnetic_motor_example.py`: rated torque and phase linkage over an electrical period (DRIVE), no-load linkage and gap B_r, cogging over a cogging period. The whole machine (PAIRGAP; FEMM periodic AGE) and its anti-periodic half (MPERIOD ANTI; FEMM anti-periodic boundaries and AGE). |
 
 ```sh
@@ -312,6 +313,37 @@ largest value over the offsets:
   magnets' corners and in the sleeve, where it falls with refinement like
   first-order B itself. FEMM's axi potential is the flux 2πr A_φ, and its
   point B is smoothed between elements; vibestran's B is each cell's.
+
+#### One pitch of the endless stack, MPERIOD SHIFT (2026-11-01)
+
+`--cases tubular_pitch` checks axial periodicity: the same stack continued
+without end, modeled as one anti-periodic pole pitch from z = -10 to 10 mm
+(cut at coil boundaries, so its coils -A, C, -B are whole). vibestran uses
+`MPERIOD,1,ANTI,31,32,0,1,.02` on gmsh's periodic mesh, FEMM anti-periodic
+boundary pairs; the same 21 offsets and two states. Every quantity is one
+pitch's. vibestran's MFORCE BODY surface closes across the periodic sides;
+FEMM's force is its weighted stress tensor and, as a second FEMM value, the
+stress line integral along the middle of the gap from side to side. Fine
+mesh (15.2k vibestran / 12.6k FEMM triangles):
+
+| quantity | vibestran against FEMM | coarse to fine, vibestran / FEMM |
+|---|---:|---:|
+| phase linkages (up to 0.0079 Wb-turn) | within 0.03% of the largest | |
+| energy | -0.09 to -0.12% | up to 0.18% / 0.25% |
+| no-load back-EMF (peak 1.34 V per m/s) | within 0.08% of the peak | 0.04% / 0.27% |
+| loaded axial force (up to 5.56 N) | within 0.028 N (0.5%); 0.032 N from FEMM's line integral, whose two FEMM forces differ by 0.045 N | up to 0.11 N / 0.04 N |
+| no-load force (exactly zero) | vibestran up to 0.023 N (0.11 coarse), FEMM 0.007 N (0.048), FEMM line integral 0.043 N (0.12) | |
+| B along the gap, RMS difference | 2.2% (2.9% coarse) | |
+
+- The endless stack has no detent force: nothing along it varies but the
+  magnets (the sleeve is uniform and the coils are air), so every offset
+  is equivalent. Both solvers' no-load force is discretization noise that
+  falls with refinement, vibestran's from 0.11 to 0.023 N.
+- The loaded force agrees as closely as FEMM's two force methods agree
+  with each other. On gmsh's mesh the cells beside the two sides differ, so
+  vibestran's force surface has faces on the sides whose stress takes B
+  from the image cell across them, the path the unit tests exercise on
+  purpose (`AxialPeriod.ForceSurfaceOnASideTakesTheFieldAcrossIt`).
 
 These are comparisons of the same 2D (planar or axisymmetric) problem. They
 do not cover end effects beyond the modeled domain or the 3D formulation.
