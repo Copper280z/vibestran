@@ -144,7 +144,7 @@ interpolants differ little; the exterior is A = 0 on a box or circle.
 |---|---|
 | core | U-core and armature, a 200-turn coil on the yoke: linear iron at 2 A and steel from 0.5 A into deep saturation at 16 A. Coil linkage, armature force, \|B\| in the gap, energy. |
 | magnet | the core with a magnet (B_r 1.2 T) in the yoke, steel, coil at -4, 0, +4 A |
-| tubular | the static tubular stack (MAGAXI against FEMM axi): axial force on the mover, phase linkages, energy and gap B at six mover offsets, without and with current. |
+| tubular | the static tubular stack (MAGAXI against FEMM axi): axial force on the mover, phase linkages, back-EMF, energy and gap B at 21 mover offsets over a pole pitch, without and with current, and a field map at offset 0. |
 | motor | the 12-slot, 14-pole motor of `tools/magnetic_motor_example.py`: rated torque and phase linkage over an electrical period (DRIVE), no-load linkage and gap B_r, cogging over a cogging period. The whole machine (PAIRGAP; FEMM periodic AGE) and its anti-periodic half (MPERIOD ANTI; FEMM anti-periodic boundaries and AGE). |
 
 ```sh
@@ -279,29 +279,39 @@ tubular reference motor of MAGNETICS_ROADMAP.md: three 20 mm N35 magnets
 alternating along the axis in a 0.75 mm aluminium tube, a 1 mm gap, nine
 6.67 mm coils of 88 turns (A, -C, B, ...), and a 1.5 mm steel sleeve
 around the coils (the roadmap leaves back iron open; the sleeve makes the
-comparison saturate), in an A = 0 box. Each of six mover offsets over a
-pole pitch is its own mesh, solved without current and with A = 3 A,
-B = C = -1.5 A. Fine mesh (151.6k vibestran / 41.3k FEMM triangles):
+comparison saturate), in an A = 0 box. Each of 21 mover offsets, 1 mm
+apart over a pole pitch, is its own mesh, solved without current and with
+A = 3 A, B = C = -1.5 A. The back-EMF per unit speed is -dλ/dz from the
+no-load linkages at the offsets (second-order differences, the same for
+both solvers). Fine mesh (151.6k vibestran / 41.3k FEMM triangles); the
+forces and linkages cross zero, so their differences are against the
+largest value over the offsets:
 
 | quantity | vibestran against FEMM | coarse to fine, vibestran / FEMM |
 |---|---:|---:|
-| phase linkages | within 0.15%; phase C at offset 12 mm, where it is near zero, 0.23% (0.0011 Wb-turn, no load) and 4.2% (4.6e-5 Wb-turn, 1.8e-6 apart, loaded) | up to 0.15% / 0.37% |
+| phase linkages (up to 0.026 Wb-turn) | within 0.06% of the largest; within 0.23% where above a tenth of it | 0.02% / 0.07% of the largest |
 | energy | -0.14 to -0.16% | up to 0.20% / 0.34% |
-| loaded axial force (2 to 14 N) | within 1.7% | up to 5.7% / 2.9% |
-| no-load (detent) force (up to 1.7 N) | within 0.07 N | |
-| B along the gap, RMS difference | 2.0% (3.4% coarse) | |
+| no-load back-EMF (peak 3.4 V per m/s) | within 0.13% of the peak | 0.03% / 0.35% |
+| loaded axial force (up to 14.3 N) | within 0.11 N, 0.8% of the largest | up to 0.34 N / 0.19 N |
+| no-load (detent) force (up to 1.8 N) | within 0.11 N | up to 0.33 N / 0.20 N |
+| B along the gap, RMS difference | 2.2% (3.5% coarse) | |
+| B over r < 20 mm, \|z\| < 50 mm, RMS difference | 2.0% (3.6% coarse); sleeve 3.1% | |
 
-- Linkage and energy agree to about a tenth of a percent and converge
-  together.
+- Linkage, energy and back-EMF agree to about a tenth of a percent and
+  converge together; vibestran's back-EMF moves less with refinement than
+  FEMM's.
 - The forces agree within each solver's own refinement change.
   vibestran's force is Maxwell stress on one surface around the mover
-  (MFORCE BODY, LAYER 3) and moves up to 5.7% (0.3 N) between levels; FEMM's
-  weighted stress tensor up to 2.9%. At offset 0, where the exact no-load
+  (MFORCE BODY, LAYER 3), which moves more between levels than FEMM's
+  weighted stress tensor; the detent force, a tenth of the loaded force, is
+  where that shows (6% of its peak). At offset 0, where the exact no-load
   force is zero by symmetry, vibestran gives -0.0003 N and FEMM +0.07 N.
-- Pointwise B differs most at the magnet junctions, where B_r peaks and B_z
-  crosses zero steeply near the magnets' corners (6.6% of the largest |B|);
-  the RMS difference along the gap falls from 3.4% to 2.0% with refinement,
-  first-order like pointwise B itself.
+- `tubular_field.png` maps |B| with flux lines (contours of r A_φ) from
+  both solvers at offset 0, sampled at the same 100k points, and the
+  difference. The flux lines coincide; the difference is largest at the
+  magnets' corners and in the sleeve, where it falls with refinement like
+  first-order B itself. FEMM's axi potential is the flux 2πr A_φ, and its
+  point B is smoothed between elements; vibestran's B is each cell's.
 
 These are comparisons of the same 2D (planar or axisymmetric) problem. They
 do not cover end effects beyond the modeled domain or the 3D formulation.

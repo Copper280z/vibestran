@@ -25,6 +25,10 @@ Cases:
   the gap. The whole machine with the air-gap element (vibestran PAIRGAP,
   FEMM periodic AGE), and its anti-periodic half (MPERIOD ANTI; FEMM
   anti-periodic boundaries and anti-periodic AGE).
+- tubular: MAGNETICS_ROADMAP.md's tubular stack, axisymmetric (MAGAXI,
+  FEMM axi): axial force on the mover, phase linkages, back-EMF and energy
+  at 21 static mover offsets over a pole pitch, without and with current,
+  B along the gap, and a field map at offset 0 (tubular_field.png).
 
 vibestran runs locally; femmcli runs on --femm-host over ssh. Results go to
 OUTPUT/results.json, OUTPUT/summary.md and plots. femmcli must be built with
@@ -809,12 +813,23 @@ def core_size(x, y, scale):
 # comparison saturate). x is r and y is z, in an air box r < 60 mm,
 # |z| < 100 mm held at A = 0. The mover (magnets and tube) is the force body.
 TUBE_POLE = 20e-3
-TUBE_OFFSETS = [0.0, 4e-3, 8e-3, 12e-3, 16e-3, 20e-3]  # mover offsets along z
+TUBE_OFFSETS = [k * 1e-3 for k in range(21)]          # mover offsets along z, a pole pitch
 TUBE_CURRENTS = {"A": 3.0, "B": -1.5, "C": -1.5}         # the loaded state, A
 TUBE_TURNS = 88
 TUBE_PROBE_R = 7.25e-3                                  # the middle of the gap
 TUBE_PROBE_Z = np.arange(-40e-3, 40.1e-3, 2e-3)
 TUBE_FORCE_LAYER = 3  # MFORCE BODY layers: the stress surface three cells into the gap
+# The field map at offset 0: cell centers of a 0.1 mm (r) by 0.2 mm (z) grid,
+# off the material boundaries, where both solvers' B is sampled.
+TUBE_MAP_R = np.arange(0.05e-3, 20e-3, 0.1e-3)
+TUBE_MAP_Z = np.arange(-49.9e-3, 50e-3, 0.2e-3)
+
+
+def back_emf(offsets, linkage):
+    """The back-EMF per unit speed, -d lambda / dz in V per m/s, from the
+    linkage at the offsets (second-order differences, the same for both
+    solvers)."""
+    return -np.gradient(np.asarray(linkage), np.asarray(offsets), edge_order=2)
 
 
 def tubular_size(x, y, scale):
@@ -893,9 +908,25 @@ def tubular_case(level, out, args):
             for z in TUBE_PROBE_Z:
                 lua += [f"a, b1, b2 = mo_getpointvalues({TUBE_PROBE_R:.17g}, {z:.17g})",
                         f'put("{state}_gap", b1, b2)']
+            if offset == 0:
+                lua += [f"for i = 0, {len(TUBE_MAP_R) - 1} do",
+                        f"  for j = 0, {len(TUBE_MAP_Z) - 1} do",
+                        f"    a, b1, b2 = mo_getpointvalues({TUBE_MAP_R[0]:.17g} + i * {1e-4:.17g}, "
+                        f"{TUBE_MAP_Z[0]:.17g} + j * {2e-4:.17g})",
+                        f'    put("{state}_map", a, b1, b2)', "  end", "end"]
             lua.append("mo_close()")
         lua += ["closefile(results)", "quit()"]
         raw, seconds = run_femm(lua, workdir, args)
+        if offset == 0:
+            # (r, z, [A_phi, B_r, B_z]) for tubular_field_plot. FEMM's axi
+            # potential is the flux through the circle, 2 pi r A_phi.
+            maps = {state: np.array(raw.pop(f"{state}_map")).reshape(len(TUBE_MAP_R), len(TUBE_MAP_Z), 3)
+                    for state in ("noload", "loaded")}
+            for m in maps.values():
+                m[..., 0] /= 2 * np.pi * TUBE_MAP_R[:, None]
+            np.savez(workdir / "femm_map.npz", **maps)
+            results["map"] = {state: map_difference(vibestran_map(workdir / "tubular.mag.vtkhdf", k), maps[state])
+                              for k, state in enumerate(("noload", "loaded"), start=1)}
         for state in ("noload", "loaded"):
             fz, fa, fb, fc, w, elements = raw[state][0]
             gap = np.array(raw[f"{state}_gap"])
@@ -1079,6 +1110,12 @@ def core_report(data, case):
     return lines
 
 
+def tubular_back_emf(d):
+    """Each solver's no-load back-EMF per unit speed by phase, at the offsets."""
+    return {s: {c: back_emf(d["offsets"], [r["linkage"][c] for r in d[s] if r["state"] == "noload"])
+                for c in "ABC"} for s in ("vibestran", "femm")}
+
+
 def tubular_report(data):
     lines = []
     levels = [lvl for lvl in LEVELS if f"tubular_{lvl}" in data]
@@ -1092,9 +1129,32 @@ def tubular_report(data):
         for v, f in zip(d["vibestran"], d["femm"]):
             def cell(a, b):
                 return f"{a:.5g} / {b:.5g} / {rel(a, b):+.2f}"
+            if round(v["offset"] * 1e3) % 4:
+                continue
             lines.append(f"| {v['offset'] * 1e3:.0f} | {v['state']} | {cell(v['force_z'], f['force_z'])} | "
                          + " | ".join(cell(v["linkage"][c], f["linkage"][c]) for c in "ABC")
                          + f" | {cell(v['energy'], f['energy'])} |")
+        lines += ["", f"Every fourth of the {len(d['offsets'])} offsets; the ranges below and in "
+                  "tubular.png cover all of them.", ""]
+        forces = {s: {state: np.array([r["force_z"] for r in d[s] if r["state"] == state])
+                      for state in ("noload", "loaded")} for s in ("vibestran", "femm")}
+        # Both forces cross zero, so differences are against each state's largest |F|.
+        for state, name in (("loaded", "Loaded"), ("noload", "Detent (no-load)")):
+            diff = np.abs(forces["vibestran"][state] - forces["femm"][state])
+            peak = np.abs(forces["femm"][state]).max()
+            lines.append(f"{name} force: largest difference {diff.max():.3f} N, {100 * diff.max() / peak:.2f}% "
+                         f"of FEMM's largest |F_z| ({peak:.3f} N).")
+        lines.append("")
+        emf = tubular_back_emf(d)
+        lines += ["No-load back-EMF per unit speed, -d lambda / dz from the linkages at the offsets "
+                  "(V per m/s): vibestran / FEMM peak, and the largest difference over the offsets "
+                  "in percent of FEMM's peak.", "",
+                  "| phase | peak | largest difference (%) |", "|---|---:|---:|"]
+        for c in "ABC":
+            v, f = emf["vibestran"][c], emf["femm"][c]
+            peak = np.abs(f).max()
+            lines.append(f"| {c} | {np.abs(v).max():.4g} / {peak:.4g} | "
+                         f"{100 * np.abs(v - f).max() / peak:.2f} |")
         lines.append("")
         worst = max(np.max(np.abs(np.array(v[k]) - np.array(f[k]))) / np.max(np.abs(f[k]))
                     for v, f in zip(d["vibestran"], d["femm"]) for k in ("br", "bz"))
@@ -1106,12 +1166,27 @@ def tubular_report(data):
                   f"largest RMS difference over the states {100 * rms:.2f}% of FEMM's RMS |B|; largest "
                   f"pointwise difference of B_r or B_z {100 * worst:.2f}% of FEMM's largest, at the "
                   "magnet junctions, where pointwise B of first-order elements is least accurate.", ""]
+        if "map" in d:
+            lines += [f"Field map at offset 0 ({len(TUBE_MAP_R)} x {len(TUBE_MAP_Z)} points, r < 20 mm, "
+                      "|z| < 50 mm, tubular_field.png): RMS |B| of the difference in percent of FEMM's RMS "
+                      "|B|, no load / loaded: " + "; ".join(
+                          f"{name} {100 * d['map']['noload'][name]:.2f} / {100 * d['map']['loaded'][name]:.2f}"
+                          for name in ("map", "gap", "sleeve")) + ". FEMM's B is smoothed between "
+                      "elements, vibestran's is each cell's.", ""]
         # Each solver's refinement change, for the force.
         if level == "fine" and "tubular_coarse" in data:
             c = data["tubular_coarse"]
+            ce = tubular_back_emf(c)
+            change = {s: max(np.abs(emf[s][p] - ce[s][p]).max() / np.abs(emf[s][p]).max()
+                             for p in "ABC") for s in ("vibestran", "femm")}
+            lines += [f"Coarse to fine change of the back-EMF, largest over the offsets and phases in "
+                      f"percent of the phase's peak: vibestran {100 * change['vibestran']:.2f}%, FEMM "
+                      f"{100 * change['femm']:.2f}%.", ""]
             lines += ["Coarse to fine change of the force, vibestran / FEMM (%):", "",
                       "| offset (mm) | no load | loaded |", "|---:|---:|---:|"]
             for k, offset in enumerate(d["offsets"]):
+                if round(offset * 1e3) % 4:
+                    continue
                 row = []
                 for state_k in (2 * k, 2 * k + 1):
                     row.append(" / ".join(
@@ -1234,6 +1309,84 @@ def styled_axes(fig, rows, cols):
     return axes
 
 
+PHASE_COLORS = ("#2a78d6", "#eb6834", "#1baf7a")  # categorical slots 1 to 3
+FIELD_RAMP = ("#cde2fb", "#86b6ef", "#3987e5", "#256abf", "#104281", "#0d366b")  # blue, sequential
+DIFFERENCE_RAMP = ("#fbe3d6", "#f4a780", "#eb6834", "#b8461b", "#7a2e10")      # orange, sequential
+
+
+def vibestran_map(path, subcase):
+    """vibestran's field from its VTKHDF at the TUBE_MAP points: A_phi
+    (linear on each triangle) and B (constant on it), as (r, z, 3)."""
+    from matplotlib.tri import LinearTriInterpolator, Triangulation
+    with h5py.File(path) as f:
+        block = f[f"VTKHDF/SUBCASE_{subcase}"]
+        points = block["Points"][()]
+        offsets = block["Offsets"][()]
+        assert np.all(np.diff(offsets) == 3), "the tubular mesh is triangles"
+        triangles = block["Connectivity"][()].reshape(-1, 3)
+        a = block["PointData/A_normal_Wb_per_m"][()]
+        b = block["CellData/B_T"][()]
+    mesh = Triangulation(points[:, 0], points[:, 2], triangles)
+    r, z = np.meshgrid(TUBE_MAP_R, TUBE_MAP_Z, indexing="ij")
+    cell = mesh.get_trifinder()(r, z)
+    assert np.all(cell >= 0), "every map point is in the mesh"
+    return np.stack([np.asarray(LinearTriInterpolator(mesh, a)(r, z)), b[cell, 0], b[cell, 2]], axis=-1)
+
+
+def map_difference(vib, femm):
+    """RMS |B| of vibestran minus FEMM over the map, the gap and the sleeve,
+    relative to FEMM's RMS |B| there."""
+    r, z = np.meshgrid(TUBE_MAP_R, TUBE_MAP_Z, indexing="ij")
+    inside = np.abs(z) < 40e-3
+    regions = {"map": np.ones_like(r, dtype=bool), "gap": inside & (r > 6.75e-3) & (r < 7.75e-3),
+               "sleeve": inside & (r > 12.5e-3) & (r < 14e-3)}
+    d = np.hypot(vib[..., 1] - femm[..., 1], vib[..., 2] - femm[..., 2])
+    b = np.hypot(femm[..., 1], femm[..., 2])
+    return {name: float(np.sqrt(np.mean(d[m] ** 2) / np.mean(b[m] ** 2))) for name, m in regions.items()}
+
+
+def tubular_field_plot(workdir, level, path):
+    """|B| with flux lines (contours of r A_phi, which is the flux through
+    the circle over 2 pi) from each solver at offset 0, and |B| of their
+    difference, without and with current. Both are sampled at the same
+    points: FEMM by mo_getpointvalues, vibestran from its VTKHDF."""
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap, LogNorm
+    femm = np.load(workdir / "femm_map.npz")
+    field = LinearSegmentedColormap.from_list("field", FIELD_RAMP)
+    difference = LinearSegmentedColormap.from_list("difference", DIFFERENCE_RAMP)
+    r, z = TUBE_MAP_R * 1e3, TUBE_MAP_Z * 1e3
+    flux = TUBE_MAP_R[:, None]
+    fig = plt.figure(figsize=(9, 11), facecolor=SURFACE)
+    axes = fig.subplots(6, 1, sharex=True)
+    for k, (state, label) in enumerate((("noload", "no current"), ("loaded", "A 3 A, B = C -1.5 A"))):
+        maps = {"vibestran": vibestran_map(workdir / "tubular.mag.vtkhdf", k + 1), "FEMM": femm[state]}
+        bmax = max(np.hypot(m[..., 1], m[..., 2]).max() for m in maps.values())
+        levels = np.linspace(*np.percentile(flux * maps["FEMM"][..., 0], [0.5, 99.5]), 25)
+        for row, (name, m) in enumerate(maps.items()):
+            ax = axes[3 * k + row]
+            image = ax.pcolormesh(z, r, np.hypot(m[..., 1], m[..., 2]), cmap=field, vmin=0, vmax=bmax,
+                                  shading="nearest", rasterized=True)
+            ax.contour(z, r, flux * m[..., 0], levels=levels, colors=INK, linewidths=0.5)
+            ax.set_title(f"{name}, {label}: |B| (T) and flux lines", loc="left")
+            fig.colorbar(image, ax=ax, pad=0.01, fraction=0.03)
+        d = maps["vibestran"] - maps["FEMM"]
+        ax = axes[3 * k + 2]
+        image = ax.pcolormesh(z, r, np.maximum(np.hypot(d[..., 1], d[..., 2]), 1e-4), cmap=difference,
+                              norm=LogNorm(1e-3, 1), shading="nearest", rasterized=True)
+        ax.set_title(f"|B| of vibestran minus FEMM, {label} (T)", loc="left")
+        fig.colorbar(image, ax=ax, pad=0.01, fraction=0.03)
+    for ax in axes:
+        ax.set_aspect("equal")
+        ax.set_ylabel("r (mm)")
+        ax.tick_params(colors=MUTED)
+    axes[-1].set_xlabel("z (mm)")
+    fig.suptitle(f"Tubular stack at offset 0, {level} mesh", x=0.01, ha="left", color=INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.98))
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
 def series(ax, x, y, solver, label=None):
     style = dict(color=COLORS[solver], linewidth=2, label=label or solver)
     if solver == "FEMM":
@@ -1268,10 +1421,11 @@ def plots(data, out):
         fig.savefig(out / "core.png", dpi=150)
         written.append("core.png")
         plt.close(fig)
-    tube = next((data[k] for k in ("tubular_fine", "tubular_coarse") if k in data), None)
+    tube_level = next((lvl for lvl in ("fine", "coarse") if f"tubular_{lvl}" in data), None)
+    tube = data[f"tubular_{tube_level}"] if tube_level else None
     if tube:
-        fig = plt.figure(figsize=(9, 3.4), facecolor=SURFACE)
-        axes = styled_axes(fig, 1, 2)
+        fig = plt.figure(figsize=(9, 6.6), facecolor=SURFACE)
+        axes = styled_axes(fig, 2, 2)
         offsets = np.array(tube["offsets"]) * 1e3
         for state, label in (("loaded", "A 3 A, B = C -1.5 A"), ("noload", "no current")):
             for solver, name in (("vibestran", "vibestran"), ("femm", "FEMM")):
@@ -1284,10 +1438,33 @@ def plots(data, out):
             series(axes[0, 1], TUBE_PROBE_Z * 1e3, tube[solver][0]["br"], name)
         axes[0, 1].set_title(f"B_r at r = {TUBE_PROBE_R * 1e3:g} mm, offset 0, no current (T)", loc="left")
         axes[0, 1].set_xlabel("z (mm)")
-        fig.tight_layout()
+        # Back-EMF: colour is the phase, line style the solver.
+        emf = tubular_back_emf(tube)
+        for c, color in zip("ABC", PHASE_COLORS):
+            for solver, style in (("vibestran", dict(linestyle="-")),
+                                  ("femm", dict(linestyle="--", marker="s", markersize=4,
+                                                markerfacecolor="none"))):
+                axes[1, 0].plot(offsets, emf[solver][c], color=color, linewidth=2,
+                                label=f"{c}, {'vibestran' if solver == 'vibestran' else 'FEMM'}", **style)
+            axes[1, 0].annotate(c, (offsets[-1], emf["vibestran"][c][-1]), xytext=(4, 0),
+                                textcoords="offset points", va="center", color=INK)
+            axes[1, 1].plot(offsets, emf["vibestran"][c] - emf["femm"][c], color=color, linewidth=2,
+                            marker="o", markersize=4, label=c)
+        axes[1, 0].set_title("no-load back-EMF per unit speed (V per m/s)", loc="left")
+        axes[1, 0].legend(fontsize=7, ncol=3)
+        axes[1, 1].set_title("back-EMF, vibestran minus FEMM (V per m/s)", loc="left")
+        axes[1, 1].legend(fontsize=7, title="phase", title_fontsize=7)
+        for ax in axes[1]:
+            ax.set_xlabel("mover offset (mm)")
+        fig.suptitle(f"Tubular stack, {tube_level} mesh", x=0.01, ha="left", color=INK)
+        fig.tight_layout(rect=(0, 0, 1, 0.97))
         fig.savefig(out / "tubular.png", dpi=150)
         written.append("tubular.png")
         plt.close(fig)
+        workdir = out / f"tubular_{tube_level}_00mm"
+        if (workdir / "femm_map.npz").exists():
+            tubular_field_plot(workdir, tube_level, out / "tubular_field.png")
+            written.append("tubular_field.png")
     key = next((k for k in (f"motor_whole_{lvl}" for lvl in ("graded", "fine", "coarse")) if k in data), None)
     if key:
         r = data[key]
@@ -1331,8 +1508,8 @@ def report(data, out):
     if body:
         lines += ["## Tubular stack (axisymmetric)", "",
                   "vibestran MAGAXI against FEMM's axi problem: three alternating axial magnets in a "
-                  "tube, nine three-phase coils and a saturating steel sleeve, at six static mover "
-                  "offsets over a pole pitch, without current and with A = 3 A, B = C = -1.5 A. Force "
+                  "tube, nine three-phase coils and a saturating steel sleeve, at static mover "
+                  "offsets 1 mm apart over a pole pitch, without current and with A = 3 A, B = C = -1.5 A. Force "
                   "is the axial force on the mover (magnets and tube).", "", *body]
     body = motor_report(data)
     if body:
