@@ -75,8 +75,8 @@ def steel_curve():
 class Role:
     """What a region of the geometry is. material: air, iron (linear,
     MUR 1000), steel (the curve above), magnet or gap (the air gap of the
-    air-gap element). magnet: 'radial+', 'radial-' or a fixed angle in
-    degrees. circuit/turns: a coil side. moving: turns with MOTION. body:
+    air-gap element). magnet: 'radial+', 'radial-', 'axial+', 'axial-' (along
+    the symmetry axis of an axisymmetric model) or a fixed angle in degrees. circuit/turns: a coil side. moving: turns with MOTION. body:
     the MFORCE body."""
     material: str
     region: str
@@ -492,10 +492,11 @@ def table_cards(tid):
     return out
 
 
-def vibestran_deck(g, control, bulk, motion_sets=False, period=None):
+def vibestran_deck(g, control, bulk, motion_sets=False, period=None, axisymmetric=False):
     """The deck for geometry g: grids and elements, a PID per material and
     magnetization, ESETs of coils, the body and the moving cells, COIL2D and
-    CIRCUIT cards. Returns the text and the element IDs of each region."""
+    CIRCUIT cards. axisymmetric: MAGAXI, g's x and y being r and z (grids at
+    (r, 0, z)). Returns the text and the element IDs of each region."""
     pids, lines = {}, []
     materials = {"air": "MATMAG,1,1.", "iron": "MATMAG,2,1000.", "steel": "MATMAG,3,,1",
                  "magnet": f"MATMAG,4,1.05,,{motor.BR}"}
@@ -514,15 +515,19 @@ def vibestran_deck(g, control, bulk, motion_sets=False, period=None):
                 lines.append(f"PMAG2D,{pid},{mids[role.material]}")
             elif role.magnet in ("radial+", "radial-"):
                 lines.append(f"PMAG2D,{pid},4,100,{1 if role.magnet == 'radial+' else -1}")
+            elif role.magnet in ("axial+", "axial-"):
+                lines.append(f"PMAG2D,{pid},4,0,{3 if role.magnet == 'axial+' else -3}")
             else:
                 lines.append(f"PMAG2D,{pid},4,0,1")
-    text = ["SOL MAGSTAT", "CEND", *control, "BEGIN BULK", "MAG2D,0,{depth}",
+    text = ["SOL MAGSTAT", "CEND", *control, "BEGIN BULK",
+            "MAGAXI,0" if axisymmetric else "MAG2D,0,{depth}",
             "CORD2C,100,,0.,0.,0.,0.,0.,1.", ",1.,0.,0.", *materials.values(), *lines,
             *table_cards(1), *bulk]
     used = sorted({n for _, t in cells for n in t})
     for n in used:
         x, y = g.nodes[n]
-        text.append(f"GRID,{n},,{x:.17g},{y:.17g},0.")
+        text.append(f"GRID,{n},,{x:.17g},0.,{y:.17g}" if axisymmetric else
+                    f"GRID,{n},,{x:.17g},{y:.17g},0.")
     for eid, (role, cell) in enumerate(cells, start=1):
         card = "CTRIA3" if len(cell) == 3 else "CQUAD4"
         text.append(f"{card},{eid},{pids[(role.material, role.magnet)]}," + ",".join(map(str, cell)))
@@ -609,8 +614,9 @@ def femm_age_band(g, r_in, r_out, half, size):
     return dataclasses.replace(g, points=points, segments=segments, arcs=arcs, labels=labels)
 
 
-def femm_drawing(g, depth, half, size):
-    """Lua that draws g, with its materials, circuits and boundaries."""
+def femm_drawing(g, depth, half, size, axisymmetric=False):
+    """Lua that draws g, with its materials, circuits and boundaries.
+    axisymmetric: FEMM's axi problem, g's x and y being r and z."""
     # Only the materials in use.
     used = {lab[2].material for lab in g.labels}
     definitions = {
@@ -619,7 +625,8 @@ def femm_drawing(g, depth, half, size):
         "steel": 'mi_addmaterial("Steel", 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0)',
         "magnet": f'mi_addmaterial("Magnet", 1.05, 1.05, {motor.BR / (MU0 * 1.05):.17g}, 0, 0, 0, 0, 1, '
                   '0, 0, 0, 0, 0)'}
-    out = [f'newdocument(0)', f'mi_probdef(0, "meters", "planar", 1e-9, {depth}, 30)',
+    out = [f'newdocument(0)',
+           f'mi_probdef(0, "meters", "{"axi" if axisymmetric else "planar"}", 1e-9, {depth}, 30)',
            *(v for k, v in definitions.items() if k in used),
            'mi_addboundprop("A0", 0, 0, 0, 0, 0, 0, 0, 0, 0)',
            f'mi_addboundprop("AGE", 0, 0, 0, 0, 0, 0, 0, 0, {7 if half else 6})']
@@ -668,7 +675,8 @@ def femm_drawing(g, depth, half, size):
         if material is None:
             out.append('mi_setblockprop("<No Mesh>", 1, 0, "<None>", 0, 0, 0)')
         else:
-            direction = {"radial+": '"theta"', "radial-": '"theta+180"'}.get(role.magnet, role.magnet or 0)
+            direction = {"radial+": '"theta"', "radial-": '"theta+180"', "axial+": 90,
+                         "axial-": 270}.get(role.magnet, role.magnet or 0)
             out.append(f'mi_setblockprop("{material}", 0, {mesh:.6g}, "{role.circuit or "<None>"}", '
                        f'{direction}, {1 if role.body else 0}, {role.turns:.17g})')
         out.append("mi_clearselected()")
@@ -787,6 +795,115 @@ def core_case(name, level, out, args):
 def core_size(x, y, scale):
     dx = max(abs(x) - 0.03, 0)
     return scale * min(6e-3, 2.5e-4 + 0.15 * max(0, math.hypot(dx, y - 0.05075) - 0.001))
+
+
+# --------------------------------------------------------------------------
+# Tubular stack (axisymmetric).
+# --------------------------------------------------------------------------
+
+# MAGNETICS_ROADMAP.md's tubular reference motor, static: three 20 mm N35
+# magnets (r 6 mm) alternating along the axis inside a 0.75 mm aluminium
+# tube, a 1 mm gap, nine 6.67 mm coils of 88 turns (r 7.75 to 12.5 mm) in
+# the sequence A, -C, B, -A, C, -B, A, -C, B, and a 1.5 mm steel sleeve
+# around them (the roadmap leaves back iron open; the sleeve makes the
+# comparison saturate). x is r and y is z, in an air box r < 60 mm,
+# |z| < 100 mm held at A = 0. The mover (magnets and tube) is the force body.
+TUBE_POLE = 20e-3
+TUBE_OFFSETS = [0.0, 4e-3, 8e-3, 12e-3, 16e-3, 20e-3]  # mover offsets along z
+TUBE_CURRENTS = {"A": 3.0, "B": -1.5, "C": -1.5}         # the loaded state, A
+TUBE_TURNS = 88
+TUBE_PROBE_R = 7.25e-3                                  # the middle of the gap
+TUBE_PROBE_Z = np.arange(-40e-3, 40.1e-3, 2e-3)
+TUBE_FORCE_LAYER = 3  # MFORCE BODY layers: the stress surface three cells into the gap
+
+
+def tubular_size(x, y, scale):
+    """Fine at the gap (r 6 to 7.75 mm), coarser away from it."""
+    return scale * min(2.5e-3, 2.5e-4 + 0.15 * max(0.0, 6e-3 - x, x - 7.75e-3))
+
+
+def tubular_geometry(scale, offset):
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Verbosity", 2)
+    gmsh.model.add("tubular")
+    b = Builder()
+    mm = 1e-3
+    e = [(b.rectangle(0, -100 * mm, 60 * mm, 100 * mm), 1, Role("air", "air")),
+         (b.rectangle(12.5 * mm, -40 * mm, 14 * mm, 40 * mm), 2, Role("steel", "sleeve"))]
+    width = TUBE_POLE / 3
+    for k, (phase, sign) in enumerate([("A", 1), ("C", -1), ("B", 1), ("A", -1), ("C", 1),
+                                       ("B", -1), ("A", 1), ("C", -1), ("B", 1)]):
+        z0 = -1.5 * TUBE_POLE + k * width
+        e.append((b.rectangle(7.75 * mm, z0, 12.5 * mm, z0 + width), 3,
+                  Role("air", f"coil{k}", phase, sign * TUBE_TURNS)))
+    e.append((b.rectangle(6 * mm, -1.5 * TUBE_POLE + offset, 6.75 * mm, 1.5 * TUBE_POLE + offset), 4,
+              Role("air", "tube", moving=True, body=True)))
+    for j in range(3):
+        z0 = -1.5 * TUBE_POLE + j * TUBE_POLE + offset
+        e.append((b.rectangle(0, z0, 6 * mm, z0 + TUBE_POLE), 5,
+                  Role("magnet", f"magnet{j}", magnet="axial+" if j % 2 == 0 else "axial-",
+                       moving=True, body=True)))
+    expr = f"{scale} * Min(2.5e-3, 2.5e-4 + 0.15 * Max(0, Max(6e-3 - x, x - 7.75e-3)))"
+    g = build(e, (lambda x, y: tubular_size(x, y, scale), expr))
+    gmsh.finalize()
+    return g
+
+
+def tubular_case(level, out, args):
+    """At each mover offset, no load and TUBE_CURRENTS: axial force on the
+    mover, phase linkages, energy and B along the gap, from both solvers."""
+    scale = LEVELS[level]
+    results = {"vibestran": [], "femm": [], "offsets": TUBE_OFFSETS}
+    for offset in TUBE_OFFSETS:
+        g = tubular_geometry(scale, offset)
+        workdir = out / f"tubular_{level}_{round(offset * 1e3):02d}mm"
+        workdir.mkdir(parents=True, exist_ok=True)
+        control = ["MPROBE = ALL"]
+        bulk = ["PARAM,MAGTOL,1e-10", f"MFORCE,1,BODY,30,0,{TUBE_FORCE_LAYER}",
+                *(f"MPROBE,{k},0,{TUBE_PROBE_R:.17g},0.,{z:.17g}"
+                  for k, z in enumerate(TUBE_PROBE_Z, start=1))]
+        deck, circuit_ids = vibestran_deck(g, control, bulk, axisymmetric=True)
+        loads = [f"ICIRC,1,{circuit_ids[c]},{i:.17g}" for c, i in TUBE_CURRENTS.items()]
+        deck = deck.replace("MPROBE = ALL\n", "MPROBE = ALL\nSUBCASE 1\n  LABEL = NOLOAD\n"
+                            "SUBCASE 2\n  LABEL = LOADED\n  LOAD = 1\n", 1)
+        deck = deck.replace("ENDDATA", "\n".join(loads) + "\nENDDATA")
+        path = workdir / "tubular.bdf"
+        path.write_text(deck)
+        with run_vibestran(path, args.vibestran) as h5:
+            for k, state in enumerate(("noload", "loaded"), start=1):
+                sub = h5[f"MAGSTAT/subcases/{k}"]
+                b = sub["probes/B_T"][()]                         # (probes, 3)
+                linkage = sub["circuits/linkage_Wb_turn"][()]     # (circuits,)
+                results["vibestran"].append({
+                    "offset": offset, "state": state,
+                    "force_z": float(sub["forces/force_N"][()][0][2]),
+                    "linkage": {c: float(linkage[circuit_ids[c] - 1]) for c in "ABC"},
+                    "energy": float(sub.attrs["energy_J"]),
+                    "br": b[:, 0].tolist(), "bz": b[:, 2].tolist(), "cells": len(g.cells),
+                    "seconds": float((workdir / "seconds.txt").read_text())})
+        lua = femm_drawing(g, 0, False, lambda x, y: tubular_size(x, y, scale), axisymmetric=True)
+        lua.append(LUA_PRELUDE)
+        for state, currents in (("noload", {c: 0.0 for c in "ABC"}), ("loaded", TUBE_CURRENTS)):
+            lua += [f'mi_modifycircprop("{c}", 1, {i:.17g})' for c, i in currents.items()]
+            lua += ["solve()", 'ia, va, fa = mo_getcircuitproperties("A")',
+                    'ib, vb, fb = mo_getcircuitproperties("B")', 'ic, vc, fc = mo_getcircuitproperties("C")',
+                    "mo_groupselectblock(1)", "fz = mo_blockintegral(19)", "mo_clearblock()",
+                    "mo_groupselectblock()", "w = mo_blockintegral(2)", "mo_clearblock()",
+                    f'put("{state}", fz, fa, fb, fc, w, mo_numelements())']
+            for z in TUBE_PROBE_Z:
+                lua += [f"a, b1, b2 = mo_getpointvalues({TUBE_PROBE_R:.17g}, {z:.17g})",
+                        f'put("{state}_gap", b1, b2)']
+            lua.append("mo_close()")
+        lua += ["closefile(results)", "quit()"]
+        raw, seconds = run_femm(lua, workdir, args)
+        for state in ("noload", "loaded"):
+            fz, fa, fb, fc, w, elements = raw[state][0]
+            gap = np.array(raw[f"{state}_gap"])
+            results["femm"].append({"offset": offset, "state": state, "force_z": fz,
+                                    "linkage": {"A": fa, "B": fb, "C": fc}, "energy": w,
+                                    "br": gap[:, 0].tolist(), "bz": gap[:, 1].tolist(),
+                                    "cells": int(elements), "seconds": seconds})
+    return results
 
 
 # --------------------------------------------------------------------------
@@ -962,6 +1079,49 @@ def core_report(data, case):
     return lines
 
 
+def tubular_report(data):
+    lines = []
+    levels = [lvl for lvl in LEVELS if f"tubular_{lvl}" in data]
+    for level in levels:
+        d = data[f"tubular_{level}"]
+        v0, f0 = d["vibestran"][0], d["femm"][0]
+        lines += [f"### {level} mesh ({v0['cells']} vibestran / {f0['cells']} FEMM triangles at offset 0)", "",
+                  "| offset (mm) | state | force F_z (N): vibestran / FEMM / diff % | "
+                  "linkage A (Wb-turn) | linkage B | linkage C | energy (J) |",
+                  "|---:|---|---:|---:|---:|---:|---:|"]
+        for v, f in zip(d["vibestran"], d["femm"]):
+            def cell(a, b):
+                return f"{a:.5g} / {b:.5g} / {rel(a, b):+.2f}"
+            lines.append(f"| {v['offset'] * 1e3:.0f} | {v['state']} | {cell(v['force_z'], f['force_z'])} | "
+                         + " | ".join(cell(v["linkage"][c], f["linkage"][c]) for c in "ABC")
+                         + f" | {cell(v['energy'], f['energy'])} |")
+        lines.append("")
+        worst = max(np.max(np.abs(np.array(v[k]) - np.array(f[k]))) / np.max(np.abs(f[k]))
+                    for v, f in zip(d["vibestran"], d["femm"]) for k in ("br", "bz"))
+        rms = max(np.sqrt(np.mean((np.array(v["br"]) - np.array(f["br"])) ** 2
+                                  + (np.array(v["bz"]) - np.array(f["bz"])) ** 2))
+                  / np.sqrt(np.mean(np.array(f["br"]) ** 2 + np.array(f["bz"]) ** 2))
+                  for v, f in zip(d["vibestran"], d["femm"]))
+        lines += [f"B along the gap (r = {TUBE_PROBE_R * 1e3:g} mm, |z| <= 40 mm, 41 points): "
+                  f"largest RMS difference over the states {100 * rms:.2f}% of FEMM's RMS |B|; largest "
+                  f"pointwise difference of B_r or B_z {100 * worst:.2f}% of FEMM's largest, at the "
+                  "magnet junctions, where pointwise B of first-order elements is least accurate.", ""]
+        # Each solver's refinement change, for the force.
+        if level == "fine" and "tubular_coarse" in data:
+            c = data["tubular_coarse"]
+            lines += ["Coarse to fine change of the force, vibestran / FEMM (%):", "",
+                      "| offset (mm) | no load | loaded |", "|---:|---:|---:|"]
+            for k, offset in enumerate(d["offsets"]):
+                row = []
+                for state_k in (2 * k, 2 * k + 1):
+                    row.append(" / ".join(
+                        f"{rel(d[s][state_k]['force_z'], c[s][state_k]['force_z']):+.2f}"
+                        for s in ("vibestran", "femm")))
+                lines.append(f"| {offset * 1e3:.0f} | " + " | ".join(row) + " |")
+            lines.append("")
+    return lines
+
+
 def motor_metrics(r, half_femm_scale=1.0):
     """Scalar measures of one solver's motor results. half_femm_scale
     multiplies FEMM's linkage in a half model (its circuits hold half the
@@ -1108,6 +1268,26 @@ def plots(data, out):
         fig.savefig(out / "core.png", dpi=150)
         written.append("core.png")
         plt.close(fig)
+    tube = next((data[k] for k in ("tubular_fine", "tubular_coarse") if k in data), None)
+    if tube:
+        fig = plt.figure(figsize=(9, 3.4), facecolor=SURFACE)
+        axes = styled_axes(fig, 1, 2)
+        offsets = np.array(tube["offsets"]) * 1e3
+        for state, label in (("loaded", "A 3 A, B = C -1.5 A"), ("noload", "no current")):
+            for solver, name in (("vibestran", "vibestran"), ("femm", "FEMM")):
+                series(axes[0, 0], offsets, [r["force_z"] for r in tube[solver] if r["state"] == state], name,
+                       f"{name}, {label}")
+        axes[0, 0].set_title("axial force on the mover (N)", loc="left")
+        axes[0, 0].set_xlabel("mover offset (mm)")
+        axes[0, 0].legend(fontsize=7)
+        for solver, name in (("vibestran", "vibestran"), ("femm", "FEMM")):
+            series(axes[0, 1], TUBE_PROBE_Z * 1e3, tube[solver][0]["br"], name)
+        axes[0, 1].set_title(f"B_r at r = {TUBE_PROBE_R * 1e3:g} mm, offset 0, no current (T)", loc="left")
+        axes[0, 1].set_xlabel("z (mm)")
+        fig.tight_layout()
+        fig.savefig(out / "tubular.png", dpi=150)
+        written.append("tubular.png")
+        plt.close(fig)
     key = next((k for k in (f"motor_whole_{lvl}" for lvl in ("graded", "fine", "coarse")) if k in data), None)
     if key:
         r = data[key]
@@ -1147,6 +1327,13 @@ def report(data, out):
         body = core_report(data, case)
         if body:
             lines += [f"## {title}", "", *body]
+    body = tubular_report(data)
+    if body:
+        lines += ["## Tubular stack (axisymmetric)", "",
+                  "vibestran MAGAXI against FEMM's axi problem: three alternating axial magnets in a "
+                  "tube, nine three-phase coils and a saturating steel sleeve, at six static mover "
+                  "offsets over a pole pitch, without current and with A = 3 A, B = C = -1.5 A. Force "
+                  "is the axial force on the mover (magnets and tube).", "", *body]
     body = motor_report(data)
     if body:
         lines += ["## 12-slot, 14-pole motor", "",
@@ -1164,7 +1351,7 @@ def main():
     parser.add_argument("output", type=pathlib.Path)
     parser.add_argument("--report-only", action="store_true",
                         help="rewrite summary.md and the plots from OUTPUT/results.json")
-    parser.add_argument("--cases", nargs="+", default=["core", "magnet", "motor"])
+    parser.add_argument("--cases", nargs="+", default=["core", "magnet", "motor", "tubular"])
     parser.add_argument("--levels", nargs="+", default=list(MOTOR_LEVELS),
                         help="mesh levels; graded is the motor's only (the core cases skip it)")
     parser.add_argument("--airgap", nargs="+", default=["AGE"], choices=["AGE", "BAND"],
@@ -1190,7 +1377,9 @@ def main():
                     store.write_text(json.dumps(data, indent=1))
             elif level in LEVELS:
                 print(f"{case} {level}", flush=True)
-                data[f"{case}_{level}"] = core_case(case, level, args.output, args)
+                run = tubular_case if case == "tubular" else core_case
+                data[f"{case}_{level}"] = run(case, level, args.output, args) if run is core_case \
+                    else run(level, args.output, args)
                 store.write_text(json.dumps(data, indent=1))
     report(data, args.output)
     print("wrote", store, "and", args.output / "summary.md")

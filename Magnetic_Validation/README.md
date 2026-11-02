@@ -144,6 +144,7 @@ interpolants differ little; the exterior is A = 0 on a box or circle.
 |---|---|
 | core | U-core and armature, a 200-turn coil on the yoke: linear iron at 2 A and steel from 0.5 A into deep saturation at 16 A. Coil linkage, armature force, \|B\| in the gap, energy. |
 | magnet | the core with a magnet (B_r 1.2 T) in the yoke, steel, coil at -4, 0, +4 A |
+| tubular | the static tubular stack (MAGAXI against FEMM axi): axial force on the mover, phase linkages, energy and gap B at six mover offsets, without and with current. |
 | motor | the 12-slot, 14-pole motor of `tools/magnetic_motor_example.py`: rated torque and phase linkage over an electrical period (DRIVE), no-load linkage and gap B_r, cogging over a cogging period. The whole machine (PAIRGAP; FEMM periodic AGE) and its anti-periodic half (MPERIOD ANTI; FEMM anti-periodic boundaries and AGE). |
 
 ```sh
@@ -271,8 +272,39 @@ circle's shorter wavelengths with no gap stiffness. On this mesh (842 and
 the half model). Each circle's self terms now run to its own resolution
 (MAGNETICS.md, "METHOD=AGE").
 
-These are planar comparisons of the same 2D problem. They do not cover end
-effects or the 3D formulation.
+#### Tubular stack, axisymmetric (2026-11-01)
+
+`--cases tubular` compares MAGAXI with FEMM's axi problem on the static
+tubular reference motor of MAGNETICS_ROADMAP.md: three 20 mm N35 magnets
+alternating along the axis in a 0.75 mm aluminium tube, a 1 mm gap, nine
+6.67 mm coils of 88 turns (A, -C, B, ...), and a 1.5 mm steel sleeve
+around the coils (the roadmap leaves back iron open; the sleeve makes the
+comparison saturate), in an A = 0 box. Each of six mover offsets over a
+pole pitch is its own mesh, solved without current and with A = 3 A,
+B = C = -1.5 A. Fine mesh (151.6k vibestran / 41.3k FEMM triangles):
+
+| quantity | vibestran against FEMM | coarse to fine, vibestran / FEMM |
+|---|---:|---:|
+| phase linkages | within 0.15%; phase C at offset 12 mm, where it is near zero, 0.23% (0.0011 Wb-turn, no load) and 4.2% (4.6e-5 Wb-turn, 1.8e-6 apart, loaded) | up to 0.15% / 0.37% |
+| energy | -0.14 to -0.16% | up to 0.20% / 0.34% |
+| loaded axial force (2 to 14 N) | within 1.7% | up to 5.7% / 2.9% |
+| no-load (detent) force (up to 1.7 N) | within 0.07 N | |
+| B along the gap, RMS difference | 2.0% (3.4% coarse) | |
+
+- Linkage and energy agree to about a tenth of a percent and converge
+  together.
+- The forces agree within each solver's own refinement change.
+  vibestran's force is Maxwell stress on one surface around the mover
+  (MFORCE BODY, LAYER 3) and moves up to 5.7% (0.3 N) between levels; FEMM's
+  weighted stress tensor up to 2.9%. At offset 0, where the exact no-load
+  force is zero by symmetry, vibestran gives -0.0003 N and FEMM +0.07 N.
+- Pointwise B differs most at the magnet junctions, where B_r peaks and B_z
+  crosses zero steeply near the magnets' corners (6.6% of the largest |B|);
+  the RMS difference along the gap falls from 3.4% to 2.0% with refinement,
+  first-order like pointwise B itself.
+
+These are comparisons of the same 2D (planar or axisymmetric) problem. They
+do not cover end effects beyond the modeled domain or the 3D formulation.
 
 ## Motor mesh efficiency (2026-11-01)
 
