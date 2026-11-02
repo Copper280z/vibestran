@@ -22,11 +22,12 @@ CudaMixedPCGSolverBackend& CudaMixedPCGSolverBackend::operator=(
     CudaMixedPCGSolverBackend&&) noexcept = default;
 
 std::optional<CudaMixedPCGSolverBackend>
-CudaMixedPCGSolverBackend::try_create(double tolerance, int max_iters) noexcept {
+CudaMixedPCGSolverBackend::try_create(double tolerance, int max_iters, std::size_t device_memory_budget) noexcept {
     auto ctx = try_create_cuda_pcg_context(
         tolerance > 0.0 ? tolerance : 1e-6, max_iters);
     if (!ctx)
         return std::nullopt;
+    ctx->device_memory_budget = pcg_device_budget(device_memory_budget);
     return CudaMixedPCGSolverBackend(std::move(ctx));
 }
 
@@ -41,14 +42,14 @@ CudaMixedPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
 
 std::vector<std::pair<std::string, std::string>> CudaMixedPCGSolverBackend::details() const {
     return {{"Device", ctx_->device_name},
-            {"Method", "conjugate gradient, IC0 preconditioner (ILU0, then Jacobi, when IC0 fails)"},
+            {"Method", "conjugate gradient; smoothed-aggregation AMG for large systems, IC0/ILU0 for small resident systems"},
             {"Tolerance", [this] {
                  std::ostringstream text;
                  text << std::scientific << std::setprecision(1) << ctx_->tolerance
                       << " (estimated relative error)";
                  return text.str();
              }()},
-            {"Precision", "fp32 inner solves, refined in fp64"},
+            {"Precision", "fp32 AMG with fp64 Krylov operator; small IC0 solves in fp32; spill AMG in fp64; compensated refinement"},
             {"Iterative refinement", "always"}};
 }
 

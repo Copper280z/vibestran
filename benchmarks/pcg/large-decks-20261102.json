@@ -1,0 +1,43 @@
+{
+  "motor_source": "build/pcg-large-cases/tri_0.225/motor.bdf",
+  "motor_source_sha256": "dc4b33dc844050f3b84d9c1b2b6e8b250f6982c050ce124a5ce85632be64c188",
+  "motor_phase_currents_A": [
+    2.5881904510252074,
+    7.0710678118654755,
+    -9.659258262890683
+  ],
+  "thermal_side": 60,
+  "cases": {
+    "motor218k": {
+      "path": "build/pcg-large-cases/motor218k.bdf",
+      "counts": {
+        "GRID": 218579,
+        "CTRIA3": 436258,
+        "CHEXA": 0
+      },
+      "sha256": "cad8f405822e602a405d017ca7595dd8869fa78a0c1af4104f7bb42323f3db94"
+    },
+    "thermal227k": {
+      "path": "build/pcg-large-cases/thermal227k.bdf",
+      "counts": {
+        "GRID": 226981,
+        "CTRIA3": 0,
+        "CHEXA": 216000
+      },
+      "sha256": "6bdf7ac80bfb3eb422135c57eb53794ad4b368541a2eeef4f4ce1daa2c07977f"
+    },
+    "plate262k": {
+      "path": "plate262k.bdf",
+      "counts": {
+        "GRID": 263169,
+        "CQUAD4": 262144
+      },
+      "sha256": "e0c1468300c737bdcf89629c21215119b2975da5d0fb04c16fc10c454fe7d602"
+    }
+  },
+  "generation": {
+    "motor": ".venv/bin/python Magnetic_Validation/mesh_study.py decks build/pcg-large-cases --mesh tri:0.225",
+    "prepare": "python3 tools/prepare_large_pcg_cases.py --motor build/pcg-large-cases/tri_0.225/motor.bdf --output build/pcg-large-cases"
+  },
+  "gmsh_version": "4.15.2"
+}

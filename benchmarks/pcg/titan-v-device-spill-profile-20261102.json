@@ -1,0 +1,748 @@
+{
+  "scope": "Instrumented one-solve traces; timings are separate from the uninstrumented benchmark. PCIe totals include setup/coarse transfers but exclude device-to-device copies.",
+  "cuda": {
+    "cuda-plate-90": {
+      "copies": [
+        {
+          "kind": 1,
+          "count": 4407,
+          "bytes": 5066834860,
+          "seconds": 0.40070105500000003
+        },
+        {
+          "kind": 2,
+          "count": 6988,
+          "bytes": 6734565584,
+          "seconds": 0.5356754810000001
+        },
+        {
+          "kind": 8,
+          "count": 10470,
+          "bytes": 37097360640,
+          "seconds": 0.142089125
+        }
+      ],
+      "pcie_bytes": 11801400444,
+      "pcie_seconds": 0.936376536,
+      "kernel_count": 44517,
+      "kernel_seconds": 4.7370178240000005,
+      "first_to_last_kernel_seconds": 7.480665202000001,
+      "tracked_device_allocation_peak_bytes": 757184957,
+      "tracked_allocation_note": "CUDA allocation events for device and device-static memory; excludes driver/context allocations and pinned host buffers.",
+      "kernels": [
+        {
+          "kernel": "vibestran::amg_device_spmv_kernel(const int *, const int *, const double *, const double *, double *, int, double, double)",
+          "count": 18315,
+          "seconds": 4.2117593740000006
+        },
+        {
+          "kernel": "void cub::CUB_200700_520_NS::detail::for_each::static_kernel<cub::CUB_200700_520_NS::detail::for_each::policy_hub_t::policy_350_t, long, cub::CUB_200700_520_NS::detail::for_each::op_wrapper_t<long, amgcl::backend::vmul_impl<double, thrust::THRUST_200700_520_NS::device_vector<double, thrust::THRUST_200700_520_NS::device_allocator<double>>, thrust::THRUST_200700_520_NS::device_vector<double, thrust::THRUST_200700_520_NS::device_allocator<double>>, double, thrust::THRUST_200700_520_NS::device_vector<double, thrust::THRUST_200700_520_NS::device_allocator<double>>, void>::functor, thrust::THRUST_200700_520_NS::zip_iterator<thrust::THRUST_200700_520_NS::tuple<thrust::THRUST_200700_520_NS::detail::normal_iterator<thrust::THRUST_200700_520_NS::device_ptr<const double>>, thrust::THRUST_200700_520_NS::detail::normal_iterator<thrust::THRUST_200700_520_NS::device_ptr<const double>>, thrust::THRUST_200700_520_NS::detail::normal_iterator<thrust::THRUST_200700_520_NS::device_ptr<double>>>>>>(T2, T3)",
+          "count": 6976,
+          "seconds": 0.175160166
+        },
+        {
+          "kernel": "void cub::CUB_200700_520_NS::detail::for_each::static_kernel<cub::CUB_200700_520_NS::detail::for_each::policy_hub_t::policy_350_t, long, cub::CUB_200700_520_NS::detail::for_each::op_wrapper_t<long, amgcl::backend::axpby_impl<double, thrust::THRUST_200700_520_NS::device_vector<double, thrust::THRUST_200700_520_NS::device_allocator<double>>, double, thrust::THRUST_200700_520_NS::device_vector<double, thrust::THRUST_200700_520_NS::device_allocator<double>>, void>::functor, thrust::THRUST_200700_520_NS::zip_iterator<thrust::THRUST_200700_520_NS::tuple<thrust::THRUST_200700_520_NS::detail::normal_iterator<thrust::THRUST_200700_520_NS::device_ptr<const double>>, thrust::THRUST_200700_520_NS::detail::normal_iterator<thrust::THRUST_200700_520_NS::device_ptr<double>>>>>>(T2, T3)",
+          "count": 2613,
+          "seconds": 0.16157047000000002
+        },
+        {
+          "kernel": "void cub::CUB_200700_520_NS::DeviceReduceKernel<cub::CUB_200700_520_NS::DeviceReducePolicy<double, unsigned int, thrust::THRUST_200700_520_NS::plus<double>>::Policy600, thrust::THRUST_200700_520_NS::cuda_cub::transform_pair_of_input_iterators_t<double, thrust::THRUST_200700_520_NS::detail::normal_iterator<thrust::THRUST_200700_520_NS::device_ptr<const double>>, thrust::THRUST_200700_520_NS::detail::normal_iterator<thrust::THRUST_200700_520_NS::device_ptr<const double>>, thrust::THRUST_200700_520_NS::multiplies<double>>, unsigned int, thrust::THRUST_200700_520_NS::plus<double>, double, cuda::std::__4::__identity>(T2, T5 *, T3, cub::CUB_200700_520_NS::GridEvenShare<T3>, T4, T6)",
+          "count": 2622,
+          "seconds": 0.10616735100000001
+        },
+        {
+          "kernel": "vibestran::amg_gather_kernel(const double *, const int *, double *, int)",
+          "count": 3491,
+          "seconds": 0.036905693
+        },
+        {
+          "kernel": "void cub::CUB_200700_520_NS::detail::for_each::static_kernel<cub::CUB_200700_520_NS::detail::for_each::policy_hub_t::policy_350_t, long, thrust::THRUST_200700_520_NS::cuda_cub::__fill::functor<thrust::THRUST_200700_520_NS::detail::normal_iterator<thrust::THRUST_200700_520_NS::device_ptr<double>>, double>>(T2, T3)",
+          "count": 4363,
+          "seconds": 0.022744649000000002
+        },
+        {
+          "kernel": "vibestran::amg_tail_update_kernel(const double *, double *, int, double, double)",
+          "count": 3491,
+          "seconds": 0.015481975
+        },
+        {
+          "kernel": "void cub::CUB_200700_520_NS::DeviceReduceSingleTileKernel<cub::CUB_200700_520_NS::DeviceReducePolicy<double, unsigned int, thrust::THRUST_200700_520_NS::plus<double>>::Policy600, double *, double *, int, thrust::THRUST_200700_520_NS::plus<double>, double, double, cuda::std::__4::__identity>(T2, T3, T4, T5, T6, T8)",
+          "count": 2622,
+          "seconds": 0.006979255
+        },
+        {
+          "kernel": "void cub::CUB_200700_520_NS::detail::for_each::static_kernel<cub::CUB_200700_520_NS::detail::for_each::policy_hub_t::policy_350_t, unsigned long, thrust::THRUST_200700_520_NS::cuda_cub::__uninitialized_fill::functor<thrust::THRUST_200700_520_NS::device_ptr<double>, double>>(T2, T3)",
+          "count": 24,
+          "seconds": 0.000248891
+        }
+      ],
+      "trace": "/tmp/vibestran-pcg-20261102/large/device-spill-validation-20261102/cuda-plate-90.nsys-rep"
+    },
+    "old-cuda-plate-equal-budget": {
+      "copies": [
+        {
+          "kind": 1,
+          "count": 3494,
+          "bytes": 44430558868,
+          "seconds": 3.406714378
+        },
+        {
+          "kind": 2,
+          "count": 3491,
+          "bytes": 44012740608,
+          "seconds": 3.374461837
+        }
+      ],
+      "pcie_bytes": 88443299476,
+      "pcie_seconds": 6.781176215,
+      "kernel_count": 3491,
+      "kernel_seconds": 3.4104906400000004,
+      "first_to_last_kernel_seconds": 41.093404957000004,
+      "tracked_device_allocation_peak_bytes": 451554094,
+      "tracked_allocation_note": "CUDA allocation events for device and device-static memory; excludes driver/context allocations and pinned host buffers.",
+      "kernels": [
+        {
+          "kernel": "void vibestran::partitioned_spmv_kernel<double>(const int *, const int *, const T1 *, const T1 *, T1 *, int)",
+          "count": 3491,
+          "seconds": 3.4104906400000004
+        }
+      ],
+      "trace": "/tmp/vibestran-pcg-20261102/large/device-spill-validation-20261102/old-cuda-plate-equal-budget.nsys-rep"
+    }
+  },
+  "vulkan": {
+    "plate-90": {
+      "batch_count": 10404,
+      "gpu_batch_seconds": 6.440050328000001,
+      "first_to_last_batch_seconds": 8.805227617,
+      "trace": "/tmp/vibestran-pcg-20261102/large/device-spill-validation-20261102/vulkan-plate-90.nsys-rep"
+    }
+  },
+  "sampled_fine_kernel": {
+    "sampling": "First matching fine-matrix product at 90% residency; one launch, not whole-program counters.",
+    "metrics": {
+      "dram__throughput.avg.pct_of_peak_sustained_elapsed": 86.99,
+      "sm__warps_active.avg.pct_of_peak_sustained_active": 89.0
+    }
+  },
+  "compute_sanitizer": {
+    "case": "motor first tangent, CUDA fp64, 90% rows",
+    "tool": "memcheck",
+    "errors": 0,
+    "evidence": "========= COMPUTE-SANITIZER\nBackend: CUDA PCG float64 (GPU); n=225529; nnz=967156\nbackend,n,nnz,budget_mib,run,seconds,iterations,corrections,relative_error,relative_residual,estimated_error\n[2026-11-02 14:35:37.960] [debug] [cuda device AMG] 202976 GPU rows, 22553 CPU rows, 27907 gathered inputs, 403680 vector bytes/SpMV; fixed=39715564 planned=59016176 budget=59016176 bytes\n[2026-11-02 14:35:37.962] [debug] [cuda device AMG] row budgets: 50%=52573888 75%=56843044 90%=59016176 bytes\n[2026-11-02 14:35:51.875] [debug] [amg-pcg] inner iterations=273, scaled residual=7.410e-09\n[2026-11-02 14:35:54.081] [debug] [amg-pcg] inner iterations=43, scaled residual=8.692e-04\n[2026-11-02 14:36:04.691] [debug] [amg-pcg] inner iterations=208, scaled residual=8.934e-04\n[2026-11-02 14:36:04.696] [debug] [amg-pcg] n=225529, nnz=1708783, setup=70.077 ms, iteration/refinement=26727.308 ms, iterations=524, estimated error=2.709e-11\n[2026-11-02 14:36:04.698] [debug] [cuda-pcg device AMG] 2 refinement correction(s), estimated relative error 2.05e-08 -> 2.71e-11, backward error 4.66e-17, inner iterations 524\ncuda-pcg,225529,967156,56.2822113037,0,26.799864554,524,2,8.45908029937e-12,4.31813784468e-14,2.70900979963e-11\n========= ERROR SUMMARY: 0 errors\n"
+  },
+  "pcg-tests": {
+    "tests": 28,
+    "failures": 0,
+    "disabled": 0,
+    "errors": 0,
+    "timestamp": "2026-11-02T14:36:04Z",
+    "time": "0.733s",
+    "name": "AllTests",
+    "testsuites": [
+      {
+        "name": "CudaAmgTest",
+        "tests": 1,
+        "failures": 0,
+        "disabled": 0,
+        "errors": 0,
+        "timestamp": "2026-11-02T14:36:04Z",
+        "time": "0.553s",
+        "testsuite": [
+          {
+            "name": "ResidentAndBudgetedHierarchyPreserveMaterialInterface",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 29,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:04Z",
+            "time": "0.553s",
+            "classname": "CudaAmgTest"
+          }
+        ]
+      },
+      {
+        "name": "CudaPartitionTest",
+        "tests": 2,
+        "failures": 0,
+        "disabled": 0,
+        "errors": 0,
+        "timestamp": "2026-11-02T14:36:05Z",
+        "time": "0.074s",
+        "testsuite": [
+          {
+            "name": "DoubleAndMixedPreserveMaterialInterface",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 46,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.042s",
+            "classname": "CudaPartitionTest"
+          },
+          {
+            "name": "ColoredResidentSolveRecoversOriginalEquationOrdering",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 65,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.031s",
+            "classname": "CudaPartitionTest"
+          }
+        ]
+      },
+      {
+        "name": "EigenPCGTest",
+        "tests": 7,
+        "failures": 0,
+        "disabled": 0,
+        "errors": 0,
+        "timestamp": "2026-11-02T14:36:05Z",
+        "time": "0s",
+        "testsuite": [
+          {
+            "name": "DiagonalSystemExactSolution",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 132,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0s",
+            "classname": "EigenPCGTest"
+          },
+          {
+            "name": "TridiagonalAgreesWithDirectSolver",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 152,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0s",
+            "classname": "EigenPCGTest"
+          },
+          {
+            "name": "LargeBandedSpdAgreesWithDirect",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 172,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0s",
+            "classname": "EigenPCGTest"
+          },
+          {
+            "name": "StiffDiagonalDoesNotConvergeFalsely",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 203,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0s",
+            "classname": "EigenPCGTest"
+          },
+          {
+            "name": "ZeroRhsReturnZeroDisplacement",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 221,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0s",
+            "classname": "EigenPCGTest"
+          },
+          {
+            "name": "DiagnosticsPopulatedAfterSolve",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 234,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0s",
+            "classname": "EigenPCGTest"
+          },
+          {
+            "name": "LargeTridiagonalConvergesWithinBound",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 251,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0s",
+            "classname": "EigenPCGTest"
+          }
+        ]
+      },
+      {
+        "name": "EigenPCGTest_Static",
+        "tests": 1,
+        "failures": 0,
+        "disabled": 0,
+        "errors": 0,
+        "timestamp": "2026-11-02T14:36:05Z",
+        "time": "0s",
+        "testsuite": [
+          {
+            "name": "NameContainsPCG",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 278,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0s",
+            "classname": "EigenPCGTest_Static"
+          }
+        ]
+      },
+      {
+        "name": "CudaPCGTest",
+        "tests": 10,
+        "failures": 0,
+        "disabled": 0,
+        "errors": 0,
+        "timestamp": "2026-11-02T14:36:05Z",
+        "time": "0.046s",
+        "testsuite": [
+          {
+            "name": "DiagonalSystemExactSolution",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 321,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.001s",
+            "classname": "CudaPCGTest"
+          },
+          {
+            "name": "TridiagonalAgreesWithEigen",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 339,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.002s",
+            "classname": "CudaPCGTest"
+          },
+          {
+            "name": "LowerTriangularTridiagonalAgreesWithEigen",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 355,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.002s",
+            "classname": "CudaPCGTest"
+          },
+          {
+            "name": "LargerTridiagonalConverges",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 375,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.01s",
+            "classname": "CudaPCGTest"
+          },
+          {
+            "name": "StiffDiagonalDoesNotConvergeFalsely",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 395,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.001s",
+            "classname": "CudaPCGTest"
+          },
+          {
+            "name": "ZeroRhsReturnZeroDisplacement",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 413,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.001s",
+            "classname": "CudaPCGTest"
+          },
+          {
+            "name": "LargeBandedSpdAgreesWithEigen",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 427,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.022s",
+            "classname": "CudaPCGTest"
+          },
+          {
+            "name": "NameAndDeviceNameAreNonEmpty",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 452,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0s",
+            "classname": "CudaPCGTest"
+          },
+          {
+            "name": "IllConditionedSystemIsAccurateToTheTargetError",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 485,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.002s",
+            "classname": "CudaPCGTest"
+          },
+          {
+            "name": "IncompleteCholeskyBreakdownIsHandledWithADiagonalShift",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 500,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.002s",
+            "classname": "CudaPCGTest"
+          }
+        ]
+      },
+      {
+        "name": "CudaMixedPCGTest",
+        "tests": 3,
+        "failures": 0,
+        "disabled": 0,
+        "errors": 0,
+        "timestamp": "2026-11-02T14:36:05Z",
+        "time": "0.014s",
+        "testsuite": [
+          {
+            "name": "TridiagonalAgreesWithEigenAfterRefinement",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 460,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.009s",
+            "classname": "CudaMixedPCGTest"
+          },
+          {
+            "name": "Fp32InnerSolvesAreRefinedToTheTargetError",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 517,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.002s",
+            "classname": "CudaMixedPCGTest"
+          },
+          {
+            "name": "HopelesslyIllConditionedSystemIsRejected",
+            "file": "../tests/unit/test_pcg_solver.cpp",
+            "line": 529,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.003s",
+            "classname": "CudaMixedPCGTest"
+          }
+        ]
+      },
+      {
+        "name": "PcgPartitionTest",
+        "tests": 3,
+        "failures": 0,
+        "disabled": 0,
+        "errors": 0,
+        "timestamp": "2026-11-02T14:36:05Z",
+        "time": "0.012s",
+        "testsuite": [
+          {
+            "name": "DeviceOwnedVectorsGatherEveryCrossPartitionCouplingWithinBudget",
+            "file": "../tests/unit/test_pcg_partition.cpp",
+            "line": 11,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.01s",
+            "classname": "PcgPartitionTest"
+          },
+          {
+            "name": "CpuSuffixAndResidentPrefixPreserveInterfaceFlux",
+            "file": "../tests/unit/test_pcg_partition.cpp",
+            "line": 60,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.001s",
+            "classname": "PcgPartitionTest"
+          },
+          {
+            "name": "SymmetricColorPermutationPreservesLowerAndFullOperators",
+            "file": "../tests/unit/test_pcg_partition.cpp",
+            "line": 92,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0s",
+            "classname": "PcgPartitionTest"
+          }
+        ]
+      },
+      {
+        "name": "PcgAmgTest",
+        "tests": 1,
+        "failures": 0,
+        "disabled": 0,
+        "errors": 0,
+        "timestamp": "2026-11-02T14:36:05Z",
+        "time": "0.029s",
+        "testsuite": [
+          {
+            "name": "EquilibrationAndRefinementPreserveInterfaceFluxAcrossDifferentUnits",
+            "file": "../tests/unit/test_pcg_partition.cpp",
+            "line": 40,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.029s",
+            "classname": "PcgAmgTest"
+          }
+        ]
+      }
+    ]
+  },
+  "vulkan-tests": {
+    "tests": 19,
+    "failures": 0,
+    "disabled": 0,
+    "errors": 0,
+    "timestamp": "2026-11-02T14:36:05Z",
+    "time": "3.266s",
+    "name": "AllTests",
+    "testsuites": [
+      {
+        "name": "VulkanAmgTest",
+        "tests": 1,
+        "failures": 0,
+        "disabled": 0,
+        "errors": 0,
+        "timestamp": "2026-11-02T14:36:05Z",
+        "time": "0.704s",
+        "testsuite": [
+          {
+            "name": "ResidentAndBudgetedHierarchyPreserveMaterialInterface",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 24,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:05Z",
+            "time": "0.704s",
+            "classname": "VulkanAmgTest"
+          }
+        ]
+      },
+      {
+        "name": "VulkanPartitionTest",
+        "tests": 2,
+        "failures": 0,
+        "disabled": 0,
+        "errors": 0,
+        "timestamp": "2026-11-02T14:36:06Z",
+        "time": "0.405s",
+        "testsuite": [
+          {
+            "name": "BudgetedFloatAndDoublePreserveMaterialInterface",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 43,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:06Z",
+            "time": "0.306s",
+            "classname": "VulkanPartitionTest"
+          },
+          {
+            "name": "BudgetSmallerThanVectorUsesCpuWithoutLosingCouplings",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 63,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:06Z",
+            "time": "0.098s",
+            "classname": "VulkanPartitionTest"
+          }
+        ]
+      },
+      {
+        "name": "VulkanTest",
+        "tests": 16,
+        "failures": 0,
+        "disabled": 0,
+        "errors": 0,
+        "timestamp": "2026-11-02T14:36:06Z",
+        "time": "2.156s",
+        "testsuite": [
+          {
+            "name": "DiagonalSystemConvergesInOneIteration",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 113,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:06Z",
+            "time": "0.106s",
+            "classname": "VulkanTest"
+          },
+          {
+            "name": "TridiagonalSystemAgreesWithEigen",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 136,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:07Z",
+            "time": "0.113s",
+            "classname": "VulkanTest"
+          },
+          {
+            "name": "LargerTridiagonalAgreesWithEigen",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 166,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:07Z",
+            "time": "0.109s",
+            "classname": "VulkanTest"
+          },
+          {
+            "name": "ConvergenceRateForWellConditionedSystem",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 197,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:07Z",
+            "time": "0.106s",
+            "classname": "VulkanTest"
+          },
+          {
+            "name": "LargeDiagonalSystemIsCorrect",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 230,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:07Z",
+            "time": "0.121s",
+            "classname": "VulkanTest"
+          },
+          {
+            "name": "TiledPathProducesCorrectSolution",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 264,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:07Z",
+            "time": "0.144s",
+            "classname": "VulkanTest"
+          },
+          {
+            "name": "SingularMatrixThrowsSolverError",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 302,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:07Z",
+            "time": "0.096s",
+            "classname": "VulkanTest"
+          },
+          {
+            "name": "NameContainsVulkan",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 322,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:07Z",
+            "time": "0.102s",
+            "classname": "VulkanTest"
+          },
+          {
+            "name": "LargeStiffDiagonalSucceedsWithDefaultConfig",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 340,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:07Z",
+            "time": "0.181s",
+            "classname": "VulkanTest"
+          },
+          {
+            "name": "SmallProblemFallsBackToCpu",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 379,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:08Z",
+            "time": "0.133s",
+            "classname": "VulkanTest"
+          },
+          {
+            "name": "DetailsDescribeTheConfiguredSolve",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 420,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:08Z",
+            "time": "0.167s",
+            "classname": "VulkanTest"
+          },
+          {
+            "name": "Float64PathAgreesWithEigenToDoublePrecision",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 451,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:08Z",
+            "time": "0.188s",
+            "classname": "VulkanTest"
+          },
+          {
+            "name": "StiffSystemDoesNotFalseConverge",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 511,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:08Z",
+            "time": "0.109s",
+            "classname": "VulkanTest"
+          },
+          {
+            "name": "VulkanContextHandlesAreValid",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 547,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:08Z",
+            "time": "0.135s",
+            "classname": "VulkanTest"
+          },
+          {
+            "name": "Float32PcgIsRefinedToDoubleAccuracy",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 564,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:08Z",
+            "time": "0.117s",
+            "classname": "VulkanTest"
+          },
+          {
+            "name": "IllConditionedTridiagonalConverges",
+            "file": "../tests/unit/test_vulkan_solver.cpp",
+            "line": 590,
+            "status": "RUN",
+            "result": "COMPLETED",
+            "timestamp": "2026-11-02T14:36:08Z",
+            "time": "0.221s",
+            "classname": "VulkanTest"
+          }
+        ]
+      }
+    ]
+  },
+  "stats_export_retry": "The old CUDA stats command rejected an export timestamp; rerunning directly against its SQLite export succeeded. The trace and measurements were unchanged."
+}

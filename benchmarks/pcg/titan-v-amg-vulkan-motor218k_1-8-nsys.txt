@@ -1,0 +1,39 @@
+Generating SQLite file large/profile-next/final-profile-vulkan-motor218k_1-8.sqlite from large/profile-next/final-profile-vulkan-motor218k_1-8.nsys-rep
+Processing [large/profile-next/final-profile-vulkan-motor218k_1-8.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/vulkan_api_sum.py]...
+
+ ** Vulkan API Summary (vulkan_api_sum):
+
+ Time (%)  Total Time (ns)  Num Calls   Avg (ns)    Med (ns)   Min (ns)  Max (ns)  StdDev (ns)            Name
+ --------  ---------------  ---------  ----------  ----------  --------  --------  -----------  ------------------------
+     32.1         24112668          1  24112668.0  24112668.0  24112668  24112668          0.0  vkCreateDevice
+     30.1         22667231       1762     12864.5      9468.0      6091   1776877      52941.5  vkQueueSubmit
+     11.8          8850151          1   8850151.0   8850151.0   8850151   8850151          0.0  vkDestroyDevice
+      6.1          4571579       1762      2594.5      2365.0      1463     15329        962.8  vkBeginCommandBuffer
+      5.3          3963357         10    396335.7    218472.5    152048   1229082     355738.4  vkAllocateMemory
+      3.7          2811936       1762      1595.9      1112.0       631    379186      10551.0  vkWaitForFences
+      3.4          2581668         10    258166.8    165753.5    112833    736281     217662.9  vkFreeMemory
+      3.2          2418248       1762      1372.4      1202.0       541     13676        803.7  vkEndCommandBuffer
+      2.2          1672848       1759       951.0       872.0       431     11361        379.5  vkCmdBindPipeline
+      1.0           755808          1    755808.0    755808.0    755808    755808          0.0  vkAllocateDescriptorSets
+      0.4           332848          9     36983.1     31630.0     25969     76344      15150.8  vkCreateComputePipelines
+      0.2           175090          4     43772.5     33007.0     26049     83027      26432.2  vkDestroyFence
+      0.2           166193          4     41548.3     41723.5     31830     50916       8587.2  vkCreateFence
+      0.1            91764         80      1147.0      1112.0      1001      1834        144.9  vkCmdBindDescriptorSets
+      0.0            25249          9      2805.4      2775.0      1723      5721       1309.8  vkCreateShaderModule
+      0.0            23084          4      5771.0      3126.0       431     16401       7518.9  vkAllocateCommandBuffers
+      0.0             4638         10       463.8       380.0       310      1322        305.5  vkCreateBuffer
+      0.0             2164          1      2164.0      2164.0      2164      2164          0.0  vkFreeDescriptorSets
+      0.0             2042         10       204.2       195.5        90       351         74.9  vkBindBufferMemory
+      0.0             1824          1      1824.0      1824.0      1824      1824          0.0  vkCreateCommandPool
+      0.0             1312          5       262.4       151.0       120       751        274.0  vkUpdateDescriptorSets
+      0.0             1132          5       226.4       200.0       120       471        142.6  vkUnmapMemory
+      0.0              613          5       122.6        91.0        80       261         77.5  vkMapMemory
+
+Processing [large/profile-next/final-profile-vulkan-motor218k_1-8.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/cuda_gpu_kern_sum.py]...
+SKIPPED: large/profile-next/final-profile-vulkan-motor218k_1-8.sqlite does not contain CUDA kernel data.
+
+Processing [large/profile-next/final-profile-vulkan-motor218k_1-8.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/cuda_api_sum.py]...
+SKIPPED: large/profile-next/final-profile-vulkan-motor218k_1-8.sqlite does not contain CUDA trace data.
+
+Processing [large/profile-next/final-profile-vulkan-motor218k_1-8.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/cuda_gpu_mem_size_sum.py]...
+SKIPPED: large/profile-next/final-profile-vulkan-motor218k_1-8.sqlite does not contain GPU memory data.

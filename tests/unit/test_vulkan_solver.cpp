@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 #include "solver/vulkan_solver_backend.hpp"
 #include "hilbert_system.hpp"
+#include "pcg_partition_problem.hpp"
 #include "solver/vulkan_context.hpp"
 #include "solver/solver_backend.hpp"
 #include "core/sparse_matrix.hpp"
@@ -19,6 +20,56 @@
 #include <numeric>
 
 using namespace vibestran;
+
+TEST(VulkanAmgTest, ResidentAndBudgetedHierarchyPreserveMaterialInterface) {
+    auto context = VulkanContext::create();
+    if (!context || !context->device_info().supports_float64) GTEST_SKIP() << "Vulkan fp64 unavailable";
+    const auto problem = test::pcg_partition_problem(50003);
+    for (std::size_t budget : {0U, 1024U, 1024U * 1024U, 8U * 1024U * 1024U}) {
+        VulkanSolverConfig cfg;
+        cfg.min_dofs_for_gpu = 0;
+        cfg.device_memory_budget = budget;
+        auto backend = VulkanSolverBackend::try_create(cfg);
+        ASSERT_TRUE(backend);
+        const auto x = backend->solve(problem.matrix.expanded_symmetric(), problem.rhs);
+        ASSERT_TRUE(backend->last_refinement()->converged);
+        EXPECT_EQ(backend->last_solve_was_full_gpu(), budget == 0);
+        for (std::size_t i = 0; i < x.size(); ++i) EXPECT_NEAR(x[i], problem.exact[i], 2e-8) << i;
+        const auto zero = backend->solve(problem.matrix.expanded_symmetric(), std::vector<double>(x.size(), 0));
+        for (double v : zero) EXPECT_EQ(v, 0);
+    }
+}
+
+TEST(VulkanPartitionTest, BudgetedFloatAndDoublePreserveMaterialInterface) {
+    const auto problem = test::pcg_partition_problem();
+    const auto full = problem.matrix.expanded_symmetric();
+    for (bool fp64 : {false, true}) {
+        auto context = VulkanContext::create();
+        if (!context) GTEST_SKIP() << "Vulkan unavailable";
+        if (fp64 && !context->device_info().supports_float64) continue;
+        VulkanSolverConfig cfg;
+        cfg.min_dofs_for_gpu = 0;
+        cfg.use_double = fp64;
+        cfg.device_memory_budget = 256 * 1024;
+        auto backend = VulkanSolverBackend::try_create(cfg);
+        ASSERT_TRUE(backend);
+        const auto x = backend->solve(full, problem.rhs);
+        EXPECT_FALSE(backend->last_solve_was_full_gpu());
+        ASSERT_TRUE(backend->last_refinement()->converged);
+        for (int i = 0; i < full.n; ++i) EXPECT_NEAR(x[i], problem.exact[i], 2e-8) << fp64 << " row=" << i;
+    }
+}
+
+TEST(VulkanPartitionTest, BudgetSmallerThanVectorUsesCpuWithoutLosingCouplings) {
+    const auto problem = test::pcg_partition_problem(1024);
+    VulkanSolverConfig cfg;
+    cfg.min_dofs_for_gpu = 0;
+    cfg.device_memory_budget = 1024;
+    auto backend = VulkanSolverBackend::try_create(cfg);
+    if (!backend) GTEST_SKIP() << "Vulkan unavailable";
+    const auto x = backend->solve(problem.matrix.expanded_symmetric(), problem.rhs);
+    for (std::size_t i = 0; i < x.size(); ++i) EXPECT_NEAR(x[i], problem.exact[i], 2e-8) << i;
+}
 
 // ── Test fixture ──────────────────────────────────────────────────────────────
 
@@ -383,8 +434,11 @@ TEST_F(VulkanTest, DetailsDescribeTheConfiguredSolve) {
         EXPECT_NE(rows["Method"].find("below 1234 equations"), std::string::npos)
             << rows["Method"];
         EXPECT_EQ(rows["Tolerance"].rfind("2.5e-09", 0), 0U) << rows["Tolerance"];
-        EXPECT_EQ(rows["Precision"].rfind(use_double ? "fp64" : "fp32", 0), 0U)
+        // Automatic mode now uses fp64 AMG for large systems, while retaining
+        // fp32 Jacobi for smaller ones. Its description must mention both.
+        EXPECT_NE(rows["Precision"].find(use_double ? "fp64" : "fp32"), std::string::npos)
             << rows["Precision"];
+        if (!use_double) EXPECT_NE(rows["Precision"].find("fp64 AMG"), std::string::npos);
     }
 }
 

@@ -2,15 +2,12 @@
 // include/solver/cuda_mixed_pcg_solver_backend.hpp
 // Experimental CUDA mixed-precision PCG backend.
 //
-// Algorithm: float32 inner PCG solves with IC0 → ILU0 → Jacobi fallback,
-// wrapped by iterative refinement with compensated double-precision residuals
-// on the original system (iterative_refinement.hpp).  Converges when cond(K)
-// is below about 1e7; beyond that the fp32 corrections do not contract and
-// solve() throws.
-//
-// This backend is intentionally separate from the stable CUDA PCG backend so
-// mixed-precision experimentation does not complicate the maintained float64
-// solver path.
+// Large resident systems use fp32 AMG preconditioning with an fp64 Krylov
+// operator and reductions. Small resident systems use fp32 IC0/ILU0/Jacobi.
+// Large budgeted systems use the common fp64 device-owned AMG spill path,
+// falling back to a host hierarchy when the GPU working state cannot fit. All paths refine
+// against the original fp64 matrix using compensated residuals and reject
+// solutions that fail the requested forward-error estimate.
 
 #ifdef HAVE_CUDA
 
@@ -34,8 +31,11 @@ public:
     /// @param tolerance  Target relative error of the solution (<=0 selects
     ///                   default 1e-6).
     /// @param max_iters  Maximum inner PCG iterations per correction solve.
+    /// @param device_memory_budget  Bytes; 0 uses VIBESTRAN_PCG_DEVICE_MEMORY_MIB
+    ///                               or free VRAM. Oversized matrices use partitioned PCG (AMG for large systems).
     [[nodiscard]] static std::optional<CudaMixedPCGSolverBackend>
-    try_create(double tolerance = 0.0, int max_iters = 0) noexcept;
+    try_create(double tolerance = 0.0, int max_iters = 0,
+               std::size_t device_memory_budget = 0) noexcept;
 
     [[nodiscard]] std::vector<double> solve(
         const SparseMatrixBuilder::CsrData& K,

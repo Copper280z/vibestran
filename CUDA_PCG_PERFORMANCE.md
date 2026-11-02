@@ -1,5 +1,9 @@
 # CUDA PCG performance review (2026-11-01)
 
+See [PCG_PERFORMANCE.md](PCG_PERFORMANCE.md) for the November 2026 CUDA and
+Vulkan changes, raw measurements, and thermal/magnetic replay instructions.
+The measurements below describe the earlier implementation.
+
 `--backend=cuda-pcg` (`src/solver/cuda_pcg_backend_impl.hpp`) against the
 direct backends, measured on a MAGSTAT tangent. The findings are about the
 backend's structure, not the physics, so they should apply to structural,

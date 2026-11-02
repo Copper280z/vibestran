@@ -19,16 +19,17 @@ CudaPCGSolverBackend::CudaPCGSolverBackend(CudaPCGSolverBackend&&) noexcept = de
 CudaPCGSolverBackend& CudaPCGSolverBackend::operator=(CudaPCGSolverBackend&&) noexcept = default;
 
 std::optional<CudaPCGSolverBackend>
-CudaPCGSolverBackend::try_create(double tolerance, int max_iters) noexcept {
+CudaPCGSolverBackend::try_create(double tolerance, int max_iters, std::size_t device_memory_budget) noexcept {
     auto ctx = try_create_cuda_pcg_context(
         tolerance > 0.0 ? tolerance : 1e-8, max_iters);
     if (!ctx)
         return std::nullopt;
+    ctx->device_memory_budget = pcg_device_budget(device_memory_budget);
     return CudaPCGSolverBackend(std::move(ctx));
 }
 
 std::string_view CudaPCGSolverBackend::name() const noexcept {
-    return "CUDA PCG + IC0/ILU0 float64 (GPU)";
+    return "CUDA PCG float64 (GPU)";
 }
 
 int CudaPCGSolverBackend::last_iteration_count() const noexcept {
@@ -62,7 +63,7 @@ CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
 
 std::vector<std::pair<std::string, std::string>> CudaPCGSolverBackend::details() const {
     return {{"Device", ctx_->device_name},
-            {"Method", "conjugate gradient, IC0 preconditioner (ILU0, then Jacobi, when IC0 fails)"},
+            {"Method", "conjugate gradient; smoothed-aggregation AMG for large systems, IC0/ILU0 for small resident systems"},
             {"Tolerance", [this] {
                  std::ostringstream text;
                  text << std::scientific << std::setprecision(1) << ctx_->tolerance

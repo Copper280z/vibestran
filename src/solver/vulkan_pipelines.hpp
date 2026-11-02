@@ -25,7 +25,9 @@ enum PipelineId : int {
     PL_DOT_REDUCE_D  = 5,
     PL_AXPBY_D       = 6,
     PL_JACOBI_D      = 7,
-    PL_COUNT         = 8,
+    PL_AMG_VECTOR_D  = 8,
+    PL_AMG_GATHER_D  = 9,
+    PL_COUNT         = 10,
 };
 
 using Pipelines = VulkanSolverBackend::Pipelines;
@@ -64,6 +66,7 @@ struct PCJacobi { uint32_t n; };
 //   double alpha (offset 0), double beta (offset 8), uint n (offset 16),
 //   uint _pad (offset 20) → total 24 bytes, aligned to 8.
 struct PCAxpbyD { double alpha; double beta; uint32_t n; uint32_t _pad; };
+struct PCAmgVector { double alpha, beta, gamma; uint32_t n, operation; };
 
 // ── Dispatch helpers (float32) ────────────────────────────────────────────────
 

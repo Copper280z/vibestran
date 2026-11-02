@@ -1,6 +1,9 @@
 .cache
 build/
 subprojects/*/
+!subprojects/packagefiles/
+!subprojects/packagefiles/**
+subprojects/.wraplock
 .venv/
 
 # Root-level solver decks and the outputs they generate (tracked decks live

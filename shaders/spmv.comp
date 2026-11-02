@@ -1,44 +1,34 @@
-// shaders/spmv.comp
-// Sparse matrix-vector product: y[row_start..row_start+row_count] = A * x
-// CSR format. One workgroup per row, 64 invocations per workgroup.
-// The row_start push constant enables the tiled path to reuse this shader by
-// dispatching only a subset of rows at a time.
+// Eight lanes cooperate on each CSR row; sixteen rows share a workgroup.
+// All lanes reach each barrier, including the final partial workgroup.
 #version 450
 
-layout(local_size_x = 64) in;
-
+layout(local_size_x = 128) in;
 layout(push_constant) uniform PC {
     uint row_start;
     uint row_count;
     uint n;
 } pc;
-
 layout(set = 0, binding = 0) readonly buffer RowPtr { int row_ptr[]; };
 layout(set = 0, binding = 1) readonly buffer ColInd { int col_ind[]; };
 layout(set = 0, binding = 2) readonly buffer Values { float values[]; };
-layout(set = 0, binding = 3) readonly buffer X      { float x[];      };
-layout(set = 0, binding = 4)          buffer Y      { float y[];      };
-
-shared float s[64];
-
+layout(set = 0, binding = 3) readonly buffer X { float x[]; };
+layout(set = 0, binding = 4) buffer Y { float y[]; };
+shared float partial[128];
 void main() {
-    uint row = gl_WorkGroupID.x + pc.row_start;
-    if (row >= pc.row_start + pc.row_count) return;
-
-    int start = row_ptr[row];
-    int end   = row_ptr[row + 1];
-    uint tid  = gl_LocalInvocationID.x;
-
-    float sum = 0.0;
-    for (int i = start + int(tid); i < end; i += 64)
-        sum += values[i] * x[col_ind[i]];
-
-    s[tid] = sum;
+    uint tid = gl_LocalInvocationID.x;
+    uint lane = tid % 8u;
+    uint offset = gl_WorkGroupID.x * 16u + tid / 8u;
+    uint row = pc.row_start + offset;
+    float sum = 0;
+    if (offset < pc.row_count) {
+        for (int j = row_ptr[row] + int(lane); j < row_ptr[row + 1]; j += 8)
+            sum += values[j] * x[col_ind[j]];
+    }
+    partial[tid] = sum;
     barrier();
-    // Tree reduction within workgroup
-    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
-        if (tid < stride) s[tid] += s[tid + stride];
+    for (uint stride = 4u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) partial[tid] += partial[tid + stride];
         barrier();
     }
-    if (tid == 0u) y[row] = s[0];
+    if (lane == 0u && offset < pc.row_count) y[row] = partial[tid];
 }

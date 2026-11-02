@@ -3,6 +3,7 @@
 
 #include "solver/vulkan_context.hpp"
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
 namespace vibestran {
@@ -26,6 +27,7 @@ VulkanContext::VulkanContext(VulkanContext&& o) noexcept
     , command_pool_(o.command_pool_)
     , compute_queue_family_(o.compute_queue_family_)
     , device_info_(std::move(o.device_info_))
+    , memory_budget_(o.memory_budget_)
 {
     o.instance_      = VK_NULL_HANDLE;
     o.device_        = VK_NULL_HANDLE;
@@ -48,6 +50,25 @@ VkPhysicalDevice        VulkanContext::physical_device() const noexcept { return
 VkQueue                 VulkanContext::compute_queue()   const noexcept { return compute_queue_; }
 VkCommandPool           VulkanContext::command_pool()    const noexcept { return command_pool_; }
 uint32_t                VulkanContext::compute_queue_family() const noexcept { return compute_queue_family_; }
+
+uint64_t VulkanContext::available_memory() const noexcept {
+    if (!memory_budget_) return device_info_.vram_bytes;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{};
+    budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+    VkPhysicalDeviceMemoryProperties2 properties{};
+    properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+    properties.pNext = &budget;
+    vkGetPhysicalDeviceMemoryProperties2(phys_dev_, &properties);
+    const auto& memory = properties.memoryProperties;
+    for (uint32_t h = 0; h < memory.memoryHeapCount; ++h) {
+        if ((memory.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) &&
+            memory.memoryHeaps[h].size == device_info_.vram_bytes) {
+            const auto limit = std::min(budget.heapBudget[h], memory.memoryHeaps[h].size);
+            return limit > budget.heapUsage[h] ? limit - budget.heapUsage[h] : 0;
+        }
+    }
+    return 0;
+}
 
 uint32_t VulkanContext::find_memory_type(uint32_t type_filter,
                                          VkMemoryPropertyFlags props) const noexcept {
@@ -84,7 +105,6 @@ std::optional<VulkanContext> VulkanContext::create() noexcept {
     uint32_t dev_count = 0;
     vkEnumeratePhysicalDevices(ctx.instance_, &dev_count, nullptr);
     if (dev_count == 0) {
-        vkDestroyInstance(ctx.instance_, nullptr);
         return std::nullopt;
     }
     std::vector<VkPhysicalDevice> devs(dev_count);
@@ -133,7 +153,6 @@ std::optional<VulkanContext> VulkanContext::create() noexcept {
     }
 
     if (candidates.empty()) {
-        vkDestroyInstance(ctx.instance_, nullptr);
         return std::nullopt;
     }
 
@@ -167,8 +186,21 @@ std::optional<VulkanContext> VulkanContext::create() noexcept {
     dev_ci.pQueueCreateInfos    = &q_ci;
     dev_ci.pEnabledFeatures     = &enabled_features;
 
+    uint32_t extension_count = 0;
+    if (vkEnumerateDeviceExtensionProperties(ctx.phys_dev_, nullptr, &extension_count, nullptr) == VK_SUCCESS) {
+        std::vector<VkExtensionProperties> extensions(extension_count);
+        if (vkEnumerateDeviceExtensionProperties(ctx.phys_dev_, nullptr, &extension_count, extensions.data()) == VK_SUCCESS)
+            ctx.memory_budget_ = std::any_of(extensions.begin(), extensions.end(), [](const auto& extension) {
+                return std::strcmp(extension.extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME) == 0;
+            });
+    }
+    const char* budget_extension = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
+    if (ctx.memory_budget_) {
+        dev_ci.enabledExtensionCount = 1;
+        dev_ci.ppEnabledExtensionNames = &budget_extension;
+    }
+
     if (vkCreateDevice(ctx.phys_dev_, &dev_ci, nullptr, &ctx.device_) != VK_SUCCESS) {
-        vkDestroyInstance(ctx.instance_, nullptr);
         return std::nullopt;
     }
 
@@ -181,8 +213,6 @@ std::optional<VulkanContext> VulkanContext::create() noexcept {
     pool_ci.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 
     if (vkCreateCommandPool(ctx.device_, &pool_ci, nullptr, &ctx.command_pool_) != VK_SUCCESS) {
-        vkDestroyDevice(ctx.device_, nullptr);
-        vkDestroyInstance(ctx.instance_, nullptr);
         return std::nullopt;
     }
 
@@ -192,6 +222,7 @@ std::optional<VulkanContext> VulkanContext::create() noexcept {
     ctx.device_info_.vram_bytes            = best.vram_bytes;
     ctx.device_info_.supports_float64      = best.float64;
     ctx.device_info_.max_workgroup_count_x = props.limits.maxComputeWorkGroupCount[0];
+    ctx.device_info_.max_storage_buffer_range = props.limits.maxStorageBufferRange;
 
     return ctx;
 }

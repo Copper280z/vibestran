@@ -1,0 +1,76 @@
+Nsight Systems 2024.6.2 excerpts, TITAN V, 2026-11-02.
+Full trace directory on bob-desktop.local: /tmp/vibestran-pcg-20261102/measurements/
+CUDA: side 64. Vulkan resident: side 32; partitioned: side 64, budget 8 MiB.
+Numbers are profiler observations; use titan-v-20261102.json for unprofiled timings.
+
+baseline-cuda-stats.txt
+
+ ** CUDA GPU Kernel Summary (cuda_gpu_kern_sum):
+ Time (%)  Total Time (ns)  Instances  Avg (ns)   Med (ns)   Min (ns)  Max (ns)  StdDev (ns)                                                  Name
+     74.8         92611090        248   373431.8   373470.0    370462    377374       1318.7  void cusparse::spsm_v2_kernel<int, double, (int)64, (int)4, (int)16, (int)16, (int)1>(T1, T1, long,…
+ ** CUDA API Summary (cuda_api_sum):
+ Time (%)  Total Time (ns)  Num Calls  Avg (ns)   Med (ns)   Min (ns)  Max (ns)  StdDev (ns)                Name
+      1.1          1691224          6   281870.7    23595.0      3937    826761     411992.7  cudaMemcpyAsync
+      0.0             4079          2     2039.5     2039.5      1303      2776       1041.6  cudaStreamSynchronize
+
+baseline-vulkan-api.txt
+
+ ** Vulkan API Summary (vulkan_api_sum):
+ Time (%)  Total Time (ns)  Num Calls   Avg (ns)    Med (ns)   Min (ns)  Max (ns)  StdDev (ns)            Name
+     24.7        158439244        939    168731.9    157247.0    126469   1690160      76641.8  vkAllocateMemory
+     19.7        126534310        939    134754.3    129404.0    103756   1631179      55922.7  vkFreeMemory
+     17.8        114119137       3187     35807.7     29676.0       411    126028      20269.7  vkWaitForFences
+     14.6         93384037       3187     29301.5     28353.0     26400   1473060      25693.5  vkCreateFence
+     11.9         76142253       3187     23891.5     23223.0     21461   1451459      25374.4  vkDestroyFence
+      3.5         22556732       3187      7077.7      4980.0      3797   1721890      54646.1  vkQueueSubmit
+
+final-profile-cuda-pcg-64-0-stats.txt
+
+ ** CUDA GPU Kernel Summary (cuda_gpu_kern_sum):
+ Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                                                  Name
+     39.4         21755025        390   55782.1   55712.0     54144     58655        727.1  void cusparse::spsm_v2_kernel<int, double, (int)128, (int)2, (int)16, (int)16, (int)1>(T1, T1, long…
+ ** CUDA API Summary (cuda_api_sum):
+ Time (%)  Total Time (ns)  Num Calls  Avg (ns)   Med (ns)   Min (ns)  Max (ns)  StdDev (ns)                Name
+      0.2           234353          6    39058.8    23384.5      3817     88427      36481.3  cudaMemcpyAsync
+      0.0             4559          2     2279.5     2279.5      1513      3046       1084.0  cudaStreamSynchronize
+ ** CUDA GPU MemOps Summary (by Size) (cuda_gpu_mem_size_sum):
+ Total (MB)  Count  Avg (MB)  Med (MB)  Min (MB)  Max (MB)  StdDev (MB)            Operation
+     21.873      9     2.430     2.097     0.000     8.290        2.536  [CUDA memcpy Host-to-Device]
+     14.582      4     3.645     2.097     2.097     8.290        3.097  [CUDA memcpy Device-to-Device]
+      6.292     38     0.166     0.000     0.000     2.097        0.573  [CUDA memcpy Device-to-Host]
+
+final-profile-cuda-pcg-64-8-stats.txt
+
+ ** CUDA GPU Kernel Summary (cuda_gpu_kern_sum):
+ Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                                                  Name
+    100.0         14798388        446   33180.2   33152.0     32639     34464        274.1  void vibestran::partitioned_spmv_kernel<double>(const int *, const int *, const T1 *, const T1 *, T…
+ ** CUDA API Summary (cuda_api_sum):
+ Time (%)  Total Time (ns)  Num Calls  Avg (ns)   Med (ns)   Min (ns)  Max (ns)  StdDev (ns)                Name
+     28.8          7440921        892     8341.8     9613.0      3577     55094       4149.7  cudaMemcpyAsync
+     11.9          3082025        446     6910.4     6488.0      4699     15941       1582.4  cudaStreamSynchronize
+ ** CUDA GPU MemOps Summary (by Size) (cuda_gpu_mem_size_sum):
+ Total (MB)  Count  Avg (MB)  Med (MB)  Min (MB)  Max (MB)  StdDev (MB)           Operation
+    941.029    449     2.096     2.097     0.264     3.623        0.114  [CUDA memcpy Host-to-Device]
+    235.081    446     0.527     0.527     0.527     0.527        0.000  [CUDA memcpy Device-to-Host]
+
+final-profile-vulkan-32-0-stats.txt
+
+ ** Vulkan API Summary (vulkan_api_sum):
+ Time (%)  Total Time (ns)  Num Calls   Avg (ns)    Med (ns)   Min (ns)  Max (ns)  StdDev (ns)            Name
+     39.1         32670338        586     55751.4     46818.5       391    125256      22166.1  vkWaitForFences
+      6.1          5093990         24    212249.6    188145.5    126058    556160     111150.4  vkAllocateMemory
+      4.6          3846554         24    160273.1    135851.5    102433    646180     108758.2  vkFreeMemory
+      2.4          2029408        586      3463.2      2760.5      2404    201641       8294.0  vkQueueSubmit
+      0.5           413280         13     31790.8     31289.0     29206     36388       2133.3  vkCreateFence
+      0.4           336253         13     25865.6     25268.0     24276     32060       1998.4  vkDestroyFence
+
+final-profile-vulkan-64-8-stats.txt
+
+ ** Vulkan API Summary (vulkan_api_sum):
+ Time (%)  Total Time (ns)  Num Calls   Avg (ns)    Med (ns)   Min (ns)  Max (ns)  StdDev (ns)            Name
+     50.0         50736114        513     98900.8    114235.0       841    404353      47781.8  vkWaitForFences
+      6.0          6100714        513     11892.2     10400.0      6182    406798      17679.0  vkQueueSubmit
+      4.4          4444009         10    444400.9    242878.5    146056   1177593     384211.0  vkAllocateMemory
+      2.6          2636318         10    263631.8    148716.0    107853    945234     264609.0  vkFreeMemory
+      0.2           208763          4     52190.8     43311.5     31108     91032      26570.5  vkCreateFence
+      0.2           198695          4     49673.8     43036.0     29065     83558      24059.3  vkDestroyFence

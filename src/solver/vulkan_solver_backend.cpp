@@ -4,6 +4,7 @@
 #include "solver/vulkan_solver_backend.hpp"
 #include "solver/vulkan_context.hpp"
 #include "solver/solver_backend.hpp"
+#include "solver/pcg_memory.hpp"
 #include "vulkan_pcg_internal.hpp"
 #include "vulkan_pipelines.hpp"
 #include "core/exceptions.hpp"
@@ -18,7 +19,9 @@ namespace vibestran {
 // ── Constructor / destructor ──────────────────────────────────────────────────
 
 VulkanSolverBackend::VulkanSolverBackend(VulkanContext ctx, const VulkanSolverConfig& cfg)
-    : ctx_(std::move(ctx)), cfg_(cfg) {}
+    : ctx_(std::move(ctx)), cfg_(cfg) {
+    cfg_.device_memory_budget = pcg_device_budget(cfg_.device_memory_budget);
+}
 
 VulkanSolverBackend::~VulkanSolverBackend() = default;
 
@@ -37,17 +40,16 @@ VulkanSolverBackend::try_create(const VulkanSolverConfig& cfg) {
 // ── Accessors ─────────────────────────────────────────────────────────────────
 
 std::string_view VulkanSolverBackend::name() const noexcept {
-    return "Vulkan PCG (Jacobi preconditioner)";
+    return "Vulkan PCG";
 }
 
 std::vector<std::pair<std::string, std::string>> VulkanSolverBackend::details() const {
     return {{"Device", ctx_.device_info().device_name},
-            {"Method", std::format("conjugate gradient, Jacobi preconditioner (CPU direct "
+            {"Method", std::format("conjugate gradient; AMG for large fp64 systems, Jacobi otherwise (CPU direct "
                                    "below {} equations)", cfg_.min_dofs_for_gpu)},
             {"Tolerance", std::format("{:.1e} (estimated relative error)", cfg_.tolerance)},
             {"Precision", cfg_.use_double ? "fp64"
-                                          : "fp32 inner solves, refined in fp64 (fp64 "
-                                            "retry when fp32 cannot converge)"},
+                                          : "fp64 AMG when supported; otherwise fp32 Jacobi with fp64 refinement/retry"},
             {"Iterative refinement", "always"}};
 }
 
@@ -67,7 +69,7 @@ static size_t vram_needed_f32(const SparseMatrixBuilder::CsrData& K) noexcept {
                   + static_cast<size_t>(K.n + 1) * sizeof(int);
     size_t vecs   = 6ULL * static_cast<size_t>(K.n) * sizeof(float); // x,r,z,p,Ap,diag
     size_t parts  = static_cast<size_t>((static_cast<uint32_t>(K.n) + 255u) / 256u) * sizeof(float);
-    return matrix + vecs + parts;
+    return matrix + vecs + 2 * parts;
 }
 
 // Returns estimated bytes needed for a float64 full-GPU solve.
@@ -77,13 +79,16 @@ static size_t vram_needed_f64(const SparseMatrixBuilder::CsrData& K) noexcept {
                   + static_cast<size_t>(K.n + 1) * sizeof(int);
     size_t vecs   = 6ULL * static_cast<size_t>(K.n) * sizeof(double);
     size_t parts  = static_cast<size_t>((static_cast<uint32_t>(K.n) + 255u) / 256u) * sizeof(double);
-    return matrix + vecs + parts;
+    return matrix + vecs + 2 * parts;
 }
 
-bool VulkanSolverBackend::fits_in_vram(const SparseMatrixBuilder::CsrData& K) const noexcept {
+bool VulkanSolverBackend::fits_in_vram(const SparseMatrixBuilder::CsrData& K, std::size_t available) const noexcept {
+    const auto scalar_bytes = cfg_.use_double ? sizeof(double) : sizeof(float);
+    const auto limit = ctx_.device_info().max_storage_buffer_range;
+    if (std::size_t(K.nnz) * std::max(sizeof(int), scalar_bytes) > limit ||
+        std::size_t(K.n) * scalar_bytes > limit || (std::size_t(K.n) + 1) * sizeof(int) > limit ||
+        (std::size_t(K.n) + 255) / 256 > ctx_.device_info().max_workgroup_count_x) return false;
     size_t needed    = cfg_.use_double ? vram_needed_f64(K) : vram_needed_f32(K);
-    size_t available = static_cast<size_t>(
-        static_cast<double>(ctx_.device_info().vram_bytes) * (1.0 - cfg_.vram_headroom));
     return needed <= available;
 }
 
@@ -170,28 +175,38 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
     spdlog::debug("[vulkan] pipeline init: {:.3f} ms", ms_since(t_pipelines));
 
     const size_t vram_total = ctx_.device_info().vram_bytes;
-    const size_t available  = static_cast<size_t>(
-        static_cast<double>(vram_total) * (1.0 - cfg_.vram_headroom));
+    size_t available  = static_cast<size_t>(
+        static_cast<double>(ctx_.available_memory()) * (1.0 - cfg_.vram_headroom));
+    if (cfg_.device_memory_budget) available = std::min(available, cfg_.device_memory_budget);
 
-    enum class Path { Float32, Float64, Tiled };
+    // A multilevel preconditioner removes the low-frequency error that Jacobi
+    // leaves behind on refined meshes. Leave conservative hierarchy headroom.
+    if (n >= 50000 && ctx_.device_info().supports_float64) {
+        RefinementReport report;
+        auto u = solve_vulkan_amg(ctx_, *pl, K, F, cfg_.tolerance, cfg_.max_iterations,
+            last_iters_, report, available, last_full_gpu_);
+        last_residual_ = report.relative_residual;
+        last_refinement_ = report;
+        if (!report.converged)
+            throw SolverError(std::format("Vulkan AMG PCG: estimated error {:.3e} exceeds {:.3e} after {} iterations and {} corrections (n={})",
+                report.estimated_error, cfg_.tolerance, last_iters_, report.corrections, n));
+        return u;
+    }
+
+    enum class Path { Float32, Float64, Partitioned32, Partitioned64 };
     Path path;
-    if (!cfg_.force_tiled && fits_in_vram(K)) {
+    if (!cfg_.force_tiled && fits_in_vram(K, available)) {
         path = cfg_.use_double ? Path::Float64 : Path::Float32;
         spdlog::debug("[vulkan] {} DOFs → full-GPU {} ({} / {} VRAM)", n,
                       cfg_.use_double ? "float64" : "float32",
                       mib_str(cfg_.use_double ? vram_needed_f64(K) : vram_needed_f32(K)),
                       mib_str(vram_total));
     } else {
-        if (cfg_.use_double)
-            throw SolverError(std::format(
-                "Vulkan solver: use_double=true but K ({}) exceeds available VRAM ({}) "
-                "for a full-GPU float64 solve. Use --cpu.",
-                mib_str(vram_needed_f64(K)), mib_str(available)));
-        path = Path::Tiled;
-        spdlog::debug("[vulkan] {} DOFs → tiled float32 (matrix {} exceeds VRAM budget {})",
+        path = cfg_.use_double ? Path::Partitioned64 : Path::Partitioned32;
+        spdlog::debug("[vulkan] {} DOFs → partitioned PCG (matrix {} exceeds VRAM budget {})",
                       n, mib_str(vram_needed_f32(K)), mib_str(available));
     }
-    last_full_gpu_ = path != Path::Tiled;
+    last_full_gpu_ = path == Path::Float32 || path == Path::Float64;
 
     // Each inner PCG solve stops at inner_tolerance (or its precision floor)
     // and returns its iterate; refinement with compensated double-precision
@@ -202,6 +217,9 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
     inner.throw_on_no_convergence = false;
     int total_iters = 0;
     const auto refine_on = [&](Path p, RefinementReport& rep) {
+        auto workspace = (p == Path::Partitioned32 || p == Path::Partitioned64)
+            ? make_partitioned_pcg(ctx_, *pl, K, p == Path::Partitioned64, available)
+            : make_full_pcg(ctx_, *pl, K, p == Path::Float64);
         const auto pcg = [&](const std::vector<double>& rhs) {
             double scale = std::accumulate(rhs.begin(), rhs.end(), 0.0,
                 [](double m, double v) { return std::max(m, std::abs(v)); });
@@ -212,11 +230,7 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
                            [scale](double v) { return v / scale; });
             int iters = 0;
             double res = 0.0;
-            std::vector<double> x =
-                p == Path::Float64 ? solve_full_gpu_double(ctx_, *pl, K, b, inner, iters, res)
-              : p == Path::Float32 ? solve_full_gpu(ctx_, *pl, K, b, inner, iters, res)
-                                   : solve_tiled(ctx_, *pl, K, b, inner,
-                                                 static_cast<uint64_t>(available), iters, res);
+            std::vector<double> x = workspace->solve(b, inner, iters, res);
             total_iters += iters;
             std::transform(x.begin(), x.end(), x.begin(),
                            [scale](double v) { return v * scale; });
@@ -239,12 +253,18 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
     std::vector<double> u = refine_on(path, rep);
     // float32 too imprecise for this K (cond(K) beyond about 1e7 with Jacobi
     // PCG): retry in float64 when the device supports it and K fits.
-    if (!rep.converged && path == Path::Float32 && ctx_.device_info().supports_float64 &&
-        vram_needed_f64(K) <= available) {
+    if (!rep.converged && (path == Path::Float32 || path == Path::Partitioned32) &&
+        ctx_.device_info().supports_float64) {
         notices().add(std::format("Vulkan fp32 PCG could not reach the target accuracy "
                                   "(estimated relative error {:.2e}); solved again in fp64",
                                   rep.estimated_error));
-        u = refine_on(Path::Float64, rep);
+        const auto limit = ctx_.device_info().max_storage_buffer_range;
+        const bool fits = vram_needed_f64(K) <= available &&
+            std::size_t(K.nnz) * sizeof(double) <= limit && std::size_t(K.n) * sizeof(double) <= limit &&
+            (std::size_t(K.n) + 255) / 256 <= ctx_.device_info().max_workgroup_count_x;
+        path = fits && !cfg_.force_tiled ? Path::Float64 : Path::Partitioned64;
+        last_full_gpu_ = path == Path::Float64;
+        u = refine_on(path, rep);
     }
     last_iters_      = total_iters;
     last_residual_   = rep.relative_residual;
@@ -256,7 +276,7 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
             "matrix is too ill-conditioned for Jacobi PCG{}, or singular (check SPCs). "
             "Use --backend=cpu for a direct solve.",
             cfg_.tolerance, rep.estimated_error, rep.corrections, total_iters, n,
-            path == Path::Float64 ? "" : " in float32"));
+            (path == Path::Float64 || path == Path::Partitioned64) ? "" : " in float32"));
     spdlog::info("[vulkan] converged: {} PCG iterations, {} refinement correction(s), "
                  "estimated relative error {:.2e}, solve = {:.3f} ms",
                  last_iters_, rep.corrections, rep.estimated_error, ms_since(t_solve));

@@ -33,6 +33,13 @@
 #include "core/exceptions.hpp"
 #include "core/logger.hpp"
 #include "solver/iterative_refinement.hpp"
+#include "solver/pcg_memory.hpp"
+#include "partitioned_pcg.hpp"
+#include "pcg_coloring.hpp"
+#include "amg_pcg.hpp"
+#include "amg_coarse.hpp"
+#include "amg_hybrid.hpp"
+#include <amgcl/backend/cuda.hpp>
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -497,10 +504,6 @@ template<> struct ScalarTraits<double> {
         const double* x, const double* y, double* r) {
         throw_if_cublas_failed(cublasDdot(h, n, x, 1, y, 1, r), "cublasDdot");
     }
-    static void axpy(cublasHandle_t h, int n,
-        const double* alpha, const double* x, double* y) {
-        throw_if_cublas_failed(cublasDaxpy(h, n, alpha, x, 1, y, 1), "cublasDaxpy");
-    }
 
     static cusparseStatus_t csric02_buffer_size(
         cusparseHandle_t h, int m, int nnz, const cusparseMatDescr_t d,
@@ -549,10 +552,6 @@ template<> struct ScalarTraits<float> {
     static void dot(cublasHandle_t h, int n,
         const float* x, const float* y, float* r) {
         throw_if_cublas_failed(cublasSdot(h, n, x, 1, y, 1, r), "cublasSdot");
-    }
-    static void axpy(cublasHandle_t h, int n,
-        const float* alpha, const float* x, float* y) {
-        throw_if_cublas_failed(cublasSaxpy(h, n, alpha, x, 1, y, 1), "cublasSaxpy");
     }
 
     static cusparseStatus_t csric02_buffer_size(
@@ -672,6 +671,7 @@ struct IterationHostState {
     double rel = 1.0;
     double pAp = 0.0;
     int flags = 0;
+    int iterations = 0;
 };
 
 static constexpr int kIterFlagBreakdown = 1;
@@ -688,6 +688,11 @@ __global__ static void prepare_iteration_scalars_kernel(
     if (blockIdx.x != 0 || threadIdx.x != 0)
         return;
 
+    if (state->flags != 0) {
+        *alpha = T{0};
+        *neg_alpha = T{0};
+        return;
+    }
     const double p_ap = static_cast<double>(*pAp);
     state->pAp = p_ap;
     state->flags = 0;
@@ -719,11 +724,11 @@ __global__ static void finalize_iteration_kernel(
     if (blockIdx.x != 0 || threadIdx.x != 0)
         return;
 
-    if ((state->flags & kIterFlagBreakdown) != 0) {
-        state->rel = 1e300;
+    if (state->flags != 0) {
         *beta = T{0};
         return;
     }
+    ++state->iterations;
 
     const double rr_host = static_cast<double>(*rr);
     state->rel = std::sqrt(std::abs(rr_host)) / norm_b;
@@ -747,12 +752,23 @@ __global__ static void update_search_direction_kernel(
     const T* __restrict__ z,
     const T* __restrict__ beta,
     T* __restrict__ p,
-    int n)
+    int n, const IterationHostState* state)
 {
     int i = static_cast<int>(blockIdx.x) * blockDim.x +
             static_cast<int>(threadIdx.x);
-    if (i < n)
+    if (i < n && state->flags == 0)
         p[i] = z[i] + (*beta) * p[i];
+}
+
+template<typename T>
+__global__ static void update_solution_residual_kernel(
+    const T* p, const T* ap, const T* alpha, T* x, T* r,
+    int n, const IterationHostState* state) {
+    const int i = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n && state->flags == 0) {
+        x[i] += *alpha * p[i];
+        r[i] -= *alpha * ap[i];
+    }
 }
 
 template<typename T>
@@ -801,10 +817,10 @@ static void launch_update_search_direction(
     const T* z,
     const T* beta,
     T* p,
-    int n)
+    int n, const IterationHostState* state)
 {
     update_search_direction_kernel<T><<<(n + kBlock - 1) / kBlock, kBlock>>>(
-        z, beta, p, n);
+        z, beta, p, n, state);
 }
 
 
@@ -1854,6 +1870,7 @@ static std::vector<double> run_pcg_prepared(
     }
     evt_zero_solution.record([&]() {
         prepared.d_u.zero(n);
+        prepared.d_iter_state.zero(1);
     });
 
     CublasPointerModeGuard pointer_mode_guard(cublas, CUBLAS_POINTER_MODE_DEVICE);
@@ -1935,10 +1952,9 @@ static std::vector<double> run_pcg_prepared(
         });
 
         evt_axpy_solution.record([&]() {
-            Tr::axpy(cublas, n, prepared.d_alpha.ptr, prepared.d_p.ptr, prepared.d_u.ptr);
-        });
-        evt_axpy_residual.record([&]() {
-            Tr::axpy(cublas, n, prepared.d_neg_alpha.ptr, prepared.d_Ap.ptr, prepared.d_r.ptr);
+            update_solution_residual_kernel<T><<<(n + kBlock - 1) / kBlock, kBlock>>>(
+                prepared.d_p.ptr, prepared.d_Ap.ptr, prepared.d_alpha.ptr,
+                prepared.d_u.ptr, prepared.d_r.ptr, n, prepared.d_iter_state.ptr);
         });
 
         apply_precond();
@@ -1955,7 +1971,7 @@ static std::vector<double> run_pcg_prepared(
                 prepared.d_rz.ptr, prepared.d_rz_new.ptr, prepared.d_rr.ptr,
                 prepared.d_beta.ptr, norm_b, tolerance, prepared.d_iter_state.ptr);
         });
-        {
+        if (profile.enabled || (iter + 1) % 8 == 0 || iter + 1 == max_iters) {
             const HostTimePoint t0 = HostClock::now();
             prepared.d_iter_state.download(&iter_state, 1);
             if (profile.enabled)
@@ -2000,7 +2016,7 @@ static std::vector<double> run_pcg_prepared(
 
         evt_update_search.record([&]() {
             launch_update_search_direction<T>(
-                prepared.d_z.ptr, prepared.d_beta.ptr, prepared.d_p.ptr, n);
+                prepared.d_z.ptr, prepared.d_beta.ptr, prepared.d_p.ptr, n, prepared.d_iter_state.ptr);
         });
         update_pending = profile.enabled;
     }
@@ -2010,7 +2026,7 @@ static std::vector<double> run_pcg_prepared(
         add_gpu_phase(SolveGpuPhase::UpdateSearch, evt_update_search);
     }
 
-    out_iters = iter;
+    out_iters = iter_state.iterations;
     out_rel_res = rel;
 
     // Breakdown and the iteration limit both leave iter == max_iters.
@@ -2090,6 +2106,7 @@ struct CudaPCGContext {
     std::string      device_name;
     double           tolerance = 0.0;
     int              max_iters = 10000;
+    std::size_t      device_memory_budget = 0;
 
     int    last_iters   = 0;
     double last_rel_res = 0.0;
@@ -2199,7 +2216,9 @@ static void require_refined(const CudaPCGContext& ctx, const char* label) {
             std::string_view(label) == "cuda-pcg-mixed" ? " in fp32" : ""));
 }
 
-static std::vector<double> solve_cuda_pcg_stable(
+#include "cuda_partitioned_pcg.hpp"
+
+static std::vector<double> solve_cuda_pcg_stable_ordered(
     CudaPCGContext& ctx,
     const SparseMatrixBuilder::CsrData& K,
     const std::vector<double>& F)
@@ -2234,11 +2253,105 @@ static std::vector<double> solve_cuda_pcg_stable(
         [&](const std::vector<double>& r) { return inner(r, kCudaPcgCorrectionTolerance); },
         opts);
     ctx.last_iters = total_iters;
-    require_refined(ctx, "cuda-pcg");
+    ctx.last_rel_res = ctx.last_refinement->relative_residual;
     return u;
 }
 
-static std::vector<double> solve_cuda_pcg_mixed(
+template<class Solve>
+static std::vector<double> solve_cuda_pcg_colored(
+    CudaPCGContext& ctx, const SparseMatrixBuilder::CsrData& K,
+    const std::vector<double>& F, Solve&& solve_ordered, const char* label) {
+    int attempted_iters = 0;
+    const char* natural = std::getenv("VIBESTRAN_CUDA_PCG_NATURAL_ORDER");
+    if (K.n >= 1024 && !(natural && natural[0] == '1')) {
+        auto colored = detail::color_pcg_matrix(K);
+        if (colored) {
+            log_debug("[cuda-pcg] IC0 symmetric coloring: " + std::to_string(colored->colors) + " colors");
+            std::vector<double> rhs(F.size());
+            for (int i = 0; i < K.n; ++i) rhs[colored->new_index[i]] = F[i];
+            // Full CSR avoids a transpose SpMV with scattered atomic additions.
+            const auto full = colored->matrix.expanded_symmetric();
+            const auto permuted = solve_ordered(ctx, full, rhs);
+            if (ctx.last_refinement->converged) {
+                std::vector<double> solution(F.size());
+                for (int i = 0; i < K.n; ++i) solution[i] = permuted[colored->new_index[i]];
+                return solution;
+            }
+            ctx.notices.push_back("CUDA PCG: multicolor IC0 did not reach the accuracy target; retried with the original ordering");
+            attempted_iters = ctx.last_iters;
+        }
+    }
+    const auto full = K.expanded_symmetric();
+    auto solution = solve_ordered(ctx, full, F);
+    ctx.last_iters += attempted_iters;
+    require_refined(ctx, label);
+    return solution;
+}
+
+struct CudaAmgCoarse : detail::AmgCoarseFactor {
+    mutable std::vector<double> rhs, solution;
+    template<class Matrix, class Params>
+    CudaAmgCoarse(const Matrix& a, const Params&) : detail::AmgCoarseFactor(*a),
+        rhs(amgcl::backend::rows(*a)), solution(rhs.size()) {}
+    template<class X, class Y> void operator()(const X& b, Y& x) const {
+        thrust::copy(b.begin(), b.end(), rhs.begin());
+        detail::AmgCoarseFactor::operator()(rhs, solution);
+        thrust::copy(solution.begin(), solution.end(), x.begin());
+    }
+};
+
+} // namespace vibestran
+#include "cuda_device_amg.hpp"
+namespace vibestran {
+
+// Keep the Krylov operator and reductions in fp64. Only the multigrid
+// preconditioner uses fp32; conversions stay on the device between cycles.
+class CudaMixedAmg {
+    using FloatBackend = amgcl::backend::cuda<float, CudaAmgCoarse>;
+    using DoubleBackend = amgcl::backend::cuda<double, CudaAmgCoarse>;
+    using FloatAmg = detail::PcgAmg<FloatBackend>;
+public:
+    using params = FloatAmg::params;
+    template<class Matrix>
+    CudaMixedAmg(const Matrix& a, const params& p, const DoubleBackend::params& bp)
+        : preconditioner_(a, p, FloatBackend::params(bp.cusparse_handle)),
+          matrix_(DoubleBackend::copy_matrix(
+              std::make_shared<amgcl::backend::builtin<double>::matrix>(a), bp)),
+          rhs_(amgcl::backend::rows(a)), solution_(rhs_.size()) {}
+    const DoubleBackend::matrix& system_matrix() const { return *matrix_; }
+    template<class X, class Y> void apply(const X& b, Y& x) const {
+        thrust::copy(b.begin(), b.end(), rhs_.begin());
+        preconditioner_.apply(rhs_, solution_);
+        thrust::copy(solution_.begin(), solution_.end(), x.begin());
+    }
+private:
+    FloatAmg preconditioner_;
+    std::shared_ptr<DoubleBackend::matrix> matrix_;
+    mutable FloatBackend::vector rhs_, solution_;
+};
+
+static std::vector<double> solve_cuda_pcg_stable(
+    CudaPCGContext& ctx, const SparseMatrixBuilder::CsrData& K, const std::vector<double>& F) {
+    validate_pcg_inputs(K, F);
+    if (const auto budget = cuda_pcg_spill_budget<double>(ctx, K))
+        return K.n >= 50000 ? solve_cuda_device_amg(ctx, K, F, *budget)
+                           : solve_cuda_partitioned<double>(ctx, K, F, *budget);
+    if (K.n >= 50000) {
+        using Backend = amgcl::backend::cuda<double, CudaAmgCoarse>;
+        auto result = detail::solve_amg_pcg<Backend>(K, F, ctx.tolerance, ctx.max_iters,
+            typename Backend::params(ctx.cusparse),
+            [](const auto& host, auto& device) { thrust::copy(host.begin(), host.end(), device.begin()); },
+            [](const auto& device, auto& host) { thrust::copy(device.begin(), device.end(), host.begin()); });
+        ctx.last_iters = result.iterations;
+        ctx.last_refinement = result.refinement;
+        ctx.last_rel_res = result.refinement.relative_residual;
+        require_refined(ctx, "cuda-pcg AMG");
+        return std::move(result.solution);
+    }
+    return solve_cuda_pcg_colored(ctx, K, F, solve_cuda_pcg_stable_ordered, "cuda-pcg");
+}
+
+static std::vector<double> solve_cuda_pcg_mixed_ordered(
     CudaPCGContext& ctx,
     const SparseMatrixBuilder::CsrData& K,
     const std::vector<double>& F)
@@ -2327,8 +2440,29 @@ static std::vector<double> solve_cuda_pcg_mixed(
         profile.total.add(host_elapsed_ms(total_start, HostClock::now()));
         profile.log_summary(n, nnz, total_inner_iters, true_rel_res);
     }
-    require_refined(ctx, "cuda-pcg-mixed");
     return solution;
+}
+
+static std::vector<double> solve_cuda_pcg_mixed(
+    CudaPCGContext& ctx, const SparseMatrixBuilder::CsrData& K, const std::vector<double>& F) {
+    validate_pcg_inputs(K, F);
+    if (const auto budget = cuda_pcg_spill_budget<float>(ctx, K))
+        return K.n >= 50000 ? solve_cuda_device_amg(ctx, K, F, *budget)
+                           : solve_cuda_partitioned<float>(ctx, K, F, *budget);
+    if (K.n >= 50000) {
+        using Backend = amgcl::backend::cuda<double, CudaAmgCoarse>;
+        auto result = detail::solve_amg_pcg<Backend>(K, F, ctx.tolerance, ctx.max_iters,
+            typename Backend::params(ctx.cusparse),
+            [](const auto& host, auto& device) { thrust::copy(host.begin(), host.end(), device.begin()); },
+            [](const auto& device, auto& host) { thrust::copy(device.begin(), device.end(), host.begin()); },
+            std::type_identity<CudaMixedAmg>{});
+        ctx.last_iters = result.iterations;
+        ctx.last_refinement = result.refinement;
+        ctx.last_rel_res = result.refinement.relative_residual;
+        require_refined(ctx, "cuda-pcg mixed AMG");
+        return std::move(result.solution);
+    }
+    return solve_cuda_pcg_colored(ctx, K, F, solve_cuda_pcg_mixed_ordered, "cuda-pcg-mixed");
 }
 
 } // namespace vibestran

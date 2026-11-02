@@ -1,6 +1,7 @@
 #pragma once
 // include/solver/vulkan_solver_backend.hpp
-// Vulkan compute backend: Jacobi-Preconditioned Conjugate Gradient (PCG).
+// Vulkan PCG with smoothed-aggregation AMG on large fp64 systems and Jacobi
+// otherwise. Both paths use compensated refinement.
 //
 // Two execution paths are selected automatically at solve() time:
 //
@@ -11,12 +12,14 @@
 //
 //  Full-GPU path  — entire K matrix + working vectors fit in VRAM.
 //                   SpMV, dot products, vector ops all run as GPU dispatches.
-//                   Minimal CPU↔GPU sync (only two scalar readbacks per iter).
+//                   AMG uses a small CPU coarse solve (at most 256 equations).
 //
-//  Tiled path     — K is too large for VRAM.
-//                   Matrix is streamed in row-band tiles each CG iteration.
-//                   GPU handles only SpMV; all scalar/vector ops run on CPU.
-//                   Memory footprint is O(nnz_per_tile) not O(nnz_total).
+//  Partitioned   — K is too large for the device budget.
+//                   A fixed row prefix stays on the GPU; CPU computes the rest.
+//                   Large systems keep vectors and the AMG hierarchy on GPU;
+//                   only compact CPU-row inputs/outputs cross PCIe.
+//                   A host hierarchy is used when the working state cannot fit.
+//                   Small partitioned Jacobi solves use CPU vectors. K must fit in RAM.
 //
 // Use try_create() to construct — returns nullopt if Vulkan is unavailable
 // so the caller can fall back to EigenSolverBackend without exception handling.
@@ -44,15 +47,16 @@ struct VulkanSolverConfig {
   /// returns its iterate (refinement then judges it) instead of throwing.
   bool throw_on_no_convergence = true;
   double vram_headroom = 0.15; // fraction of VRAM reserved for driver
+  std::size_t device_memory_budget = 0; // bytes; 0 uses VIBESTRAN_PCG_DEVICE_MEMORY_MIB or automatic budget
   bool force_tiled =
-      false; // bypass VRAM check and always use tiled path (for testing)
+      false; // force the small-system partitioned path; large AMG uses the device budget
   int stagnation_window =
-      200; // throw if A-norm progress hasn't improved within this many iters
+      0; // optional diagnostic cutoff; disabled for production convergence
   double stagnation_threshold =
       0.01; // minimum fractional improvement required per window (1%)
   int min_dofs_for_gpu =
       50000; // fall back to Eigen CPU for problems smaller than this
-  bool use_double = false; // use float64 GPU compute for higher precision
+  bool use_double = false; // request float64 for the Jacobi path; large AMG systems use fp64
                            // (requires shaderFloat64)
 };
 
@@ -110,7 +114,7 @@ private:
 
   /// Returns true if K + working vectors fit in available VRAM.
   [[nodiscard]] bool
-  fits_in_vram(const SparseMatrixBuilder::CsrData &K) const noexcept;
+  fits_in_vram(const SparseMatrixBuilder::CsrData &K, std::size_t available) const noexcept;
 
   VulkanContext ctx_;
   VulkanSolverConfig cfg_;

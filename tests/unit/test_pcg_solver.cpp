@@ -18,12 +18,62 @@
 #include "core/sparse_matrix.hpp"
 #include "core/exceptions.hpp"
 #include "hilbert_system.hpp"
+#include "pcg_partition_problem.hpp"
 #include <cmath>
 #include <vector>
 
 #ifdef HAVE_CUDA
 #include "solver/cuda_mixed_pcg_solver_backend.hpp"
 #include "solver/cuda_pcg_solver_backend.hpp"
+
+TEST(CudaAmgTest, ResidentAndBudgetedHierarchyPreserveMaterialInterface) {
+    const auto problem = vibestran::test::pcg_partition_problem(50003);
+    for (std::size_t budget : {0U, 1024U, 1024U * 1024U, 8U * 1024U * 1024U}) {
+        auto stable = vibestran::CudaPCGSolverBackend::try_create(1e-8, 10000, budget);
+        auto mixed = vibestran::CudaMixedPCGSolverBackend::try_create(1e-8, 10000, budget);
+        if (!stable || !mixed) GTEST_SKIP() << "CUDA unavailable";
+        for (vibestran::SolverBackend* backend : {static_cast<vibestran::SolverBackend*>(&*stable),
+                                               static_cast<vibestran::SolverBackend*>(&*mixed)}) {
+            const auto x = backend->solve(problem.matrix, problem.rhs);
+            ASSERT_TRUE(backend->last_refinement()->converged);
+            for (std::size_t i = 0; i < x.size(); ++i) EXPECT_NEAR(x[i], problem.exact[i], 2e-8) << i;
+            const auto zero = backend->solve(problem.matrix, std::vector<double>(x.size(), 0));
+            for (double v : zero) EXPECT_EQ(v, 0);
+        }
+    }
+}
+
+TEST(CudaPartitionTest, DoubleAndMixedPreserveMaterialInterface) {
+    const auto problem = vibestran::test::pcg_partition_problem();
+    // Exercise both a nonempty GPU prefix and a budget too small for even
+    // the input vector; both must preserve the material-interface couplings.
+    for (std::size_t budget : {1024U, 256U * 1024U}) {
+        auto stable = vibestran::CudaPCGSolverBackend::try_create(1e-8, 10000, budget);
+        auto mixed = vibestran::CudaMixedPCGSolverBackend::try_create(1e-8, 10000, budget);
+        if (!stable || !mixed) GTEST_SKIP() << "CUDA unavailable";
+        for (vibestran::SolverBackend* backend : {static_cast<vibestran::SolverBackend*>(&*stable),
+                                               static_cast<vibestran::SolverBackend*>(&*mixed)}) {
+            const auto x = backend->solve(problem.matrix, problem.rhs);
+            ASSERT_TRUE(backend->last_refinement()->converged);
+            for (std::size_t i = 0; i < x.size(); ++i) EXPECT_NEAR(x[i], problem.exact[i], 2e-8) << i;
+            const auto zero = backend->solve(problem.matrix, std::vector<double>(x.size(), 0.0));
+            for (double v : zero) EXPECT_EQ(v, 0.0);
+        }
+    }
+}
+
+TEST(CudaPartitionTest, ColoredResidentSolveRecoversOriginalEquationOrdering) {
+    const auto problem = vibestran::test::pcg_partition_problem(4096);
+    auto stable = vibestran::CudaPCGSolverBackend::try_create(1e-8);
+    auto mixed = vibestran::CudaMixedPCGSolverBackend::try_create(1e-8);
+    if (!stable || !mixed) GTEST_SKIP() << "CUDA unavailable";
+    for (vibestran::SolverBackend* backend : {static_cast<vibestran::SolverBackend*>(&*stable),
+                                           static_cast<vibestran::SolverBackend*>(&*mixed)}) {
+        const auto x = backend->solve(problem.matrix, problem.rhs);
+        ASSERT_TRUE(backend->last_refinement()->converged);
+        for (std::size_t i = 0; i < x.size(); ++i) EXPECT_NEAR(x[i], problem.exact[i], 2e-8) << i;
+    }
+}
 #endif
 
 using namespace vibestran;

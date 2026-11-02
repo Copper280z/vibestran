@@ -1,0 +1,52 @@
+Generating SQLite file large/profile-next/final-profile-cuda-pcg-plate_sc1-0.sqlite from large/profile-next/final-profile-cuda-pcg-plate_sc1-0.nsys-rep
+Processing [large/profile-next/final-profile-cuda-pcg-plate_sc1-0.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/vulkan_api_sum.py]...
+SKIPPED: large/profile-next/final-profile-cuda-pcg-plate_sc1-0.sqlite does not contain Vulkan API trace data.
+
+Processing [large/profile-next/final-profile-cuda-pcg-plate_sc1-0.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/cuda_gpu_kern_sum.py]...
+
+ ** CUDA GPU Kernel Summary (cuda_gpu_kern_sum):
+
+ Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                                                  Name
+ --------  ---------------  ---------  --------  --------  --------  --------  -----------  ----------------------------------------------------------------------------------------------------
+     87.5       3717879121      18315  202996.4   17536.0      3424    820189     304346.2  void cusparse::csrmv_v3_kernel<std::integral_constant<bool, (bool)0>, int, int, double, double, dou…
+      4.0        168160642       6976   24105.6    4880.0      2015     86560      35156.4  void cub::CUB_200700_520_NS::detail::for_each::static_kernel<cub::CUB_200700_520_NS::detail::for_ea…
+      3.8        161737392       2613   61897.2   60768.0     59744     68256       1815.3  void cub::CUB_200700_520_NS::detail::for_each::static_kernel<cub::CUB_200700_520_NS::detail::for_ea…
+      2.4        104008314       2622   39667.5   44640.0     25568     48863       8678.7  void cub::CUB_200700_520_NS::DeviceReduceKernel<cub::CUB_200700_520_NS::DeviceReducePolicy<double, …
+      1.5         65128337      18315    3556.0    1888.0      1247     21248       4320.8  void cusparse::vector_scalar_multiply_kernel<(int)256, cusparse::AlignedVectorScalarMultiplyPolicy,…
+      0.5         22590498       4363    5177.7    1344.0      1248     22656       6881.3  void cub::CUB_200700_520_NS::detail::for_each::static_kernel<cub::CUB_200700_520_NS::detail::for_ea…
+      0.2          6860809       2622    2616.6    2592.0      2464      4128        167.0  void cub::CUB_200700_520_NS::DeviceReduceSingleTileKernel<cub::CUB_200700_520_NS::DeviceReducePolic…
+      0.0          1160668         24   48361.2    2640.0      1568    678813     140927.9  void cub::CUB_200700_520_NS::detail::for_each::static_kernel<cub::CUB_200700_520_NS::detail::for_ea…
+      0.0           304955         24   12706.5   20879.5      1248     23936       9885.7  void cub::CUB_200700_520_NS::detail::for_each::static_kernel<cub::CUB_200700_520_NS::detail::for_ea…
+      0.0            99711         12    8309.3    5535.5      2656     28704       7309.6  void cusparse::<unnamed>::csr_partition_kernel<int, int>(const T1 *, T2, T1, T1, T2, T2 *, T2)
+      0.0            23968         12    1997.3    1440.0      1216      6432       1483.7  void cub::CUB_200700_520_NS::detail::for_each::static_kernel<cub::CUB_200700_520_NS::detail::for_ea…
+
+Processing [large/profile-next/final-profile-cuda-pcg-plate_sc1-0.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/cuda_api_sum.py]...
+
+ ** CUDA API Summary (cuda_api_sum):
+
+ Time (%)  Total Time (ns)  Num Calls  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                Name
+ --------  ---------------  ---------  --------  --------  --------  --------  -----------  ---------------------------------
+     92.3       4406347689      31516  139813.0   13175.0       621   1345132     281065.0  cudaStreamSynchronize
+      3.6        171607498      14882   11531.2    4098.0      2304  22231794     269809.2  cudaMemcpyAsync
+      3.4        161559623      55898    2890.3    2645.0      2314   1622536       7000.5  cudaLaunchKernel
+      0.4         17220722       2727    6314.9    2595.0      1794   1589293      53470.1  cudaFree
+      0.3         16334503       2725    5994.3    2755.0      1953    992535      26576.8  cudaMalloc
+      0.0           229414          2  114707.0  114707.0    102744    126670      16918.2  cudaGetDeviceProperties_v2_v12000
+      0.0           188499       1257     150.0     120.0        51      3657        131.7  cuGetProcAddress_v2
+      0.0            24657          1   24657.0   24657.0     24657     24657          0.0  cudaMemGetInfo
+      0.0            24305          4    6076.3    2579.5      1052     18094       8047.3  cudaDeviceSynchronize
+      0.0            18025         18    1001.4     201.0       181      9678       2262.6  cudaEventCreateWithFlags
+      0.0             8375         18     465.3     235.5       180      3377        741.3  cudaEventDestroy
+      0.0             7144          5    1428.8    1293.0       972      2044        459.5  cuInit
+      0.0             1453          4     363.3      85.0        70      1213        566.6  cuModuleGetLoadingMode
+      0.0              631          2     315.5     315.5       220       411        135.1  cudaGetDriverEntryPoint_v11030
+
+Processing [large/profile-next/final-profile-cuda-pcg-plate_sc1-0.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/cuda_gpu_mem_size_sum.py]...
+
+ ** CUDA GPU MemOps Summary (by Size) (cuda_gpu_mem_size_sum):
+
+ Total (MB)  Count  Avg (MB)  Med (MB)  Min (MB)  Max (MB)  StdDev (MB)            Operation
+ ----------  -----  --------  --------  --------  --------  -----------  ------------------------------
+  37097.361  10470     3.543     1.475     0.005    12.607        5.272  [CUDA memcpy Device-to-Device]
+    934.959    915     1.022     0.000     0.000   274.343       13.467  [CUDA memcpy Host-to-Device]
+     38.213   3497     0.011     0.000     0.000    12.607        0.369  [CUDA memcpy Device-to-Host]

@@ -22,6 +22,7 @@ struct VulkanDeviceInfo {
     std::string device_name;      // Human-readable GPU name
     bool        supports_float64; // shaderFloat64 feature available
     uint32_t    max_workgroup_count_x; // maxComputeWorkGroupCount[0]
+    uint32_t    max_storage_buffer_range; // maxStorageBufferRange
 };
 
 /// Owns all global Vulkan objects needed for compute:
@@ -41,6 +42,9 @@ public:
     [[nodiscard]] static std::optional<VulkanContext> create() noexcept;
 
     [[nodiscard]] const VulkanDeviceInfo& device_info()         const noexcept;
+    /// Current remaining device-local budget; total heap size if the driver
+    /// does not expose VK_EXT_memory_budget. Query before allocating a solve.
+    [[nodiscard]] uint64_t available_memory() const noexcept;
     [[nodiscard]] VkDevice               device()               const noexcept;
     [[nodiscard]] VkPhysicalDevice       physical_device()      const noexcept; // only used in tests
     [[nodiscard]] VkQueue                compute_queue()        const noexcept;
@@ -62,6 +66,7 @@ private:
     VkCommandPool    command_pool_{VK_NULL_HANDLE};
     uint32_t         compute_queue_family_{0};
     VulkanDeviceInfo device_info_{};
+    bool memory_budget_{false};
 };
 
 } // namespace vibestran

@@ -1,0 +1,44 @@
+Generating SQLite file large/profile-next/final-profile-cuda-pcg-motor218k_1-8.sqlite from large/profile-next/final-profile-cuda-pcg-motor218k_1-8.nsys-rep
+Processing [large/profile-next/final-profile-cuda-pcg-motor218k_1-8.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/vulkan_api_sum.py]...
+SKIPPED: large/profile-next/final-profile-cuda-pcg-motor218k_1-8.sqlite does not contain Vulkan API trace data.
+
+Processing [large/profile-next/final-profile-cuda-pcg-motor218k_1-8.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/cuda_gpu_kern_sum.py]...
+
+ ** CUDA GPU Kernel Summary (cuda_gpu_kern_sum):
+
+ Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                                                  Name
+ --------  ---------------  ---------  --------  --------  --------  --------  -----------  ----------------------------------------------------------------------------------------------------
+    100.0         56991140       1771   32180.2   32160.0     31136     37472        493.8  void vibestran::partitioned_spmv_kernel<double>(const int *, const int *, const T1 *, const T1 *, T…
+
+Processing [large/profile-next/final-profile-cuda-pcg-motor218k_1-8.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/cuda_api_sum.py]...
+
+ ** CUDA API Summary (cuda_api_sum):
+
+ Time (%)  Total Time (ns)  Num Calls  Avg (ns)   Med (ns)   Min (ns)  Max (ns)  StdDev (ns)                Name
+ --------  ---------------  ---------  ---------  ---------  --------  --------  -----------  ---------------------------------
+     38.9         29386849       3542     8296.7     7233.0      3236     49484       5030.6  cudaMemcpyAsync
+     33.3         25176724       1771    14216.1    11392.0      7334   2112000      50118.6  cudaLaunchKernel
+     16.2         12244934       1771     6914.1     6392.0      2916     26420       2021.2  cudaStreamSynchronize
+      4.5          3389666         10   338966.6    64091.5      3136   1617085     623739.5  cudaFree
+      3.3          2465879          2  1232939.5  1232939.5   1175551   1290328      81159.6  cudaMallocHost
+      1.5          1113694          2   556847.0   556847.0    505345    608349      72834.8  cudaFreeHost
+      0.9           716945          3   238981.7   187184.0     38603    491158     230681.1  cudaMemcpy
+      0.7           517770          8    64721.3    71720.5      2715    168369      55047.2  cudaMalloc
+      0.3           248990          2   124495.0   124495.0    101311    147679      32787.1  cudaGetDeviceProperties_v2_v12000
+      0.2           183185       1257      145.7      110.0        50      3637        131.0  cuGetProcAddress_v2
+      0.0            23174          1    23174.0    23174.0     23174     23174          0.0  cudaMemGetInfo
+      0.0            18283         18     1015.7      215.5       190     10209       2369.9  cudaEventCreateWithFlags
+      0.0            11011          4     2752.8     2339.5      1082      5250       1828.6  cudaDeviceSynchronize
+      0.0             6806         18      378.1      271.0       180      2014        417.5  cudaEventDestroy
+      0.0             6593          5     1318.6     1233.0      1052      1753        272.6  cuInit
+      0.0             1121          4      280.3      115.0        80       811        354.8  cuModuleGetLoadingMode
+      0.0              841          2      420.5      420.5       250       591        241.1  cudaGetDriverEntryPoint_v11030
+
+Processing [large/profile-next/final-profile-cuda-pcg-motor218k_1-8.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/cuda_gpu_mem_size_sum.py]...
+
+ ** CUDA GPU MemOps Summary (by Size) (cuda_gpu_mem_size_sum):
+
+ Total (MB)  Count  Avg (MB)  Med (MB)  Min (MB)  Max (MB)  StdDev (MB)           Operation
+ ----------  -----  --------  --------  --------  --------  -----------  ----------------------------
+   3201.315   1774     1.805     1.804     0.249     3.847        0.061  [CUDA memcpy Host-to-Device]
+    883.375   1771     0.499     0.499     0.499     0.499        0.000  [CUDA memcpy Device-to-Host]

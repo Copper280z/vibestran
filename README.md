@@ -283,16 +283,17 @@ sudo apt install libcudss0-cuda-12 libcudss0-dev-cuda-12
 
 ### CUDA — PCG
 
-GPU Preconditioned Conjugate Gradient with IC0 → ILU0 → Jacobi fallback preconditioning
-(IC0 is retried on K + α diag(K) with a growing shift α when it meets a
-non-positive pivot, as shell stiffness matrices often cause),
-using cuSPARSE SpSV for triangular solves and cuBLAS for vector operations.
-O(nnz) device memory — no factorization fill-in — making it suitable for systems too large
-for cuDSS even with hybrid host/device memory mode. This is slower than the cuDSS direct solve for most cases.
-Like the CPU PCG it is refined to an estimated relative error of 1e-8 and fails
-with an error, not an inaccurate answer, when it cannot get there.
-`--backend=cuda-pcg-mixed` runs the PCG in fp32 inside the same refinement, which
-only converges for cond(K) below about 1e7.
+GPU preconditioned conjugate gradient with compensated fp64 refinement and
+an estimated relative-error target of 1e-8. Systems with at least 50,000
+equations use diagonally equilibrated smoothed-aggregation multigrid (AMG).
+The matrix, transfer operators and Krylov vectors stay on the GPU when they
+fit; only the small coarse problem (at most 256 equations) is solved directly
+on the CPU. Smaller resident systems retain colored IC0 → ILU0 → Jacobi.
+
+`--backend=cuda-pcg-mixed` uses fp32 AMG preconditioning with an fp64 Krylov
+operator and reductions on large resident systems. Its small-system IC0 path
+uses fp32 inner solves. Both variants check the final answer against the
+original fp64 matrix and fail if the requested accuracy is not reached.
 
 ```bash
 vibestran --backend=cuda-pcg model.bdf
@@ -300,22 +301,72 @@ vibestran --backend=cuda-pcg model.bdf
 
 Requires CUDA toolkit ≥ 11 with cuBLAS and cuSPARSE (both included in the standard toolkit).
 
-[CUDA_PCG_PERFORMANCE.md](CUDA_PCG_PERFORMANCE.md) profiles this backend
-against the direct ones: the IC0 triangular solves dominate, and each solve
-rebuilds the preconditioner.
+Small resident solves group independent equations by graph color to reduce IC0
+triangular dependencies. Set `VIBESTRAN_CUDA_PCG_NATURAL_ORDER=1` to compare
+with the original ordering. Each solve still rebuilds its preconditioner.
+[PCG_PERFORMANCE.md](PCG_PERFORMANCE.md) records resident and partitioned
+benchmarks, including thermal and magnetic systems;
+[PCG_LARGE_DECKS.md](PCG_LARGE_DECKS.md) adds decks above 200,000 GRID nodes,
+including the full radial motor and structural plate, accuracy checks, and
+the 50/75/90% residency sweep and device-owned spill performance.
+[CUDA_PCG_PERFORMANCE.md](CUDA_PCG_PERFORMANCE.md) retains the earlier direct-solver comparison.
 
 ### Vulkan - Experimental
 
-PCG iterative solver using Vulkan compute shaders. Requires Vulkan SDK, `glslc`, and `xxd`. Unfortunately performance is terrible right now, it's orders of magnitude slower than the base Eigen Cholesky CPU solver.
-The fp32 Jacobi PCG is refined with double-precision residuals to an estimated
-relative error of 1e-8, retried in fp64 if that fails (when the GPU supports
-it). Systems below 50,000 DOFs use the CPU direct solver.
+PCG using Vulkan compute shaders. Requires Vulkan SDK, `glslc`, and `xxd`.
+Large systems on fp64-capable GPUs use the same equilibrated AMG algorithm
+as CUDA. Smaller systems and devices without fp64 retain Jacobi PCG with
+compensated refinement and an fp64 retry when supported. Systems below
+50,000 equations use the CPU direct solver by default.
 
 ```bash
 vibestran --backend=vulkan model.bdf
 ```
 
+### PCG systems larger than available VRAM
+
+CUDA PCG (both precisions) and Vulkan automatically partition an oversized
+matrix: a fixed prefix of rows stays on the GPU and the CPU computes the
+remaining rows concurrently. Large systems reserve GPU space for PCG vectors
+and the AMG hierarchy first. CPU rows download only the input entries they
+reference and upload only their output rows; vector updates, reductions and
+the AMG cycle stay on the GPU, apart from the small terminal coarse solve.
+If this working state and hierarchy cannot fit, the host-based AMG path remains
+available. Smaller systems use partitioned Jacobi. Budgeted large CUDA mixed
+solves share the fp64 spill path. Accuracy requirements and compensated
+refinement are unchanged.
+
+An optional device budget makes the path reproducible or leaves memory for
+other applications:
+
+```bash
+VIBESTRAN_PCG_DEVICE_MEMORY_MIB=2048 vibestran --backend=cuda-pcg model.bdf
+VIBESTRAN_PCG_DEVICE_MEMORY_MIB=2048 vibestran --backend=vulkan model.bdf
+```
+
+The budget guides working-storage estimates and row partitioning; it is not
+a hard limit on driver/library allocations. Automatic sizing reserves
+headroom from CUDA free memory or the Vulkan driver's current memory budget
+(total heap size when that extension is unavailable). If even an input vector
+cannot fit, the partitioned solve computes all rows on the CPU. Vulkan's
+existing small-system CPU-direct threshold still applies.
+
+This supports exceeding VRAM while the matrix and work arrays fit in system
+RAM. It does not implement disk-backed assembly or solves beyond system RAM.
+cuDSS configuration and behavior are separate and unchanged.
+
+The [large-deck benchmarks](PCG_LARGE_DECKS.md) pass thermal, motor and plate
+accuracy checks at 50%, 75% and 90% fine-matrix row residency. At 90%, the
+1.58-million-equation plate takes 7.90 s with CUDA and 9.34 s with Vulkan,
+versus 48.07/63.00 s with the earlier host-based spill method. Total budgets
+are larger because the hierarchy now resides on the GPU; equal-budget controls
+also show substantial improvements. Low residency and the host fallback remain
+slower, and these tests force partitioning on matrices that fit physical VRAM.
+
 ## Dependencies
+
+AMGCL 1.5.0 is pinned by a Meson wrap and downloaded during configuration
+when it is not already cached.
 
 | Dependency | Required | Purpose |
 |---|---|---|

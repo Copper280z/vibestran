@@ -1,0 +1,9 @@
+==PROF== Connected to process 2179297 (/tmp/vibestran-pcg-20261102/build/pcg_benchmark)
+backend,n,nnz,budget_mib,run,seconds,iterations,corrections,relative_error,relative_residual,estimated_error
+cuda-pcg,1575936,22007790,0,0,7.401624589,872,2,1.85576570081e-09,5.97614772106e-13,5.15201096564e-09
+==PROF== Disconnected from process 2179297
+"ID","Process ID","Process Name","Host Name","Kernel Name","Context","Stream","Block Size","Grid Size","Device","CC","Section Name","Metric Name","Metric Unit","Metric Value"
+"0","2179297","pcg_benchmark","127.0.0.1","void csrmv_v3_kernel<integral_constant<bool, 0>, int, int, double, double, double, double, void>(KernelCoeffs<T7>, const T3 *, const T2 *, const T3 *, const T4 *, T2, int, int, const T5 *, T6 *, T3 *, T7 *)","1","7","(64, 1, 1)","(89305, 1, 1)","0","7.0","Command line profiler metrics","dram__throughput.avg.pct_of_peak_sustained_elapsed","%","90.33"
+"0","2179297","pcg_benchmark","127.0.0.1","void csrmv_v3_kernel<integral_constant<bool, 0>, int, int, double, double, double, double, void>(KernelCoeffs<T7>, const T3 *, const T2 *, const T3 *, const T4 *, T2, int, int, const T5 *, T6 *, T3 *, T7 *)","1","7","(64, 1, 1)","(89305, 1, 1)","0","7.0","Command line profiler metrics","sm__warps_active.avg.pct_of_peak_sustained_active","%","61.15"
+
+Backend: CUDA PCG float64 (GPU); n=1575936; nnz=22007790

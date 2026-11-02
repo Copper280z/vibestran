@@ -192,7 +192,7 @@ static void print_usage() {
       "Vulkan; SOL 101 only)\n"
       "  --backend=cuda             CUDA cuDSS direct solver "
       "(requires CUDA; SOL 101 + SOL 103)\n"
-      "  --backend=cuda-pcg         CUDA PCG + IC0/ILU0 GPU solver "
+      "  --backend=cuda-pcg         CUDA PCG + AMG/IC0 GPU solver "
       "(stable float64 path; requires CUDA; SOL 101 + SOL 103)\n"
       "  --backend=cuda-pcg-mixed   CUDA mixed-precision PCG + "
       "iterative refinement experiment (requires CUDA; SOL 101 only)\n"

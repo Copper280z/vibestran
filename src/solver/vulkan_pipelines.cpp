@@ -18,6 +18,8 @@
 #include "dot_reduce_d_spv.h"
 #include "axpby_d_spv.h"
 #include "jacobi_precond_d_spv.h"
+#include "amg_vector_d_spv.h"
+#include "amg_gather_d_spv.h"
 
 namespace vibestran {
 
@@ -153,6 +155,8 @@ VulkanSolverBackend::Pipelines* build_pipelines(const VulkanContext& ctx) {
         { dot_reduce_d_spv,     dot_reduce_d_spv_len,     3, sizeof(PCDot)     },
         { axpby_d_spv,          axpby_d_spv_len,          2, sizeof(PCAxpbyD)  },
         { jacobi_precond_d_spv, jacobi_precond_d_spv_len, 3, sizeof(PCJacobi)  },
+        { amg_vector_d_spv, amg_vector_d_spv_len, 3, sizeof(PCAmgVector) },
+        { amg_gather_d_spv, amg_gather_d_spv_len, 3, sizeof(PCDot) },
     };
 
     auto* pl   = new VulkanSolverBackend::Pipelines();
@@ -167,10 +171,10 @@ VulkanSolverBackend::Pipelines* build_pipelines(const VulkanContext& ctx) {
     }
 
     // Descriptor pool
-    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 512};
+    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2048};
     VkDescriptorPoolCreateInfo pool_ci{};
     pool_ci.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_ci.maxSets       = 128;
+    pool_ci.maxSets       = 512;
     pool_ci.poolSizeCount = 1;
     pool_ci.pPoolSizes    = &pool_size;
     pool_ci.flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
@@ -191,7 +195,7 @@ void cmd_spmv(VkCommandBuffer cmd, const Pipelines& pl,
                             pl.pl_layout[PL_SPMV], 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pl.pl_layout[PL_SPMV],
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmd, row_count, 1, 1);
+    vkCmdDispatch(cmd, (row_count + 15) / 16, 1, 1);
 }
 
 void cmd_dot_reduce(VkCommandBuffer cmd, const Pipelines& pl,
@@ -235,7 +239,7 @@ void cmd_spmv_d(VkCommandBuffer cmd, const Pipelines& pl,
                             pl.pl_layout[PL_SPMV_D], 0, 1, &ds, 0, nullptr);
     vkCmdPushConstants(cmd, pl.pl_layout[PL_SPMV_D],
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(cmd, row_count, 1, 1);
+    vkCmdDispatch(cmd, (row_count + 15) / 16, 1, 1);
 }
 
 void cmd_dot_reduce_d(VkCommandBuffer cmd, const Pipelines& pl,

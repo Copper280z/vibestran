@@ -1,0 +1,40 @@
+Generating SQLite file large/profile-next/final-profile-vulkan-motor218k_1-0.sqlite from large/profile-next/final-profile-vulkan-motor218k_1-0.nsys-rep
+Processing [large/profile-next/final-profile-vulkan-motor218k_1-0.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/vulkan_api_sum.py]...
+
+ ** Vulkan API Summary (vulkan_api_sum):
+
+ Time (%)  Total Time (ns)  Num Calls   Avg (ns)    Med (ns)   Min (ns)  Max (ns)  StdDev (ns)            Name
+ --------  ---------------  ---------  ----------  ----------  --------  --------  -----------  ------------------------
+     77.8        444504661       1800    246947.0    151687.0       430   1161544     161124.4  vkWaitForFences
+      7.1         40277183        126    319660.2    173503.0    118604   3982855     462701.4  vkAllocateMemory
+      4.2         24092951          1  24092951.0  24092951.0  24092951  24092951          0.0  vkCreateDevice
+      4.1         23197387        126    184106.2    122897.0     97805   1607878     197341.3  vkFreeMemory
+      2.4         13584010       1800      7546.7      4709.0      2776   1846188      53285.2  vkQueueSubmit
+      2.2         12460533          1  12460533.0  12460533.0  12460533  12460533          0.0  vkDestroyDevice
+      0.7          4189162      31919       131.2       110.0        70     28875        198.0  vkCmdBindPipeline
+      0.3          1963144       1800      1090.6       922.0       531     16602        793.1  vkBeginCommandBuffer
+      0.3          1815992       1800      1008.9       971.0       441      6913        521.4  vkEndCommandBuffer
+      0.3          1700021         47     36170.7     31780.0     29135     60264       8731.1  vkCreateFence
+      0.2          1381096         47     29385.0     25809.0     23905     48301       6254.9  vkDestroyFence
+      0.1           846704         65     13026.2       220.0       110    828676     102749.8  vkAllocateDescriptorSets
+      0.1           628888       1754       358.5       331.0       251      5490        158.5  vkCmdPipelineBarrier
+      0.1           327720          9     36413.3     31710.0     25649     72246      14069.0  vkCreateComputePipelines
+      0.0            62764        126       498.1       385.5       240      2945        404.5  vkCreateBuffer
+      0.0            51137         47      1088.0       481.0       350     13706       2365.6  vkAllocateCommandBuffers
+      0.0            46538         33      1410.2      1102.0      1002      5380       1010.7  vkCmdBindDescriptorSets
+      0.0            26129          9      2903.2      2746.0      1743      6282       1462.1  vkCreateShaderModule
+      0.0            25493        227       112.3       110.0        30       651         99.7  vkUpdateDescriptorSets
+      0.0            23661        126       187.8       161.0        70       561         99.0  vkBindBufferMemory
+      0.0            20185         65       310.5       210.0       140      3186        435.4  vkFreeDescriptorSets
+      0.0             7664         49       156.4       100.0        60       601        132.1  vkUnmapMemory
+      0.0             5735         49       117.0        81.0        60       340         77.5  vkMapMemory
+      0.0             1162          1      1162.0      1162.0      1162      1162          0.0  vkCreateCommandPool
+
+Processing [large/profile-next/final-profile-vulkan-motor218k_1-0.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/cuda_gpu_kern_sum.py]...
+SKIPPED: large/profile-next/final-profile-vulkan-motor218k_1-0.sqlite does not contain CUDA kernel data.
+
+Processing [large/profile-next/final-profile-vulkan-motor218k_1-0.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/cuda_api_sum.py]...
+SKIPPED: large/profile-next/final-profile-vulkan-motor218k_1-0.sqlite does not contain CUDA trace data.
+
+Processing [large/profile-next/final-profile-vulkan-motor218k_1-0.sqlite] with [/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64/reports/cuda_gpu_mem_size_sum.py]...
+SKIPPED: large/profile-next/final-profile-vulkan-motor218k_1-0.sqlite does not contain GPU memory data.

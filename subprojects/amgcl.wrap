@@ -1,0 +1,9 @@
+[wrap-file]
+directory = amgcl-1.5.0
+source_url = https://codeload.github.com/ddemidov/amgcl/tar.gz/refs/tags/1.5.0
+source_filename = amgcl-1.5.0.tar.gz
+source_hash = 6794cab752f0f15bc40db9c8a08a5ad761adf7d74b3d6652b9e2d4bf7f19ab31
+patch_directory = amgcl
+
+[provide]
+amgcl = amgcl_dep

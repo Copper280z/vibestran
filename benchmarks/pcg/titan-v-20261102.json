@@ -1,0 +1,3746 @@
+{
+  "date": "2026-11-02",
+  "baseline_commit": "ac147f6",
+  "hardware": {
+    "cpu": "AMD Ryzen 7 5700",
+    "cpu_affinity": "0-7",
+    "gpu": "NVIDIA TITAN V 12 GiB",
+    "driver": "580.178.04",
+    "cuda": "12.8",
+    "nsight_systems": "2024.6.2",
+    "system_ram": "32 GiB"
+  },
+  "protocol": {
+    "repeats": 3,
+    "warmups": 1,
+    "timing": "wall seconds inside solve, including setup and refinement; excluding assembly, context creation and independent verification",
+    "physical_rhs": "captured actual thermal load or magnetic Newton/response RHS, checked against CPU direct reference",
+    "synthetic_rhs": "manufactured nontrivial exact solution",
+    "spill": "explicit device budget, not physically exhausted VRAM",
+    "timeout_note": "Physical batches capped at 30 s initially; baseline coil spill ended after two samples. Complete replacement batch permitted 60 s for warmup + 3 solves. Other physical batches succeeded within 30 s."
+  },
+  "physical_decks": {
+    "thermal_interface": {
+      "deck_sha256": "2ada01fe5cdf58bd1f896c21e5190cbbad79b8a2d3275bd30bcaca6a8393ca89",
+      "direct_cli_wall_seconds": 0.4,
+      "capture": "system,n,nnz,direct_seconds\nmeasurements/thermal_interface_1,14375,357043,0.159919\n"
+    },
+    "magnetic_winding": {
+      "deck_sha256": "54b6bcf578431f96aabbcd3ca079958b71569e494bede97e485bd6ce097251f1",
+      "direct_cli_wall_seconds": 0.16,
+      "capture": "system,n,nnz,direct_seconds\nmeasurements/magnetic_winding_1,3969,17547,0.00580918\nmeasurements/magnetic_winding_2,3969,17547,0.00494206\n"
+    },
+    "magnetic_motor": {
+      "deck_sha256": "8e055b8ac4d2544c6e7b916bbb110a4c4e1db7914b78bc7b2d435c7d13f8003b",
+      "direct_cli_wall_seconds": 0.17,
+      "capture": "system,n,nnz,direct_seconds\nmeasurements/magnetic_motor_1,3969,19469,0.00570983\nmeasurements/magnetic_motor_2,3969,19469,0.00456236\nmeasurements/magnetic_motor_3,3969,19469,0.00491232\nmeasurements/magnetic_motor_4,3969,19469,0.00451929\nmeasurements/magnetic_motor_5,3969,19469,0.00489824\nmeasurements/magnetic_motor_6,3969,19469,0.00461888\nmeasurements/magnetic_motor_7,3969,19469,0.00450906\nmeasurements/magnetic_motor_8,3969,19469,0.00496004\n[2026-11-02 09:19:19.713] [warning] The B-H curve was exceeded; its vacuum-slope extrapolation was used\n"
+    },
+    "magnetic_coil": {
+      "deck_sha256": "ccf453783f6735fc8cf34b97d85c04c16cbf75456c5856b76543e6397f16685d",
+      "direct_cli_wall_seconds": 0.18,
+      "capture": "system,n,nnz,direct_seconds\nmeasurements/magnetic_coil_1,5401,35803,0.0162174\nmeasurements/magnetic_coil_2,5401,35803,0.0141247\nmeasurements/magnetic_coil_3,5401,35803,0.011487\n"
+    }
+  },
+  "results": {
+    "baseline-beam-cpu-pcg": {
+      "samples": [
+        {
+          "backend": "cpu-pcg",
+          "n": 18150.0,
+          "nnz": 649101.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.559916983,
+          "iterations": 355.0,
+          "corrections": 2.0,
+          "relative_error": 6.30655432099e-12,
+          "relative_residual": 5.37450043237e-15,
+          "estimated_error": 9.06887873262e-09
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 18150.0,
+          "nnz": 649101.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.556567433,
+          "iterations": 355.0,
+          "corrections": 2.0,
+          "relative_error": 6.30655432099e-12,
+          "relative_residual": 5.37450043237e-15,
+          "estimated_error": 9.06887873262e-09
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 18150.0,
+          "nnz": 649101.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.570833519,
+          "iterations": 355.0,
+          "corrections": 2.0,
+          "relative_error": 6.30655432099e-12,
+          "relative_residual": 5.37450043237e-15,
+          "estimated_error": 9.06887873262e-09
+        }
+      ],
+      "median_seconds": 0.559916983
+    },
+    "baseline-beam-cuda-pcg": {
+      "samples": [],
+      "failure": "Backend: CUDA PCG + IC0/ILU0 float64 (GPU); n=18150; nnz=649101\nBenchmark solve failed: cuda-pcg: did not converge: after 238 iterations and 2 refinement correction(s) the estimated relative error of the solution is 9.01e-08 (tolerance 1.0e-08). The stiffness matrix is too ill-conditioned for this preconditioner, or singular (check boundary conditions); use a direct solver (--backend=cpu or --backend=cuda).\n"
+    },
+    "baseline-beam-vulkan-spill": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 18150.0,
+          "nnz": 1280052.0,
+          "budget_mib": 4.0,
+          "run": 0.0,
+          "seconds": 15.245954291,
+          "iterations": 1296.0,
+          "corrections": 3.0,
+          "relative_error": 4.9196968632e-13,
+          "relative_residual": 9.95165571112e-17,
+          "estimated_error": 5.28920795141e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 18150.0,
+          "nnz": 1280052.0,
+          "budget_mib": 4.0,
+          "run": 1.0,
+          "seconds": 15.393439645,
+          "iterations": 1296.0,
+          "corrections": 3.0,
+          "relative_error": 4.9196968632e-13,
+          "relative_residual": 9.95165571112e-17,
+          "estimated_error": 5.28920795141e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 18150.0,
+          "nnz": 1280052.0,
+          "budget_mib": 4.0,
+          "run": 2.0,
+          "seconds": 19.921633008,
+          "iterations": 1296.0,
+          "corrections": 3.0,
+          "relative_error": 4.9196968632e-13,
+          "relative_residual": 9.95165571112e-17,
+          "estimated_error": 5.28920795141e-12
+        }
+      ],
+      "median_seconds": 15.393439645
+    },
+    "baseline-beam-vulkan": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 18150.0,
+          "nnz": 1280052.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 2.545113407,
+          "iterations": 1288.0,
+          "corrections": 3.0,
+          "relative_error": 4.91636457765e-13,
+          "relative_residual": 1.02877798052e-16,
+          "estimated_error": 3.44487785363e-11
+        },
+        {
+          "backend": "vulkan",
+          "n": 18150.0,
+          "nnz": 1280052.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 2.833504757,
+          "iterations": 1288.0,
+          "corrections": 3.0,
+          "relative_error": 4.91636457765e-13,
+          "relative_residual": 1.02877798052e-16,
+          "estimated_error": 3.44487785363e-11
+        },
+        {
+          "backend": "vulkan",
+          "n": 18150.0,
+          "nnz": 1280052.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 3.101098557,
+          "iterations": 1288.0,
+          "corrections": 3.0,
+          "relative_error": 4.91636457765e-13,
+          "relative_residual": 1.02877798052e-16,
+          "estimated_error": 3.44487785363e-11
+        }
+      ],
+      "median_seconds": 2.833504757
+    },
+    "baseline-contrast-cuda-pcg": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 32768.0,
+          "nnz": 128000.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.042277947,
+          "iterations": 65.0,
+          "corrections": 2.0,
+          "relative_error": 2.99209401104e-13,
+          "relative_residual": 6.37629376583e-15,
+          "estimated_error": 4.01184482344e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 32768.0,
+          "nnz": 128000.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.041981639,
+          "iterations": 65.0,
+          "corrections": 2.0,
+          "relative_error": 2.99209401104e-13,
+          "relative_residual": 6.37626396272e-15,
+          "estimated_error": 4.0118448367e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 32768.0,
+          "nnz": 128000.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.042636384,
+          "iterations": 65.0,
+          "corrections": 2.0,
+          "relative_error": 2.99209401104e-13,
+          "relative_residual": 6.3763152628e-15,
+          "estimated_error": 4.01184482037e-10
+        }
+      ],
+      "median_seconds": 0.042277947
+    },
+    "baseline-contrast-vulkan": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 32768.0,
+          "nnz": 223232.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.574670407,
+          "iterations": 282.0,
+          "corrections": 3.0,
+          "relative_error": 1.43238543082e-15,
+          "relative_residual": 1.07344921455e-16,
+          "estimated_error": 7.16853166784e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 32768.0,
+          "nnz": 223232.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.573888692,
+          "iterations": 282.0,
+          "corrections": 3.0,
+          "relative_error": 1.43238543082e-15,
+          "relative_residual": 1.07344921455e-16,
+          "estimated_error": 7.16853166784e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 32768.0,
+          "nnz": 223232.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.572766595,
+          "iterations": 282.0,
+          "corrections": 3.0,
+          "relative_error": 1.43238543082e-15,
+          "relative_residual": 1.07344921455e-16,
+          "estimated_error": 7.16853166784e-12
+        }
+      ],
+      "median_seconds": 0.573888692
+    },
+    "baseline-cpu-pcg-64": {
+      "samples": [
+        {
+          "backend": "cpu-pcg",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 1.804339136,
+          "iterations": 206.0,
+          "corrections": 2.0,
+          "relative_error": 5.87206113912e-13,
+          "relative_residual": 7.51300094937e-15,
+          "estimated_error": 2.93786944943e-10
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 1.820851929,
+          "iterations": 206.0,
+          "corrections": 2.0,
+          "relative_error": 5.87206113912e-13,
+          "relative_residual": 7.51300094937e-15,
+          "estimated_error": 2.93786944943e-10
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 1.822194808,
+          "iterations": 206.0,
+          "corrections": 2.0,
+          "relative_error": 5.87206113912e-13,
+          "relative_residual": 7.51300094937e-15,
+          "estimated_error": 2.93786944943e-10
+        }
+      ],
+      "median_seconds": 1.820851929
+    },
+    "baseline-cuda-pcg-64": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.153947694,
+          "iterations": 121.0,
+          "corrections": 2.0,
+          "relative_error": 4.22553297174e-13,
+          "relative_residual": 5.70337778029e-15,
+          "estimated_error": 1.57859982573e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.150970193,
+          "iterations": 121.0,
+          "corrections": 2.0,
+          "relative_error": 4.22553297174e-13,
+          "relative_residual": 5.70337780504e-15,
+          "estimated_error": 1.57859982468e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.150525685,
+          "iterations": 121.0,
+          "corrections": 2.0,
+          "relative_error": 4.22553297174e-13,
+          "relative_residual": 5.70337502116e-15,
+          "estimated_error": 1.57859982483e-10
+        }
+      ],
+      "median_seconds": 0.150970193
+    },
+    "baseline-physical-magnetic_coil_1-cuda-pcg-mixed-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.155936996,
+          "iterations": 389.0,
+          "corrections": 3.0,
+          "relative_error": 4.26786441214e-14,
+          "relative_residual": 2.74665754648e-15,
+          "estimated_error": 2.8913600733e-12
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.154636049,
+          "iterations": 386.0,
+          "corrections": 3.0,
+          "relative_error": 4.26786441214e-14,
+          "relative_residual": 3.06907574655e-15,
+          "estimated_error": 3.00780122162e-12
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.154438466,
+          "iterations": 386.0,
+          "corrections": 3.0,
+          "relative_error": 4.26786441214e-14,
+          "relative_residual": 2.81981126424e-15,
+          "estimated_error": 3.00221659423e-12
+        }
+      ],
+      "median_seconds": 0.154636049
+    },
+    "baseline-physical-magnetic_coil_1-cuda-pcg-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.13988645,
+          "iterations": 333.0,
+          "corrections": 2.0,
+          "relative_error": 4.0859554372e-14,
+          "relative_residual": 9.51613258897e-15,
+          "estimated_error": 3.30002317666e-11
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.139876792,
+          "iterations": 333.0,
+          "corrections": 2.0,
+          "relative_error": 4.09994843527e-14,
+          "relative_residual": 9.61778121801e-15,
+          "estimated_error": 3.29802736973e-11
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.140090987,
+          "iterations": 333.0,
+          "corrections": 2.0,
+          "relative_error": 4.0859554372e-14,
+          "relative_residual": 9.53662625647e-15,
+          "estimated_error": 3.30055977093e-11
+        }
+      ],
+      "median_seconds": 0.13988645
+    },
+    "baseline-physical-magnetic_coil_1-vulkan-resident": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 5401.0,
+          "nnz": 66205.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 2.329225642,
+          "iterations": 1231.0,
+          "corrections": 3.0,
+          "relative_error": 4.25387141407e-14,
+          "relative_residual": 2.70970643647e-15,
+          "estimated_error": 1.19571963179e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 5401.0,
+          "nnz": 66205.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 2.520263824,
+          "iterations": 1231.0,
+          "corrections": 3.0,
+          "relative_error": 4.25387141407e-14,
+          "relative_residual": 2.70970643647e-15,
+          "estimated_error": 1.19571963179e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 5401.0,
+          "nnz": 66205.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 2.754284005,
+          "iterations": 1231.0,
+          "corrections": 3.0,
+          "relative_error": 4.25387141407e-14,
+          "relative_residual": 2.70970643647e-15,
+          "estimated_error": 1.19571963179e-12
+        }
+      ],
+      "median_seconds": 2.520263824
+    },
+    "baseline-physical-magnetic_coil_1-vulkan-spill": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 5401.0,
+          "nnz": 66205.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 9.592923208,
+          "iterations": 1291.0,
+          "corrections": 3.0,
+          "relative_error": 4.25387141407e-14,
+          "relative_residual": 3.00574149564e-15,
+          "estimated_error": 6.94697058753e-13
+        },
+        {
+          "backend": "vulkan",
+          "n": 5401.0,
+          "nnz": 66205.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 10.150927995,
+          "iterations": 1291.0,
+          "corrections": 3.0,
+          "relative_error": 4.25387141407e-14,
+          "relative_residual": 3.00574149564e-15,
+          "estimated_error": 6.94697058753e-13
+        },
+        {
+          "backend": "vulkan",
+          "n": 5401.0,
+          "nnz": 66205.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 9.438505764,
+          "iterations": 1291.0,
+          "corrections": 3.0,
+          "relative_error": 4.25387141407e-14,
+          "relative_residual": 3.00574149564e-15,
+          "estimated_error": 6.94697058753e-13
+        }
+      ],
+      "median_seconds": 9.592923208
+    },
+    "baseline-physical-magnetic_motor_1-cuda-pcg-mixed-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.10847998,
+          "iterations": 166.0,
+          "corrections": 3.0,
+          "relative_error": 2.53590363355e-13,
+          "relative_residual": 4.18674421841e-15,
+          "estimated_error": 4.84879430453e-11
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.10876061,
+          "iterations": 167.0,
+          "corrections": 3.0,
+          "relative_error": 2.94099732442e-13,
+          "relative_residual": 5.03412262176e-15,
+          "estimated_error": 1.56807870933e-10
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.108049186,
+          "iterations": 166.0,
+          "corrections": 3.0,
+          "relative_error": 3.00522993925e-13,
+          "relative_residual": 4.95735929354e-15,
+          "estimated_error": 1.21389846543e-10
+        }
+      ],
+      "median_seconds": 0.10847998
+    },
+    "baseline-physical-magnetic_motor_1-cuda-pcg-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.049611483,
+          "iterations": 70.0,
+          "corrections": 1.0,
+          "relative_error": 2.1344926126e-12,
+          "relative_residual": 1.47815781779e-12,
+          "estimated_error": 6.5898257284e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.049674531,
+          "iterations": 70.0,
+          "corrections": 1.0,
+          "relative_error": 2.29897092831e-12,
+          "relative_residual": 1.47815422497e-12,
+          "estimated_error": 6.58982575978e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.049592988,
+          "iterations": 70.0,
+          "corrections": 1.0,
+          "relative_error": 1.99309521648e-12,
+          "relative_residual": 1.47823316629e-12,
+          "estimated_error": 6.58982524309e-09
+        }
+      ],
+      "median_seconds": 0.049611483
+    },
+    "baseline-physical-magnetic_motor_1-vulkan-resident": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.936007626,
+          "iterations": 494.0,
+          "corrections": 3.0,
+          "relative_error": 3.20820500212e-13,
+          "relative_residual": 3.77744272933e-15,
+          "estimated_error": 9.33620755474e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.936846697,
+          "iterations": 494.0,
+          "corrections": 3.0,
+          "relative_error": 3.20820500212e-13,
+          "relative_residual": 3.77744272933e-15,
+          "estimated_error": 9.33620755474e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.939157309,
+          "iterations": 494.0,
+          "corrections": 3.0,
+          "relative_error": 3.20820500212e-13,
+          "relative_residual": 3.77744272933e-15,
+          "estimated_error": 9.33620755474e-12
+        }
+      ],
+      "median_seconds": 0.936846697
+    },
+    "baseline-physical-magnetic_motor_1-vulkan-spill": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 2.162272043,
+          "iterations": 491.0,
+          "corrections": 3.0,
+          "relative_error": 2.45882449575e-13,
+          "relative_residual": 3.80012504546e-15,
+          "estimated_error": 8.05388910441e-11
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 2.141386807,
+          "iterations": 491.0,
+          "corrections": 3.0,
+          "relative_error": 2.45882449575e-13,
+          "relative_residual": 3.80012504546e-15,
+          "estimated_error": 8.05388910441e-11
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 2.302989536,
+          "iterations": 491.0,
+          "corrections": 3.0,
+          "relative_error": 2.45882449575e-13,
+          "relative_residual": 3.80012504546e-15,
+          "estimated_error": 8.05388910441e-11
+        }
+      ],
+      "median_seconds": 2.162272043
+    },
+    "baseline-physical-magnetic_motor_7-cuda-pcg-mixed-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.069116232,
+          "iterations": 104.0,
+          "corrections": 2.0,
+          "relative_error": 3.05840727592e-14,
+          "relative_residual": 7.11231181641e-13,
+          "estimated_error": 8.3150998331e-10
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.069113085,
+          "iterations": 104.0,
+          "corrections": 2.0,
+          "relative_error": 2.89076124746e-14,
+          "relative_residual": 6.8656380732e-13,
+          "estimated_error": 7.77690805363e-10
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.069695325,
+          "iterations": 105.0,
+          "corrections": 2.0,
+          "relative_error": 2.39235413583e-14,
+          "relative_residual": 4.68050654862e-13,
+          "estimated_error": 8.66495534631e-10
+        }
+      ],
+      "median_seconds": 0.069116232
+    },
+    "baseline-physical-magnetic_motor_7-cuda-pcg-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.046729687,
+          "iterations": 65.0,
+          "corrections": 1.0,
+          "relative_error": 6.41274377437e-13,
+          "relative_residual": 7.08819946949e-12,
+          "estimated_error": 4.28527087494e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.046135885,
+          "iterations": 65.0,
+          "corrections": 1.0,
+          "relative_error": 6.41206412831e-13,
+          "relative_residual": 7.08812534706e-12,
+          "estimated_error": 4.28527080999e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.04620241,
+          "iterations": 65.0,
+          "corrections": 1.0,
+          "relative_error": 6.41335262397e-13,
+          "relative_residual": 7.08821972781e-12,
+          "estimated_error": 4.28527088285e-10
+        }
+      ],
+      "median_seconds": 0.04620241
+    },
+    "baseline-physical-magnetic_motor_7-vulkan-resident": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.717805014,
+          "iterations": 379.0,
+          "corrections": 2.0,
+          "relative_error": 5.46296495236e-15,
+          "relative_residual": 1.11831550197e-13,
+          "estimated_error": 1.61783025377e-10
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.719444689,
+          "iterations": 379.0,
+          "corrections": 2.0,
+          "relative_error": 5.46296495236e-15,
+          "relative_residual": 1.11831550197e-13,
+          "estimated_error": 1.61783025377e-10
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.720809635,
+          "iterations": 379.0,
+          "corrections": 2.0,
+          "relative_error": 5.46296495236e-15,
+          "relative_residual": 1.11831550197e-13,
+          "estimated_error": 1.61783025377e-10
+        }
+      ],
+      "median_seconds": 0.719444689
+    },
+    "baseline-physical-magnetic_motor_7-vulkan-spill": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 2.11615452,
+          "iterations": 378.0,
+          "corrections": 2.0,
+          "relative_error": 1.63164612241e-14,
+          "relative_residual": 1.09884390704e-13,
+          "estimated_error": 4.90731208141e-10
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 1.940236135,
+          "iterations": 378.0,
+          "corrections": 2.0,
+          "relative_error": 1.63164612241e-14,
+          "relative_residual": 1.09884390704e-13,
+          "estimated_error": 4.90731208141e-10
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 1.783331586,
+          "iterations": 378.0,
+          "corrections": 2.0,
+          "relative_error": 1.63164612241e-14,
+          "relative_residual": 1.09884390704e-13,
+          "estimated_error": 4.90731208141e-10
+        }
+      ],
+      "median_seconds": 1.940236135
+    },
+    "baseline-physical-magnetic_winding_1-cuda-pcg-mixed-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.072834281,
+          "iterations": 109.0,
+          "corrections": 2.0,
+          "relative_error": 2.05864721246e-13,
+          "relative_residual": 8.99396278888e-13,
+          "estimated_error": 2.19982268214e-09
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.074018348,
+          "iterations": 111.0,
+          "corrections": 2.0,
+          "relative_error": 1.96118028691e-13,
+          "relative_residual": 7.55379907875e-13,
+          "estimated_error": 1.91419813504e-09
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.068354559,
+          "iterations": 102.0,
+          "corrections": 2.0,
+          "relative_error": 1.37820054533e-13,
+          "relative_residual": 8.65426109055e-13,
+          "estimated_error": 4.32502320913e-09
+        }
+      ],
+      "median_seconds": 0.072834281
+    },
+    "baseline-physical-magnetic_winding_1-cuda-pcg-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.058780714,
+          "iterations": 75.0,
+          "corrections": 1.0,
+          "relative_error": 9.05076048804e-13,
+          "relative_residual": 7.00989845253e-12,
+          "estimated_error": 1.46431796311e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.055287065,
+          "iterations": 75.0,
+          "corrections": 1.0,
+          "relative_error": 9.05076048804e-13,
+          "relative_residual": 7.00978856332e-12,
+          "estimated_error": 1.46431774418e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.053272059,
+          "iterations": 75.0,
+          "corrections": 1.0,
+          "relative_error": 9.04711686465e-13,
+          "relative_residual": 7.00979872139e-12,
+          "estimated_error": 1.4643183783e-09
+        }
+      ],
+      "median_seconds": 0.055287065
+    },
+    "baseline-physical-magnetic_winding_1-vulkan-resident": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 31125.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.71451112,
+          "iterations": 377.0,
+          "corrections": 2.0,
+          "relative_error": 2.62340883711e-14,
+          "relative_residual": 2.30062287987e-13,
+          "estimated_error": 1.22150216836e-09
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 31125.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.714344032,
+          "iterations": 377.0,
+          "corrections": 2.0,
+          "relative_error": 2.62340883711e-14,
+          "relative_residual": 2.30062287987e-13,
+          "estimated_error": 1.22150216836e-09
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 31125.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.71385143,
+          "iterations": 377.0,
+          "corrections": 2.0,
+          "relative_error": 2.62340883711e-14,
+          "relative_residual": 2.30062287987e-13,
+          "estimated_error": 1.22150216836e-09
+        }
+      ],
+      "median_seconds": 0.714344032
+    },
+    "baseline-physical-magnetic_winding_1-vulkan-spill": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 31125.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 1.626539584,
+          "iterations": 384.0,
+          "corrections": 2.0,
+          "relative_error": 2.28637367401e-14,
+          "relative_residual": 1.12163558137e-13,
+          "estimated_error": 6.33622927091e-10
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 31125.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 1.767444122,
+          "iterations": 384.0,
+          "corrections": 2.0,
+          "relative_error": 2.28637367401e-14,
+          "relative_residual": 1.12163558137e-13,
+          "estimated_error": 6.33622927091e-10
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 31125.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 1.554715292,
+          "iterations": 384.0,
+          "corrections": 2.0,
+          "relative_error": 2.28637367401e-14,
+          "relative_residual": 1.12163558137e-13,
+          "estimated_error": 6.33622927091e-10
+        }
+      ],
+      "median_seconds": 1.626539584
+    },
+    "baseline-physical-thermal_interface_1-cuda-pcg-mixed-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.039691216,
+          "iterations": 54.0,
+          "corrections": 2.0,
+          "relative_error": 1.21896929002e-13,
+          "relative_residual": 2.65656006359e-13,
+          "estimated_error": 1.36318528266e-09
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.039480469,
+          "iterations": 54.0,
+          "corrections": 2.0,
+          "relative_error": 1.26233795599e-13,
+          "relative_residual": 2.7212480893e-13,
+          "estimated_error": 1.36318528265e-09
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.039379537,
+          "iterations": 54.0,
+          "corrections": 2.0,
+          "relative_error": 1.22903701604e-13,
+          "relative_residual": 2.69487635484e-13,
+          "estimated_error": 1.36572389852e-09
+        }
+      ],
+      "median_seconds": 0.039480469
+    },
+    "baseline-physical-thermal_interface_1-cuda-pcg-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.036615536,
+          "iterations": 42.0,
+          "corrections": 1.0,
+          "relative_error": 4.12761278394e-12,
+          "relative_residual": 3.90241699737e-12,
+          "estimated_error": 2.12383870438e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.036320088,
+          "iterations": 42.0,
+          "corrections": 1.0,
+          "relative_error": 4.12761278394e-12,
+          "relative_residual": 3.90241853433e-12,
+          "estimated_error": 2.12383901415e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.033886001,
+          "iterations": 42.0,
+          "corrections": 1.0,
+          "relative_error": 4.12761278394e-12,
+          "relative_residual": 3.90241797084e-12,
+          "estimated_error": 2.12383870386e-09
+        }
+      ],
+      "median_seconds": 0.036320088
+    },
+    "baseline-physical-thermal_interface_1-vulkan-resident": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 14375.0,
+          "nnz": 357043.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.267518588,
+          "iterations": 128.0,
+          "corrections": 2.0,
+          "relative_error": 1.70376902035e-15,
+          "relative_residual": 1.44424032875e-15,
+          "estimated_error": 2.94324146381e-11
+        },
+        {
+          "backend": "vulkan",
+          "n": 14375.0,
+          "nnz": 357043.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.268404552,
+          "iterations": 128.0,
+          "corrections": 2.0,
+          "relative_error": 1.70376902035e-15,
+          "relative_residual": 1.44424032875e-15,
+          "estimated_error": 2.94324146381e-11
+        },
+        {
+          "backend": "vulkan",
+          "n": 14375.0,
+          "nnz": 357043.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.268416715,
+          "iterations": 128.0,
+          "corrections": 2.0,
+          "relative_error": 1.70376902035e-15,
+          "relative_residual": 1.44424032875e-15,
+          "estimated_error": 2.94324146381e-11
+        }
+      ],
+      "median_seconds": 0.268404552
+    },
+    "baseline-physical-thermal_interface_1-vulkan-spill": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 14375.0,
+          "nnz": 357043.0,
+          "budget_mib": 1.0,
+          "run": 0.0,
+          "seconds": 0.929723454,
+          "iterations": 128.0,
+          "corrections": 2.0,
+          "relative_error": 1.39399283483e-15,
+          "relative_residual": 5.8328462866e-16,
+          "estimated_error": 7.58086221067e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 14375.0,
+          "nnz": 357043.0,
+          "budget_mib": 1.0,
+          "run": 1.0,
+          "seconds": 0.919354013,
+          "iterations": 128.0,
+          "corrections": 2.0,
+          "relative_error": 1.39399283483e-15,
+          "relative_residual": 5.8328462866e-16,
+          "estimated_error": 7.58086221067e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 14375.0,
+          "nnz": 357043.0,
+          "budget_mib": 1.0,
+          "run": 2.0,
+          "seconds": 0.925524917,
+          "iterations": 128.0,
+          "corrections": 2.0,
+          "relative_error": 1.39399283483e-15,
+          "relative_residual": 5.8328462866e-16,
+          "estimated_error": 7.58086221067e-12
+        }
+      ],
+      "median_seconds": 0.925524917
+    },
+    "baseline-vulkan-64": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 262144.0,
+          "nnz": 1810432.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 1.350932595,
+          "iterations": 511.0,
+          "corrections": 3.0,
+          "relative_error": 6.35418491992e-16,
+          "relative_residual": 1.62221910953e-16,
+          "estimated_error": 1.6982382923e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 262144.0,
+          "nnz": 1810432.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 1.361063826,
+          "iterations": 511.0,
+          "corrections": 3.0,
+          "relative_error": 6.35418491992e-16,
+          "relative_residual": 1.62221910953e-16,
+          "estimated_error": 1.6982382923e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 262144.0,
+          "nnz": 1810432.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 1.360403716,
+          "iterations": 511.0,
+          "corrections": 3.0,
+          "relative_error": 6.35418491992e-16,
+          "relative_residual": 1.62221910953e-16,
+          "estimated_error": 1.6982382923e-12
+        }
+      ],
+      "median_seconds": 1.360403716
+    },
+    "baseline-vulkan-spill64": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 262144.0,
+          "nnz": 1810432.0,
+          "budget_mib": 8.0,
+          "run": 0.0,
+          "seconds": 10.562064482,
+          "iterations": 510.0,
+          "corrections": 3.0,
+          "relative_error": 6.35418491992e-16,
+          "relative_residual": 1.62164266103e-16,
+          "estimated_error": 1.69382852217e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 262144.0,
+          "nnz": 1810432.0,
+          "budget_mib": 8.0,
+          "run": 1.0,
+          "seconds": 10.506520623,
+          "iterations": 510.0,
+          "corrections": 3.0,
+          "relative_error": 6.35418491992e-16,
+          "relative_residual": 1.62164266103e-16,
+          "estimated_error": 1.69382852217e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 262144.0,
+          "nnz": 1810432.0,
+          "budget_mib": 8.0,
+          "run": 2.0,
+          "seconds": 11.021897994,
+          "iterations": 510.0,
+          "corrections": 3.0,
+          "relative_error": 6.35418491992e-16,
+          "relative_residual": 1.62164266103e-16,
+          "estimated_error": 1.69382852217e-12
+        }
+      ],
+      "median_seconds": 10.562064482
+    },
+    "final-cpu-64": {
+      "samples": [
+        {
+          "backend": "cpu",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 5.343232234,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 1.20729513478e-14,
+          "relative_residual": 1.08235595028e-15,
+          "estimated_error": -1.0
+        },
+        {
+          "backend": "cpu",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 5.39233337,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 1.20729513478e-14,
+          "relative_residual": 1.08235595028e-15,
+          "estimated_error": -1.0
+        },
+        {
+          "backend": "cpu",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 5.36869472,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 1.20729513478e-14,
+          "relative_residual": 1.08235595028e-15,
+          "estimated_error": -1.0
+        }
+      ],
+      "median_seconds": 5.36869472
+    },
+    "final-cpu-pcg-64": {
+      "samples": [
+        {
+          "backend": "cpu-pcg",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 1.826743756,
+          "iterations": 206.0,
+          "corrections": 2.0,
+          "relative_error": 5.87206113912e-13,
+          "relative_residual": 7.51300094937e-15,
+          "estimated_error": 2.93786944943e-10
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 1.82095437,
+          "iterations": 206.0,
+          "corrections": 2.0,
+          "relative_error": 5.87206113912e-13,
+          "relative_residual": 7.51300094937e-15,
+          "estimated_error": 2.93786944943e-10
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 1.801268529,
+          "iterations": 206.0,
+          "corrections": 2.0,
+          "relative_error": 5.87206113912e-13,
+          "relative_residual": 7.51300094937e-15,
+          "estimated_error": 2.93786944943e-10
+        }
+      ],
+      "median_seconds": 1.82095437
+    },
+    "final-cuda-pcg-64": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.101493528,
+          "iterations": 182.0,
+          "corrections": 2.0,
+          "relative_error": 3.83872196474e-13,
+          "relative_residual": 8.82717328284e-15,
+          "estimated_error": 1.76897445124e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.100909626,
+          "iterations": 182.0,
+          "corrections": 2.0,
+          "relative_error": 3.83872196474e-13,
+          "relative_residual": 8.82718800596e-15,
+          "estimated_error": 1.76897444936e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.10119849,
+          "iterations": 182.0,
+          "corrections": 2.0,
+          "relative_error": 3.83872196474e-13,
+          "relative_residual": 8.82724487467e-15,
+          "estimated_error": 1.76897465121e-10
+        }
+      ],
+      "median_seconds": 0.10119849
+    },
+    "final-cuda-pcg-beam": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 18150.0,
+          "nnz": 649101.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.151743933,
+          "iterations": 385.0,
+          "corrections": 2.0,
+          "relative_error": 4.23134613961e-12,
+          "relative_residual": 3.80124996379e-15,
+          "estimated_error": 4.93814604294e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 18150.0,
+          "nnz": 649101.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.147250971,
+          "iterations": 389.0,
+          "corrections": 2.0,
+          "relative_error": 4.1163574203e-12,
+          "relative_residual": 5.89126803934e-15,
+          "estimated_error": 4.94718320188e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 18150.0,
+          "nnz": 649101.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.147479051,
+          "iterations": 389.0,
+          "corrections": 2.0,
+          "relative_error": 4.18678303731e-12,
+          "relative_residual": 6.25685841863e-15,
+          "estimated_error": 5.05266437666e-09
+        }
+      ],
+      "median_seconds": 0.147479051
+    },
+    "final-cuda-pcg-contrast": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 32768.0,
+          "nnz": 128000.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.015963817,
+          "iterations": 101.0,
+          "corrections": 2.0,
+          "relative_error": 2.48120987405e-13,
+          "relative_residual": 5.97725244372e-15,
+          "estimated_error": 3.56970121099e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 32768.0,
+          "nnz": 128000.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.015844232,
+          "iterations": 101.0,
+          "corrections": 2.0,
+          "relative_error": 2.48120987405e-13,
+          "relative_residual": 5.97759422421e-15,
+          "estimated_error": 3.56970138378e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 32768.0,
+          "nnz": 128000.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.015768269,
+          "iterations": 101.0,
+          "corrections": 2.0,
+          "relative_error": 2.48120987405e-13,
+          "relative_residual": 5.97671932888e-15,
+          "estimated_error": 3.56970045105e-10
+        }
+      ],
+      "median_seconds": 0.015844232
+    },
+    "final-cuda-pcg-mixed-64": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.099221128,
+          "iterations": 229.0,
+          "corrections": 3.0,
+          "relative_error": 2.70052859096e-15,
+          "relative_residual": 1.78749379136e-16,
+          "estimated_error": 1.55047361696e-11
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.096677004,
+          "iterations": 229.0,
+          "corrections": 3.0,
+          "relative_error": 3.17709245996e-15,
+          "relative_residual": 1.79292047122e-16,
+          "estimated_error": 1.54294763098e-11
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.096776182,
+          "iterations": 230.0,
+          "corrections": 3.0,
+          "relative_error": 3.33594708296e-15,
+          "relative_residual": 1.76829487712e-16,
+          "estimated_error": 1.56731183468e-11
+        }
+      ],
+      "median_seconds": 0.096776182
+    },
+    "final-cuda-pcg-mixed-beam": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 18150.0,
+          "nnz": 649101.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.213473368,
+          "iterations": 638.0,
+          "corrections": 3.0,
+          "relative_error": 4.95231347312e-12,
+          "relative_residual": 3.55046147041e-16,
+          "estimated_error": 2.11469307919e-10
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 18150.0,
+          "nnz": 649101.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.269216133,
+          "iterations": 825.0,
+          "corrections": 4.0,
+          "relative_error": 4.91795611702e-13,
+          "relative_residual": 9.66442202488e-17,
+          "estimated_error": 2.01496157767e-12
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 18150.0,
+          "nnz": 649101.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.225184668,
+          "iterations": 682.0,
+          "corrections": 3.0,
+          "relative_error": 5.01543790328e-13,
+          "relative_residual": 3.85681165829e-16,
+          "estimated_error": 9.80531250368e-10
+        }
+      ],
+      "median_seconds": 0.225184668
+    },
+    "final-cuda-pcg-mixed-contrast": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 32768.0,
+          "nnz": 128000.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.016427643,
+          "iterations": 133.0,
+          "corrections": 3.0,
+          "relative_error": 2.36741480927e-14,
+          "relative_residual": 1.2248533514e-16,
+          "estimated_error": 7.72150642766e-11
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 32768.0,
+          "nnz": 128000.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.016172261,
+          "iterations": 133.0,
+          "corrections": 3.0,
+          "relative_error": 2.39128789978e-14,
+          "relative_residual": 1.23173172528e-16,
+          "estimated_error": 7.711348925e-11
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 32768.0,
+          "nnz": 128000.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.016178112,
+          "iterations": 133.0,
+          "corrections": 3.0,
+          "relative_error": 2.42311868713e-14,
+          "relative_residual": 1.23343265932e-16,
+          "estimated_error": 7.69508190059e-11
+        }
+      ],
+      "median_seconds": 0.016178112
+    },
+    "final-cuda-pcg-mixed-spill64": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 8.0,
+          "run": 0.0,
+          "seconds": 0.622027786,
+          "iterations": 446.0,
+          "corrections": 4.0,
+          "relative_error": 2.19219379737e-14,
+          "relative_residual": 8.59870850076e-16,
+          "estimated_error": 5.37416475855e-11
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 8.0,
+          "run": 1.0,
+          "seconds": 0.61702994,
+          "iterations": 446.0,
+          "corrections": 4.0,
+          "relative_error": 2.19219379737e-14,
+          "relative_residual": 8.59870850076e-16,
+          "estimated_error": 5.37416475855e-11
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 8.0,
+          "run": 2.0,
+          "seconds": 0.619908364,
+          "iterations": 446.0,
+          "corrections": 4.0,
+          "relative_error": 2.19219379737e-14,
+          "relative_residual": 8.59870850076e-16,
+          "estimated_error": 5.37416475855e-11
+        }
+      ],
+      "median_seconds": 0.619908364
+    },
+    "final-cuda-pcg-spill64": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 8.0,
+          "run": 0.0,
+          "seconds": 0.836909522,
+          "iterations": 446.0,
+          "corrections": 4.0,
+          "relative_error": 2.17630833507e-14,
+          "relative_residual": 8.59477034202e-16,
+          "estimated_error": 5.3646319082e-11
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 8.0,
+          "run": 1.0,
+          "seconds": 0.839785921,
+          "iterations": 446.0,
+          "corrections": 4.0,
+          "relative_error": 2.17630833507e-14,
+          "relative_residual": 8.59477034202e-16,
+          "estimated_error": 5.3646319082e-11
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 262144.0,
+          "nnz": 1036288.0,
+          "budget_mib": 8.0,
+          "run": 2.0,
+          "seconds": 0.847375067,
+          "iterations": 446.0,
+          "corrections": 4.0,
+          "relative_error": 2.17630833507e-14,
+          "relative_residual": 8.59477034202e-16,
+          "estimated_error": 5.3646319082e-11
+        }
+      ],
+      "median_seconds": 0.839785921
+    },
+    "final-vulkan-64": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 262144.0,
+          "nnz": 1810432.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.324279821,
+          "iterations": 511.0,
+          "corrections": 3.0,
+          "relative_error": 6.35418491992e-16,
+          "relative_residual": 1.62221910953e-16,
+          "estimated_error": 1.6982382923e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 262144.0,
+          "nnz": 1810432.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.293568412,
+          "iterations": 511.0,
+          "corrections": 3.0,
+          "relative_error": 6.35418491992e-16,
+          "relative_residual": 1.62221910953e-16,
+          "estimated_error": 1.6982382923e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 262144.0,
+          "nnz": 1810432.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.302077526,
+          "iterations": 511.0,
+          "corrections": 3.0,
+          "relative_error": 6.35418491992e-16,
+          "relative_residual": 1.62221910953e-16,
+          "estimated_error": 1.6982382923e-12
+        }
+      ],
+      "median_seconds": 0.302077526
+    },
+    "final-vulkan-beam": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 18150.0,
+          "nnz": 1280052.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.195677812,
+          "iterations": 1288.0,
+          "corrections": 3.0,
+          "relative_error": 4.91636457765e-13,
+          "relative_residual": 1.02877798052e-16,
+          "estimated_error": 3.44487785363e-11
+        },
+        {
+          "backend": "vulkan",
+          "n": 18150.0,
+          "nnz": 1280052.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.189658247,
+          "iterations": 1288.0,
+          "corrections": 3.0,
+          "relative_error": 4.91636457765e-13,
+          "relative_residual": 1.02877798052e-16,
+          "estimated_error": 3.44487785363e-11
+        },
+        {
+          "backend": "vulkan",
+          "n": 18150.0,
+          "nnz": 1280052.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.191817454,
+          "iterations": 1288.0,
+          "corrections": 3.0,
+          "relative_error": 4.91636457765e-13,
+          "relative_residual": 1.02877798052e-16,
+          "estimated_error": 3.44487785363e-11
+        }
+      ],
+      "median_seconds": 0.191817454
+    },
+    "final-vulkan-contrast": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 32768.0,
+          "nnz": 223232.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.065170843,
+          "iterations": 282.0,
+          "corrections": 3.0,
+          "relative_error": 1.43238543082e-15,
+          "relative_residual": 1.07344921455e-16,
+          "estimated_error": 7.16853166784e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 32768.0,
+          "nnz": 223232.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.06178987,
+          "iterations": 282.0,
+          "corrections": 3.0,
+          "relative_error": 1.43238543082e-15,
+          "relative_residual": 1.07344921455e-16,
+          "estimated_error": 7.16853166784e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 32768.0,
+          "nnz": 223232.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.059107707,
+          "iterations": 282.0,
+          "corrections": 3.0,
+          "relative_error": 1.43238543082e-15,
+          "relative_residual": 1.07344921455e-16,
+          "estimated_error": 7.16853166784e-12
+        }
+      ],
+      "median_seconds": 0.06178987
+    },
+    "final-vulkan-spill64": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 262144.0,
+          "nnz": 1810432.0,
+          "budget_mib": 8.0,
+          "run": 0.0,
+          "seconds": 0.603172285,
+          "iterations": 510.0,
+          "corrections": 3.0,
+          "relative_error": 7.14845803491e-16,
+          "relative_residual": 1.62186905786e-16,
+          "estimated_error": 1.67929497009e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 262144.0,
+          "nnz": 1810432.0,
+          "budget_mib": 8.0,
+          "run": 1.0,
+          "seconds": 0.593615392,
+          "iterations": 510.0,
+          "corrections": 3.0,
+          "relative_error": 7.14845803491e-16,
+          "relative_residual": 1.62186905786e-16,
+          "estimated_error": 1.67929497009e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 262144.0,
+          "nnz": 1810432.0,
+          "budget_mib": 8.0,
+          "run": 2.0,
+          "seconds": 0.597945526,
+          "iterations": 510.0,
+          "corrections": 3.0,
+          "relative_error": 7.14845803491e-16,
+          "relative_residual": 1.62186905786e-16,
+          "estimated_error": 1.67929497009e-12
+        }
+      ],
+      "median_seconds": 0.597945526
+    },
+    "updated-beam-vulkan-spill": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 18150.0,
+          "nnz": 1280052.0,
+          "budget_mib": 4.0,
+          "run": 0.0,
+          "seconds": 0.160711048,
+          "iterations": 1296.0,
+          "corrections": 3.0,
+          "relative_error": 4.91959739199e-13,
+          "relative_residual": 9.83295872649e-17,
+          "estimated_error": 2.81307703689e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 18150.0,
+          "nnz": 1280052.0,
+          "budget_mib": 4.0,
+          "run": 1.0,
+          "seconds": 0.161494106,
+          "iterations": 1296.0,
+          "corrections": 3.0,
+          "relative_error": 4.91959739199e-13,
+          "relative_residual": 9.83295872649e-17,
+          "estimated_error": 2.81307703689e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 18150.0,
+          "nnz": 1280052.0,
+          "budget_mib": 4.0,
+          "run": 2.0,
+          "seconds": 0.1619258,
+          "iterations": 1296.0,
+          "corrections": 3.0,
+          "relative_error": 4.91959739199e-13,
+          "relative_residual": 9.83295872649e-17,
+          "estimated_error": 2.81307703689e-12
+        }
+      ],
+      "median_seconds": 0.161494106
+    },
+    "updated-physical-magnetic_coil_1-cpu-pcg-resident": {
+      "samples": [
+        {
+          "backend": "cpu-pcg",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.0695068,
+          "iterations": 546.0,
+          "corrections": 2.0,
+          "relative_error": 3.79210247768e-14,
+          "relative_residual": 9.05862233651e-15,
+          "estimated_error": 3.04694796409e-11
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.070540161,
+          "iterations": 546.0,
+          "corrections": 2.0,
+          "relative_error": 3.79210247768e-14,
+          "relative_residual": 9.05862233651e-15,
+          "estimated_error": 3.04694796409e-11
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.069298316,
+          "iterations": 546.0,
+          "corrections": 2.0,
+          "relative_error": 3.79210247768e-14,
+          "relative_residual": 9.05862233651e-15,
+          "estimated_error": 3.04694796409e-11
+        }
+      ],
+      "median_seconds": 0.0695068
+    },
+    "updated-physical-magnetic_coil_1-cpu-resident": {
+      "samples": [
+        {
+          "backend": "cpu",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.014044827,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 0.0,
+          "relative_residual": 8.55467929578e-15,
+          "estimated_error": -1.0
+        },
+        {
+          "backend": "cpu",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.011171412,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 0.0,
+          "relative_residual": 8.55467929578e-15,
+          "estimated_error": -1.0
+        },
+        {
+          "backend": "cpu",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.011169708,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 0.0,
+          "relative_residual": 8.55467929578e-15,
+          "estimated_error": -1.0
+        }
+      ],
+      "median_seconds": 0.011171412
+    },
+    "updated-physical-magnetic_coil_1-cuda-pcg-mixed-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.101187904,
+          "iterations": 698.0,
+          "corrections": 3.0,
+          "relative_error": 4.28185741022e-14,
+          "relative_residual": 2.83364703971e-15,
+          "estimated_error": 2.63523272853e-12
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.100987496,
+          "iterations": 694.0,
+          "corrections": 3.0,
+          "relative_error": 4.29585040829e-14,
+          "relative_residual": 2.90472882013e-15,
+          "estimated_error": 2.48865498051e-12
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.101061465,
+          "iterations": 700.0,
+          "corrections": 3.0,
+          "relative_error": 4.26786441214e-14,
+          "relative_residual": 3.02593929972e-15,
+          "estimated_error": 4.70941947894e-12
+        }
+      ],
+      "median_seconds": 0.101061465
+    },
+    "updated-physical-magnetic_coil_1-cuda-pcg-mixed-spill": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 0.035948662,
+          "iterations": 882.0,
+          "corrections": 3.0,
+          "relative_error": 2.79608087487e-12,
+          "relative_residual": 8.54129085464e-13,
+          "estimated_error": 2.78228672308e-09
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 0.035856027,
+          "iterations": 882.0,
+          "corrections": 3.0,
+          "relative_error": 2.79608087487e-12,
+          "relative_residual": 8.54129085464e-13,
+          "estimated_error": 2.78228672308e-09
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 0.035902154,
+          "iterations": 882.0,
+          "corrections": 3.0,
+          "relative_error": 2.79608087487e-12,
+          "relative_residual": 8.54129085464e-13,
+          "estimated_error": 2.78228672308e-09
+        }
+      ],
+      "median_seconds": 0.035902154
+    },
+    "updated-physical-magnetic_coil_1-cuda-pcg-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.08408864,
+          "iterations": 558.0,
+          "corrections": 2.0,
+          "relative_error": 6.14292615387e-14,
+          "relative_residual": 8.59321044559e-15,
+          "estimated_error": 2.17884948846e-11
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.084180063,
+          "iterations": 557.0,
+          "corrections": 2.0,
+          "relative_error": 6.25487013845e-14,
+          "relative_residual": 9.38955108293e-15,
+          "estimated_error": 2.34658669215e-11
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.084002818,
+          "iterations": 557.0,
+          "corrections": 2.0,
+          "relative_error": 6.24087714038e-14,
+          "relative_residual": 9.26143096742e-15,
+          "estimated_error": 2.35699536659e-11
+        }
+      ],
+      "median_seconds": 0.08408864
+    },
+    "updated-physical-magnetic_coil_1-cuda-pcg-spill": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 0.040799229,
+          "iterations": 841.0,
+          "corrections": 3.0,
+          "relative_error": 1.314082449e-12,
+          "relative_residual": 8.42514110086e-13,
+          "estimated_error": 2.68798212945e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 0.040626794,
+          "iterations": 841.0,
+          "corrections": 3.0,
+          "relative_error": 1.314082449e-12,
+          "relative_residual": 8.42514110086e-13,
+          "estimated_error": 2.68798212945e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 5401.0,
+          "nnz": 35803.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 0.040652692,
+          "iterations": 841.0,
+          "corrections": 3.0,
+          "relative_error": 1.314082449e-12,
+          "relative_residual": 8.42514110086e-13,
+          "estimated_error": 2.68798212945e-09
+        }
+      ],
+      "median_seconds": 0.040652692
+    },
+    "updated-physical-magnetic_coil_1-vulkan-resident": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 5401.0,
+          "nnz": 66205.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.138239026,
+          "iterations": 1231.0,
+          "corrections": 3.0,
+          "relative_error": 4.25387141407e-14,
+          "relative_residual": 2.70970643647e-15,
+          "estimated_error": 1.19571963179e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 5401.0,
+          "nnz": 66205.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.132611642,
+          "iterations": 1231.0,
+          "corrections": 3.0,
+          "relative_error": 4.25387141407e-14,
+          "relative_residual": 2.70970643647e-15,
+          "estimated_error": 1.19571963179e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 5401.0,
+          "nnz": 66205.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.12680593,
+          "iterations": 1231.0,
+          "corrections": 3.0,
+          "relative_error": 4.25387141407e-14,
+          "relative_residual": 2.70970643647e-15,
+          "estimated_error": 1.19571963179e-12
+        }
+      ],
+      "median_seconds": 0.132611642
+    },
+    "updated-physical-magnetic_coil_1-vulkan-spill": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 5401.0,
+          "nnz": 66205.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 0.052010717,
+          "iterations": 917.0,
+          "corrections": 2.0,
+          "relative_error": 3.51714006555e-13,
+          "relative_residual": 9.71613229378e-14,
+          "estimated_error": 8.3927203809e-09
+        },
+        {
+          "backend": "vulkan",
+          "n": 5401.0,
+          "nnz": 66205.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 0.052614095,
+          "iterations": 917.0,
+          "corrections": 2.0,
+          "relative_error": 3.51714006555e-13,
+          "relative_residual": 9.71613229378e-14,
+          "estimated_error": 8.3927203809e-09
+        },
+        {
+          "backend": "vulkan",
+          "n": 5401.0,
+          "nnz": 66205.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 0.055853151,
+          "iterations": 917.0,
+          "corrections": 2.0,
+          "relative_error": 3.51714006555e-13,
+          "relative_residual": 9.71613229378e-14,
+          "estimated_error": 8.3927203809e-09
+        }
+      ],
+      "median_seconds": 0.052614095
+    },
+    "updated-physical-magnetic_motor_1-cpu-pcg-resident": {
+      "samples": [
+        {
+          "backend": "cpu-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.009929506,
+          "iterations": 101.0,
+          "corrections": 1.0,
+          "relative_error": 1.32462853501e-11,
+          "relative_residual": 6.17049754874e-12,
+          "estimated_error": 8.96720055627e-09
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.009668004,
+          "iterations": 101.0,
+          "corrections": 1.0,
+          "relative_error": 1.32462853501e-11,
+          "relative_residual": 6.17049754874e-12,
+          "estimated_error": 8.96720055627e-09
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.009611537,
+          "iterations": 101.0,
+          "corrections": 1.0,
+          "relative_error": 1.32462853501e-11,
+          "relative_residual": 6.17049754874e-12,
+          "estimated_error": 8.96720055627e-09
+        }
+      ],
+      "median_seconds": 0.009668004
+    },
+    "updated-physical-magnetic_motor_1-cpu-resident": {
+      "samples": [
+        {
+          "backend": "cpu",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.00534938,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 0.0,
+          "relative_residual": 1.23913291837e-14,
+          "estimated_error": -1.0
+        },
+        {
+          "backend": "cpu",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.004622076,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 0.0,
+          "relative_residual": 1.23913291837e-14,
+          "estimated_error": -1.0
+        },
+        {
+          "backend": "cpu",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.004669396,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 0.0,
+          "relative_residual": 1.23913291837e-14,
+          "estimated_error": -1.0
+        }
+      ],
+      "median_seconds": 0.004669396
+    },
+    "updated-physical-magnetic_motor_1-cuda-pcg-mixed-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.020082546,
+          "iterations": 246.0,
+          "corrections": 3.0,
+          "relative_error": 2.20189403642e-13,
+          "relative_residual": 5.53301550766e-15,
+          "estimated_error": 1.6376076244e-10
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.019463788,
+          "iterations": 241.0,
+          "corrections": 3.0,
+          "relative_error": 1.57155797621e-13,
+          "relative_residual": 1.43897241285e-14,
+          "estimated_error": 3.79003216196e-10
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.020053421,
+          "iterations": 245.0,
+          "corrections": 3.0,
+          "relative_error": 2.91787358308e-13,
+          "relative_residual": 3.94344401157e-15,
+          "estimated_error": 2.54761752134e-11
+        }
+      ],
+      "median_seconds": 0.020053421
+    },
+    "updated-physical-magnetic_motor_1-cuda-pcg-mixed-spill": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 0.01728797,
+          "iterations": 472.0,
+          "corrections": 4.0,
+          "relative_error": 2.72603217345e-13,
+          "relative_residual": 3.89274949169e-15,
+          "estimated_error": 4.28459513715e-11
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 0.017122227,
+          "iterations": 472.0,
+          "corrections": 4.0,
+          "relative_error": 2.72603217345e-13,
+          "relative_residual": 3.89274949169e-15,
+          "estimated_error": 4.28459513715e-11
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 0.017115034,
+          "iterations": 472.0,
+          "corrections": 4.0,
+          "relative_error": 2.72603217345e-13,
+          "relative_residual": 3.89274949169e-15,
+          "estimated_error": 4.28459513715e-11
+        }
+      ],
+      "median_seconds": 0.017122227
+    },
+    "updated-physical-magnetic_motor_1-cuda-pcg-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.007242835,
+          "iterations": 75.0,
+          "corrections": 1.0,
+          "relative_error": 1.9180972154e-11,
+          "relative_residual": 3.93418186444e-12,
+          "estimated_error": 9.83671918925e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.007218669,
+          "iterations": 75.0,
+          "corrections": 1.0,
+          "relative_error": 1.91818285889e-11,
+          "relative_residual": 3.93443412864e-12,
+          "estimated_error": 9.83671929089e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.007166421,
+          "iterations": 75.0,
+          "corrections": 1.0,
+          "relative_error": 1.91811862627e-11,
+          "relative_residual": 3.93447085705e-12,
+          "estimated_error": 9.83671916557e-09
+        }
+      ],
+      "median_seconds": 0.007218669
+    },
+    "updated-physical-magnetic_motor_1-cuda-pcg-spill": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 0.012178664,
+          "iterations": 246.0,
+          "corrections": 3.0,
+          "relative_error": 5.25337145836e-13,
+          "relative_residual": 5.35667790495e-13,
+          "estimated_error": 2.40385389289e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 0.012234279,
+          "iterations": 246.0,
+          "corrections": 3.0,
+          "relative_error": 5.25337145836e-13,
+          "relative_residual": 5.35667790495e-13,
+          "estimated_error": 2.40385389289e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 0.012118059,
+          "iterations": 246.0,
+          "corrections": 3.0,
+          "relative_error": 5.25337145836e-13,
+          "relative_residual": 5.35667790495e-13,
+          "estimated_error": 2.40385389289e-10
+        }
+      ],
+      "median_seconds": 0.012178664
+    },
+    "updated-physical-magnetic_motor_1-vulkan-resident": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.063416702,
+          "iterations": 494.0,
+          "corrections": 3.0,
+          "relative_error": 3.20820500212e-13,
+          "relative_residual": 3.77744272933e-15,
+          "estimated_error": 9.33620755474e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.061639857,
+          "iterations": 494.0,
+          "corrections": 3.0,
+          "relative_error": 3.20820500212e-13,
+          "relative_residual": 3.77744272933e-15,
+          "estimated_error": 9.33620755474e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.060730451,
+          "iterations": 494.0,
+          "corrections": 3.0,
+          "relative_error": 3.20820500212e-13,
+          "relative_residual": 3.77744272933e-15,
+          "estimated_error": 9.33620755474e-12
+        }
+      ],
+      "median_seconds": 0.061639857
+    },
+    "updated-physical-magnetic_motor_1-vulkan-spill": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 0.031160932,
+          "iterations": 502.0,
+          "corrections": 3.0,
+          "relative_error": 2.22073560344e-13,
+          "relative_residual": 3.71860781006e-15,
+          "estimated_error": 9.64928636388e-11
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 0.0320068,
+          "iterations": 502.0,
+          "corrections": 3.0,
+          "relative_error": 2.22073560344e-13,
+          "relative_residual": 3.71860781006e-15,
+          "estimated_error": 9.64928636388e-11
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 0.030508991,
+          "iterations": 502.0,
+          "corrections": 3.0,
+          "relative_error": 2.22073560344e-13,
+          "relative_residual": 3.71860781006e-15,
+          "estimated_error": 9.64928636388e-11
+        }
+      ],
+      "median_seconds": 0.031160932
+    },
+    "updated-physical-magnetic_motor_7-cpu-pcg-resident": {
+      "samples": [
+        {
+          "backend": "cpu-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.011258747,
+          "iterations": 118.0,
+          "corrections": 1.0,
+          "relative_error": 4.88315429568e-13,
+          "relative_residual": 8.3902043181e-12,
+          "estimated_error": 4.33717304021e-10
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.010848682,
+          "iterations": 118.0,
+          "corrections": 1.0,
+          "relative_error": 4.88315429568e-13,
+          "relative_residual": 8.3902043181e-12,
+          "estimated_error": 4.33717304021e-10
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.010774703,
+          "iterations": 118.0,
+          "corrections": 1.0,
+          "relative_error": 4.88315429568e-13,
+          "relative_residual": 8.3902043181e-12,
+          "estimated_error": 4.33717304021e-10
+        }
+      ],
+      "median_seconds": 0.010848682
+    },
+    "updated-physical-magnetic_motor_7-cpu-resident": {
+      "samples": [
+        {
+          "backend": "cpu",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.005287794,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 0.0,
+          "relative_residual": 1.60444376728e-15,
+          "estimated_error": -1.0
+        },
+        {
+          "backend": "cpu",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.004589605,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 0.0,
+          "relative_residual": 1.60444376728e-15,
+          "estimated_error": -1.0
+        },
+        {
+          "backend": "cpu",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.004577172,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 0.0,
+          "relative_residual": 1.60444376728e-15,
+          "estimated_error": -1.0
+        }
+      ],
+      "median_seconds": 0.004589605
+    },
+    "updated-physical-magnetic_motor_7-cuda-pcg-mixed-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.013720064,
+          "iterations": 163.0,
+          "corrections": 2.0,
+          "relative_error": 9.27669086083e-14,
+          "relative_residual": 1.82665470289e-12,
+          "estimated_error": 2.59650549203e-09
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.013049097,
+          "iterations": 154.0,
+          "corrections": 2.0,
+          "relative_error": 8.05582352584e-14,
+          "relative_residual": 1.09810866667e-12,
+          "estimated_error": 1.62375037865e-09
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.012459845,
+          "iterations": 147.0,
+          "corrections": 2.0,
+          "relative_error": 4.56849586841e-14,
+          "relative_residual": 1.47493265061e-12,
+          "estimated_error": 2.13336059351e-09
+        }
+      ],
+      "median_seconds": 0.013049097
+    },
+    "updated-physical-magnetic_motor_7-cuda-pcg-mixed-spill": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 0.014969783,
+          "iterations": 396.0,
+          "corrections": 3.0,
+          "relative_error": 8.32111557826e-14,
+          "relative_residual": 6.88379826076e-13,
+          "estimated_error": 2.1491573085e-10
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 0.014733247,
+          "iterations": 396.0,
+          "corrections": 3.0,
+          "relative_error": 8.32111557826e-14,
+          "relative_residual": 6.88379826076e-13,
+          "estimated_error": 2.1491573085e-10
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 0.014666341,
+          "iterations": 396.0,
+          "corrections": 3.0,
+          "relative_error": 8.32111557826e-14,
+          "relative_residual": 6.88379826076e-13,
+          "estimated_error": 2.1491573085e-10
+        }
+      ],
+      "median_seconds": 0.014733247
+    },
+    "updated-physical-magnetic_motor_7-cuda-pcg-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.007278292,
+          "iterations": 83.0,
+          "corrections": 1.0,
+          "relative_error": 1.9058102108e-12,
+          "relative_residual": 5.87939035561e-12,
+          "estimated_error": 2.23951528747e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.007216144,
+          "iterations": 83.0,
+          "corrections": 1.0,
+          "relative_error": 1.9058083524e-12,
+          "relative_residual": 5.87934087331e-12,
+          "estimated_error": 2.23951801499e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.007232716,
+          "iterations": 83.0,
+          "corrections": 1.0,
+          "relative_error": 1.9058081754e-12,
+          "relative_residual": 5.87938992056e-12,
+          "estimated_error": 2.23951758086e-10
+        }
+      ],
+      "median_seconds": 0.007232716
+    },
+    "updated-physical-magnetic_motor_7-cuda-pcg-spill": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 0.01840577,
+          "iterations": 395.0,
+          "corrections": 3.0,
+          "relative_error": 4.96070828296e-14,
+          "relative_residual": 6.43278166891e-13,
+          "estimated_error": 4.05604405791e-11
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 0.018234867,
+          "iterations": 395.0,
+          "corrections": 3.0,
+          "relative_error": 4.96070828296e-14,
+          "relative_residual": 6.43278166891e-13,
+          "estimated_error": 4.05604405791e-11
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 19469.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 0.018336821,
+          "iterations": 395.0,
+          "corrections": 3.0,
+          "relative_error": 4.96070828296e-14,
+          "relative_residual": 6.43278166891e-13,
+          "estimated_error": 4.05604405791e-11
+        }
+      ],
+      "median_seconds": 0.018336821
+    },
+    "updated-physical-magnetic_motor_7-vulkan-resident": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.049899662,
+          "iterations": 379.0,
+          "corrections": 2.0,
+          "relative_error": 5.46296495236e-15,
+          "relative_residual": 1.11831550197e-13,
+          "estimated_error": 1.61783025377e-10
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.049572223,
+          "iterations": 379.0,
+          "corrections": 2.0,
+          "relative_error": 5.46296495236e-15,
+          "relative_residual": 1.11831550197e-13,
+          "estimated_error": 1.61783025377e-10
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.049185624,
+          "iterations": 379.0,
+          "corrections": 2.0,
+          "relative_error": 5.46296495236e-15,
+          "relative_residual": 1.11831550197e-13,
+          "estimated_error": 1.61783025377e-10
+        }
+      ],
+      "median_seconds": 0.049572223
+    },
+    "updated-physical-magnetic_motor_7-vulkan-spill": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 0.022835715,
+          "iterations": 357.0,
+          "corrections": 2.0,
+          "relative_error": 1.1341416657e-14,
+          "relative_residual": 8.60815879361e-14,
+          "estimated_error": 1.99164047647e-10
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 0.023800966,
+          "iterations": 357.0,
+          "corrections": 2.0,
+          "relative_error": 1.1341416657e-14,
+          "relative_residual": 8.60815879361e-14,
+          "estimated_error": 1.99164047647e-10
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 34969.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 0.021935495,
+          "iterations": 357.0,
+          "corrections": 2.0,
+          "relative_error": 1.1341416657e-14,
+          "relative_residual": 8.60815879361e-14,
+          "estimated_error": 1.99164047647e-10
+        }
+      ],
+      "median_seconds": 0.022835715
+    },
+    "updated-physical-magnetic_winding_1-cpu-pcg-resident": {
+      "samples": [
+        {
+          "backend": "cpu-pcg",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.010071645,
+          "iterations": 114.0,
+          "corrections": 1.0,
+          "relative_error": 1.03132759909e-12,
+          "relative_residual": 7.5512294664e-12,
+          "estimated_error": 5.93749109863e-10
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.009853804,
+          "iterations": 114.0,
+          "corrections": 1.0,
+          "relative_error": 1.03132759909e-12,
+          "relative_residual": 7.5512294664e-12,
+          "estimated_error": 5.93749109863e-10
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.00984597,
+          "iterations": 114.0,
+          "corrections": 1.0,
+          "relative_error": 1.03132759909e-12,
+          "relative_residual": 7.5512294664e-12,
+          "estimated_error": 5.93749109863e-10
+        }
+      ],
+      "median_seconds": 0.009853804
+    },
+    "updated-physical-magnetic_winding_1-cpu-resident": {
+      "samples": [
+        {
+          "backend": "cpu",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.005332638,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 0.0,
+          "relative_residual": 3.2036384393e-14,
+          "estimated_error": -1.0
+        },
+        {
+          "backend": "cpu",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.004598933,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 0.0,
+          "relative_residual": 3.2036384393e-14,
+          "estimated_error": -1.0
+        },
+        {
+          "backend": "cpu",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.00461852,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 0.0,
+          "relative_residual": 3.2036384393e-14,
+          "estimated_error": -1.0
+        }
+      ],
+      "median_seconds": 0.00461852
+    },
+    "updated-physical-magnetic_winding_1-cuda-pcg-mixed-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.033799114,
+          "iterations": 178.0,
+          "corrections": 2.0,
+          "relative_error": 1.02522452992e-13,
+          "relative_residual": 9.09016942887e-13,
+          "estimated_error": 2.35790018316e-09
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.032332374,
+          "iterations": 172.0,
+          "corrections": 2.0,
+          "relative_error": 1.00564005423e-13,
+          "relative_residual": 7.34550270838e-13,
+          "estimated_error": 1.79960890803e-09
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.035063641,
+          "iterations": 178.0,
+          "corrections": 2.0,
+          "relative_error": 1.99579470907e-13,
+          "relative_residual": 8.04207816802e-13,
+          "estimated_error": 2.93744854009e-09
+        }
+      ],
+      "median_seconds": 0.033799114
+    },
+    "updated-physical-magnetic_winding_1-cuda-pcg-mixed-spill": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 0.014320177,
+          "iterations": 384.0,
+          "corrections": 3.0,
+          "relative_error": 2.33374077801e-13,
+          "relative_residual": 7.18313882905e-13,
+          "estimated_error": 1.05543697919e-10
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 0.014262368,
+          "iterations": 384.0,
+          "corrections": 3.0,
+          "relative_error": 2.33374077801e-13,
+          "relative_residual": 7.18313882905e-13,
+          "estimated_error": 1.05543697919e-10
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 0.014144806,
+          "iterations": 384.0,
+          "corrections": 3.0,
+          "relative_error": 2.33374077801e-13,
+          "relative_residual": 7.18313882905e-13,
+          "estimated_error": 1.05543697919e-10
+        }
+      ],
+      "median_seconds": 0.014262368
+    },
+    "updated-physical-magnetic_winding_1-cuda-pcg-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.026343467,
+          "iterations": 134.0,
+          "corrections": 1.0,
+          "relative_error": 8.18038995197e-13,
+          "relative_residual": 7.16551390095e-12,
+          "estimated_error": 1.20459786579e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.026318089,
+          "iterations": 134.0,
+          "corrections": 1.0,
+          "relative_error": 8.17401361105e-13,
+          "relative_residual": 7.16598463592e-12,
+          "estimated_error": 1.20459773149e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.026352525,
+          "iterations": 134.0,
+          "corrections": 1.0,
+          "relative_error": 8.1808454049e-13,
+          "relative_residual": 7.16558951818e-12,
+          "estimated_error": 1.20459760495e-09
+        }
+      ],
+      "median_seconds": 0.026343467
+    },
+    "updated-physical-magnetic_winding_1-cuda-pcg-spill": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 0.017434406,
+          "iterations": 373.0,
+          "corrections": 3.0,
+          "relative_error": 4.92800062805e-13,
+          "relative_residual": 7.5831921472e-13,
+          "estimated_error": 2.66794311184e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 0.017484761,
+          "iterations": 373.0,
+          "corrections": 3.0,
+          "relative_error": 4.92800062805e-13,
+          "relative_residual": 7.5831921472e-13,
+          "estimated_error": 2.66794311184e-10
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 3969.0,
+          "nnz": 17547.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 0.017534336,
+          "iterations": 373.0,
+          "corrections": 3.0,
+          "relative_error": 4.92800062805e-13,
+          "relative_residual": 7.5831921472e-13,
+          "estimated_error": 2.66794311184e-10
+        }
+      ],
+      "median_seconds": 0.017484761
+    },
+    "updated-physical-magnetic_winding_1-vulkan-resident": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 31125.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.05076753,
+          "iterations": 377.0,
+          "corrections": 2.0,
+          "relative_error": 2.62340883711e-14,
+          "relative_residual": 2.30062287987e-13,
+          "estimated_error": 1.22150216836e-09
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 31125.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.049667654,
+          "iterations": 377.0,
+          "corrections": 2.0,
+          "relative_error": 2.62340883711e-14,
+          "relative_residual": 2.30062287987e-13,
+          "estimated_error": 1.22150216836e-09
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 31125.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.049981306,
+          "iterations": 377.0,
+          "corrections": 2.0,
+          "relative_error": 2.62340883711e-14,
+          "relative_residual": 2.30062287987e-13,
+          "estimated_error": 1.22150216836e-09
+        }
+      ],
+      "median_seconds": 0.049981306
+    },
+    "updated-physical-magnetic_winding_1-vulkan-spill": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 31125.0,
+          "budget_mib": 0.25,
+          "run": 0.0,
+          "seconds": 0.024922504,
+          "iterations": 386.0,
+          "corrections": 2.0,
+          "relative_error": 2.04042909553e-14,
+          "relative_residual": 1.15772652965e-13,
+          "estimated_error": 5.67565851948e-10
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 31125.0,
+          "budget_mib": 0.25,
+          "run": 1.0,
+          "seconds": 0.026210697,
+          "iterations": 386.0,
+          "corrections": 2.0,
+          "relative_error": 2.04042909553e-14,
+          "relative_residual": 1.15772652965e-13,
+          "estimated_error": 5.67565851948e-10
+        },
+        {
+          "backend": "vulkan",
+          "n": 3969.0,
+          "nnz": 31125.0,
+          "budget_mib": 0.25,
+          "run": 2.0,
+          "seconds": 0.024414225,
+          "iterations": 386.0,
+          "corrections": 2.0,
+          "relative_error": 2.04042909553e-14,
+          "relative_residual": 1.15772652965e-13,
+          "estimated_error": 5.67565851948e-10
+        }
+      ],
+      "median_seconds": 0.024922504
+    },
+    "updated-physical-thermal_interface_1-cpu-pcg-resident": {
+      "samples": [
+        {
+          "backend": "cpu-pcg",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.051774502,
+          "iterations": 48.0,
+          "corrections": 1.0,
+          "relative_error": 5.2708417966e-12,
+          "relative_residual": 8.95166469321e-12,
+          "estimated_error": 7.1247047794e-09
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.052092933,
+          "iterations": 48.0,
+          "corrections": 1.0,
+          "relative_error": 5.2708417966e-12,
+          "relative_residual": 8.95166469321e-12,
+          "estimated_error": 7.1247047794e-09
+        },
+        {
+          "backend": "cpu-pcg",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.05223965,
+          "iterations": 48.0,
+          "corrections": 1.0,
+          "relative_error": 5.2708417966e-12,
+          "relative_residual": 8.95166469321e-12,
+          "estimated_error": 7.1247047794e-09
+        }
+      ],
+      "median_seconds": 0.052092933
+    },
+    "updated-physical-thermal_interface_1-cpu-resident": {
+      "samples": [
+        {
+          "backend": "cpu",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.14851911,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 0.0,
+          "relative_residual": 1.49593026801e-15,
+          "estimated_error": -1.0
+        },
+        {
+          "backend": "cpu",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.134709507,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 0.0,
+          "relative_residual": 1.49593026801e-15,
+          "estimated_error": -1.0
+        },
+        {
+          "backend": "cpu",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.135486333,
+          "iterations": -1.0,
+          "corrections": 0.0,
+          "relative_error": 0.0,
+          "relative_residual": 1.49593026801e-15,
+          "estimated_error": -1.0
+        }
+      ],
+      "median_seconds": 0.135486333
+    },
+    "updated-physical-thermal_interface_1-cuda-pcg-mixed-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.013215752,
+          "iterations": 65.0,
+          "corrections": 2.0,
+          "relative_error": 1.66582143763e-13,
+          "relative_residual": 3.4424560726e-13,
+          "estimated_error": 1.0791700847e-09
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.013077932,
+          "iterations": 66.0,
+          "corrections": 2.0,
+          "relative_error": 1.65497927113e-13,
+          "relative_residual": 3.74751146045e-13,
+          "estimated_error": 1.00125665006e-09
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.013096267,
+          "iterations": 66.0,
+          "corrections": 2.0,
+          "relative_error": 1.17714950497e-13,
+          "relative_residual": 3.57531710955e-13,
+          "estimated_error": 1.01379747436e-09
+        }
+      ],
+      "median_seconds": 0.013096267
+    },
+    "updated-physical-thermal_interface_1-cuda-pcg-mixed-spill": {
+      "samples": [
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 1.0,
+          "run": 0.0,
+          "seconds": 0.012567569,
+          "iterations": 103.0,
+          "corrections": 2.0,
+          "relative_error": 1.35604525211e-13,
+          "relative_residual": 1.73782070638e-13,
+          "estimated_error": 1.63416123874e-10
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 1.0,
+          "run": 1.0,
+          "seconds": 0.012371448,
+          "iterations": 103.0,
+          "corrections": 2.0,
+          "relative_error": 1.35604525211e-13,
+          "relative_residual": 1.73782070638e-13,
+          "estimated_error": 1.63416123874e-10
+        },
+        {
+          "backend": "cuda-pcg-mixed",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 1.0,
+          "run": 2.0,
+          "seconds": 0.012423656,
+          "iterations": 103.0,
+          "corrections": 2.0,
+          "relative_error": 1.35604525211e-13,
+          "relative_residual": 1.73782070638e-13,
+          "estimated_error": 1.63416123874e-10
+        }
+      ],
+      "median_seconds": 0.012423656
+    },
+    "updated-physical-thermal_interface_1-cuda-pcg-resident": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.01003149,
+          "iterations": 44.0,
+          "corrections": 1.0,
+          "relative_error": 7.70878037663e-13,
+          "relative_residual": 5.3109607256e-12,
+          "estimated_error": 2.9555178517e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.009944214,
+          "iterations": 44.0,
+          "corrections": 1.0,
+          "relative_error": 7.70878037663e-13,
+          "relative_residual": 5.31095710135e-12,
+          "estimated_error": 2.95551793067e-09
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.009882058,
+          "iterations": 44.0,
+          "corrections": 1.0,
+          "relative_error": 7.70878037663e-13,
+          "relative_residual": 5.31095601876e-12,
+          "estimated_error": 2.95551785515e-09
+        }
+      ],
+      "median_seconds": 0.009944214
+    },
+    "updated-physical-thermal_interface_1-cuda-pcg-spill": {
+      "samples": [
+        {
+          "backend": "cuda-pcg",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 1.0,
+          "run": 0.0,
+          "seconds": 0.006819765,
+          "iterations": 28.0,
+          "corrections": 1.0,
+          "relative_error": 1.08421664931e-14,
+          "relative_residual": 4.53516459903e-15,
+          "estimated_error": 1.03881786955e-12
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 1.0,
+          "run": 1.0,
+          "seconds": 0.006652229,
+          "iterations": 28.0,
+          "corrections": 1.0,
+          "relative_error": 1.08421664931e-14,
+          "relative_residual": 4.53516459903e-15,
+          "estimated_error": 1.03881786955e-12
+        },
+        {
+          "backend": "cuda-pcg",
+          "n": 14375.0,
+          "nnz": 185709.0,
+          "budget_mib": 1.0,
+          "run": 2.0,
+          "seconds": 0.006525801,
+          "iterations": 28.0,
+          "corrections": 1.0,
+          "relative_error": 1.08421664931e-14,
+          "relative_residual": 4.53516459903e-15,
+          "estimated_error": 1.03881786955e-12
+        }
+      ],
+      "median_seconds": 0.006652229
+    },
+    "updated-physical-thermal_interface_1-vulkan-resident": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 14375.0,
+          "nnz": 357043.0,
+          "budget_mib": 0.0,
+          "run": 0.0,
+          "seconds": 0.030922683,
+          "iterations": 128.0,
+          "corrections": 2.0,
+          "relative_error": 1.70376902035e-15,
+          "relative_residual": 1.44424032875e-15,
+          "estimated_error": 2.94324146381e-11
+        },
+        {
+          "backend": "vulkan",
+          "n": 14375.0,
+          "nnz": 357043.0,
+          "budget_mib": 0.0,
+          "run": 1.0,
+          "seconds": 0.031071163,
+          "iterations": 128.0,
+          "corrections": 2.0,
+          "relative_error": 1.70376902035e-15,
+          "relative_residual": 1.44424032875e-15,
+          "estimated_error": 2.94324146381e-11
+        },
+        {
+          "backend": "vulkan",
+          "n": 14375.0,
+          "nnz": 357043.0,
+          "budget_mib": 0.0,
+          "run": 2.0,
+          "seconds": 0.032225172,
+          "iterations": 128.0,
+          "corrections": 2.0,
+          "relative_error": 1.70376902035e-15,
+          "relative_residual": 1.44424032875e-15,
+          "estimated_error": 2.94324146381e-11
+        }
+      ],
+      "median_seconds": 0.031071163
+    },
+    "updated-physical-thermal_interface_1-vulkan-spill": {
+      "samples": [
+        {
+          "backend": "vulkan",
+          "n": 14375.0,
+          "nnz": 357043.0,
+          "budget_mib": 1.0,
+          "run": 0.0,
+          "seconds": 0.017901549,
+          "iterations": 130.0,
+          "corrections": 2.0,
+          "relative_error": 1.39399283483e-15,
+          "relative_residual": 4.75632458457e-16,
+          "estimated_error": 2.94430301504e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 14375.0,
+          "nnz": 357043.0,
+          "budget_mib": 1.0,
+          "run": 1.0,
+          "seconds": 0.01881873,
+          "iterations": 130.0,
+          "corrections": 2.0,
+          "relative_error": 1.39399283483e-15,
+          "relative_residual": 4.75632458457e-16,
+          "estimated_error": 2.94430301504e-12
+        },
+        {
+          "backend": "vulkan",
+          "n": 14375.0,
+          "nnz": 357043.0,
+          "budget_mib": 1.0,
+          "run": 2.0,
+          "seconds": 0.017897852,
+          "iterations": 130.0,
+          "corrections": 2.0,
+          "relative_error": 1.39399283483e-15,
+          "relative_residual": 4.75632458457e-16,
+          "estimated_error": 2.94430301504e-12
+        }
+      ],
+      "median_seconds": 0.017901549
+    }
+  }
+}

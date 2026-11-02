@@ -19,6 +19,7 @@ namespace vibestran {
 /// A device-local Vulkan buffer.  Move-only, destroyed on scope exit.
 class VulkanBuffer {
 public:
+    VulkanBuffer() = default;
     ~VulkanBuffer();
     VulkanBuffer(VulkanBuffer&&) noexcept;
     VulkanBuffer& operator=(VulkanBuffer&&) noexcept;
@@ -29,6 +30,12 @@ public:
     /// Returns nullopt if allocation fails.
     [[nodiscard]] static std::optional<VulkanBuffer>
         create(const VulkanContext& ctx, VkDeviceSize size_bytes) noexcept;
+
+    /// Persistent coherent transfer storage. The caller synchronizes GPU
+    /// accesses before reading or overwriting mapped_data().
+    [[nodiscard]] static std::optional<VulkanBuffer>
+        create_host(const VulkanContext& ctx, VkDeviceSize size_bytes) noexcept;
+    [[nodiscard]] void* mapped_data() const noexcept { return mapped_; }
 
     /// Upload host data to the device buffer via a staging buffer.
     /// Throws SolverError on failure.
@@ -52,8 +59,6 @@ public:
     [[nodiscard]] VkDeviceSize size_bytes() const noexcept { return size_;   }
 
 private:
-    VulkanBuffer() = default;
-
     void upload_raw(const VulkanContext& ctx, const void* data, VkDeviceSize size);
     [[nodiscard]] std::vector<std::byte> download_raw(const VulkanContext& ctx, VkDeviceSize size);
 
@@ -61,6 +66,7 @@ private:
     VkDeviceMemory memory_{VK_NULL_HANDLE};
     VkDeviceSize   size_{0};
     VkDevice       device_{VK_NULL_HANDLE}; // non-owning
+    void*          mapped_{nullptr};
 };
 
 /// Execute a single-use command buffer and wait for completion.

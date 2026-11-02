@@ -63,6 +63,9 @@ endif
 # ── spdlog structured logging ─────────────────────────────────────────────────
 spdlog_dep = dependency('spdlog', required : true)
 
+# Header-only smoothed aggregation preconditioner, pinned by the Meson wrap.
+amgcl_dep = dependency('amgcl', fallback : ['amgcl', 'amgcl_dep'], include_type : 'system')
+
 # ── Spectra eigensolver (header-only, bundled) ────────────────────────────────
 spectra_dep = dependency('spectra', required : false)
 if not spectra_dep.found()
@@ -186,7 +189,7 @@ have_vulkan_backend = vulkan_dep.found() and glslc.found()
 
 if have_vulkan_backend
   shader_names = ['spmv', 'dot_reduce', 'axpby', 'jacobi_precond',
-                  'spmv_d', 'dot_reduce_d', 'axpby_d', 'jacobi_precond_d']
+                  'spmv_d', 'dot_reduce_d', 'axpby_d', 'jacobi_precond_d', 'amg_vector_d', 'amg_gather_d']
   foreach name : shader_names
     spv = custom_target(name + '_spv',
       input   : 'shaders' / name + '.comp',
@@ -207,6 +210,7 @@ if have_vulkan_backend
     'src/solver/vulkan_pipelines.cpp',
     'src/solver/vulkan_pcg_full.cpp',
     'src/solver/vulkan_pcg_tiled.cpp',
+    'src/solver/vulkan_amg.cpp',
     'src/solver/vulkan_solver_backend.cpp',
   )
   vulkan_compile_args = ['-DHAVE_VULKAN=1']
@@ -469,7 +473,7 @@ src_inc = include_directories('src/solver') # for internal vulkan_pipelines.hpp
 # ── Library (solver logic, no main) ──────────────────────────────────────────
 tbb_args = tbb_dep.found() ? ['-DHAVE_TBB=1'] : []
 
-solver_lib_deps = [eigen_dep, spectra_dep, spdlog_dep, thread_dep]
+solver_lib_deps = [eigen_dep, spectra_dep, spdlog_dep, thread_dep, amgcl_dep]
 if hdf5_dep.found()
   solver_lib_deps += hdf5_dep
 endif
@@ -543,6 +547,7 @@ solver_lib = static_library(
   dependencies        : solver_lib_deps,
   link_whole          : [precise_lib, magnetic_lib],
   cpp_args            : vulkan_compile_args + cuda_compile_args + cholmod_args + tbb_args + accelerate_args,
+  cuda_args           : tbb_args,
   install             : false,
 )
 
@@ -573,6 +578,14 @@ executable(
 )
 
 # ── Tests ────────────────────────────────────────────────────────────────────
+executable(
+  'pcg_benchmark',
+  'tools/pcg_benchmark.cpp',
+  dependencies : solver_lib_dep,
+  build_by_default : false,
+  install : false,
+)
+
 # Google Test
 gtest_dep = dependency('gtest',
   main         : true,
@@ -604,6 +617,7 @@ unit_test_sources = files(
   'tests/unit/test_types.cpp',
   'tests/unit/test_sparse_matrix.cpp',
   'tests/unit/test_pcg_solver.cpp',
+  'tests/unit/test_pcg_partition.cpp',
   'tests/unit/test_output_writers.cpp',
   'tests/unit/test_coord_sys.cpp',
   'tests/unit/test_mpc_handler.cpp',

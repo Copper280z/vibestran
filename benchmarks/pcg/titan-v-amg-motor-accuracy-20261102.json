@@ -1,0 +1,572 @@
+{
+  "reference": "motor218k-direct.mag.vtkhdf",
+  "reference_sha256": "5ccc9838315c4a4ff22a9c46c3451ae26d84274bf8bc2c87219d605a3eadc271",
+  "relative_error_definition": "max(abs(candidate-reference))/max(abs(reference)) over each complete dataset; scalar attributes use abs(reference) denominator",
+  "cli_accuracy_defaults": "cuda-pcg and vulkan 1e-8; cuda-pcg-mixed retains its existing 1e-6 default. Replay benchmarks explicitly request 1e-8 for every backend.",
+  "comparisons": [
+    {
+      "file": "motor218k-cuda-pcg-0.mag.vtkhdf",
+      "sha256": "61a21a8118ba6fb73df55255e3d43027ebef561472b39a4e62fc693b7c82ba9e",
+      "datasets": {
+        "VTKHDF/SUBCASE_1/PointData/A_normal_Wb_per_m": {
+          "max_abs_reference": 0.005875938555310938,
+          "max_abs_error": 1.502487370630412e-14,
+          "relative_error": 2.5570168178024876e-12
+        },
+        "VTKHDF/SUBCASE_1/CellData/B_T": {
+          "max_abs_reference": 2.4639083555848345,
+          "max_abs_error": 4.196198943873242e-12,
+          "relative_error": 1.7030661608666975e-12
+        },
+        "VTKHDF/SUBCASE_1/CellData/H_A_per_m": {
+          "max_abs_reference": 1514919.7364690527,
+          "max_abs_error": 4.7602225095033646e-07,
+          "relative_error": 3.1422275351685654e-13
+        },
+        "MAGSTAT/subcases/1/probes/B_T": {
+          "max_abs_reference": 1.046530406841837,
+          "max_abs_error": 3.497202527569243e-14,
+          "relative_error": 3.341711339399026e-14
+        },
+        "MAGSTAT/subcases/1/probes/B_local_T": {
+          "max_abs_reference": 1.046530406841837,
+          "max_abs_error": 3.497202527569243e-14,
+          "relative_error": 3.341711339399026e-14
+        },
+        "MAGSTAT/subcases/1/probes/H_A_per_m": {
+          "max_abs_reference": 832802.4367242532,
+          "max_abs_error": 2.782326191663742e-08,
+          "relative_error": 3.3409198496197364e-14
+        },
+        "MAGSTAT/subcases/1/probes/H_local_A_per_m": {
+          "max_abs_reference": 832802.4367242532,
+          "max_abs_error": 2.782326191663742e-08,
+          "relative_error": 3.3409198496197364e-14
+        },
+        "MAGSTAT/subcases/1/circuits/current_A": {
+          "max_abs_reference": 9.659258262890683,
+          "max_abs_error": 0.0,
+          "relative_error": 0.0
+        },
+        "MAGSTAT/subcases/1/circuits/inductance_H": {
+          "max_abs_reference": 0.0019256077750699182,
+          "max_abs_error": 2.990229591715021e-16,
+          "relative_error": 1.552875736392603e-13
+        },
+        "MAGSTAT/subcases/1/circuits/linkage_Wb_turn": {
+          "max_abs_reference": 0.05188572272068661,
+          "max_abs_error": 2.0122792321330962e-16,
+          "relative_error": 3.878290841135011e-15
+        },
+        "MAGSTAT/subcases/1/circuits/linkage_rate_Wb_per_rad": {
+          "max_abs_reference": 0.28286948950377044,
+          "max_abs_error": 2.724209746673978e-14,
+          "relative_error": 9.630624184506354e-14
+        },
+        "MAGSTAT/subcases/1/sources/current_A": {
+          "max_abs_reference": 9.659258262890683,
+          "max_abs_error": 0.0,
+          "relative_error": 0.0
+        },
+        "MAGSTAT/subcases/1/sources/differential_inductance_H": {
+          "status": "unreported (all NaN in both outputs)"
+        },
+        "MAGSTAT/subcases/1/sources/linkage_Wb_turn": {
+          "status": "unreported (all NaN in both outputs)"
+        }
+      },
+      "attributes": {
+        "air_gap_torque_Nm": {
+          "cpu": 4.897365337720938,
+          "candidate": 4.8973653377209345,
+          "relative_error": 7.254336635734448e-16
+        },
+        "energy_J": {
+          "cpu": 3.00874070929979,
+          "candidate": 3.008740709299788,
+          "relative_error": 5.903987784356644e-16
+        },
+        "coenergy_J": {
+          "cpu": -2.7181593058316746,
+          "candidate": -2.718159305831676,
+          "relative_error": 4.901359632203581e-16
+        }
+      },
+      "identical_geometry": true,
+      "iterations": 11,
+      "nonlinear_residual": 6.524090955363633e-14,
+      "bh_extrapolated": 0,
+      "max_dataset_relative_error": 2.5570168178024876e-12
+    },
+    {
+      "file": "motor218k-cuda-pcg-8.mag.vtkhdf",
+      "sha256": "8c445672fca28d3da64b84ed17be5f6c80eed4380664554b484f54aab25c99ec",
+      "datasets": {
+        "VTKHDF/SUBCASE_1/PointData/A_normal_Wb_per_m": {
+          "max_abs_reference": 0.005875938555310938,
+          "max_abs_error": 9.810728618386833e-15,
+          "relative_error": 1.6696445216431772e-12
+        },
+        "VTKHDF/SUBCASE_1/CellData/B_T": {
+          "max_abs_reference": 2.4639083555848345,
+          "max_abs_error": 2.6377788842069094e-12,
+          "relative_error": 1.0705669625365612e-12
+        },
+        "VTKHDF/SUBCASE_1/CellData/H_A_per_m": {
+          "max_abs_reference": 1514919.7364690527,
+          "max_abs_error": 3.641471266746521e-07,
+          "relative_error": 2.4037387454163055e-13
+        },
+        "MAGSTAT/subcases/1/probes/B_T": {
+          "max_abs_reference": 1.046530406841837,
+          "max_abs_error": 2.7533531010703882e-14,
+          "relative_error": 2.6309346418125665e-14
+        },
+        "MAGSTAT/subcases/1/probes/B_local_T": {
+          "max_abs_reference": 1.046530406841837,
+          "max_abs_error": 2.7533531010703882e-14,
+          "relative_error": 2.6309346418125665e-14
+        },
+        "MAGSTAT/subcases/1/probes/H_A_per_m": {
+          "max_abs_reference": 832802.4367242532,
+          "max_abs_error": 2.1886080503463745e-08,
+          "relative_error": 2.6280038984456504e-14
+        },
+        "MAGSTAT/subcases/1/probes/H_local_A_per_m": {
+          "max_abs_reference": 832802.4367242532,
+          "max_abs_error": 2.1886080503463745e-08,
+          "relative_error": 2.6280038984456504e-14
+        },
+        "MAGSTAT/subcases/1/circuits/current_A": {
+          "max_abs_reference": 9.659258262890683,
+          "max_abs_error": 0.0,
+          "relative_error": 0.0
+        },
+        "MAGSTAT/subcases/1/circuits/inductance_H": {
+          "max_abs_reference": 0.0019256077750699182,
+          "max_abs_error": 3.0682921481339775e-16,
+          "relative_error": 1.593414914427508e-13
+        },
+        "MAGSTAT/subcases/1/circuits/linkage_Wb_turn": {
+          "max_abs_reference": 0.05188572272068661,
+          "max_abs_error": 2.2898349882893854e-16,
+          "relative_error": 4.413227508877771e-15
+        },
+        "MAGSTAT/subcases/1/circuits/linkage_rate_Wb_per_rad": {
+          "max_abs_reference": 0.28286948950377044,
+          "max_abs_error": 3.4014457916953234e-14,
+          "relative_error": 1.2024788525840588e-13
+        },
+        "MAGSTAT/subcases/1/sources/current_A": {
+          "max_abs_reference": 9.659258262890683,
+          "max_abs_error": 0.0,
+          "relative_error": 0.0
+        },
+        "MAGSTAT/subcases/1/sources/differential_inductance_H": {
+          "status": "unreported (all NaN in both outputs)"
+        },
+        "MAGSTAT/subcases/1/sources/linkage_Wb_turn": {
+          "status": "unreported (all NaN in both outputs)"
+        }
+      },
+      "attributes": {
+        "air_gap_torque_Nm": {
+          "cpu": 4.897365337720938,
+          "candidate": 4.8973653377210375,
+          "relative_error": 2.0312142580056454e-14
+        },
+        "energy_J": {
+          "cpu": 3.00874070929979,
+          "candidate": 3.0087407092997913,
+          "relative_error": 4.427990838267483e-16
+        },
+        "coenergy_J": {
+          "cpu": -2.7181593058316746,
+          "candidate": -2.718159305831676,
+          "relative_error": 4.901359632203581e-16
+        }
+      },
+      "identical_geometry": true,
+      "iterations": 11,
+      "nonlinear_residual": 6.526718415066804e-14,
+      "bh_extrapolated": 0,
+      "max_dataset_relative_error": 1.6696445216431772e-12
+    },
+    {
+      "file": "motor218k-cuda-pcg-mixed-0.mag.vtkhdf",
+      "sha256": "a9bc2ce434a1feca4a6ecf53b53f7a498d4a3cc29abff15e83e9149db4e4567d",
+      "datasets": {
+        "VTKHDF/SUBCASE_1/PointData/A_normal_Wb_per_m": {
+          "max_abs_reference": 0.005875938555310938,
+          "max_abs_error": 6.415874775900221e-15,
+          "relative_error": 1.0918893578458652e-12
+        },
+        "VTKHDF/SUBCASE_1/CellData/B_T": {
+          "max_abs_reference": 2.4639083555848345,
+          "max_abs_error": 1.7621459846850485e-12,
+          "relative_error": 7.151832496898143e-13
+        },
+        "VTKHDF/SUBCASE_1/CellData/H_A_per_m": {
+          "max_abs_reference": 1514919.7364690527,
+          "max_abs_error": 4.525645636022091e-07,
+          "relative_error": 2.987383111510834e-13
+        },
+        "MAGSTAT/subcases/1/probes/B_T": {
+          "max_abs_reference": 1.046530406841837,
+          "max_abs_error": 3.091971123581061e-14,
+          "relative_error": 2.954497168325806e-14
+        },
+        "MAGSTAT/subcases/1/probes/B_local_T": {
+          "max_abs_reference": 1.046530406841837,
+          "max_abs_error": 3.091971123581061e-14,
+          "relative_error": 2.954497168325806e-14
+        },
+        "MAGSTAT/subcases/1/probes/H_A_per_m": {
+          "max_abs_reference": 832802.4367242532,
+          "max_abs_error": 2.459273673593998e-08,
+          "relative_error": 2.9530096997161896e-14
+        },
+        "MAGSTAT/subcases/1/probes/H_local_A_per_m": {
+          "max_abs_reference": 832802.4367242532,
+          "max_abs_error": 2.459273673593998e-08,
+          "relative_error": 2.9530096997161896e-14
+        },
+        "MAGSTAT/subcases/1/circuits/current_A": {
+          "max_abs_reference": 9.659258262890683,
+          "max_abs_error": 0.0,
+          "relative_error": 0.0
+        },
+        "MAGSTAT/subcases/1/circuits/inductance_H": {
+          "max_abs_reference": 0.0019256077750699182,
+          "max_abs_error": 1.9942543710155247e-16,
+          "relative_error": 1.0356493138604584e-13
+        },
+        "MAGSTAT/subcases/1/circuits/linkage_Wb_turn": {
+          "max_abs_reference": 0.05188572272068661,
+          "max_abs_error": 1.700029006457271e-16,
+          "relative_error": 3.2764870899244057e-15
+        },
+        "MAGSTAT/subcases/1/circuits/linkage_rate_Wb_per_rad": {
+          "max_abs_reference": 0.28286948950377044,
+          "max_abs_error": 2.7727820040013285e-14,
+          "relative_error": 9.802336790954506e-14
+        },
+        "MAGSTAT/subcases/1/sources/current_A": {
+          "max_abs_reference": 9.659258262890683,
+          "max_abs_error": 0.0,
+          "relative_error": 0.0
+        },
+        "MAGSTAT/subcases/1/sources/differential_inductance_H": {
+          "status": "unreported (all NaN in both outputs)"
+        },
+        "MAGSTAT/subcases/1/sources/linkage_Wb_turn": {
+          "status": "unreported (all NaN in both outputs)"
+        }
+      },
+      "attributes": {
+        "air_gap_torque_Nm": {
+          "cpu": 4.897365337720938,
+          "candidate": 4.8973653377208555,
+          "relative_error": 1.686633267808259e-14
+        },
+        "energy_J": {
+          "cpu": 3.00874070929979,
+          "candidate": 3.0087407092997998,
+          "relative_error": 3.247193281396154e-15
+        },
+        "coenergy_J": {
+          "cpu": -2.7181593058316746,
+          "candidate": -2.718159305831687,
+          "relative_error": 4.574602323390009e-15
+        }
+      },
+      "identical_geometry": true,
+      "iterations": 11,
+      "nonlinear_residual": 6.519745150394064e-14,
+      "bh_extrapolated": 0,
+      "max_dataset_relative_error": 1.0918893578458652e-12
+    },
+    {
+      "file": "motor218k-cuda-pcg-mixed-8.mag.vtkhdf",
+      "sha256": "c09a7444f55ca3558ec7d7ca53be7033926a496f88da88abe89ec42aa4213cba",
+      "datasets": {
+        "VTKHDF/SUBCASE_1/PointData/A_normal_Wb_per_m": {
+          "max_abs_reference": 0.005875938555310938,
+          "max_abs_error": 2.866543807877875e-14,
+          "relative_error": 4.87844415133811e-12
+        },
+        "VTKHDF/SUBCASE_1/CellData/B_T": {
+          "max_abs_reference": 2.4639083555848345,
+          "max_abs_error": 8.074874102703689e-12,
+          "relative_error": 3.277262356126485e-12
+        },
+        "VTKHDF/SUBCASE_1/CellData/H_A_per_m": {
+          "max_abs_reference": 1514919.7364690527,
+          "max_abs_error": 4.0218583308160305e-07,
+          "relative_error": 2.6548326185188557e-13
+        },
+        "MAGSTAT/subcases/1/probes/B_T": {
+          "max_abs_reference": 1.046530406841837,
+          "max_abs_error": 2.6256774532384952e-14,
+          "relative_error": 2.5089356564059354e-14
+        },
+        "MAGSTAT/subcases/1/probes/B_local_T": {
+          "max_abs_reference": 1.046530406841837,
+          "max_abs_error": 2.6256774532384952e-14,
+          "relative_error": 2.5089356564059354e-14
+        },
+        "MAGSTAT/subcases/1/probes/H_A_per_m": {
+          "max_abs_reference": 832802.4367242532,
+          "max_abs_error": 2.08965502679348e-08,
+          "relative_error": 2.5091845732499693e-14
+        },
+        "MAGSTAT/subcases/1/probes/H_local_A_per_m": {
+          "max_abs_reference": 832802.4367242532,
+          "max_abs_error": 2.08965502679348e-08,
+          "relative_error": 2.5091845732499693e-14
+        },
+        "MAGSTAT/subcases/1/circuits/current_A": {
+          "max_abs_reference": 9.659258262890683,
+          "max_abs_error": 0.0,
+          "relative_error": 0.0
+        },
+        "MAGSTAT/subcases/1/circuits/inductance_H": {
+          "max_abs_reference": 0.0019256077750699182,
+          "max_abs_error": 3.1159970437233397e-16,
+          "relative_error": 1.6181888565599497e-13
+        },
+        "MAGSTAT/subcases/1/circuits/linkage_Wb_turn": {
+          "max_abs_reference": 0.05188572272068661,
+          "max_abs_error": 1.1796119636642288e-16,
+          "relative_error": 2.2734808379067306e-15
+        },
+        "MAGSTAT/subcases/1/circuits/linkage_rate_Wb_per_rad": {
+          "max_abs_reference": 0.28286948950377044,
+          "max_abs_error": 2.4424906541753444e-14,
+          "relative_error": 8.634691067107073e-14
+        },
+        "MAGSTAT/subcases/1/sources/current_A": {
+          "max_abs_reference": 9.659258262890683,
+          "max_abs_error": 0.0,
+          "relative_error": 0.0
+        },
+        "MAGSTAT/subcases/1/sources/differential_inductance_H": {
+          "status": "unreported (all NaN in both outputs)"
+        },
+        "MAGSTAT/subcases/1/sources/linkage_Wb_turn": {
+          "status": "unreported (all NaN in both outputs)"
+        }
+      },
+      "attributes": {
+        "air_gap_torque_Nm": {
+          "cpu": 4.897365337720938,
+          "candidate": 4.897365337720998,
+          "relative_error": 1.21510138648552e-14
+        },
+        "energy_J": {
+          "cpu": 3.00874070929979,
+          "candidate": 3.008740709299793,
+          "relative_error": 1.0331978622624127e-15
+        },
+        "coenergy_J": {
+          "cpu": -2.7181593058316746,
+          "candidate": -2.7181593058316786,
+          "relative_error": 1.4704078896610743e-15
+        }
+      },
+      "identical_geometry": true,
+      "iterations": 11,
+      "nonlinear_residual": 6.526744643903986e-14,
+      "bh_extrapolated": 0,
+      "max_dataset_relative_error": 4.87844415133811e-12
+    },
+    {
+      "file": "motor218k-vulkan-0.mag.vtkhdf",
+      "sha256": "8c677b56fda83591b399237202d9ca70767cc956b615095c5974f82773cedc4c",
+      "datasets": {
+        "VTKHDF/SUBCASE_1/PointData/A_normal_Wb_per_m": {
+          "max_abs_reference": 0.005875938555310938,
+          "max_abs_error": 1.8698584347554004e-14,
+          "relative_error": 3.1822293871084446e-12
+        },
+        "VTKHDF/SUBCASE_1/CellData/B_T": {
+          "max_abs_reference": 2.4639083555848345,
+          "max_abs_error": 5.245470724446477e-12,
+          "relative_error": 2.1289228199404397e-12
+        },
+        "VTKHDF/SUBCASE_1/CellData/H_A_per_m": {
+          "max_abs_reference": 1514919.7364690527,
+          "max_abs_error": 7.348135113716125e-07,
+          "relative_error": 4.850511176811931e-13
+        },
+        "MAGSTAT/subcases/1/probes/B_T": {
+          "max_abs_reference": 1.046530406841837,
+          "max_abs_error": 3.2585045772748344e-14,
+          "relative_error": 3.1136262797257596e-14
+        },
+        "MAGSTAT/subcases/1/probes/B_local_T": {
+          "max_abs_reference": 1.046530406841837,
+          "max_abs_error": 3.2585045772748344e-14,
+          "relative_error": 3.1136262797257596e-14
+        },
+        "MAGSTAT/subcases/1/probes/H_A_per_m": {
+          "max_abs_reference": 832802.4367242532,
+          "max_abs_error": 2.593151293694973e-08,
+          "relative_error": 3.1137652573338755e-14
+        },
+        "MAGSTAT/subcases/1/probes/H_local_A_per_m": {
+          "max_abs_reference": 832802.4367242532,
+          "max_abs_error": 2.593151293694973e-08,
+          "relative_error": 3.1137652573338755e-14
+        },
+        "MAGSTAT/subcases/1/circuits/current_A": {
+          "max_abs_reference": 9.659258262890683,
+          "max_abs_error": 0.0,
+          "relative_error": 0.0
+        },
+        "MAGSTAT/subcases/1/circuits/inductance_H": {
+          "max_abs_reference": 0.0019256077750699182,
+          "max_abs_error": 3.0314292742694704e-16,
+          "relative_error": 1.574271413688803e-13
+        },
+        "MAGSTAT/subcases/1/circuits/linkage_Wb_turn": {
+          "max_abs_reference": 0.05188572272068661,
+          "max_abs_error": 1.0408340855860843e-16,
+          "relative_error": 2.0060125040353505e-15
+        },
+        "MAGSTAT/subcases/1/circuits/linkage_rate_Wb_per_rad": {
+          "max_abs_reference": 0.28286948950377044,
+          "max_abs_error": 1.5654144647214707e-14,
+          "relative_error": 5.534052002100442e-14
+        },
+        "MAGSTAT/subcases/1/sources/current_A": {
+          "max_abs_reference": 9.659258262890683,
+          "max_abs_error": 0.0,
+          "relative_error": 0.0
+        },
+        "MAGSTAT/subcases/1/sources/differential_inductance_H": {
+          "status": "unreported (all NaN in both outputs)"
+        },
+        "MAGSTAT/subcases/1/sources/linkage_Wb_turn": {
+          "status": "unreported (all NaN in both outputs)"
+        }
+      },
+      "attributes": {
+        "air_gap_torque_Nm": {
+          "cpu": 4.897365337720938,
+          "candidate": 4.897365337720773,
+          "relative_error": 3.373266535616518e-14
+        },
+        "energy_J": {
+          "cpu": 3.00874070929979,
+          "candidate": 3.0087407092997807,
+          "relative_error": 3.0995935867872382e-15
+        },
+        "coenergy_J": {
+          "cpu": -2.7181593058316746,
+          "candidate": -2.7181593058316658,
+          "relative_error": 3.2675730881357207e-15
+        }
+      },
+      "identical_geometry": true,
+      "iterations": 11,
+      "nonlinear_residual": 6.524276682618276e-14,
+      "bh_extrapolated": 0,
+      "max_dataset_relative_error": 3.1822293871084446e-12
+    },
+    {
+      "file": "motor218k-vulkan-8.mag.vtkhdf",
+      "sha256": "b425785d3feb956eb362babf6f1913ba372ec421a0998c8bb44e69bf81eaff21",
+      "datasets": {
+        "VTKHDF/SUBCASE_1/PointData/A_normal_Wb_per_m": {
+          "max_abs_reference": 0.005875938555310938,
+          "max_abs_error": 1.968390728190883e-14,
+          "relative_error": 3.34991714032095e-12
+        },
+        "VTKHDF/SUBCASE_1/CellData/B_T": {
+          "max_abs_reference": 2.4639083555848345,
+          "max_abs_error": 5.5213611460658285e-12,
+          "relative_error": 2.2408954998471425e-12
+        },
+        "VTKHDF/SUBCASE_1/CellData/H_A_per_m": {
+          "max_abs_reference": 1514919.7364690527,
+          "max_abs_error": 8.772476576268673e-07,
+          "relative_error": 5.790720369592254e-13
+        },
+        "MAGSTAT/subcases/1/probes/B_T": {
+          "max_abs_reference": 1.046530406841837,
+          "max_abs_error": 2.8158031462055533e-14,
+          "relative_error": 2.690608058587549e-14
+        },
+        "MAGSTAT/subcases/1/probes/B_local_T": {
+          "max_abs_reference": 1.046530406841837,
+          "max_abs_error": 2.8158031462055533e-14,
+          "relative_error": 2.690608058587549e-14
+        },
+        "MAGSTAT/subcases/1/probes/H_A_per_m": {
+          "max_abs_reference": 832802.4367242532,
+          "max_abs_error": 2.240267349407077e-08,
+          "relative_error": 2.6900345755698662e-14
+        },
+        "MAGSTAT/subcases/1/probes/H_local_A_per_m": {
+          "max_abs_reference": 832802.4367242532,
+          "max_abs_error": 2.240267349407077e-08,
+          "relative_error": 2.6900345755698662e-14
+        },
+        "MAGSTAT/subcases/1/circuits/current_A": {
+          "max_abs_reference": 9.659258262890683,
+          "max_abs_error": 0.0,
+          "relative_error": 0.0
+        },
+        "MAGSTAT/subcases/1/circuits/inductance_H": {
+          "max_abs_reference": 0.0019256077750699182,
+          "max_abs_error": 2.905661822261152e-16,
+          "relative_error": 1.5089582935214562e-13
+        },
+        "MAGSTAT/subcases/1/circuits/linkage_Wb_turn": {
+          "max_abs_reference": 0.05188572272068661,
+          "max_abs_error": 1.3877787807814457e-16,
+          "relative_error": 2.6746833387138007e-15
+        },
+        "MAGSTAT/subcases/1/circuits/linkage_rate_Wb_per_rad": {
+          "max_abs_reference": 0.28286948950377044,
+          "max_abs_error": 3.597122599785507e-14,
+          "relative_error": 1.2716545026103142e-13
+        },
+        "MAGSTAT/subcases/1/sources/current_A": {
+          "max_abs_reference": 9.659258262890683,
+          "max_abs_error": 0.0,
+          "relative_error": 0.0
+        },
+        "MAGSTAT/subcases/1/sources/differential_inductance_H": {
+          "status": "unreported (all NaN in both outputs)"
+        },
+        "MAGSTAT/subcases/1/sources/linkage_Wb_turn": {
+          "status": "unreported (all NaN in both outputs)"
+        }
+      },
+      "attributes": {
+        "air_gap_torque_Nm": {
+          "cpu": 4.897365337720938,
+          "candidate": 4.897365337720919,
+          "relative_error": 3.808526733760585e-15
+        },
+        "energy_J": {
+          "cpu": 3.00874070929979,
+          "candidate": 3.0087407092997913,
+          "relative_error": 4.427990838267483e-16
+        },
+        "coenergy_J": {
+          "cpu": -2.7181593058316746,
+          "candidate": -2.718159305831677,
+          "relative_error": 8.168932720339302e-16
+        }
+      },
+      "identical_geometry": true,
+      "iterations": 11,
+      "nonlinear_residual": 6.526380398222203e-14,
+      "bh_extrapolated": 0,
+      "max_dataset_relative_error": 3.34991714032095e-12
+    }
+  ]
+}

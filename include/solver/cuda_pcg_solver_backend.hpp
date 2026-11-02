@@ -2,16 +2,16 @@
 // include/solver/cuda_pcg_solver_backend.hpp
 // CUDA Preconditioned Conjugate Gradient solver backend.
 //
-// Algorithm: PCG with IC0 → ILU0 → Jacobi fallback preconditioning.
-//   - cuSPARSE generic API for sparse matrix-vector products (K*p)
-//   - cuSPARSE SpSV for triangular forward/backward solves (IC0/ILU0)
-//   - cuBLAS for dot products and axpy operations
-//   - Custom CUDA kernels for Jacobi preconditioner apply and axpby
+// Large systems use diagonally equilibrated smoothed-aggregation AMG with
+// fp64 Krylov iterations; small resident systems use colored IC0/ILU0/Jacobi.
+// AMG factors only its small coarse problem on the CPU (at most 256 equations).
 //
-// Memory footprint: O(nnz + n) device memory — the matrix is stored once on
-// the device and no fill-in factorisation is performed.  This makes the PCG
-// backend suitable for very large systems (millions of DOFs) that would exhaust
-// device memory with cuDSS sparse Cholesky.
+// When estimated resident storage exceeds the device budget, a matrix row
+// prefix stays on the GPU and the CPU computes the remaining rows. Only
+// compact inputs/outputs for CPU rows cross PCIe per fine product. Large solves
+// keep Krylov vectors and the AMG hierarchy on the GPU when that working state
+// fits; smaller budgets retain the host hierarchy. Matrix construction and
+// refinement still require host RAM; this does not implement disk-backed solves.
 //
 // Convergence: the PCG solution is refined with compensated double-precision
 // residuals (iterative_refinement.hpp) until the estimated relative error
@@ -45,11 +45,14 @@ public:
     /// @param tolerance             Target relative error of the solution
     ///                               (<=0 selects the default 1e-8).
     /// @param max_iters             Maximum PCG iterations (0 = default: 10000).
+    /// @param device_memory_budget  Bytes for resident storage estimation/partitioning;
+    ///                               0 uses VIBESTRAN_PCG_DEVICE_MEMORY_MIB or free VRAM.
     [[nodiscard]] static std::optional<CudaPCGSolverBackend>
     try_create(double tolerance = 0.0,
-               int max_iters = 0) noexcept;
+               int max_iters = 0,
+               std::size_t device_memory_budget = 0) noexcept;
 
-    /// Solve K*u = F using PCG with IC0 → ILU0 → Jacobi preconditioning.
+    /// Solve K*u = F using AMG PCG for large systems, IC0/ILU0/Jacobi for small ones.
     /// Throws SolverError if the system does not converge or on GPU errors.
     [[nodiscard]] std::vector<double> solve(
         const SparseMatrixBuilder::CsrData& K,

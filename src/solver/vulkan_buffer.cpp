@@ -12,16 +12,18 @@ namespace vibestran {
 
 VulkanBuffer::~VulkanBuffer() {
     if (device_ == VK_NULL_HANDLE) return;
+    if (mapped_) vkUnmapMemory(device_, memory_);
     if (buffer_ != VK_NULL_HANDLE) vkDestroyBuffer(device_, buffer_, nullptr);
     if (memory_ != VK_NULL_HANDLE) vkFreeMemory(device_, memory_, nullptr);
 }
 
 VulkanBuffer::VulkanBuffer(VulkanBuffer&& o) noexcept
-    : buffer_(o.buffer_), memory_(o.memory_), size_(o.size_), device_(o.device_)
+    : buffer_(o.buffer_), memory_(o.memory_), size_(o.size_), device_(o.device_), mapped_(o.mapped_)
 {
     o.buffer_ = VK_NULL_HANDLE;
     o.memory_ = VK_NULL_HANDLE;
     o.device_ = VK_NULL_HANDLE;
+    o.mapped_ = nullptr;
 }
 
 VulkanBuffer& VulkanBuffer::operator=(VulkanBuffer&& o) noexcept {
@@ -97,6 +99,26 @@ VulkanBuffer::create(const VulkanContext& ctx, VkDeviceSize size_bytes) noexcept
 }
 
 // ── submit_and_wait ────────────────────────────────────────────────────────────
+
+std::optional<VulkanBuffer>
+VulkanBuffer::create_host(const VulkanContext& ctx, VkDeviceSize size_bytes) noexcept {
+    auto rb = alloc_raw(ctx, size_bytes,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    if (rb.buffer == VK_NULL_HANDLE)
+        rb = alloc_raw(ctx, size_bytes,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (rb.buffer == VK_NULL_HANDLE) return std::nullopt;
+    VulkanBuffer buf;
+    buf.device_ = ctx.device();
+    buf.buffer_ = rb.buffer;
+    buf.memory_ = rb.memory;
+    buf.size_ = size_bytes;
+    if (vkMapMemory(ctx.device(), rb.memory, 0, size_bytes, 0, &buf.mapped_) != VK_SUCCESS)
+        return std::nullopt;
+    return buf;
+}
 
 void submit_and_wait(const VulkanContext& ctx, VkCommandBuffer cmd) {
     VkFenceCreateInfo fence_ci{};

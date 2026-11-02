@@ -10,30 +10,30 @@
 
 namespace vibestran {
 
-// Defined in vulkan_pcg_full.cpp
-// Returns solution vector u.  Throws SolverError on failure.
-std::vector<double> solve_full_gpu(VulkanContext& ctx, Pipelines& pl,
-                                    const SparseMatrixBuilder::CsrData& K,
-                                    const std::vector<double>& F,
-                                    const VulkanSolverConfig& cfg,
-                                    int& out_iters, double& out_residual);
+std::vector<double> solve_vulkan_amg(VulkanContext& ctx, Pipelines& pl,
+    const SparseMatrixBuilder::CsrData& k, const std::vector<double>& rhs,
+    double tolerance, int max_iterations, int& iterations, RefinementReport& report,
+    std::size_t budget, bool& fully_resident);
 
-// Float64 variant — requires shaderFloat64 device feature.
-// Throws SolverError if the device does not support float64.
-std::vector<double> solve_full_gpu_double(VulkanContext& ctx, Pipelines& pl,
-                                           const SparseMatrixBuilder::CsrData& K,
-                                           const std::vector<double>& F,
-                                           const VulkanSolverConfig& cfg,
-                                           int& out_iters, double& out_residual);
+std::vector<double> solve_vulkan_hybrid_amg(VulkanContext& ctx, Pipelines& pl,
+    const SparseMatrixBuilder::CsrData& k, const std::vector<double>& rhs,
+    std::size_t budget, double tolerance, int max_iterations, int& iterations, RefinementReport& report);
+
+// Matrix storage and descriptors survive all refinement correction solves.
+class VulkanPcgWorkspace {
+public:
+    virtual ~VulkanPcgWorkspace() = default;
+    virtual std::vector<double> solve(const std::vector<double>& rhs,
+        const VulkanSolverConfig& cfg, int& iterations, double& residual) = 0;
+};
+
+std::unique_ptr<VulkanPcgWorkspace> make_full_pcg(VulkanContext& ctx, Pipelines& pl,
+    const SparseMatrixBuilder::CsrData& K, bool use_double);
 
 // Defined in vulkan_pcg_tiled.cpp
 // Returns solution vector u.  Throws SolverError on failure.
-std::vector<double> solve_tiled(VulkanContext& ctx, Pipelines& pl,
-                                 const SparseMatrixBuilder::CsrData& K,
-                                 const std::vector<double>& F,
-                                 const VulkanSolverConfig& cfg,
-                                 uint64_t available_vram_bytes,
-                                 int& out_iters, double& out_residual);
+std::unique_ptr<VulkanPcgWorkspace> make_partitioned_pcg(VulkanContext& ctx, Pipelines& pl,
+    const SparseMatrixBuilder::CsrData& K, bool use_double, std::size_t budget);
 
 } // namespace vibestran
 
