@@ -268,6 +268,10 @@ void write_f06(std::ostream &f06, const Model &model, const Results &results,
       f06 << "Air-gap torque on the part inside the gap, about the plane "
              "normal (Nm): "
           << c.gap_torque << '\n';
+    if (std::isfinite(c.gap_force))
+      f06 << "Air-gap force on the part on the gap's inner side, along "
+          << (results.mesh.axisymmetric ? "the axis" : "the MPERIOD shift") << " (N): "
+          << c.gap_force << '\n';
     for (const auto &s : c.sources) {
       f06 << (s.wire ? "WIRE PATH " : "COIL ") << s.id << " I(A)=" << s.current;
       if (s.closed)
@@ -780,13 +784,17 @@ void write_tables(Hdf5File &h5, hid_t group, const Model &model,
     h5.array(circuits.get(), "current_A", current, shape({nc}));
     h5.array(circuits.get(), "linkage_Wb_turn", linkage, shape({nc}));
     h5.array(circuits.get(), "inductance_H", inductance, shape({nc, nc}));
-    // With an air-gap element: dlambda/d(delta), the back-EMF per unit speed.
+    // With an air-gap element: dlambda/d(delta), the back-EMF per unit speed;
+    // per metre for a strip or tube.
     if (first.linkage_rate.array().isFinite().any()) {
       std::vector<double> rate;
       for (const auto *c : states)
         rate.insert(rate.end(), c->linkage_rate.data(),
                     c->linkage_rate.data() + c->linkage_rate.size());
-      h5.array(circuits.get(), "linkage_rate_Wb_per_rad", rate, shape({nc}));
+      h5.array(circuits.get(),
+               std::isfinite(first.gap_force) ? "linkage_rate_Wb_per_m"
+                                              : "linkage_rate_Wb_per_rad",
+               rate, shape({nc}));
     }
   }
   {
@@ -954,8 +962,19 @@ Status write_hdf5(const std::string &path, const Model &model,
   if (const auto &gap = results.mesh.air_gap) {
     auto group = h5.group(magstat.get(), "air_gap");
     h5.attribute(group.get(), "property", int64_t{gap->property});
+    h5.attribute(group.get(), "shape",
+                 std::string(gap->shape == GapShape::Annulus ? "annulus"
+                             : gap->shape == GapShape::Strip ? "strip"
+                                                             : "tube"));
+    // A strip's sides are lines at these distances from center_m along
+    // across; a tube's, cylinders of these radii.
     h5.attribute(group.get(), "inner_radius_m", gap->inner.radius);
     h5.attribute(group.get(), "outer_radius_m", gap->outer.radius);
+    if (gap->shape != GapShape::Annulus) {
+      h5.attribute(group.get(), "length_m", gap->length);
+      h5.vectors(group.get(), "along", {gap->u});
+      h5.vectors(group.get(), "across", {gap->v});
+    }
     h5.attribute(group.get(), "harmonics", int64_t{gap->harmonics});
     h5.attribute(group.get(), "band_points", int64_t{gap->band_points});
     h5.attribute(group.get(), "band_layers", int64_t{gap->band_points > 0 ? gap->band_layers : 0});
@@ -1077,6 +1096,8 @@ Status write_hdf5(const std::string &path, const Model &model,
       h5.attribute(group.get(), "coenergy_J", c.coenergy);
       if (std::isfinite(c.gap_torque))
         h5.attribute(group.get(), "air_gap_torque_Nm", c.gap_torque);
+      if (std::isfinite(c.gap_force))
+        h5.attribute(group.get(), "air_gap_force_N", c.gap_force);
       write_tables(h5, group.get(), model, subcase, {&c}, false);
       continue;
     }

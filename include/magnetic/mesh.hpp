@@ -32,29 +32,51 @@ struct Face {
   double area{0};
   bool flat{true};
 };
+// The region of an air gap: the annulus between two circles (a machine that
+// turns), the strip between two parallel lines of a MAG2D model that repeats
+// along them, or the tube between two cylinders of a MAGAXI model that
+// repeats along its axis (MPERIOD SHIFT, both).
+enum class GapShape { Annulus, Strip, Tube };
 // One circle of an air gap: boundary grids on a circle about AirGap::center,
 // in increasing angle.
 // In a periodic sector model the circle is the arc of the sector unfolded
 // around the machine: each copy of an arc grid stands for its image in
 // another sector, with the factor sign (-1 in an odd sector of an
 // anti-periodic model).
+// A strip's or tube's side of the gap is a line along AirGap::u through one
+// pitch, unfolded the same way over AirGap::length; its angle is the phase
+// 2 pi s / length of the distance s along u from AirGap::center.
 struct GapCircle {
+  // The circle's radius; a line's distance from AirGap::center along v: in
+  // a tube, its radius.
   double radius{0};
   std::vector<int> nodes;     // mesh node indices
   std::vector<double> angles; // radians in [angles[0], angles[0] + 2 pi)
   std::vector<double> sign;   // potential at angles[k] = sign[k] a[nodes[k]]
 };
-// The air annulus of a PAIRGAP property between a circle of boundary grids
-// on one part of the field mesh and a concentric circle on another, coupled
-// analytically by the air-gap element (air_gap.hpp).
+// The air gap of a PAIRGAP property between a circle (or line) of boundary
+// grids on one part of the field mesh and a concentric circle (parallel
+// line) on another, coupled analytically by the air-gap element
+// (air_gap.hpp). Its inner side is the circle of smaller radius, or the line
+// of smaller distance along v.
 struct AirGap {
   int property{0};
+  GapShape shape{GapShape::Annulus};
   std::vector<int> elements; // PAIRGAP element IDs, not field cells
+  // An annulus's center; a strip's or tube's origin of distances, on the
+  // axis for a tube.
   Vector center{Vector::Zero()};
-  Vector u{Vector::UnitX()}, v{Vector::UnitY()}; // in-plane, u x v = normal
+  // In-plane, u x v = normal. Along a strip or tube u runs along the lines
+  // (a tube's: the symmetry axis) and v across them (a tube's: radially).
+  Vector u{Vector::UnitX()}, v{Vector::UnitY()};
+  // A strip's or tube's period along u: the pitch, or two pitches when the
+  // model is anti-periodic; 0 for an annulus.
+  double length{0};
   GapCircle inner, outer;
   std::vector<int> faces; // boundary faces on either circle
-  double deviation{0};    // largest |distance - radius| / radius of a grid
+  // Largest |distance - radius| / radius of a grid; for a strip, over the
+  // pitch, and for a tube over the larger of the pitch and the radius.
+  double deviation{0};
   double inner_chord{0};  // nearest approach of the inner circle's edges
   int harmonics{0}; // the gap field series' (NHARM); the AGE's energy sums all the circles resolve
   int band_points{0}; // METHOD=BAND: the sliding band's grid; 0 for the AGE
@@ -65,7 +87,9 @@ struct AirGap {
   // in a sector model.
   int band_first{0};
   double image_sign{1};
-  int sectors{1}; // the circles are unfolded from one of this many sectors
+  // The circles are unfolded from one of this many sectors (the lines, from
+  // one of this many pitches).
+  int sectors{1};
 };
 // The two sides of an MPERIOD on the field mesh: each grid of the first
 // side with its image on the second, turned by 2 pi / sectors

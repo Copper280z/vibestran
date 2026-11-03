@@ -89,12 +89,16 @@ struct CaseResults {
   std::vector<Vector> probe_b, probe_h;
   std::vector<ForceResult> forces;
   // With an air-gap element: the torque on the part inside the gap about the
-  // gap's plane normal u x v (N m); NaN without one.
+  // gap's plane normal u x v (N m); NaN without one, or for a strip or tube.
   double gap_torque{std::numeric_limits<double>::quiet_NaN()};
+  // With a strip or tube air-gap element: the force on the part on its inner
+  // side along the gap's u (N, the whole stack's); NaN otherwise.
+  double gap_force{std::numeric_limits<double>::quiet_NaN()};
   // With an air-gap element: each circuit's dlambda/d(delta) at fixed
   // currents (Wb per radian, the back-EMF per unit speed), for the same
-  // rotation as gap_torque, or in a MOTION step about the MOTION axis. It is
-  // dT/di by reciprocity, from the inductance solves. NaN for open circuits.
+  // rotation as gap_torque, or in a MOTION step about the MOTION axis; for a
+  // strip or tube, for the move of gap_force (Wb per m). It is dT/di (dF/di)
+  // by reciprocity, from the inductance solves. NaN for open circuits.
   Eigen::VectorXd linkage_rate;
   // A MOTION subcase keeps one state per position in steps, in order; its
   // own fields then hold only the total Newton iterations, the largest

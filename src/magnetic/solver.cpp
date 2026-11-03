@@ -1398,17 +1398,25 @@ Result<CaseResults> solve_state(const Model &model, const Setup &setup,
   if (auto *e = std::get_if<Error>(&force))
     return *e;
   output.forces = std::get<std::vector<ForceResult>>(std::move(force));
-  if (mesh.air_gap)
-    output.gap_torque = mesh.depth * (mesh.air_gap->band_points > 0
-                                          ? band_torque(*mesh.air_gap, eq.a)
-                                          : air_gap_torque(*mesh.air_gap, eq.a));
+  if (mesh.air_gap) {
+    const double gap_load = mesh.depth * (mesh.air_gap->band_points > 0
+                                              ? band_torque(*mesh.air_gap, eq.a)
+                                              : air_gap_torque(*mesh.air_gap, eq.a));
+    (mesh.air_gap->shape == GapShape::Annulus ? output.gap_torque : output.gap_force) =
+        gap_load;
+  }
   if (mesh.period) {
     // A sector stands for the whole machine: its cells' energy, and each
     // source's linkage, are one sector's share. A source is in series with
     // its images in the other sectors, which carry its current times the
     // period's sign and link the same flux. The gap torque and the linkage
-    // rates come from the unfolded gap, the whole machine's already.
+    // rates come from the unfolded gap, the whole machine's already. A
+    // strip's or tube's unfolded lines are one or two pitches.
     const double n = mesh.period->sectors;
+    if (mesh.air_gap && mesh.air_gap->shape != GapShape::Annulus) {
+      output.gap_force *= n / mesh.air_gap->sectors;
+      output.linkage_rate *= n / mesh.air_gap->sectors;
+    }
     output.energy *= n;
     output.coenergy *= n;
     for (auto &source : output.sources)
@@ -1544,7 +1552,35 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
                                  mesh.depth)
                    : "first-order edge elements, tree gauge");
   solution.add("Field cells", std::to_string(mesh.cells.size()));
-  if (mesh.air_gap) {
+  if (mesh.air_gap && mesh.air_gap->shape != GapShape::Annulus) {
+    const auto &g = *mesh.air_gap;
+    const bool tube = g.shape == GapShape::Tube;
+    const int finer = std::max(own_harmonics(g.inner), own_harmonics(g.outer));
+    solution.add(
+        "Air gap",
+        std::format("PAIRGAP {}, air-gap element (AGE) in place of its {} elements: "
+                    "{}, {} + {} grids over a {:.6g} m period, {} coupled harmonics, "
+                    "{} on the finer side{}, largest deviation {:.1e} of the {}",
+                    g.property, g.elements.size(),
+                    tube ? std::format("the tube from radius {:.6g} to {:.6g} m about "
+                                       "the axis",
+                                       g.inner.radius, g.outer.radius)
+                         : std::format("the strip between two lines {:.6g} m apart "
+                                       "along ({:.6g}, {:.6g}, {:.6g})",
+                                       g.outer.radius - g.inner.radius, g.u.x(), g.u.y(),
+                                       g.u.z()),
+                    g.inner.nodes.size(), g.outer.nodes.size(), g.length,
+                    coupled_harmonics(g), finer,
+                    g.harmonics < finer ? std::format(", the gap field's to {}", g.harmonics)
+                                        : "",
+                    g.deviation, tube ? "larger of the pitch and the radius" : "pitch"));
+    if (g.sectors > 1)
+      solution.add("Air gap",
+                   std::format("the pitch's lines ({} + {} grids) continued over two "
+                               "pitches, changing sign in the second: even harmonics "
+                               "of the period vanish",
+                               g.inner.nodes.size() / 2 + 1, g.outer.nodes.size() / 2 + 1));
+  } else if (mesh.air_gap) {
     const auto &g = *mesh.air_gap;
     // Round-off in the fitted center prints as zero.
     const auto shown = [&g](double x) {
@@ -1612,7 +1648,7 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
     solution.add(
         "Periodic",
         std::format("MPERIOD {}: {} ({} grid pairs{}). Energy, coenergy, linkage, "
-                    "inductance, back-EMF and air-gap torque are the whole "
+                    "inductance, back-EMF and air-gap {} are the whole "
                     "machine's: {} times the {}'s, its sources in series with their "
                     "images. Fields, probes and MFORCE are the modeled {}'s",
                     period->id, kind, period->pairs.size(),
@@ -1620,7 +1656,8 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
                         ? std::string()
                         : std::format(", {} on the axis{}", period->axial.size(),
                                       period->anti ? " held at A = 0" : ""),
-                    period->sectors, part, part));
+                    period->translation ? "force" : "torque", period->sectors, part,
+                    part));
   }
   for (const auto &[pid, reason] : model.meshed_air_gaps)
     solution.add("Air gap",

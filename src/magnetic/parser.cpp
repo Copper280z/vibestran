@@ -943,13 +943,17 @@ Status validate(const Model &m) {
     return Error{"MAGSTAT requires at least one subcase"};
   // Periodic sectors and NORMAL faces are planar; say so before anything
   // else about a 3D deck that uses them.
-  // The tubular air gap and motion are not built yet.
+  // Motion along the axis is not built yet.
   if (m.options.axisymmetric) {
     const auto missing = [](std::string_view what) {
       return Error{std::format("{} is not available for MAGAXI models yet", what)};
     };
-    if (!m.air_gaps.empty() && m.meshed_air_gaps.size() != m.air_gaps.size())
-      return missing(std::format("PAIRGAP {} (AGE or BAND)", m.air_gaps.begin()->first));
+    if (!m.air_gaps.empty() && (!m.period || m.period->shift == 0))
+      return Error{std::format(
+          "PAIRGAP {} in a MAGAXI model is a tube along the axis, which the "
+          "air-gap element solves only in a model that repeats along it: it needs "
+          "MPERIOD with SHIFT. METHOD=MESH solves the gap as air",
+          m.air_gaps.begin()->first)};
     if (!m.motions.empty())
       return missing(std::format("MOTION {}", m.motions.begin()->first));
     if (!m.drives.empty())
@@ -1359,13 +1363,15 @@ Status validate(const Model &m) {
       return Error{std::format("MPERIOD {}: the z axis of CID {} must be parallel "
                                "to the MAG2D plane normal, the sector axis",
                                period->id, period->coordinates)};
-    // The air gaps that slide along a line are not built yet.
-    if (translation && m.air_gaps.size() != m.meshed_air_gaps.size())
-      return Error{std::format(
-          "MPERIOD {} with SHIFT: PAIRGAP {} (AGE or BAND) is not available in "
-          "a model that repeats along a line yet; METHOD=MESH solves the gap as "
-          "air",
-          period->id, m.air_gaps.begin()->first)};
+    // The sliding band along a line is not built yet.
+    for (const auto &[id, gap] : m.air_gaps)
+      if (translation &&
+          m.options.air_gap_method.value_or(gap.method) == AirGapMethod::Band)
+        return Error{std::format(
+            "MPERIOD {} with SHIFT: the sliding band (BAND) of PAIRGAP {} is not "
+            "available in a model that repeats along a line yet; METHOD=AGE "
+            "solves the gap exactly, METHOD=MESH as air",
+            period->id, id)};
     if (translation && !m.motions.empty())
       return Error{std::format("MPERIOD {} with SHIFT: MOTION {} is not available "
                                "in a model that repeats along a line yet",

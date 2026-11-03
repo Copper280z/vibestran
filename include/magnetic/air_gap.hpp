@@ -1,7 +1,9 @@
 #pragma once
 // Air-gap element (AGE) for planar MAGSTAT: the elements of a PAIRGAP
 // property are replaced by the exact Laplace solution in the air annulus
-// that matches the piecewise-linear potential on both of its circles.
+// that matches the piecewise-linear potential on both of its circles; or,
+// in a model that repeats along a line (MPERIOD SHIFT), in the strip
+// (MAG2D) or tube (MAGAXI) between two lines along it.
 #include "magnetic/mesh.hpp"
 
 namespace vibestran::magnetic {
@@ -12,7 +14,10 @@ inline constexpr double kAirGapTolerance = 1e-6;
 // The air gap of PAIRGAP property pid, from its elements (the field mesh
 // excludes them). They must form one annulus between two meshed parts: two
 // closed boundaries, each on a circle and shared with field cells, about a
-// common center. The error names the grids, elements and radii that fail.
+// common center. In a model that repeats along a line they must form one
+// pitch of a strip or tube: two boundaries from one periodic side to the
+// other, each a line along the shift (a tube's: at one radius). The error
+// names the grids, elements and radii that fail.
 [[nodiscard]] Result<AirGap> make_air_gap(const Mesh &mesh, const Model &model,
                                           int pid);
 
@@ -29,13 +34,24 @@ inline constexpr double kAirGapTolerance = 1e-6;
 [[nodiscard]] int coupled_harmonics(const AirGap &gap);
 
 // Stiffness per unit depth over [inner nodes, outer nodes]: (1/2) a^T K a is
-// the energy per unit depth of the annulus field for those nodal potentials,
+// the energy per unit depth of the annulus field for those nodal potentials
+// (a strip's per unit depth, a tube's in all, over its length),
 // each the circle's sign times its grid's potential: each circle's self
 // terms to its own_harmonics and the coupling to coupled_harmonics, whatever
 // NHARM. In a sector model that is the whole machine's gap.
 [[nodiscard]] Eigen::MatrixXd air_gap_stiffness(const AirGap &gap);
 
-// Whether x (in the plane) lies in the annulus.
+// The energy of harmonic m (each of its cos and sin parts, m >= 1; the mean
+// for m = 0) of the traces, alpha on the inner side and beta on the outer:
+// (1/2) [alpha beta] [inner mutual; mutual outer] [alpha beta]^T per unit
+// depth (a tube's in all, over its length). An annulus's and a strip's are
+// symmetric, inner = outer; a tube's are not.
+struct HarmonicStiffness {
+  double inner{0}, outer{0}, mutual{0};
+};
+[[nodiscard]] HarmonicStiffness harmonic_stiffness(const AirGap &gap, int m);
+
+// Whether x (in the plane) lies in the annulus (strip, tube).
 [[nodiscard]] bool in_air_gap(const AirGap &gap, const Vector &x);
 
 // The annulus field of one state, the nodal potential a of the planar mesh:
@@ -47,7 +63,7 @@ inline constexpr double kAirGapTolerance = 1e-6;
 class AirGapSeries {
 public:
   AirGapSeries(const AirGap &gap, const Eigen::VectorXd &a);
-  // B at x in the annulus.
+  // B at x in the annulus (strip, tube).
   [[nodiscard]] Vector field(const Vector &x) const;
   // The potential A at x in the annulus, the series the element solves: on
   // the circles it is the harmonics of the nodal trace, not the trace
@@ -55,8 +71,11 @@ public:
   [[nodiscard]] double potential(const Vector &x) const;
 
 private:
+  // A, its derivatives across (radially) and along the gap (in arc length
+  // around an annulus), and the directions they are taken in.
   struct Point {
-    double a{0}, da_dr{0}, da_dtheta{0}, r{0}, theta{0};
+    double a{0}, across{0}, along{0}, r{0};
+    Vector e_across{Vector::Zero()}, e_along{Vector::Zero()};
   };
   [[nodiscard]] Point evaluate(const Vector &x) const;
   const AirGap *gap_;
@@ -68,7 +87,9 @@ private:
 // u x v: -dW/d(delta) for a rigid rotation delta of the inner part with its
 // nodal potentials held, i.e. of the inner circle's harmonics. The part
 // outside the gap takes the opposite torque. It equals the Maxwell stress
-// torque on any circle in the annulus.
+// torque on any circle in the annulus. For a strip or tube it is the force
+// along u on the inner part, per unit depth (a tube's in all), for a move
+// delta along u, over the gap's length: the pitch, or two.
 [[nodiscard]] double air_gap_torque(const AirGap &gap, const Eigen::VectorXd &a);
 // The gradient of air_gap_torque with respect to the nodal potentials a
 // (zero off the circles). The torque is bilinear, so gradient . a is twice

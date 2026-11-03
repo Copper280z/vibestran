@@ -73,7 +73,7 @@ in the deck, overriding the cards ([Air gap](#air-gap-pairgap)).
 | `CTRIA3` / `CQUAD4` | `EID,PID,G1,...` (three/four corners, planar mode only) |
 | `MAG2D` | `CID,DEPTH` (one card activates planar mode; CID=0 uses basic z) |
 | `PMAG2D` | `PID,MID,CID,AXIS` (planar magnetic property; orientation as PMAG) |
-| `PAIRGAP` | `PID,METHOD,NHARM,NBAND,NLAYER` (planar air-gap property; METHOD `AGE`, `BAND` or `MESH`; see [Air gap](#air-gap-pairgap)) |
+| `PAIRGAP` | `PID,METHOD,NHARM,NBAND,NLAYER` (planar air-gap property; METHOD `AGE`, `BAND` or `MESH`; see [Air gap](#air-gap-pairgap), and [Gaps along a line](#gaps-along-a-line-strip-and-tube) for MPERIOD SHIFT models) |
 | `MOTION` | `ID,ESET,CID,ROTATE,START,STEP,COUNT` + `,SPEED` (planar rotation of ESET through the air gap, degrees; SPEED in rpm; see [Motion](#motion-motion)) |
 | `DRIVE` | `ID,WAVE,POLES,IPEAK,GAMMA,THETA0` + `,C1,C2,...` (phase currents from the rotor position; WAVE `SINE` or `SIX`; see [Phase currents](#phase-currents-drive)) |
 | `COIL2D` | `ID,ESET,SIGNED_TURNS` (one planar winding region; ID unique) |
@@ -436,9 +436,13 @@ tangential uniform field is not axisymmetric. On the axis, where A_φ / r is
   surface of revolution closes, and a BODY surface closes there by itself.
 - **Periodicity.** A stack that repeats along the axis is one pitch with
   `MPERIOD ... SHIFT` (see [Models that repeat along a line](#models-that-repeat-along-a-line-mperiod-shift)).
-- **Not yet available** with MAGAXI: the tubular air gap (`PAIRGAP` AGE and
-  BAND; METHOD=MESH works, as ordinary air), `MOTION` and `DRIVE`. They are
-  the next steps toward tubular linear motors.
+- **Air gap.** A tubular gap is solved exactly by the air-gap element in a
+  model that repeats along the axis (`PAIRGAP` with `MPERIOD ... SHIFT`; see
+  [Gaps along a line](#gaps-along-a-line-strip-and-tube)). Without SHIFT a
+  MAGAXI PAIRGAP is an error unless METHOD=MESH solves it as air.
+- **Not yet available** with MAGAXI: the sliding band (`PAIRGAP` BAND),
+  `MOTION` and `DRIVE`. They are the next steps toward tubular linear
+  motors.
 
 HDF5 `/MAGSTAT` carries `axisymmetric = 1` (`dimension` is 2, `depth_m` 1),
 and the planar blocks' nodal potential is A_φ.
@@ -467,7 +471,10 @@ remanence, no B–H table). Under the AGE the gap elements are not field cells,
 so a COIL2D, MFORCE BODY or BFIELD ESET may not contain them and an FSET may
 not name them; under MESH they are ordinary air elements. Keep such sets off
 the gap if the deck is to run both ways. `PARAM,AIRGAP,AGE|BAND|MESH` overrides
-METHOD on every PAIRGAP in the deck. PAIRGAP requires MAG2D.
+METHOD on every PAIRGAP in the deck. PAIRGAP requires MAG2D or MAGAXI; a
+MAGAXI gap, and any gap of a model that repeats along a line, is a strip or
+tube (see [Gaps along a line](#gaps-along-a-line-strip-and-tube)), and the
+rest of this section describes the annulus.
 
 **METHOD=MESH** is resolved when the deck is read. The PID becomes an
 ordinary property of a new MUR=1 material, exactly what the deck would say
@@ -685,6 +692,99 @@ not touch them; the AGE gives the rotor torque instead. A model has one AGE
 gap. 3D models mesh their air gap with ordinary air elements; PAIRGAP is
 planar only.
 
+### Gaps along a line: strip and tube
+
+A model that repeats along a line (`MPERIOD ... SHIFT`) has no annulus: its
+gap runs along the shift. In MAG2D it is a **strip** between two lines
+parallel to the shift, the gap of a flat linear machine; in MAGAXI a
+**tube** between two cylinders about the axis, the gap of a tubular one.
+`PAIRGAP` with METHOD=AGE solves either exactly, by an air-gap element that
+is the Laplace field of the strip or tube matching the potential on both of
+its sides. METHOD=MESH solves it as air, as for an annulus, and is the
+cross-check. The sliding band (BAND) is not available along a line yet, and
+MAGAXI has no gap other than the tube: a MAGAXI PAIRGAP without SHIFT is an
+error, unless METHOD=MESH.
+
+```text
+MAGAXI,0
+MPERIOD,1,ANTI,31,32,0,4,0.02  $ one anti-periodic pitch of four, along z
+PAIRGAP,9                      $ the gap's elements: r = 6.75 to 7.75 mm, the pitch long
+```
+
+The gap's elements fill one pitch of the gap, as in a sector model they fill
+one sector of the annulus. The FSETs of the periodic sides hold field faces
+only, so they leave out the gap's elements; the gap continues across the
+sides by itself. The region is validated, and each failure is an error
+naming the PAIRGAP and the grid involved:
+
+1. As for an annulus, every boundary edge of the gap's elements off the
+   periodic sides is an edge of a field element, and the boundary does not
+   meet itself.
+2. That boundary is exactly two chains, each from a grid of the first
+   periodic side to its image on the second: one pitch of a line on each of
+   two parts.
+3. Each chain is a line along the shift: every grid within 1e-6 of the
+   pitch of the chain's mean distance across it (a tube's: of its mean
+   radius, within 1e-6 of the larger of the pitch and the radius).
+4. The sides are apart, and a tube's inner side is off the axis.
+5. Each chain advances along the shift at every grid, through exactly one
+   pitch; NHARM, when given, is at most half the finer side's grid count.
+
+**How it works.** As around an annulus, each side's piecewise-linear trace
+is expanded in a Fourier series, here over the gap's period Λ along the
+shift: the pitch, or two pitches when the model is anti-periodic (the pitch's
+trace continued with the opposite sign, so only odd harmonics remain). With
+κ = 2πn/Λ:
+
+- **Strip.** A strip of width g and period Λ maps conformally onto an
+  annulus with ln(r₂/r₁) = 2πg/Λ (and the annulus onto it), so its energy per
+  unit depth is the annulus's with that substitution: the mean term
+  Λ (α₀ − β₀)² / (2μ₀ g), and for each harmonic coth(κg) self terms and a
+  1/sinh(κg) coupling.
+- **Tube.** A_φ = a I₁(κr) + b K₁(κr) for harmonic n, and a r + b/r for the
+  mean, which holds a uniform axial field exactly (c/r carries none). The
+  energy of each harmonic, in all, over Λ, is
+  (πΛ/μ₀) [x₁P₁α² + x₂P₂β² − 2αβ] / (2E), with x = κr at the inner and outer
+  radius, E = I₁(x₂)K₁(x₁) − I₁(x₁)K₁(x₂), P₁ = I₁(x₂)K₀(x₁) + K₁(x₂)I₀(x₁)
+  and P₂ = K₁(x₁)I₀(x₂) + I₁(x₁)K₀(x₂). It is evaluated with exponentially
+  scaled Bessel functions, in which E, P₁ and P₂ share a factor e^(x₂ − x₁)
+  that cancels, so no harmonic overflows. The mean term's energy is
+  2πΛ (β₀r₂ − α₀r₁)² / (μ₀ (r₂² − r₁²)).
+
+A shift of the inner part by δ along the gap turns each harmonic's
+(cos, sin) pair by κδ, as a turn by φ turns an annulus's by nφ, and only the
+coupling depends on it.
+
+**Results.** The F06 `Air gap` row describes the strip (its width and
+direction) or tube (its radii), the grid counts over the period, and the
+coupled harmonics; an anti-periodic model adds that the pitch's lines are
+continued over two pitches. Each subcase reports the **air-gap force**: the
+force along the shift (a tube's: along the axis) on the part on the gap's
+inner side, the one nearer the axis in a tube and at smaller distance across
+the gap (along the plane normal crossed with the shift) in a strip. It is
+the whole machine's, SECTORS pitches, like the energy (`Air-gap force on
+the part on the gap's inner side` in the F06, `air_gap_force_N` in the HDF5
+subcase), and closed-form in the harmonics: −dW/dδ for a rigid move of the
+inner part. With closed circuits the same solve gives each circuit's
+**dλ/dδ** at fixed current, the back-EMF per unit speed in V per m/s
+(`linkage_rate_Wb_per_m`), by reciprocity with the force. Probes in the gap
+and drawn gap cells use the element's own field, as for an annulus. MFORCE
+surfaces may not touch the gap's sides; the air-gap force is the mover's.
+
+**What it guarantees.** Unit tests in `tests/unit/test_line_gap.cpp`, on
+the tubular stack of [Models that repeat along a line](#models-that-repeat-along-a-line-mperiod-shift)
+(magnets, a tube, a 1 mm gap, three-phase coils at 3 A, an iron sleeve) and
+the flat stack of the same section (MAG2D):
+
+| Comparison | Result |
+|---|---|
+| Energy of (1/2) aᵀKa against the volume integral of B²/(2μ₀) of the element's own field, for arbitrary traces on unequal grids | 1e-9 (quadrature) |
+| Traces of an exact field (I₁ and K₁ harmonics in a tube, cosh and sinh in a strip) | Potential, field and energy converge at O(h²) |
+| Tube coefficients far from the axis, and across a gap many wavelengths thick | The strip's per unit circumference, error falling as gap/radius; each side's lone-cylinder field (x K₀/K₁ and x I₀/I₁) to 1e-12, coupling below 1e-100 |
+| AGE against the gap meshed as air, refined with the rest of the mesh | Differences fall at O(h²): tube coenergy 1.5e-4, 3.8e-5; linkage 9.3e-5, 2.3e-5; force 7.2e-4, 1.7e-4 (48 and 96 rows a pitch). Strip coenergy 3.6e-5, 9.3e-6; linkage 8.3e-5, 2.1e-5; force 2.2e-4, 5.5e-5 |
+| The mover moved one row (the gap's elements sheared) | The stack whose magnets start a row later: energy, linkage and force 1e-10 |
+| Air-gap force and dλ/dδ | Central differences of the coenergy and linkage as the mover moves: 1e-6 |
+
 ### Motion (MOTION)
 
 A planar model with an AGE air gap can turn its rotor through a sweep of
@@ -708,9 +808,10 @@ MOTION,ID,ESET,CID,TYPE,START,STEP,COUNT
 **A reserved type.** `TRANSLATE` is part of the card so decks keep one
 layout when linear motion arrives, but it is an error until it can take
 effect. A value that is accepted but changes nothing would leave a deck that
-reads as solved but was not. `TRANSLATE` needs a different air-gap element:
-the AGE is the exact field of an annulus, and a gap that slides in a
-straight line needs the field of a periodic strip.
+reads as solved but was not. A gap that slides in a straight line needs the
+field of a periodic strip or tube, which the air-gap element now solves for
+a static deck (see [Gaps along a line](#gaps-along-a-line-strip-and-tube));
+moving the mover along it is the next step.
 
 **What moves.** Every grid of a moving element turns rigidly about the axis.
 Everything defined on the moving elements turns with them: magnetization
@@ -1277,9 +1378,10 @@ MPERIOD,1,ANTI,1,2,0,6,.02    $ one 20 mm pole pitch standing for six
   ANTI, and the `Periodic` row (`anti-periodic pitch of 6 along the z axis of
   CID 0, 0.02 long`). HDF5 `MAGSTAT/periodic` gives `shift_m` instead of
   `sector_angle_deg`, `origin_m` and `axis`.
-- **Not yet with SHIFT**: the air-gap element and band (`PAIRGAP` AGE or
-  BAND; METHOD=MESH works) and MOTION. A gap that slides along a line needs
-  the strip or tubular air-gap element.
+- **Air gap.** `PAIRGAP` AGE solves the strip (MAG2D) or tube (MAGAXI)
+  between the moving and fixed parts exactly; see
+  [Gaps along a line](#gaps-along-a-line-strip-and-tube).
+- **Not yet with SHIFT**: the sliding band (`PAIRGAP` BAND) and MOTION.
 
 **What a pitch stands for.** The pitch model is a machine of SECTORS
 pitches whose ends join: SECTORS copies of the pitch's mesh, each moved by
@@ -1513,13 +1615,19 @@ solving. The file has two top-level groups:
     polarity) with `member_offsets`.
   - `forces/`: `id`, `body`, `cid`. `probes/`: `id`, `cd`, `position_m`.
   - `air_gap/` (planar models with a PAIRGAP solved by the AGE or BAND):
-    attributes `property`, `inner_radius_m`, `outer_radius_m`, `harmonics`
+    attributes `property`, `shape` (`annulus`, `strip` or `tube`),
+    `inner_radius_m`, `outer_radius_m` (a strip's: its sides' distances
+    from `center_m` along `across`), `harmonics`
     (NHARM, the reported field's),
-    `band_points` and `band_layers` (0 for the AGE), `radial_deviation`;
-    `center_m`; `sectors` (1, or MPERIOD's SECTORS); and `inner_grids`,
+    `band_points` and `band_layers` (0 for the AGE), `radial_deviation`
+    (a strip's or tube's sides' deviation from a line, over the pitch);
+    `center_m`; `sectors` (1, or MPERIOD's SECTORS; for a strip or tube the
+    pitches its lines are unfolded over, 1 or 2 for ANTI); for a strip or
+    tube `length_m`, the period of the unfolded lines, and the unit vectors
+    `along` (the shift; a tube's axis) and `across`; and `inner_grids`,
     `outer_grids`, the grid IDs on each circle in increasing angle (in a
-    sector model, each arc grid once, without the last, which is the image
-    of the first).
+    sector or pitch model, each grid once, without the last, which is the
+    image of the first).
   - `periodic/` (with MPERIOD): attributes `id`, `type` (`PERIODIC` or
     `ANTI`), `sectors`, and `sector_angle_deg` with `origin_m` and `axis`
     for a sector or `shift_m` for a pitch; and
@@ -1528,14 +1636,16 @@ solving. The file has two top-level groups:
     torque in the subcase groups are the whole machine's.
   - `subcase_ids`, and `subcases/<ID>/` per subcase, with attributes `id`,
     `iterations`, `residual`, `energy_J`, `coenergy_J`, `bh_extrapolated`,
-    and `air_gap_torque_Nm` with an AGE or BAND gap.
+    and `air_gap_torque_Nm` with an AGE or BAND gap (`air_gap_force_N`
+    with a strip or tube).
     Its `sources/`, `circuits/`, `forces/` and `probes/` groups line up row
     for row with the definition tables:
     - `sources/current_A`, `linkage_Wb_turn`, `differential_inductance_H`
       (square, source order);
     - `circuits/current_A`, `linkage_Wb_turn`, `inductance_H` (square,
       circuit order), and with an AGE gap `linkage_rate_Wb_per_rad`, each
-      circuit's dλ/dφ at fixed current (NaN for open circuits);
+      circuit's dλ/dφ at fixed current (NaN for open circuits), or for a
+      strip or tube `linkage_rate_Wb_per_m`, dλ/dδ;
     - `forces/force_N`, `torque_Nm`, `force_local_N`, `torque_local_Nm`, and
       per connected piece `piece_force_N`, `piece_torque_Nm` with
       `piece_offsets`;
