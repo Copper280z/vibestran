@@ -1320,6 +1320,66 @@ These checks show that the AGE torque, the linkages and the dq post-processing
 are consistent with each other. They are not a validation against an
 independent solver or a test bench; the dimensions and steel are illustrative.
 
+### Worked example: a tubular linear motor
+
+`tools/magnetic_tubular_example.py` is the linear counterpart: a tubular
+motor as one pole pitch of the endless stack, from gmsh to plots and an
+animation. The design is the roadmap's reference motor:
+
+- 12 mm diameter, 20 mm long N35 magnets (1.2 T, μr 1.05), alternating along
+  the axis ([NS][SN][NS]), so the pole pitch τ is 20 mm;
+- a 0.75 mm aluminium tube, a 1 mm air gap;
+- 6.67 mm coils of 88 turns (24 AWG) to a 25 mm OD, in the sequence A, −C,
+  B, −A, C, −B;
+- 1 mm steel teeth between the coils and a 1.5 mm steel sleeve around them,
+  with the motor example's steel table.
+
+The parameters are at the top of the script. The deck is MAGAXI with
+`MPERIOD ... ANTI ... SHIFT` over the pitch, standing for three pitches
+(`PITCHES`, nine coils; an endless stack has no ends, so end effects are not
+modelled). Its gap is `PAIRGAP` (the tube air-gap element), the mover (the
+magnets and the tube) slides under `MOTION ... TRANSLATE`, and `DRIVE` sets
+the phase currents with the pole pitch in field 4. Mid-gap MPROBEs run along
+the pitch.
+
+```sh
+.venv/bin/python tools/magnetic_tubular_example.py /tmp/tubular
+```
+
+There are three subcases:
+
+1. Rated: 15 A peak on q (γ = 0), over one electrical period (two pole
+   pitches, 40 mm) in 96 positions. The field is written at every other
+   position for the animation.
+2. No load: `DRIVE` at 0 A, for THETA0 AUTO's d axis, the back-EMF at 1 m/s
+   and the incremental L_d, L_q.
+3. Cogging: 40 positions over one cogging period, the tooth pitch τ/3.
+
+The script writes `tubular_field.png` (|B| and flux lines at rated current,
+the pitch tiled into its anti-periodic copies and mirrored about the axis),
+`tubular_curves.png` (thrust, cogging, no-load back-EMF and the mid-gap flux
+density) and `tubular_motion.gif` (the rated sweep as a looping animation in
+the magnets' frame, the coils sliding past). `--no-gif` skips the animation
+and `--reuse` replots an earlier run. The mesh has 3828 triangles, 807 of
+them the gap's, which the air-gap element replaces. The solve takes 4.4 s
+for 248 positions (each DRIVE's eight-position AUTO pre-sweep included), and
+the whole script about 20 s.
+
+The results are self-consistent where the theory gives an exact relation:
+
+| Check | Result |
+|---|---|
+| Rated thrust against (3/2)(π/τ)(λ_d i_q − λ_q i_d) from the mean dq quantities (exact for the mean over a period: the stored energy returns to its start) | 115.7082 N from the air-gap element; 115.7084 N from the dq relation |
+| No-load back-EMF constant against (π/τ) λ_pm | 5.1642, 5.1645 and 5.1645 V·s/m against 5.1655 (AUTO's eight samples alias the 7th and 9th harmonics) |
+| Phase balance | THETA0 AUTO's lags are 120.35° and 240.18° |
+| Cogging from the no-load sweep (96 positions per electrical period) against the cogging sweep (40 per tooth pitch) | 31.44 and 31.45 N peak-to-peak; the cogging sweep's mean is −0.002 N |
+
+The thrust ripple at rated current (27.5 %) is almost all cogging: the
+teeth pull toward the magnet joints, three at once in each pitch. These are
+consistency checks, like the rotary example's; the motor's static thrust
+and back-EMF were compared with FEMM in `Magnetic_Validation` (the
+`tubular_pitch` and `tubular_motion` cases, without the teeth).
+
 ### Sector models (MPERIOD) and flux-normal faces (MBC NORMAL)
 
 Most machines repeat around the shaft. In a 12-slot, 14-pole motor, turning
