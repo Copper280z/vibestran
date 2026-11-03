@@ -1494,20 +1494,20 @@ Result<DriveSummary> auto_alignment(const Model &model, const Setup &base,
   std::vector<std::vector<double>> linkages;
   Eigen::VectorXd previous;
   iterations = 0;
-  for (double angle : alignment_positions(drive)) {
+  for (double angle : alignment_positions(drive, motion)) {
     const Model moved = moved_model(model, motion, part, angle);
     std::optional<Setup> own;
     if (angle != 0) {
       auto built = prepare(moved, base.normal_boundary, &base);
       if (auto *e = std::get_if<Error>(&built))
-        return Error{std::format("at {:.6g} degrees: {}", angle, e->message)};
+        return Error{std::format("at {:.6g} {}: {}", angle, motion.unit(), e->message)};
       own = std::get<Setup>(std::move(built));
     }
     bool continued = false;
     auto state = solve_state(moved, own ? *own : base, subcase, tangent,
                              previous.size() ? &previous : nullptr, continued);
     if (auto *e = std::get_if<Error>(&state))
-      return Error{std::format("at {:.6g} degrees: {}", angle, e->message)};
+      return Error{std::format("at {:.6g} {}: {}", angle, motion.unit(), e->message)};
     const auto &solved = std::get<CaseResults>(state);
     iterations += solved.iterations;
     previous = solved.potential;
@@ -1516,7 +1516,7 @@ Result<DriveSummary> auto_alignment(const Model &model, const Setup &base,
                    [&](int c) { return solved.circuits[c].linkage; });
     linkages.push_back(std::move(row));
   }
-  auto aligned = align_drive(drive, linkages);
+  auto aligned = align_drive(drive, motion, linkages);
   if (auto *e = std::get_if<Error>(&aligned))
     return *e;
   const auto &a = std::get<Alignment>(aligned);
@@ -1714,18 +1714,23 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
     if (!subcase.drive || !drives_used.insert(subcase.drive).second)
       continue;
     const auto &drive = model.drives.at(subcase.drive);
+    const auto &motion = model.motions.at(subcase.motion);
     std::string phases;
     for (int c : drive.phases)
       phases += (phases.empty() ? "" : ", ") + std::to_string(c);
     solution.add("Drive",
-                 std::format("DRIVE {}: {} currents, {} pole {}, {:.6g} A peak, "
+                 std::format("DRIVE {}: {} currents, {}, {:.6g} A peak, "
                              "gamma {:.6g} electrical degrees, phase circuits {}, "
                              "THETA0 {}",
                              drive.id, drive.six ? "six-step" : "sinusoidal",
-                             drive.poles, drive.poles == 1 ? "pair" : "pairs",
+                             motion.translate
+                                 ? std::format("pole pitch {:.6g} m", drive.pitch)
+                                 : std::format("{} pole {}", drive.poles,
+                                               drive.poles == 1 ? "pair" : "pairs"),
                              drive.peak, drive.gamma, phases,
-                             drive.theta0 ? std::format("{:.6g} degrees", *drive.theta0)
-                                          : std::string("AUTO")));
+                             drive.theta0
+                                 ? std::format("{:.6g} {}", *drive.theta0, motion.unit())
+                                 : std::string("AUTO")));
   }
   solution.add("Equations",
                std::format("{} ({} degrees of freedom before the gauge and "
@@ -1807,19 +1812,19 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
             std::string lags;
             for (size_t k = 1; k < found.lag.size(); ++k)
               lags += std::format("{}{:.2f}", lags.empty() ? "" : ", ", found.lag[k]);
-            const auto positions = alignment_positions(*drive);
+            const auto positions = alignment_positions(*drive, motion);
             solution.add(
                 "Drive",
                 std::format("DRIVE {} THETA0 AUTO with MOTION {}{}: no-load "
-                            "linkage at {} positions from 0 to {:.6g} degrees ({}); "
-                            "THETA0 {:.9g} degrees, phase 1 fundamental {:.6g} "
+                            "linkage at {} positions from 0 to {:.6g} {} ({}); "
+                            "THETA0 {:.9g} {}, phase 1 fundamental {:.6g} "
                             "Wb, later phases lag by {} electrical degrees",
                             drive->id, motion.id,
                             subcase.boundary ? std::format(" and MAGBC {}",
                                                            subcase.boundary)
                                              : "",
-                            positions.size(), positions.back(),
-                            iterations_text(iterations), found.theta0,
+                            positions.size(), positions.back(), motion.unit(),
+                            iterations_text(iterations), found.theta0, motion.unit(),
                             found.linkage, lags));
             alignments.emplace(key, found);
           }
@@ -1846,7 +1851,7 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
         double theta_e = 0;
         if (drive) {
           const auto &phases = output.drive_summary->phases;
-          theta_e = electrical_angle(*drive, output.drive_summary->theta0, angle);
+          theta_e = electrical_angle(*drive, motion, output.drive_summary->theta0, angle);
           const auto currents = phase_currents(*drive, theta_e);
           request.driven.assign(case_base.circuits.size(), 0);
           for (size_t j = 0; j < phases.size(); ++j)

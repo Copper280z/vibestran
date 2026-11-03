@@ -14,8 +14,15 @@ double wrapped(double degrees) {
 }
 } // namespace
 
-double electrical_angle(const Drive &drive, double theta0, double degrees) {
-  return drive.poles * (degrees - theta0) * degree;
+double electrical_period(const Drive &drive, const Motion &motion) {
+  return motion.translate ? 2 * drive.pitch : 360. / drive.poles;
+}
+
+double electrical_angle(const Drive &drive, const Motion &motion, double theta0,
+                        double position) {
+  if (motion.translate)
+    return pi * (position - theta0) / drive.pitch;
+  return drive.poles * (position - theta0) * degree;
 }
 
 std::vector<double> phase_currents(const Drive &drive, double theta_e) {
@@ -64,14 +71,14 @@ Fundamental fundamental(std::span<const double> samples) {
   return {mean, std::hypot(a, b), std::atan2(b, a)};
 }
 
-std::vector<double> alignment_positions(const Drive &drive) {
+std::vector<double> alignment_positions(const Drive &drive, const Motion &motion) {
   std::vector<double> out;
   for (int j = 0; j < 8; ++j)
-    out.push_back(360. * j / (8 * drive.poles));
+    out.push_back(motion.translate ? 2 * drive.pitch * j / 8 : 360. * j / (8 * drive.poles));
   return out;
 }
 
-Result<Alignment> align_drive(const Drive &drive,
+Result<Alignment> align_drive(const Drive &drive, const Motion &motion,
                               const std::vector<std::vector<double>> &linkages) {
   const auto m = drive.phases.size();
   std::vector<Fundamental> phases;
@@ -87,13 +94,18 @@ Result<Alignment> align_drive(const Drive &drive,
   if (!(phases[0].amplitude > 1e-9 * scale) || scale == 0)
     return Error{std::format(
         "THETA0 AUTO: phase 1 (circuit {}) links no flux that varies with the "
-        "rotor position at no load (fundamental {:.3e} Wb, largest linkage "
+        "{} position at no load (fundamental {:.3e} Wb, largest linkage "
         "{:.3e} Wb), so it has no d axis to find; give THETA0",
-        drive.phases[0], phases[0].amplitude, scale)};
+        drive.phases[0], motion.translate ? "mover's" : "rotor", phases[0].amplitude,
+        scale)};
   Alignment out;
   out.linkage = phases[0].amplitude;
-  const double period = 360. / drive.poles;
-  out.theta0 = std::fmod(phases[0].phase / degree / drive.poles + period, period);
+  // Phase 1's peak, a fraction phase / (2 pi) of the electrical period.
+  const double period = electrical_period(drive, motion);
+  out.theta0 = std::fmod((motion.translate ? phases[0].phase / pi * drive.pitch
+                                           : phases[0].phase / degree / drive.poles) +
+                             period,
+                         period);
   if (out.theta0 >= period)
     out.theta0 -= period;
   bool forward = true, reverse = true;

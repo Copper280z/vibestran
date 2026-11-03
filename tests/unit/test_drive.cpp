@@ -155,7 +155,8 @@ TEST(Drive, PhaseCurrentsParkTransformAndFit) {
   Drive d;
   d.poles = 3;
   d.phases = {4, 5, 6};
-  const auto positions = alignment_positions(d);
+  const Motion rotation;
+  const auto positions = alignment_positions(d, rotation);
   ASSERT_EQ(positions.size(), 8U);
   EXPECT_DOUBLE_EQ(positions[1], 15);
   auto linkages = [&](double theta0, std::array<int, 3> order) {
@@ -170,24 +171,48 @@ TEST(Drive, PhaseCurrentsParkTransformAndFit) {
     }
     return out;
   };
-  auto found = align_drive(d, linkages(97, {0, 1, 2}));
+  auto found = align_drive(d, rotation, linkages(97, {0, 1, 2}));
   ASSERT_TRUE(std::holds_alternative<Alignment>(found)) << error_of(found);
   const auto &a = std::get<Alignment>(found);
   EXPECT_NEAR(a.theta0, 97, 1e-12); // in [0, 120), one electrical period
   EXPECT_NEAR(a.linkage, .02, 1e-15);
   EXPECT_NEAR(a.lag[1], 120, 1e-10);
   EXPECT_NEAR(a.lag[2], 240, 1e-10);
-  EXPECT_NE(error_of(align_drive(d, linkages(10, {0, 2, 1})))
+  EXPECT_NE(error_of(align_drive(d, rotation, linkages(10, {0, 2, 1})))
                 .find("the phase sequence opposes the direction of increasing position: "
                       "phase 2 (circuit 5) lags phase 1 by 240.0, expected 120.0"),
             std::string::npos);
-  EXPECT_NE(error_of(align_drive(d, linkages(10, {0, 2, 1}))).find("(swap C2 and C3)"),
+  EXPECT_NE(error_of(align_drive(d, rotation, linkages(10, {0, 2, 1}))).find("(swap C2 and C3)"),
             std::string::npos);
-  EXPECT_NE(error_of(align_drive(d, linkages(10, {0, 0, 2}))).find("the phases are not in sequence"),
+  EXPECT_NE(error_of(align_drive(d, rotation, linkages(10, {0, 0, 2}))).find("the phases are not in sequence"),
             std::string::npos);
-  EXPECT_NE(error_of(align_drive(d, std::vector<std::vector<double>>(8, {0., 0., 0.})))
+  EXPECT_NE(error_of(align_drive(d, rotation, std::vector<std::vector<double>>(8, {0., 0., 0.})))
                 .find("THETA0 AUTO: phase 1 (circuit 4) links no flux that varies"),
             std::string::npos);
+
+  // Along a translation the electrical period is two pole pitches: the
+  // same fit in m, theta_e = pi (x - x0) / tau, x0 in [0, 2 tau).
+  Drive line = d;
+  line.pitch = .02;
+  Motion translation;
+  translation.translate = true;
+  const auto along = alignment_positions(line, translation);
+  ASSERT_EQ(along.size(), 8U);
+  EXPECT_DOUBLE_EQ(along[1], .005);
+  EXPECT_DOUBLE_EQ(electrical_period(line, translation), .04);
+  EXPECT_NEAR(electrical_angle(line, translation, .013, .023), pi / 2, 1e-15);
+  std::vector<std::vector<double>> sampled;
+  for (double x : along) {
+    std::vector<double> row;
+    for (int k = 0; k < 3; ++k) {
+      const double theta = pi * (x - .0317) / .02 - 2 * pi * k / 3;
+      row.push_back(.02 * std::cos(theta) + .003 * std::cos(3 * theta));
+    }
+    sampled.push_back(row);
+  }
+  const auto fitted = align_drive(line, translation, sampled);
+  ASSERT_TRUE(std::holds_alternative<Alignment>(fitted)) << error_of(fitted);
+  EXPECT_NEAR(std::get<Alignment>(fitted).theta0, .0317, 1e-15);
 }
 
 TEST(Drive, AutoFindsTheMagnetAxisAndChecksThePhaseSequence) {
@@ -518,7 +543,12 @@ TEST(Drive, CardsAndCaseControl) {
   };
   EXPECT_NE(error("DRIVE,10,SQUARE,1,1.\n,1,2,3\n").find("DRIVE WAVE must be SINE or SIX"),
             std::string::npos);
-  EXPECT_NE(error("DRIVE,10,SINE,0,1.\n,1,2,3\n").find("DRIVE 10 requires POLES >= 1"),
+  EXPECT_NE(error("DRIVE,10,SINE,0,1.\n,1,2,3\n").find("DRIVE 10 requires POLES > 0: the pole "
+                                                     "pairs of a rotation, or the pole pitch"),
+            std::string::npos);
+  EXPECT_NE(error("DRIVE,10,SINE,.02,1.\n,1,2,3\n")
+                .find("Subcase 1: DRIVE 10 with MOTION 1 ROTATE: POLES 0.02 is not a whole "
+                      "number of pole pairs"),
             std::string::npos);
   EXPECT_NE(error("DRIVE,10,SINE,1,-1.\n,1,2,3\n").find("DRIVE 10 requires IPEAK >= 0"),
             std::string::npos);

@@ -1,5 +1,6 @@
 #include "magnetic/solver.hpp"
 #include "magnetic/air_gap.hpp"
+#include "magnetic/drive.hpp"
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -45,16 +46,17 @@ TorqueSummary torque_summary(const CaseResults &c) {
   return out;
 }
 // The whole electrical periods a DRIVE subcase's positions sample
-// uniformly (COUNT STEP POLES a multiple of 360 degrees), or 0.
+// uniformly (COUNT STEP a multiple of the electrical period: 360 / POLES
+// degrees, or two pole pitches), or 0.
 int electrical_periods(const Model &model, const Subcase &subcase) {
   if (!subcase.drive)
     return 0;
   const auto &motion = model.motions.at(subcase.motion);
-  const double span =
-      motion.count * std::abs(motion.step) * model.drives.at(subcase.drive).poles;
-  const auto periods = static_cast<int>(std::lround(span / 360));
+  const double span = motion.count * std::abs(motion.step) /
+                      electrical_period(model.drives.at(subcase.drive), motion);
+  const auto periods = static_cast<int>(std::lround(span));
   return periods >= 1 && 2 * periods < motion.count &&
-                 std::abs(span - 360. * periods) <= 1e-9 * span
+                 std::abs(span - periods) <= 1e-9 * span
              ? periods
              : 0;
 }
@@ -115,11 +117,15 @@ void write_drive_f06(std::ostream &f06, const Model &model,
                      const std::vector<CircuitResults> &circuits) {
   const auto &drive = model.drives.at(subcase.drive);
   const auto &summary = *c.drive_summary;
+  const auto &motion = model.motions.at(subcase.motion);
   f06 << "DRIVE " << drive.id << ": " << (drive.six ? "six-step" : "sinusoidal")
       << " currents, " << drive.peak << " A peak, gamma " << drive.gamma
-      << " electrical degrees, " << drive.poles
-      << (drive.poles == 1 ? " pole pair" : " pole pairs") << ", THETA0 "
-      << summary.theta0 << " degrees";
+      << " electrical degrees, ";
+  if (motion.translate)
+    f06 << "pole pitch " << drive.pitch << " m";
+  else
+    f06 << drive.poles << (drive.poles == 1 ? " pole pair" : " pole pairs");
+  f06 << ", THETA0 " << summary.theta0 << ' ' << motion.unit();
   if (summary.automatic)
     f06 << " (AUTO: phase 1 no-load fundamental " << summary.linkage << " Wb)";
   f06 << '\n';
@@ -135,16 +141,16 @@ void write_drive_f06(std::ostream &f06, const Model &model,
         << mean.apparent(0, 0) << "  L_q " << mean.apparent(1, 1) << "  L_dq "
         << mean.apparent(0, 1) << "  magnet linkage lambda_m,d(Wb) "
         << mean.magnet[0] << "  lambda_m,q(Wb) " << mean.magnet[1] << '\n';
-  const auto &motion = model.motions.at(subcase.motion);
   if (const int periods = electrical_periods(model, subcase)) {
     for (size_t k = 0; k < summary.phases.size(); ++k) {
       const auto s = spectrum(linkage_rates(c, summary.phases[k]), periods);
       f06 << "Phase " << k + 1 << " (circuit " << circuits[summary.phases[k]].id
           << ") back-EMF over " << periods << " electrical "
-          << (periods == 1 ? "period" : "periods")
-          << ": fundamental constant (V s/rad, peak) " << s.fundamental;
+          << (periods == 1 ? "period" : "periods") << ": fundamental constant "
+          << (motion.translate ? "(V s/m, peak) " : "(V s/rad, peak) ") << s.fundamental;
       if (motion.speed != 0)
-        f06 << "  fundamental RMS at " << motion.speed << " rpm (V) "
+        f06 << "  fundamental RMS at " << motion.speed
+            << (motion.translate ? " m/s (V) " : " rpm (V) ")
             << s.fundamental * std::abs(angular_speed(motion)) / std::sqrt(2.);
       f06 << "  THD (%) " << s.distortion << '\n';
     }
@@ -1137,10 +1143,13 @@ Status write_hdf5(const std::string &path, const Model &model,
       const hid_t d = attributes.get();
       h5.attribute(d, "id", int64_t{drive.id});
       h5.attribute(d, "wave", std::string(drive.six ? "SIX" : "SINE"));
-      h5.attribute(d, "pole_pairs", int64_t{drive.poles});
+      if (line)
+        h5.attribute(d, "pole_pitch_m", drive.pitch);
+      else
+        h5.attribute(d, "pole_pairs", int64_t{drive.poles});
       h5.attribute(d, "current_peak_A", drive.peak);
       h5.attribute(d, "gamma_deg", drive.gamma);
-      h5.attribute(d, "theta0_deg", found.theta0);
+      h5.attribute(d, line ? "theta0_m" : "theta0_deg", found.theta0);
       h5.attribute(d, "theta0_auto", uint8_t{found.automatic});
       if (found.automatic) {
         h5.attribute(d, "alignment_linkage_Wb", found.linkage);
@@ -1170,7 +1179,9 @@ Status write_hdf5(const std::string &path, const Model &model,
           distortion.push_back(spectral.distortion);
         }
         h5.attribute(d, "electrical_periods", int64_t{periods});
-        h5.values(d, "emf_constant_fundamental_V_s_per_rad", constant);
+        h5.values(d, line ? "emf_constant_fundamental_V_s_per_m"
+                          : "emf_constant_fundamental_V_s_per_rad",
+                  constant);
         h5.values(d, "emf_thd_percent", distortion);
       }
       if (subcase.steps) {

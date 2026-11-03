@@ -443,8 +443,8 @@ tangential uniform field is not axisymmetric. On the axis, where A_φ / r is
 - **Motion.** `MOTION ... TRANSLATE` slides a part along the axis through
   the tube (see [Motion](#motion-motion)); ROTATE is an error, since
   turning about the axis changes nothing.
-- **Not yet available** with MAGAXI: `DRIVE`, the next step toward
-  tubular linear motors.
+- **DRIVE** follows the mover along the axis, its POLES field the pole
+  pitch in m (see [Along a translation](#along-a-translation)).
 
 HDF5 `/MAGSTAT` carries `axisymmetric = 1` (`dimension` is 2, `depth_m` 1),
 and the planar blocks' nodal potential is A_φ.
@@ -854,8 +854,9 @@ MOTION,1,20,0,TRANSLATE,0.,.001,21  $ 0 to 20 mm along the axis in 1 mm steps
 Positions may run any distance, beyond a pitch too: each part pairs its
 own periodic sides, so the moved part simply occupies a shifted pitch of the
 endless machine. Everything below holds for it with "turn" read as "slide",
-torque as force and radians as metres. DRIVE does not take a TRANSLATE
-motion yet.
+torque as force and radians as metres. A DRIVE follows the translation
+with its POLES field the pole pitch in m (see
+[Along a translation](#along-a-translation)).
 
 **What moves.** Every grid of a moving element turns rigidly about the axis
 (or slides rigidly along the direction of travel).
@@ -1061,7 +1062,9 @@ in space while the rotor's cells pass under it.
 
 A `DRIVE` gives the phase circuits of a MOTION subcase currents that follow
 the rotor, as a current-controlled drive does, and reports the machine in dq
-axes. Set `DRIVE = ID` in a subcase that also has `MOTION`:
+axes. It follows a rotation (`MOTION ... ROTATE`) or the mover of a linear
+machine (`MOTION ... TRANSLATE`, see [Along a translation](#along-a-translation)).
+Set `DRIVE = ID` in a subcase that also has `MOTION`:
 
 ```text
 DRIVE,ID,WAVE,POLES,IPEAK,GAMMA,THETA0
@@ -1072,10 +1075,10 @@ DRIVE,ID,WAVE,POLES,IPEAK,GAMMA,THETA0
 |---|---|
 | `ID` | Referenced by the case control `DRIVE = ID`. |
 | `WAVE` | `SINE` for sinusoidal currents, or `SIX` for 120° six-step (block) currents, which needs three phases. |
-| `POLES` | Pole pairs p, at least 1. |
+| `POLES` | Pole pairs p, a whole number of at least 1, for a ROTATE motion. For a TRANSLATE motion, the pole pitch τ in m (positive). |
 | `IPEAK` | Peak phase current I in A, at least 0. For `SIX` it is the block's amplitude. |
 | `GAMMA` | Current angle γ in electrical degrees, from +q towards −d: i_d = −I sin γ, i_q = I cos γ. γ = 0 is pure q-axis current; γ > 0 weakens the field. Blank is 0. |
-| `THETA0` | The rotor position, in degrees, at which the rotor's d axis lines up with phase 1's axis. Blank or `AUTO` finds it (see below). |
+| `THETA0` | The rotor position, in degrees, at which the rotor's d axis lines up with phase 1's axis (TRANSLATE: the mover's position x0 in m). Blank or `AUTO` finds it (see below). |
 | `C1 … Cm` | The phase circuits in phase sequence, at least three: CIRCUIT IDs, or COIL2D IDs that belong to no CIRCUIT. Each must be closed. |
 
 Fields 7 and 8 of the first line must be blank; the phases start on the
@@ -1213,8 +1216,8 @@ DRIVE,11,SINE,4,0.                  $ no load: back-EMF and magnet linkage
 ```
 
 **Results.** The F06 SOLUTION section gains a `Drive` row per DRIVE (wave,
-pole pairs, current, γ, phases, THETA0) and, for THETA0 AUTO, a row with the
-pre-sweep and what it found. The subcase block adds the DRIVE line, the mean
+pole pairs or pole pitch, current, γ, phases, THETA0) and, for THETA0 AUTO,
+a row with the pre-sweep and what it found. The subcase block adds the DRIVE line, the mean
 i_d, i_q, λ_d and λ_q over the positions, the mean incremental and apparent
 L_d, L_q and L_dq, the mean magnet linkage, and each phase's back-EMF
 constant and distortion when the sweep covers whole electrical periods.
@@ -1223,6 +1226,60 @@ inductances at each position. Every MOTION subcase with a closed circuit
 also gets a table of each circuit's dλ/dφ, or EMF in volts with `SPEED`.
 The HDF5 subcase group gains a `drive` group (see
 [Results](#results-and-angle-sweeps)).
+
+#### Along a translation
+
+With a `MOTION ... TRANSLATE` the DRIVE follows the mover of a linear
+machine, flat (MAG2D) or tubular (MAGAXI), whose model repeats along the
+travel (`MPERIOD ... SHIFT`). Field 4 is the **pole pitch** τ in m, the
+distance over which the magnets reverse, and positions and THETA0 are in m
+along the direction of travel:
+
+  θe = π (x − x0) / τ
+
+so one electrical period is two pole pitches, and moving the mover by τ
+advances θe by π. Everything else is as for a rotation, with metres for
+degrees:
+
+- **THETA0 AUTO** solves eight positions over two pole pitches, 2τ·j/8 m,
+  and gives x0 in [0, 2τ) m. Its sequence check is against the direction of
+  travel, the MOTION CID's axis: travelling the other way reverses the
+  sequence AUTO sees.
+- **Thrust in dq.** The air-gap force along the travel is the reference.
+  For phases linking exact sinusoids with position-independent inductances
+  it equals (m/2)(π/τ)(λ_d i_q − λ_q i_d).
+- **Back-EMF.** dλ/dx is per m of travel, so the back-EMF constant is in
+  V·s/m (peak) and, with SPEED in m/s, the fundamental's RMS is in volts at
+  that speed. A sweep covers whole electrical periods when COUNT·|STEP| is a
+  multiple of 2τ.
+- **Results.** The F06 rows say "pole pitch τ m" and give THETA0 in m; the
+  HDF5 `drive` group has `pole_pitch_m` and `theta0_m` in place of
+  `pole_pairs` and `theta0_deg`, and `emf_constant_fundamental_V_s_per_m`.
+
+```text
+MAGAXI,0
+MPERIOD,1,ANTI,31,32,0,4,.02        $ one anti-periodic pitch of four, along z
+PAIRGAP,9
+ESET,20,PROP,4,5,6                  $ the mover: magnets and tube
+MOTION,1,20,0,TRANSLATE,0.,.0025,16 $ two pole pitches, one electrical period
+,1.5                                $ m/s, for the back-EMF in volts
+DRIVE,10,SINE,.02,5.,0.             $ pole pitch 20 mm, 5 A peak on q, THETA0 AUTO
+,1,2,3
+```
+
+A rotation's POLES must be a whole number; a pitch with a ROTATE motion is
+an error that says so.
+
+`tests/unit/test_line_drive.cpp` checks it on the tubular and flat stacks:
+
+| Comparison | Result |
+|---|---|
+| A DRIVE position against the static deck with the mover moved by hand and its phase currents by ICIRC | The same model: energy, coenergy and linkage 1e-11 to 1e-10, thrust 1e-9; the dq currents and linkages the Park transform of the static deck's at π(x − x0)/τ |
+| THETA0 AUTO with the magnets started one alignment step (5 mm) later | x0 5 mm earlier to 1e-12 (the samples shift cyclically); lags 120.02° and 240.02° |
+| THETA0 AUTO travelling along −z, or with B and C swapped | The phase sequence opposes the direction of increasing position |
+| Thrust along a SINE or SIX sweep, along +z and −z | dW′/dx − Σλ_k di_k/dx by central differences over the sweep's own positions: 1e-6 |
+| The mover one pole pitch on, an anti-periodic stack with a slotted stator | θe 180° on; thrust and coenergy repeat, currents and linkages reverse, i_dq and λ_dq repeat (1e-10) |
+| Results | F06 pole pitch and THETA0 in m; HDF5 `pole_pitch_m`, `theta0_m`; the back-EMF constant over one electrical period is the first harmonic of dλ/dx in V·s/m |
 
 ### Worked example: a 12-slot, 14-pole motor
 
@@ -1450,7 +1507,8 @@ MPERIOD,1,ANTI,1,2,0,6,.02    $ one 20 mm pole pitch standing for six
   [Gaps along a line](#gaps-along-a-line-strip-and-tube).
 - **Motion.** `MOTION ... TRANSLATE` slides a part along the shift through
   the gap; see [Motion](#motion-motion).
-- **Not yet with SHIFT**: DRIVE.
+- **DRIVE**: field 4 is the pole pitch in m with a TRANSLATE motion; see
+  [Along a translation](#along-a-translation).
 
 **What a pitch stands for.** The pitch model is a machine of SECTORS
 pitches whose ends join: SECTORS copies of the pitch's mesh, each moved by
@@ -1742,8 +1800,9 @@ solving. The file has two top-level groups:
     `force_ripple_percent`, `positions_m`, `motion/force_N` and
     `speed_m_per_s`; its `circuits/linkage_rate_Wb_per_m` is per metre.
   - A DRIVE subcase's group also has a `drive/` group with the attributes
-    `id`, `wave` (`SINE` or `SIX`), `pole_pairs`, `current_peak_A`,
-    `gamma_deg`, `theta0_deg`, `theta0_auto` and the means over the
+    `id`, `wave` (`SINE` or `SIX`), `pole_pairs` (TRANSLATE: `pole_pitch_m`),
+    `current_peak_A`, `gamma_deg`, `theta0_deg` (TRANSLATE: `theta0_m`),
+    `theta0_auto` and the means over the
     positions `i_d_mean_A`, `i_q_mean_A`, `lambda_d_mean_Wb`,
     `lambda_q_mean_Wb`, `L_d_incremental_mean_H`, `L_q_incremental_mean_H`,
     and under `LDQ = APPARENT` `L_d_apparent_mean_H`, `L_q_apparent_mean_H`,
@@ -1752,7 +1811,8 @@ solving. The file has two top-level groups:
     (phase 1's no-load fundamental) and the dataset `alignment_lag_deg`;
     and when the sweep covers whole electrical periods the attribute
     `electrical_periods` with the per-phase datasets
-    `emf_constant_fundamental_V_s_per_rad` and `emf_thd_percent`. With
+    `emf_constant_fundamental_V_s_per_rad` (TRANSLATE: `_V_s_per_m`) and
+    `emf_thd_percent`. With
     `MSTEP = ALL` it adds per position `theta_e_deg`, `i_d_A`, `i_q_A`,
     `lambda_d_Wb`, `lambda_q_Wb` and `L_dq_incremental_H` [positions, 2, 2]
     (d first), and under `LDQ = APPARENT` `L_dq_apparent_H`,

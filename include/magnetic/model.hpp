@@ -155,9 +155,14 @@ struct Motion {
 struct Drive {
   int id{0};
   bool six{false};
-  int poles{1};              // pole pairs
+  // Field 4, read both ways: the pole pairs of a rotation (0 unless a whole
+  // number), and the pole pitch (m) of a translation. The MOTION's TYPE
+  // says which a subcase uses.
+  int poles{1};
+  double pitch{1};
   double peak{0}, gamma{0};  // A, electrical degrees from +q towards -d
-  std::optional<double> theta0; // degrees; empty for AUTO
+  // Degrees (a translation's: m); empty for AUTO.
+  std::optional<double> theta0;
   std::vector<int> phases;   // circuit IDs in phase sequence
 };
 // MBC rows of one SID. The ZERO or UNIFORM row prescribes A on faces (an

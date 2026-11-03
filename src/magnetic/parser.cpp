@@ -525,7 +525,12 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       if (wave != "SINE" && wave != "SIX")
         return Error{r.where + ": DRIVE WAVE must be SINE or SIX"};
       drive.six = wave == "SIX";
-      drive.poles = r.integer(3);
+      // Pole pairs (whole) for ROTATE, the pole pitch in m for TRANSLATE.
+      drive.pitch = r.real(3, 1);
+      drive.poles = drive.pitch >= 1 && drive.pitch <= 1e6 &&
+                            drive.pitch == std::floor(drive.pitch)
+                        ? static_cast<int>(drive.pitch)
+                        : 0;
       drive.peak = r.real(4);
       drive.gamma = r.real(5);
       if (const auto theta0 = upper(r.get(6)); !theta0.empty() && theta0 != "AUTO")
@@ -941,19 +946,13 @@ Status validate(const Model &m) {
     return Error{"MAGSTAT requires at least one subcase"};
   // Periodic sectors and NORMAL faces are planar; say so before anything
   // else about a 3D deck that uses them.
-  // DRIVE along the axis is not built yet.
   if (m.options.axisymmetric) {
-    const auto missing = [](std::string_view what) {
-      return Error{std::format("{} is not available for MAGAXI models yet", what)};
-    };
     if (!m.air_gaps.empty() && (!m.period || m.period->shift == 0))
       return Error{std::format(
           "PAIRGAP {} in a MAGAXI model is a tube along the axis, which the "
           "air-gap element solves only in a model that repeats along it: it needs "
           "MPERIOD with SHIFT. METHOD=MESH solves the gap as air",
           m.air_gaps.begin()->first)};
-    if (!m.drives.empty())
-      return missing(std::format("DRIVE {}", m.drives.begin()->first));
   }
   if (m.period && !m.options.planar)
     return Error{std::format("MPERIOD {} is for MAG2D and MAGAXI models; 3D periodic "
@@ -1403,8 +1402,10 @@ Status validate(const Model &m) {
   }
   for (const auto &[id, drive] : m.drives) {
     const auto count = drive.phases.size();
-    if (drive.poles < 1)
-      return Error{std::format("DRIVE {} requires POLES >= 1 pole pairs", id)};
+    if (!(drive.pitch > 0))
+      return Error{std::format("DRIVE {} requires POLES > 0: the pole pairs of a "
+                               "rotation, or the pole pitch in m of a translation",
+                               id)};
     if (drive.peak < 0)
       return Error{std::format("DRIVE {} requires IPEAK >= 0", id)};
     if (count < 3)
@@ -1460,14 +1461,15 @@ Status validate(const Model &m) {
                                sc.drive)};
     if (!sc.motion)
       return Error{std::format("Subcase {} DRIVE {} needs MOTION in the same "
-                               "subcase: the phase currents follow the rotor "
-                               "position",
+                               "subcase: the phase currents follow the moving "
+                               "part's position",
                                sc.id, sc.drive)};
-    if (m.motions.at(sc.motion).translate)
-      return Error{std::format("Subcase {}: DRIVE {} with MOTION {} TRANSLATE is not "
-                               "available yet; a DRIVE follows a rotation",
-                               sc.id, sc.drive, sc.motion)};
     const auto &drive = m.drives.at(sc.drive);
+    if (!m.motions.at(sc.motion).translate && drive.poles < 1)
+      return Error{std::format("Subcase {}: DRIVE {} with MOTION {} ROTATE: POLES "
+                               "{:.6g} is not a whole number of pole pairs (a pole "
+                               "pitch in m is for TRANSLATE)",
+                               sc.id, sc.drive, sc.motion, drive.pitch)};
     const auto &factors = std::get<std::map<int, double>>(r);
     const auto loaded = std::find_if(m.currents.begin(), m.currents.end(),
                                      [&](const Current &c) {

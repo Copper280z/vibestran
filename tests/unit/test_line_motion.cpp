@@ -19,41 +19,6 @@
 
 using namespace tube_deck;
 
-namespace {
-// The tubular (or flat) stack t with MOTION 1 moving `part` (the mover, PIDs
-// 4 to 6, or with stator the coils, sleeve and outer air) to `positions`
-// metres along the axis: in MAGAXI along the z axis of CID 0, in MAG2D along
-// the x axis of CID 8 (basic z), or of CID 7 (basic -z) with reversed.
-struct Travel {
-  double start{0}, step{0};
-  int count{1};
-  bool stator{false}, reversed{false};
-  double speed{0};
-};
-Axi travelling(const Tube &t, const Travel &v) {
-  Axi g = tube(t);
-  const int cid = v.reversed ? 7 : t.planar ? 8 : 0;
-  if (v.reversed)
-    g.cards += t.planar ? "CORD2R,7,0,0.,0.,0.,0.,1.,0.\n,0.,0.,-1.\n"
-                        : "CORD2R,7,0,0.,0.,0.,0.,0.,-1.\n,1.,0.,0.\n";
-  std::string stator = ",1,2";
-  for (int k = 0; k < 3 * t.pitches; ++k)
-    stator += std::format(",{}", 10 + k);
-  g.cards += std::format("ESET,40,PROP{}\nMOTION,1,40,{},TRANSLATE,{:.17g},{:.17g},{}\n",
-                         v.stator ? stator : ",4,5,6", cid, v.start, v.step, v.count);
-  if (v.speed != 0)
-    g.cards += std::format(",{:.17g}\n", v.speed);
-  g.control += "MOTION = 1\nMSTEP = ALL\n";
-  return g;
-}
-// The one subcase of a solved deck, kept with its results.
-CaseResults only(const Axi &g) {
-  const auto r = solved(parsed(g));
-  EXPECT_EQ(r.cases.size(), 1U);
-  return r.cases.empty() ? CaseResults{} : r.cases.front();
-}
-} // namespace
-
 TEST(LineMotion, EachPositionIsTheStaticDeckMovedByHand) {
   // A position is the static deck with the mover's grids moved by hand
   // (the gap's elements, which the element does not use, sheared): the same
@@ -406,12 +371,5 @@ TEST(LineMotion, CardsNameWhatFails) {
   // The moving part on both sides of the gap.
   e = message(tube_g, "ESET,40,PROP,4,5,6", "ESET,40,PROP,4,5,6,2");
   EXPECT_TRUE(contains(e, "MOTION 1: grid ")) << e;
-  // DRIVE follows a rotation for now.
-  Axi driven = strip_g;
-  driven.cards += "DRIVE,1,SINE,1,1.,0.,0.\n,1,2,3\n";
-  driven.control += "DRIVE = 1\n";
-  e = message(driven);
-  EXPECT_TRUE(contains(e, "Subcase 1: DRIVE 1 with MOTION 1 TRANSLATE is not available yet"))
-      << e;
 }
 

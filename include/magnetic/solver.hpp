@@ -66,7 +66,7 @@ struct DriveState {
 // How a DRIVE subcase set its electrical angle.
 struct DriveSummary {
   int id{0};
-  double theta0{0}; // degrees
+  double theta0{0}; // degrees (a translation's: m)
   // THETA0 AUTO: found by the no-load pre-sweep at alignment_positions,
   // with phase 1's fundamental no-load linkage (Wb) and each phase's lag
   // behind phase 1 (electrical degrees).

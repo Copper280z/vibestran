@@ -291,11 +291,6 @@ TEST(Axisymmetric, CardsAndChecks) {
                       "with SHIFT"),
             std::string::npos)
       << error("MOTION,1,101,0,TRANSLATE,0.,.001,2\n");
-  // Not yet: DRIVE.
-  EXPECT_NE(error("DRIVE,1,SINE,1,1.,0.,0.\n,1,2,3\n").find("DRIVE 1 is not available "
-                                                              "for MAGAXI"),
-            std::string::npos)
-      << error("DRIVE,1,SINE,1,1.,0.,0.\n,1,2,3\n");
 }
 
 
