@@ -19,7 +19,8 @@
 
 namespace vibestran::magnetic {
 namespace {
-// Torque on the moving part over a MOTION subcase's positions.
+// Torque (force, for TRANSLATE) on the moving part over a MOTION subcase's
+// positions.
 struct TorqueSummary {
   double mean{0}, peak_to_peak{0};
   // Percent of |mean|. NaN for a zero mean, and without current at any
@@ -104,9 +105,10 @@ std::vector<double> linkage_rates(const CaseResults &c, int circuit) {
                  [&](const CaseResults &step) { return step.linkage_rate[circuit]; });
   return out;
 }
-// The rotor speed in rad/s, which turns dlambda/dphi into volts.
+// The speed in rad/s (m/s for TRANSLATE), which turns dlambda/dphi
+// (dlambda/dx) into volts.
 double angular_speed(const Motion &motion) {
-  return motion.speed * 2 * std::numbers::pi / 60;
+  return motion.translate ? motion.speed : motion.speed * 2 * std::numbers::pi / 60;
 }
 void write_drive_f06(std::ostream &f06, const Model &model,
                      const Subcase &subcase, const CaseResults &c,
@@ -152,16 +154,21 @@ void write_motion_f06(std::ostream &f06, const Model &model,
                       const Subcase &subcase, const CaseResults &c) {
   const auto &motion = model.motions.at(subcase.motion);
   const auto summary = torque_summary(c);
+  const bool line = motion.translate;
+  const char *load = line ? "force" : "torque", *units = line ? "(N)" : "(Nm)";
   f06 << "\nSUBCASE " << c.id << "\nMOTION " << motion.id << ": "
       << c.steps.size() << (c.steps.size() == 1 ? " position" : " positions")
-      << " from " << c.steps.front().position << " to "
-      << c.steps.back().position << " degrees about the z axis of CID "
+      << " from " << c.steps.front().position << " to " << c.steps.back().position
+      << (line ? model.options.axisymmetric ? " m along the z axis of CID "
+                                            : " m along the x axis of CID "
+               : " degrees about the z axis of CID ")
       << motion.coordinates << "\nNewton iterations: " << c.iterations
       << "  largest relative residual: " << c.residual << '\n';
   if (c.extrapolated)
     f06 << "BH curve exceeded: vacuum-slope extrapolation used.\n";
-  f06 << "Torque on ESET " << motion.set
-      << " about the MOTION axis (Nm): mean " << summary.mean
+  f06 << (line ? "Force on ESET " : "Torque on ESET ") << motion.set
+      << (line ? " along the direction of travel " : " about the MOTION axis ")
+      << units << ": mean " << summary.mean
       << "  peak-to-peak " << summary.peak_to_peak << "  ripple ";
   if (std::isfinite(summary.ripple))
     f06 << summary.ripple << " %\n";
@@ -169,15 +176,16 @@ void write_motion_f06(std::ostream &f06, const Model &model,
     f06 << (summary.current_free ? "undefined (no current: cogging)\n"
                                  : "undefined (zero mean)\n");
   if (summary.current_free)
-    f06 << "No current at any position: cogging torque peak-to-peak (Nm) "
-        << summary.peak_to_peak << '\n';
+    f06 << "No current at any position: cogging " << load << " peak-to-peak "
+        << units << ' ' << summary.peak_to_peak << '\n';
   if (c.drive_summary)
     write_drive_f06(f06, model, subcase, c, c.steps.front().circuits);
   if (!subcase.steps)
     return;
   // MSTEP = ALL: one row per position, with every closed circuit's linkage.
-  f06 << "\n  STEP   POSITION(deg)          TORQUE(Nm)           ENERGY(J)"
-         "         COENERGY(J)  ITERATIONS     RESIDUAL";
+  f06 << (line ? "\n  STEP     POSITION(m)            FORCE(N)           ENERGY(J)"
+               : "\n  STEP   POSITION(deg)          TORQUE(Nm)           ENERGY(J)")
+      << "         COENERGY(J)  ITERATIONS     RESIDUAL";
   const auto &first = c.steps.front();
   for (const auto &circuit : first.circuits)
     if (std::isfinite(circuit.linkage))
@@ -216,11 +224,12 @@ void write_motion_f06(std::ostream &f06, const Model &model,
     return;
   // Back-EMF per unit speed, and in volts with SPEED.
   const bool volts = motion.speed != 0;
-  f06 << "\n  STEP   POSITION(deg)";
+  f06 << (line ? "\n  STEP     POSITION(m)" : "\n  STEP   POSITION(deg)");
   for (Eigen::Index i = 0; i < first.linkage_rate.size(); ++i)
     if (std::isfinite(first.linkage_rate[i]))
-      f06 << (volts ? "         EMF " : "  DLAMBDA/DPHI ") << std::setw(6)
-          << first.circuits[i].id << (volts ? "(V)" : "(V s/rad)");
+      f06 << (volts ? "         EMF " : line ? "    DLAMBDA/DX " : "  DLAMBDA/DPHI ")
+          << std::setw(6) << first.circuits[i].id
+          << (volts ? "(V)" : line ? "(V s/m)" : "(V s/rad)");
   f06 << '\n';
   for (size_t k = 0; k < c.steps.size(); ++k) {
     const auto &step = c.steps[k];
@@ -664,10 +673,10 @@ BlockState field_state(const BlockTopology &t, const Model &model,
     out.points.push_back(model.nodes.at(id).position);
   return out;
 }
-// Writes a block. Without times it is a single state. With times (degrees)
-// it is a VTKHDF time series: the topology is written once and time j shows
-// state state_at[j], so a block with fewer states, or a static one, repeats
-// them without copies.
+// Writes a block. Without times it is a single state. With times (positions:
+// degrees, or m for TRANSLATE) it is a VTKHDF time series: the topology is
+// written once and time j shows state state_at[j], so a block with fewer
+// states, or a static one, repeats them without copies.
 void write_block(Hdf5File &h5, hid_t vtkhdf, const std::string &name,
                  int64_t index, const BlockTopology &t,
                  const std::vector<BlockState> &states,
@@ -868,10 +877,10 @@ Status write_hdf5(const std::string &path, const Model &model,
                std::string("PartitionedDataSetCollection"));
   auto assembly = h5.group(vtkhdf.get(), "Assembly");
   // With MOTION fields the collection is a time series whose time is the
-  // position in degrees: every position BFIELD writes in any subcase. Each
-  // block holds, at each time, its state at the largest of its own positions
-  // not above it (its first position before that); static blocks hold their
-  // one state throughout. VTK requires one step count for all blocks.
+  // position (degrees, or m for TRANSLATE): every position BFIELD writes in
+  // any subcase. Each block holds, at each time, its state at the largest of
+  // its own positions not above it (its first position before that); static
+  // blocks hold their one state throughout. VTK requires one step count for all blocks.
   std::vector<double> times;
   for (size_t ci = 0; ci < results.cases.size(); ++ci)
     if (model.subcases[ci].field.enabled)
@@ -1105,16 +1114,21 @@ Status write_hdf5(const std::string &path, const Model &model,
     // per-position value, with a leading position axis.
     const auto &motion = model.motions.at(subcase.motion);
     const auto summary = torque_summary(c);
+    // A TRANSLATE subcase's positions are in m and its load is a force.
+    const bool line = motion.translate;
+    const std::string unit = line ? "_m" : "_deg", load = line ? "force_" : "torque_",
+                      newton = line ? "_N" : "_Nm";
     h5.attribute(group.get(), "motion", int64_t{motion.id});
+    h5.attribute(group.get(), "motion_type", std::string(line ? "TRANSLATE" : "ROTATE"));
     h5.attribute(group.get(), "positions", static_cast<int64_t>(c.steps.size()));
-    h5.attribute(group.get(), "start_deg", motion.start);
-    h5.attribute(group.get(), "step_deg", motion.step);
-    h5.attribute(group.get(), "torque_mean_Nm", summary.mean);
-    h5.attribute(group.get(), "torque_peak_to_peak_Nm", summary.peak_to_peak);
-    h5.attribute(group.get(), "torque_ripple_percent", summary.ripple);
+    h5.attribute(group.get(), "start" + unit, motion.start);
+    h5.attribute(group.get(), "step" + unit, motion.step);
+    h5.attribute(group.get(), load + "mean" + newton, summary.mean);
+    h5.attribute(group.get(), load + "peak_to_peak" + newton, summary.peak_to_peak);
+    h5.attribute(group.get(), load + "ripple_percent", summary.ripple);
     h5.attribute(group.get(), "current_free", uint8_t{summary.current_free});
     if (motion.speed != 0)
-      h5.attribute(group.get(), "speed_rpm", motion.speed);
+      h5.attribute(group.get(), line ? "speed_m_per_s" : "speed_rpm", motion.speed);
     if (c.drive_summary) {
       const auto &drive = model.drives.at(subcase.drive);
       const auto &found = *c.drive_summary;
@@ -1206,14 +1220,14 @@ Status write_hdf5(const std::string &path, const Model &model,
       iterations.push_back(step.iterations);
       extrapolated.push_back(step.extrapolated);
     }
-    h5.values(group.get(), "positions_deg", position);
+    h5.values(group.get(), "positions" + unit, position);
     h5.values(group.get(), "iterations", iterations);
     h5.values(group.get(), "residual", residual);
     h5.values(group.get(), "energy_J", energy);
     h5.values(group.get(), "coenergy_J", coenergy);
     h5.values(group.get(), "bh_extrapolated", extrapolated);
     auto motion_group = h5.group(group.get(), "motion");
-    h5.values(motion_group.get(), "torque_Nm", torque);
+    h5.values(motion_group.get(), line ? "force_N" : "torque_Nm", torque);
     if (motion.speed != 0 && c.steps.front().linkage_rate.array().isFinite().any()) {
       std::vector<double> emf;
       for (const auto &step : c.steps)

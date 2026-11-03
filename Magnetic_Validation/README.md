@@ -146,6 +146,7 @@ interpolants differ little; the exterior is A = 0 on a box or circle.
 | magnet | the core with a magnet (B_r 1.2 T) in the yoke, steel, coil at -4, 0, +4 A |
 | tubular | the static tubular stack (MAGAXI against FEMM axi): axial force on the mover, phase linkages, back-EMF, energy and gap B at 21 mover offsets over a pole pitch, without and with current, and a field map at offset 0. |
 | tubular_pitch | one anti-periodic pitch of the endless tubular stack (MPERIOD SHIFT against FEMM anti-periodic boundaries): the same quantities, per pitch. |
+| tubular_motion | the pitch with vibestran's gap as the air-gap element and one MOTION TRANSLATE deck sliding the mover through the 21 offsets: the element's thrust and back-EMF per unit speed at each position against tubular_pitch's FEMM solves (run first if missing). |
 | motor | the 12-slot, 14-pole motor of `tools/magnetic_motor_example.py`: rated torque and phase linkage over an electrical period (DRIVE), no-load linkage and gap B_r, cogging over a cogging period. The whole machine (PAIRGAP; FEMM periodic AGE) and its anti-periodic half (MPERIOD ANTI; FEMM anti-periodic boundaries and AGE). |
 
 ```sh
@@ -344,6 +345,38 @@ mesh (15.2k vibestran / 12.6k FEMM triangles):
   vibestran's force surface has faces on the sides whose stress takes B
   from the image cell across them, the path the unit tests exercise on
   purpose (`AxialPeriod.ForceSurfaceOnASideTakesTheFieldAcrossIt`).
+
+#### MOTION TRANSLATE through the tube air-gap element (2026-11-03)
+
+`--cases tubular_motion` slides the mover instead of remeshing it: one deck
+of the same pitch at offset 0, its gap (r 6.75 to 7.75 mm) the air-gap
+element (`PAIRGAP,9`), with `MOTION,1,20,0,TRANSLATE,0.,.001,21` moving the
+magnets and tube through the 21 offsets, no load and loaded. vibestran's
+thrust is the element's force on the mover at each position, and its
+back-EMF per unit speed the element's dλ/dz at each position, by
+reciprocity. The references are tubular_pitch's FEMM solves, one geometry per
+offset, and FEMM's back-EMF is the spectral derivative of its linkages
+(continued anti-periodically over two pitches; with 1 mm second-order
+differences, as in the sections above, the difference's own truncation,
+0.9% of the peak, would hide the comparison):
+
+| quantity | coarse (4.1k cells / 6.8k FEMM) | fine (15.2k / 12.6k) |
+|---|---:|---:|
+| loaded thrust (up to 5.55 N) against FEMM | 0.047 N (0.85%) | 0.006 N (0.11%) |
+| the meshed gap's MFORCE against FEMM, for reference | 0.12 N (2.2%) | 0.028 N (0.50%) |
+| no-load force, exactly zero: element / MFORCE / FEMM | 0.0008 / 0.11 / 0.048 N | 0.0002 / 0.023 / 0.007 N |
+| no-load back-EMF (peak 1.35 V per m/s) against FEMM | 0.19 to 0.26% of the peak | 0.07 to 0.08% |
+| the element's rate against its own linkages' spectral derivative | 0.0004% | 0.0004% |
+
+- The thrust converges onto FEMM's (coarse to fine change 0.02% of the
+  peak), and its no-load error is a hundredth of the stress methods': the
+  element's force is the exact derivative of the discrete coenergy, so it
+  carries no surface or remeshing noise.
+- The back-EMF from one position's solve is the derivative of the linkage
+  over the sweep to the reference derivative's own accuracy, and agrees
+  with FEMM as closely as the meshed-gap vibestran does.
+- One MOTION deck of 21 positions and two subcases ran in 1.8 s against
+  3.2 s for the 21 meshed decks (fine; local Mac, Accelerate).
 
 These are comparisons of the same 2D (planar or axisymmetric) problem. They
 do not cover end effects beyond the modeled domain or the 3D formulation.

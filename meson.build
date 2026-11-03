@@ -632,6 +632,7 @@ unit_test_sources = files(
   'tests/unit/test_tangent_solver.cpp',
   'tests/unit/test_axisymmetric.cpp',
   'tests/unit/test_line_gap.cpp',
+  'tests/unit/test_line_motion.cpp',
 )
 
 unit_tests = executable(

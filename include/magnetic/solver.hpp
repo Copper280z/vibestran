@@ -97,16 +97,19 @@ struct CaseResults {
   // With an air-gap element: each circuit's dlambda/d(delta) at fixed
   // currents (Wb per radian, the back-EMF per unit speed), for the same
   // rotation as gap_torque, or in a MOTION step about the MOTION axis; for a
-  // strip or tube, for the move of gap_force (Wb per m). It is dT/di (dF/di)
+  // strip or tube, for the move of gap_force, or in a MOTION step along the
+  // direction of travel (Wb per m). It is dT/di (dF/di)
   // by reciprocity, from the inductance solves. NaN for open circuits.
   Eigen::VectorXd linkage_rate;
   // A MOTION subcase keeps one state per position in steps, in order; its
   // own fields then hold only the total Newton iterations, the largest
   // residual and whether any position extrapolated a B-H curve.
   std::vector<CaseResults> steps;
-  // In a step: the position (degrees) and the torque on the moving part
-  // about the MOTION axis (N m). Only positions that BFIELD writes keep
-  // their potential, b and h, with the grid positions and the air gap there.
+  // In a step: the position (degrees, or m for TRANSLATE) and the torque on
+  // the moving part about the MOTION axis (N m), or for TRANSLATE the force
+  // on it along the direction of travel (N), toward increasing positions.
+  // Only positions that BFIELD writes keep their potential, b and h, with
+  // the grid positions and the air gap there.
   double position{0}, torque{std::numeric_limits<double>::quiet_NaN()};
   std::vector<Vector> nodes;
   std::optional<AirGap> air_gap;

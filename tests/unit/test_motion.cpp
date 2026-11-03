@@ -607,10 +607,13 @@ TEST(Motion, CardsAndCaseControl) {
     t.replace(t.find("CEND\n"), 5, "CEND\n" + control);
     return error_of(parse_string(t));
   };
+  // A rotating machine's gap is an annulus, which a part cannot slide along.
   EXPECT_NE(error("MOTION,1,20,0,TRANSLATE,0.,1.,2\n").find(
-                "MOTION TRANSLATE is not supported yet; it needs the linear air-gap element"),
+                "MOTION 1 TRANSLATE slides the part along a gap that is a line, which a "
+                "model has when it repeats along it: it needs MPERIOD with SHIFT"),
             std::string::npos);
-  EXPECT_NE(error("MOTION,1,20,0,SPIN,0.,1.,2\n").find("MOTION TYPE must be ROTATE"),
+  EXPECT_NE(error("MOTION,1,20,0,SPIN,0.,1.,2\n").find(
+                "MOTION TYPE must be ROTATE or TRANSLATE"),
             std::string::npos);
   EXPECT_NE(error("MOTION,1,20,0,ROTATE,0.,0.,2\n").find(
                 "MOTION 1 requires COUNT >= 1, and a nonzero STEP when COUNT > 1"),

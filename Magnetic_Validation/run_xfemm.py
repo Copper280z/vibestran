@@ -32,6 +32,12 @@ Cases:
 - tubular_pitch: the same stack continued without end, as one
   anti-periodic pitch (vibestran MPERIOD SHIFT, FEMM anti-periodic
   boundaries), per pitch.
+- tubular_motion: the pitch with vibestran's gap as the air-gap element
+  (PAIRGAP, the tube of MPERIOD SHIFT) and the mover slid through the 21
+  offsets by one MOTION TRANSLATE deck: the element's thrust and its
+  back-EMF per unit speed at each position against tubular_pitch's FEMM
+  solves (and vibestran's with the gap meshed), which it runs first if
+  OUTPUT does not hold them.
 
 vibestran runs locally; femmcli runs on --femm-host over ssh. Results go to
 OUTPUT/results.json, OUTPUT/summary.md and plots. femmcli must be built with
@@ -860,8 +866,10 @@ TUBE_PITCH_START = -TUBE_POLE / 2
 TUBE_PITCH_PROBE_Z = np.arange(-9.5e-3, 9.6e-3, 1e-3)  # off the sides
 
 
-def tubular_geometry(scale, offset, pitch=False):
-    """The static stack, or with pitch one pitch of the endless stack."""
+def tubular_geometry(scale, offset, pitch=False, gap=False):
+    """The static stack, or with pitch one pitch of the endless stack. gap:
+    the gap's air (r 6.75 to 7.75 mm) is a region of its own, the air-gap
+    element's (PAIRGAP 9)."""
     gmsh.initialize()
     gmsh.option.setNumber("General.Verbosity", 2)
     gmsh.model.add("tubular")
@@ -877,6 +885,8 @@ def tubular_geometry(scale, offset, pitch=False):
                   Role("air", f"coil{k}", phase, sign * TUBE_TURNS)))
     e.append((b.rectangle(6 * mm, -1.5 * TUBE_POLE + offset, 6.75 * mm, 1.5 * TUBE_POLE + offset), 4,
               Role("air", "tube", moving=True, body=True)))
+    if gap:
+        e.append((b.rectangle(6.75 * mm, -100 * mm, 7.75 * mm, 100 * mm), 3, Role("gap", "gap")))
     for j in range(-1, 4) if pitch else range(3):
         z0 = -1.5 * TUBE_POLE + j * TUBE_POLE + offset
         e.append((b.rectangle(0, z0, 6 * mm, z0 + TUBE_POLE), 5,
@@ -974,6 +984,48 @@ def tubular_case(level, out, args, pitch=False):
             if pitch:
                 # The contour's normal points out of the mover: the force on it is minus.
                 results["femm"][-1]["force_line"] = -raw[f"{state}_line"][0][1]
+    return results
+
+
+def tubular_motion_case(level, out, args):
+    """One deck of the endless stack's pitch at offset 0, its gap the air-gap
+    element, MOTION TRANSLATE sliding the mover to each of TUBE_OFFSETS,
+    without current and with TUBE_CURRENTS: at each position the element's
+    thrust on the mover and each phase's linkage and linkage rate
+    d lambda / dz (the back-EMF per unit speed, by reciprocity, at the
+    position). FEMM's results at the same offsets are tubular_pitch's."""
+    scale = LEVELS[level]
+    g = tubular_geometry(scale, 0.0, pitch=True, gap=True)
+    workdir = out / f"tubular_motion_{level}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    step = TUBE_OFFSETS[1] - TUBE_OFFSETS[0]
+    control = ["MOTION = 1", "MSTEP = ALL", "BFIELD = NONE"]
+    bulk = ["PARAM,MAGTOL,1e-10",
+            f"MOTION,1,20,0,TRANSLATE,{TUBE_OFFSETS[0]:.17g},{step:.17g},{len(TUBE_OFFSETS)}"]
+    period = f"MPERIOD,1,ANTI,31,32,0,1,{TUBE_POLE:.17g}"
+    deck, circuit_ids = vibestran_deck(g, control, bulk, motion_sets=True, period=period,
+                                       axisymmetric=True)
+    loads = [f"ICIRC,1,{circuit_ids[c]},{i:.17g}" for c, i in TUBE_CURRENTS.items()]
+    deck = deck.replace("BFIELD = NONE\n", "BFIELD = NONE\nSUBCASE 1\n  LABEL = NOLOAD\n"
+                        "SUBCASE 2\n  LABEL = LOADED\n  LOAD = 1\n", 1)
+    deck = deck.replace("ENDDATA", "\n".join(loads) + "\nENDDATA")
+    path = workdir / "tubular.bdf"
+    path.write_text(deck)
+    results = {"offsets": TUBE_OFFSETS, "cells": len(g.cells), "vibestran": []}
+    with run_vibestran(path, args.vibestran) as h5:
+        for k, state in enumerate(("noload", "loaded"), start=1):
+            sub = h5[f"MAGSTAT/subcases/{k}"]
+            positions = sub["positions_m"][()]
+            assert np.allclose(positions, TUBE_OFFSETS, atol=1e-15), positions
+            force = sub["motion/force_N"][()]
+            linkage = sub["circuits/linkage_Wb_turn"][()]       # (positions, circuits)
+            rate = sub["circuits/linkage_rate_Wb_per_m"][()]
+            for j, offset in enumerate(TUBE_OFFSETS):
+                results["vibestran"].append({
+                    "offset": offset, "state": state, "force_z": float(force[j]),
+                    "linkage": {c: float(linkage[j, circuit_ids[c] - 1]) for c in "ABC"},
+                    "rate": {c: float(rate[j, circuit_ids[c] - 1]) for c in "ABC"}})
+    results["seconds"] = float((workdir / "seconds.txt").read_text())
     return results
 
 
@@ -1242,6 +1294,74 @@ def tubular_report(data, case="tubular"):
                         for s in ("vibestran", "femm")))
                 lines.append(f"| {offset * 1e3:.0f} | " + " | ".join(row) + " |")
             lines.append("")
+    return lines
+
+
+def anti_periodic_back_emf(offsets, linkage):
+    """-d lambda / dz from linkages at offsets spanning one anti-periodic
+    pitch, both ends included (lambda(z + pitch) = -lambda(z)): the spectral
+    derivative of the series continued over the period of two pitches,
+    exact for the harmonics the samples resolve."""
+    lam = np.asarray(linkage)
+    full = np.concatenate([lam[:-1], -lam[:-1]])
+    period = 2 * (offsets[-1] - offsets[0])
+    k = 2 * np.pi * np.fft.fftfreq(len(full), d=period / len(full))
+    return -np.real(np.fft.ifft(1j * k * np.fft.fft(full)))[:len(lam)]
+
+
+def tubular_motion_report(data):
+    """The MOTION TRANSLATE sweep through the air-gap element against FEMM's
+    and vibestran's meshed-gap solves of tubular_pitch, offset by offset."""
+    lines = []
+    for level in (lvl for lvl in LEVELS if f"tubular_motion_{lvl}" in data
+                  and f"tubular_pitch_{lvl}" in data):
+        m, p = data[f"tubular_motion_{level}"], data[f"tubular_pitch_{level}"]
+        runs = {"vibestran MOTION, the element's thrust": m["vibestran"],
+                "vibestran, gap meshed, MFORCE": p["vibestran"], "FEMM, weighted stress tensor": p["femm"]}
+        force = {name: {state: np.array([r["force_z"] for r in rows if r["state"] == state])
+                        for state in ("noload", "loaded")} for name, rows in runs.items()}
+        femm = force["FEMM, weighted stress tensor"]
+        peak = np.abs(femm["loaded"]).max()
+        lines += [f"### {level} mesh ({m['cells']} vibestran cells, the gap's included; "
+                  f"{p['femm'][0]['cells']} FEMM triangles at offset 0)", "",
+                  f"Force on the mover over the 21 positions. The slotless stator has no cogging, so "
+                  f"the no-load force is each method's error; the loaded difference is from FEMM, in "
+                  f"percent of FEMM's largest loaded |F_z| ({peak:.3f} N).", "",
+                  "| force | no load: largest abs F_z (N) | loaded: largest difference from FEMM |",
+                  "|---|---:|---:|"]
+        for name, f in force.items():
+            diff = np.abs(f["loaded"] - femm["loaded"]).max()
+            lines.append(f"| {name} | {np.abs(f['noload']).max():.4f} | "
+                         + ("" if f is femm else f"{diff:.4f} N, {100 * diff / peak:.2f}%") + " |")
+        # Back-EMF: the element's rate at each position against the linkages'
+        # spectral derivatives.
+        def linkage(rows, c):
+            return [r["linkage"][c] for r in rows if r["state"] == "noload"]
+        lines += ["", "No-load back-EMF per unit speed, -d lambda / dz (V per m/s). vibestran "
+                  "MOTION's is the element's linkage rate at each position; the references are the "
+                  "spectral derivatives of the linkages at the 21 offsets, continued anti-periodically "
+                  "over two pitches. Largest difference over the positions in percent of FEMM's peak:",
+                  "", "| phase | FEMM peak | MOTION rate vs FEMM | MOTION rate vs its own linkage | "
+                  "meshed vibestran vs FEMM |", "|---|---:|---:|---:|---:|"]
+        for c in "ABC":
+            rate = -np.array([r["rate"][c] for r in m["vibestran"] if r["state"] == "noload"])
+            ref = anti_periodic_back_emf(m["offsets"], linkage(p["femm"], c))
+            own = anti_periodic_back_emf(m["offsets"], linkage(m["vibestran"], c))
+            meshed = anti_periodic_back_emf(m["offsets"], linkage(p["vibestran"], c))
+            top = np.abs(ref).max()
+            lines.append(f"| {c} | {top:.4g} | {100 * np.abs(rate - ref).max() / top:.3f} | "
+                         f"{100 * np.abs(rate - own).max() / top:.4f} | "
+                         f"{100 * np.abs(meshed - ref).max() / top:.3f} |")
+        static = sum(r["seconds"] for r in p["vibestran"]) / 2  # each run held both states
+        lines += ["", f"vibestran's wall time: the MOTION deck {m['seconds']:.1f} s for 21 positions in "
+                  f"two subcases; the meshed decks {static:.1f} s for the same 21 offsets, one deck each.",
+                  ""]
+        if level == "fine" and "tubular_motion_coarse" in data:
+            coarse = np.array([r["force_z"] for r in data["tubular_motion_coarse"]["vibestran"]
+                               if r["state"] == "loaded"])
+            change = np.abs(force["vibestran MOTION, the element's thrust"]["loaded"] - coarse).max()
+            lines += [f"Coarse to fine change of the loaded MOTION thrust: largest {change:.4f} N, "
+                      f"{100 * change / peak:.2f}% of FEMM's largest |F_z|.", ""]
     return lines
 
 
@@ -1517,6 +1637,45 @@ def plots(data, out):
         if (workdir / "femm_map.npz").exists():
             tubular_field_plot(workdir, tube_level, out / "tubular_field.png")
             written.append("tubular_field.png")
+    motion_level = next((lvl for lvl in ("fine", "coarse") if f"tubular_motion_{lvl}" in data
+                         and f"tubular_pitch_{lvl}" in data), None)
+    if motion_level:
+        m, p = data[f"tubular_motion_{motion_level}"], data[f"tubular_pitch_{motion_level}"]
+        fig = plt.figure(figsize=(9, 6.6), facecolor=SURFACE)
+        axes = styled_axes(fig, 2, 2)
+        offsets = np.array(m["offsets"]) * 1e3
+        for ax, state, label in ((axes[0, 0], "loaded", "A 3 A, B = C -1.5 A"),
+                                 (axes[0, 1], "noload", "no current")):
+            series(ax, offsets, [r["force_z"] for r in m["vibestran"] if r["state"] == state],
+                   "vibestran", "vibestran MOTION, AGE thrust")
+            series(ax, offsets, [r["force_z"] for r in p["femm"] if r["state"] == state], "FEMM",
+                   "FEMM, a solve per offset")
+            ax.set_title(f"axial force on the mover, {label} (N)", loc="left")
+            ax.set_xlabel("mover position (mm)")
+            ax.legend(fontsize=7)
+        for c, color in zip("ABC", PHASE_COLORS):
+            rate = -np.array([r["rate"][c] for r in m["vibestran"] if r["state"] == "noload"])
+            femm = anti_periodic_back_emf(m["offsets"], [r["linkage"][c] for r in p["femm"]
+                                                         if r["state"] == "noload"])
+            axes[1, 0].plot(offsets, rate, color=color, linewidth=2, label=f"{c}, vibestran rate")
+            axes[1, 0].plot(offsets, femm, color=color, linewidth=2, linestyle="--", marker="s",
+                            markersize=4, markerfacecolor="none", label=f"{c}, FEMM")
+            axes[1, 0].annotate(c, (offsets[-1], rate[-1]), xytext=(4, 0), textcoords="offset points",
+                                va="center", color=INK)
+            axes[1, 1].plot(offsets, rate - femm, color=color, linewidth=2, marker="o",
+                            markersize=4, label=c)
+        axes[1, 0].set_title("no-load back-EMF per unit speed (V per m/s)", loc="left")
+        axes[1, 0].legend(fontsize=7, ncol=3)
+        axes[1, 1].set_title("back-EMF, vibestran minus FEMM (V per m/s)", loc="left")
+        axes[1, 1].legend(fontsize=7, title="phase", title_fontsize=7)
+        for ax in axes[1]:
+            ax.set_xlabel("mover position (mm)")
+        fig.suptitle(f"MOTION TRANSLATE through the tube air-gap element, one pitch, {motion_level} mesh",
+                     x=0.01, ha="left", color=INK)
+        fig.tight_layout(rect=(0, 0, 1, 0.97))
+        fig.savefig(out / "tubular_motion.png", dpi=150)
+        written.append("tubular_motion.png")
+        plt.close(fig)
     key = next((k for k in (f"motor_whole_{lvl}" for lvl in ("graded", "fine", "coarse")) if k in data), None)
     if key:
         r = data[key]
@@ -1572,6 +1731,15 @@ def report(data, out):
                   "one pitch's. vibestran's MFORCE surface closes across the periodic sides; FEMM's "
                   "force is its weighted stress tensor, and also a stress line integral along the "
                   "middle of the gap from side to side.", "", *body]
+    body = tubular_motion_report(data)
+    if body:
+        lines += ["## MOTION TRANSLATE through the tube air-gap element", "",
+                  "The endless stack's pitch with vibestran's gap (r 6.75 to 7.75 mm) as the air-gap "
+                  "element (PAIRGAP, MPERIOD ANTI SHIFT 20 mm), one deck from offset 0 whose MOTION "
+                  "TRANSLATE slides the mover (magnets and tube) to the 21 offsets, against the solves "
+                  "above of each offset's own geometry: FEMM's, and vibestran's with the gap meshed. "
+                  "vibestran's thrust is the element's, its back-EMF the element's linkage rate.", "",
+                  *body]
     body = motor_report(data)
     if body:
         lines += ["## 12-slot, 14-pole motor", "",
@@ -1589,7 +1757,8 @@ def main():
     parser.add_argument("output", type=pathlib.Path)
     parser.add_argument("--report-only", action="store_true",
                         help="rewrite summary.md and the plots from OUTPUT/results.json")
-    parser.add_argument("--cases", nargs="+", default=["core", "magnet", "motor", "tubular", "tubular_pitch"])
+    parser.add_argument("--cases", nargs="+", default=["core", "magnet", "motor", "tubular", "tubular_pitch",
+                                                       "tubular_motion"])
     parser.add_argument("--levels", nargs="+", default=list(MOTOR_LEVELS),
                         help="mesh levels; graded is the motor's only (the core cases skip it)")
     parser.add_argument("--airgap", nargs="+", default=["AGE"], choices=["AGE", "BAND"],
@@ -1615,7 +1784,12 @@ def main():
                     store.write_text(json.dumps(data, indent=1))
             elif level in LEVELS:
                 print(f"{case} {level}", flush=True)
-                if case.startswith("tubular"):
+                if case == "tubular_motion":
+                    if f"tubular_pitch_{level}" not in data:
+                        print(f"tubular_pitch {level}", flush=True)
+                        data[f"tubular_pitch_{level}"] = tubular_case(level, args.output, args, pitch=True)
+                    data[f"{case}_{level}"] = tubular_motion_case(level, args.output, args)
+                elif case.startswith("tubular"):
                     data[f"{case}_{level}"] = tubular_case(level, args.output, args,
                                                            pitch=case == "tubular_pitch")
                 else:

@@ -278,9 +278,24 @@ TEST(Axisymmetric, CardsAndChecks) {
   auto m = parse_string(deck(left));
   ASSERT_TRUE(std::holds_alternative<Model>(m)) << error_of(m);
   EXPECT_NE(error_of(solve(std::get<Model>(m))).find("x >= 0"), std::string::npos);
-  // Not yet: the tubular air gap, motion, axial periodicity and DRIVE.
-  EXPECT_NE(error("MOTION,1,101,0,ROTATE,0.,1.,2\n").find("not available for MAGAXI"),
-            std::string::npos);
+  // A MAGAXI part can only slide along the axis, and only through a gap
+  // that repeats along it.
+  EXPECT_NE(error("MOTION,1,101,0,ROTATE,0.,1.,2\n")
+                .find("MOTION 1 ROTATE in a MAGAXI model: the field is the same at every "
+                      "angle about the axis"),
+            std::string::npos)
+      << error("MOTION,1,101,0,ROTATE,0.,1.,2\n");
+  EXPECT_NE(error("MOTION,1,101,0,TRANSLATE,0.,.001,2\n")
+                .find("MOTION 1 TRANSLATE slides the part along a gap that is a line, "
+                      "which a model has when it repeats along it: it needs MPERIOD "
+                      "with SHIFT"),
+            std::string::npos)
+      << error("MOTION,1,101,0,TRANSLATE,0.,.001,2\n");
+  // Not yet: DRIVE.
+  EXPECT_NE(error("DRIVE,1,SINE,1,1.,0.,0.\n,1,2,3\n").find("DRIVE 1 is not available "
+                                                              "for MAGAXI"),
+            std::string::npos)
+      << error("DRIVE,1,SINE,1,1.,0.,0.\n,1,2,3\n");
 }
 
 

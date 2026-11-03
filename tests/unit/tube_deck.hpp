@@ -135,7 +135,8 @@ inline double relative(double a, double b) { return std::abs(a - b) / std::abs(b
 // gap's elements (6.75 to 7.75 mm) are PAIRGAP 9, solved by the air-gap
 // element, or as air with mesh; refine divides every radial interval that
 // many times; planar makes it the flat stack of the same section (MAG2D,
-// r along basic x).
+// r along basic x). With teeth, the cells within that many rows of a coil's
+// ends are the sleeve's steel: a slotted stator, which cogs.
 inline constexpr double pitch = .02;
 struct Tube {
   int pitches{1}, machine{4}, rows{48}; // rows: per pitch
@@ -145,7 +146,7 @@ struct Tube {
   double current{0}; // phase A; B and C carry -current / 2
   double move{0};    // the mover (r < 6.75 mm) moved along z, the gap sheared
   bool gap{false}, mesh{false}, planar{false};
-  int refine{1};
+  int refine{1}, teeth{0};
   // MFORCE 1 on the stator (coils and sleeve) instead: a flat stack's
   // magnets reach the edge at x = 0, where an axisymmetric stack has its axis.
   bool stator_body{false};
@@ -171,8 +172,12 @@ inline Axi tube(const Tube &t) {
     }
     if (r < .00775)
       return r < .00675 ? 5 : t.gap ? 9 : 1;
-    if (r < .0125)
+    if (r < .0125) {
+      const double end = std::round(at / (pitch / 3)) * pitch / 3;
+      if (std::abs(at - end) < t.teeth * row)
+        return 2;
       return 10 + static_cast<int>(std::floor(at / (pitch / 3))); // coil k
+    }
     return r < sleeve ? 2 : 1;
   };
   g.dz = [move = t.move](double r, double) {

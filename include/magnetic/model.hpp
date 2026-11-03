@@ -129,17 +129,22 @@ struct Subcase {
   // incremental one in a DRIVE subcase; LDQ = INCREMENTAL omits it.
   bool apparent{true};
 };
-// MOTION: rigid rotation of the cells of ESET set about the z axis of
-// coordinates, through its origin, to the positions start + k * step degrees
-// (k = 0 .. count - 1) relative to the mesh as given. Positive angles turn
-// the cells counterclockwise looking down the z axis.
+// MOTION: rigid motion of the cells of ESET set to the positions
+// start + k * step (k = 0 .. count - 1) relative to the mesh as given.
+// ROTATE turns them about the z axis of coordinates, through its origin, by
+// that many degrees, counterclockwise looking down the z axis. TRANSLATE
+// moves them that many metres along the x axis of coordinates in MAG2D, the
+// z axis in MAGAXI (the MPERIOD shift's direction).
 struct Motion {
   int id{0}, set{0}, coordinates{0}, count{1};
-  double start{0}, step{0}; // degrees
-  // SPEED (rpm, positive toward increasing positions): scales the back-EMF
-  // dlambda/dphi to volts. 0 when blank.
+  bool translate{false};
+  double start{0}, step{0}; // degrees, or m for TRANSLATE
+  // SPEED (rpm, or m/s for TRANSLATE, positive toward increasing positions):
+  // scales the back-EMF dlambda/dphi (dlambda/dx) to volts. 0 when blank.
   double speed{0};
   [[nodiscard]] double position(int k) const { return start + k * step; }
+  // The positions' unit: "degrees" or "m".
+  [[nodiscard]] const char *unit() const { return translate ? "m" : "degrees"; }
 };
 // DRIVE: phase currents set from the electrical angle
 // theta_e = poles (phi - theta0) at each MOTION position phi. Phase k

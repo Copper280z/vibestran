@@ -1676,17 +1676,30 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
       return *e;
     const auto &moving = std::get<MovingPart>(part);
     const auto axis = motion_axis(model, motion);
+    const auto &d = axis.direction;
+    const char *side = moving.inner ? "inner" : "outer";
     solution.add(
         "Motion",
-        std::format("MOTION {} turns ESET {} ({} elements, {} grids) about the z "
-                    "axis of CID {} through ({:.6g}, {:.6g}, {:.6g}), moving the "
-                    "{} circle of PAIRGAP {}: {} {} from {:.6g} to {:.6g} degrees",
-                    motion.id, motion.set, moving.elements.size(),
-                    moving.grids.size(), motion.coordinates, axis.origin.x(),
-                    axis.origin.y(), axis.origin.z(),
-                    moving.inner ? "inner" : "outer", mesh.air_gap->property,
-                    motion.count, motion.count == 1 ? "position" : "positions",
-                    motion.position(0), motion.position(motion.count - 1)));
+        motion.translate
+            ? std::format("MOTION {} moves ESET {} ({} elements, {} grids) along "
+                          "({:.6g}, {:.6g}, {:.6g}), the {} axis of CID {}, sliding "
+                          "the {} side of PAIRGAP {}: {} {} from {:.6g} to {:.6g} m",
+                          motion.id, motion.set, moving.elements.size(),
+                          moving.grids.size(), d.x(), d.y(), d.z(),
+                          mesh.axisymmetric ? "z" : "x", motion.coordinates, side,
+                          mesh.air_gap->property, motion.count,
+                          motion.count == 1 ? "position" : "positions",
+                          motion.position(0), motion.position(motion.count - 1))
+            : std::format("MOTION {} turns ESET {} ({} elements, {} grids) about the "
+                          "z axis of CID {} through ({:.6g}, {:.6g}, {:.6g}), moving "
+                          "the {} circle of PAIRGAP {}: {} {} from {:.6g} to {:.6g} "
+                          "degrees",
+                          motion.id, motion.set, moving.elements.size(),
+                          moving.grids.size(), motion.coordinates, axis.origin.x(),
+                          axis.origin.y(), axis.origin.z(), side,
+                          mesh.air_gap->property, motion.count,
+                          motion.count == 1 ? "position" : "positions",
+                          motion.position(0), motion.position(motion.count - 1)));
     parts.emplace(subcase.motion, moving);
   }
   std::set<int> drives_used;
@@ -1816,8 +1829,8 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
         if (angle != 0) {
           auto built = prepare(moved, gauge_key, &case_base);
           if (auto *e = std::get_if<Error>(&built))
-            return Error{std::format("{}, MOTION {} at {:.6g} degrees: {}", context,
-                                     motion.id, angle, e->message)};
+            return Error{std::format("{}, MOTION {} at {:.6g} {}: {}", context,
+                                     motion.id, angle, motion.unit(), e->message)};
           own = std::get<Setup>(std::move(built));
         }
         const Setup &setup = own ? *own : case_base;
@@ -1839,12 +1852,13 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
                                  k ? &previous : nullptr, continued,
                                  drive ? &request : nullptr, &frozen);
         if (auto *e = std::get_if<Error>(&state))
-          return Error{std::format("{}, MOTION {} at {:.6g} degrees: {}", context,
-                                   motion.id, angle, e->message)};
+          return Error{std::format("{}, MOTION {} at {:.6g} {}: {}", context,
+                                   motion.id, angle, motion.unit(), e->message)};
         auto step = std::get<CaseResults>(std::move(state));
         step.position = angle;
+        // The gap's load is on its inner side, along u or about u x v.
         const double turn = part.sign * (part.inner ? 1 : -1);
-        step.torque = turn * step.gap_torque;
+        step.torque = turn * (motion.translate ? step.gap_force : step.gap_torque);
         step.linkage_rate *= turn;
         if (drive)
           step.drive =
@@ -1875,15 +1889,16 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
       }
       if (continued_at)
         notices.add(std::format("Newton did not converge at full current at {} "
-                                "of {} positions (the first at {:.6g} degrees); "
+                                "of {} positions (the first at {:.6g} {}); "
                                 "they were solved by current continuation in 8 "
                                 "stages",
-                                continued_at, motion.count, *first_continued));
+                                continued_at, motion.count, *first_continued,
+                                motion.unit()));
       if (first_extrapolated)
         notices.add(std::format("The B-H curve was exceeded (first at {:.6g} "
-                                "degrees); its vacuum-slope extrapolation was "
+                                "{}); its vacuum-slope extrapolation was "
                                 "used",
-                                *first_extrapolated));
+                                *first_extrapolated, motion.unit()));
       solution.add(context,
                    std::format("MOTION {}: {} {}, {} ({} to {} per position), "
                                "largest relative residual {:.3e}",

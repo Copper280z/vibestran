@@ -74,7 +74,7 @@ in the deck, overriding the cards ([Air gap](#air-gap-pairgap)).
 | `MAG2D` | `CID,DEPTH` (one card activates planar mode; CID=0 uses basic z) |
 | `PMAG2D` | `PID,MID,CID,AXIS` (planar magnetic property; orientation as PMAG) |
 | `PAIRGAP` | `PID,METHOD,NHARM,NBAND,NLAYER` (planar air-gap property; METHOD `AGE`, `BAND` or `MESH`; see [Air gap](#air-gap-pairgap), and [Gaps along a line](#gaps-along-a-line-strip-and-tube) for MPERIOD SHIFT models) |
-| `MOTION` | `ID,ESET,CID,ROTATE,START,STEP,COUNT` + `,SPEED` (planar rotation of ESET through the air gap, degrees; SPEED in rpm; see [Motion](#motion-motion)) |
+| `MOTION` | `ID,ESET,CID,TYPE,START,STEP,COUNT` + `,SPEED` (ROTATE: planar rotation of ESET through the air gap, degrees, SPEED in rpm; TRANSLATE: ESET slid along a strip or tube gap, metres, SPEED in m/s; see [Motion](#motion-motion)) |
 | `DRIVE` | `ID,WAVE,POLES,IPEAK,GAMMA,THETA0` + `,C1,C2,...` (phase currents from the rotor position; WAVE `SINE` or `SIX`; see [Phase currents](#phase-currents-drive)) |
 | `COIL2D` | `ID,ESET,SIGNED_TURNS` (one planar winding region; ID unique) |
 | `PSOLID` | `PID,MID,CORDM` (CORDM orients remanence along its axis 1) |
@@ -440,9 +440,11 @@ tangential uniform field is not axisymmetric. On the axis, where A_φ / r is
   model that repeats along the axis (`PAIRGAP` with `MPERIOD ... SHIFT`; see
   [Gaps along a line](#gaps-along-a-line-strip-and-tube)). Without SHIFT a
   MAGAXI PAIRGAP is an error unless METHOD=MESH solves it as air.
-- **Not yet available** with MAGAXI: the sliding band (`PAIRGAP` BAND),
-  `MOTION` and `DRIVE`. They are the next steps toward tubular linear
-  motors.
+- **Motion.** `MOTION ... TRANSLATE` slides a part along the axis through
+  the tube (see [Motion](#motion-motion)); ROTATE is an error, since
+  turning about the axis changes nothing.
+- **Not yet available** with MAGAXI: the sliding band (`PAIRGAP` BAND) and
+  `DRIVE`. They are the next steps toward tubular linear motors.
 
 HDF5 `/MAGSTAT` carries `axisymmetric = 1` (`dimension` is 2, `depth_m` 1),
 and the planar blocks' nodal potential is A_φ.
@@ -767,7 +769,9 @@ the part on the gap's inner side` in the F06, `air_gap_force_N` in the HDF5
 subcase), and closed-form in the harmonics: −dW/dδ for a rigid move of the
 inner part. With closed circuits the same solve gives each circuit's
 **dλ/dδ** at fixed current, the back-EMF per unit speed in V per m/s
-(`linkage_rate_Wb_per_m`), by reciprocity with the force. Probes in the gap
+(`linkage_rate_Wb_per_m`), by reciprocity with the force. `MOTION ...
+TRANSLATE` slides a part through the gap over a sweep of positions (see
+[Motion](#motion-motion)). Probes in the gap
 and drawn gap cells use the element's own field, as for an annulus. MFORCE
 surfaces may not touch the gap's sides; the air-gap force is the mover's.
 
@@ -788,8 +792,10 @@ the flat stack of the same section (MAG2D):
 ### Motion (MOTION)
 
 A planar model with an AGE air gap can turn its rotor through a sweep of
-positions in one run. Name the moving elements with an ESET, describe the
-sweep with `MOTION`, and set `MOTION = ID` in a subcase:
+positions in one run, and a model that repeats along a line (MAG2D or
+MAGAXI with `MPERIOD ... SHIFT`) can slide its mover along the strip or tube
+gap. Name the moving elements with an ESET, describe the sweep with
+`MOTION`, and set `MOTION = ID` in a subcase:
 
 ```text
 MOTION,ID,ESET,CID,TYPE,START,STEP,COUNT
@@ -800,20 +806,32 @@ MOTION,ID,ESET,CID,TYPE,START,STEP,COUNT
 |---|---|
 | `ID` | Referenced by the case control `MOTION = ID`. |
 | `ESET` | The moving elements: the rotor, or the stator of an outer-rotor machine. `ESET,SID,PROP,PID...` suits meshes exported by physical group. It may not hold air-gap elements. |
-| `CID` | The axis is the z axis of CID through its origin; 0 is basic z through the basic origin. It must be parallel to the MAG2D plane normal, in either direction. |
-| `TYPE` | `ROTATE`. `TRANSLATE` is reserved for linear motion (along the CID x axis in MAG2D, the symmetry axis in MAGAXI) and is an error for now (see below). |
-| `START`, `STEP`, `COUNT` | Positions `START + k*STEP` degrees for k = 0 … COUNT−1, relative to the mesh as given. Positive angles turn counterclockwise looking down the CID z axis. COUNT ≥ 1 (blank is 1); STEP must be nonzero when COUNT > 1. |
-| `SPEED` | Optional rotor speed in rpm, positive toward increasing positions. It only converts the back-EMF per unit speed into volts (see Back-EMF below); every position is still a static solve. |
+| `CID` | ROTATE: the axis is the z axis of CID through its origin; 0 is basic z through the basic origin. It must be parallel to the MAG2D plane normal, in either direction. TRANSLATE: the direction of travel is the x axis of CID in MAG2D, which must lie along the gap's lines (the MPERIOD shift), and the z axis of CID in MAGAXI, which must be parallel to the symmetry axis; either way round. Its origin does not matter. |
+| `TYPE` | `ROTATE` or `TRANSLATE`. A rotation needs an annulus (no SHIFT); a translation needs a strip or tube gap, which a model has when it repeats along a line (MPERIOD with SHIFT). MAGAXI takes TRANSLATE only. |
+| `START`, `STEP`, `COUNT` | Positions `START + k*STEP` for k = 0 … COUNT−1, relative to the mesh as given: degrees for ROTATE, positive counterclockwise looking down the CID z axis; metres for TRANSLATE, positive along the direction of travel. COUNT ≥ 1 (blank is 1); STEP must be nonzero when COUNT > 1. |
+| `SPEED` | Optional speed, positive toward increasing positions: rpm for ROTATE, m/s for TRANSLATE. It only converts the back-EMF per unit speed into volts (see Back-EMF below); every position is still a static solve. |
 
-**A reserved type.** `TRANSLATE` is part of the card so decks keep one
-layout when linear motion arrives, but it is an error until it can take
-effect. A value that is accepted but changes nothing would leave a deck that
-reads as solved but was not. A gap that slides in a straight line needs the
-field of a periodic strip or tube, which the air-gap element now solves for
-a static deck (see [Gaps along a line](#gaps-along-a-line-strip-and-tube));
-moving the mover along it is the next step.
+**Translation.** `TRANSLATE` slides the moving part along the gap of a
+model that repeats along a line (see [Gaps along a
+line](#gaps-along-a-line-strip-and-tube)):
 
-**What moves.** Every grid of a moving element turns rigidly about the axis.
+```text
+MAGAXI,0
+MPERIOD,1,ANTI,31,32,0,4,.02        $ one pole pitch of a tubular stack of four
+PAIRGAP,9                           $ the tube between mover and stator
+ESET,20,PROP,4,5,6                  $ the magnets and their tube
+MOTION,1,20,0,TRANSLATE,0.,.001,21  $ 0 to 20 mm along the axis in 1 mm steps
+,1.5                                $ SPEED 1.5 m/s
+```
+
+Positions may run any distance, beyond a pitch too: each part pairs its
+own periodic sides, so the moved part simply occupies a shifted pitch of the
+endless machine. Everything below holds for it with "turn" read as "slide",
+torque as force and radians as metres. DRIVE does not take a TRANSLATE
+motion yet.
+
+**What moves.** Every grid of a moving element turns rigidly about the axis
+(or slides rigidly along the direction of travel).
 Everything defined on the moving elements turns with them: magnetization
 (each moving magnet's PMAG2D frame, rectangular or cylindrical, turns with
 the magnet), COIL2D regions and MFORCE surfaces. Probes stay where they are
@@ -824,16 +842,17 @@ the region, and the AGE does not use their shape, so they may shear or fold.
 **What is checked.** Each failure is an error naming the MOTION and the
 grid, element, circle or distance involved:
 
-1. The model is MAG2D and has a PAIRGAP solved by the AGE. Under
-   `PARAM,AIRGAP,MESH` or `METHOD=MESH` the gap is meshed air, which cannot
-   slide, and MOTION is an error that says so.
+1. The model is MAG2D (MAGAXI for TRANSLATE) and has a PAIRGAP solved by
+   the AGE. Under `PARAM,AIRGAP,MESH` or `METHOD=MESH` the gap is meshed
+   air, which cannot slide, and MOTION is an error that says so.
 2. No grid belongs to both a moving and a fixed element: the moving and
    fixed parts meet only across the air gap.
 3. The moving elements border exactly one of the gap's circles (the inner
    one for a rotor, the outer one for an outer rotor), and the fixed
    elements the other.
 4. The axis passes through the gap's center, to 1e-6 of the outer radius,
-   and is parallel to the plane normal.
+   and is parallel to the plane normal. A translation's direction is along
+   the gap's lines (the MPERIOD shift) to 1e-9.
 
 **How a position is solved.** Each position is a static model: the deck
 the analyst would write by hand for that angle. For position φ the solver
@@ -852,7 +871,7 @@ motion-specific path.
 **How the air-gap element sees the rotation.** Only through the moving
 circle. Turning that circle's grids by φ adds φ to each grid's angle. The
 hat-function transform of the trace then turns each harmonic's (cos, sin)
-pair by nφ. In the harmonic energy W_n (under "How the AGE works" in
+pair by nφ (sliding a line's grids by x turns it by κx, κ = 2πn/Λ). In the harmonic energy W_n (under "How the AGE works" in
 [Air gap](#air-gap-pairgap)), the self terms depend only on each circle's
 amplitude, which a rotation does not change, so only the inner-to-outer
 coupling term changes. Solving the turned deck is
@@ -888,7 +907,9 @@ from zero, then by current continuation, as a static subcase is.
 about the MOTION axis, positive in the direction of positive positions:
 the air-gap torque above, with its sign taken for the moving side and the
 axis direction. It is exactly the derivative of the solved model's coenergy
-with respect to the position at fixed current.
+with respect to the position at fixed current. For TRANSLATE it is the
+**thrust**, the air-gap force on the moving part along the direction of
+travel, in N, the whole machine's (SECTORS pitches).
 
 **Back-EMF.** At each position the solver reports each closed circuit's
 dλ/dφ at fixed currents, in Wb per radian. That is V·s/rad, the back-EMF
@@ -906,7 +927,9 @@ difference between positions. It is the motional EMF at the position's
 currents. When the currents also change in time (a `DRIVE` sweep at speed),
 the terminal voltage adds the incremental inductance times di/dt, and the
 winding's resistive drop. A static subcase with a PAIRGAP reports the same
-rate for a turn of the part inside the gap about the plane normal.
+rate for a turn of the part inside the gap about the plane normal. For
+TRANSLATE the rate is dλ/dx in Wb per m, V per m/s: e = v·dλ/dx at a speed
+v.
 | Case control | Values | Default | Meaning |
 |---|---|---|---|
 | `MOTION` | ID | none | The subcase solves every position of MOTION ID, with its LOAD and MAGBC at each. |
@@ -931,6 +954,18 @@ MOTION did. The test suite checks each of these:
 | A round, unmagnetized iron rotor in a wound stator | Every position the same to round-off and zero torque, between mesh pitches too: the rotor polygon's shape is above the gap's harmonics. |
 | A magnet rotor in a two-slot stator without current | Cogging torque and energy repeat every 180° and the winding's linkage reverses, to round-off: the magnet frame turns with the rotor. |
 
+For TRANSLATE, `tests/unit/test_line_motion.cpp` checks the same on the
+tubular stack (MAGAXI) and the flat stack of its section (MAG2D), each one
+anti-periodic 20 mm pitch with a 1 mm gap and three-phase coils:
+
+| Comparison | Result |
+|---|---|
+| MOTION at x against the static deck with the mover's grids moved by x, positions off the mesh rows and beyond a pitch, along +z and −z | Round-off: energy, coenergy, linkage, thrust and back-EMF within 1e-13 relative. With a saturating sleeve (6 A, `MAGTOL` 1e-11), within 1e-13 too. |
+| Thrust and dλ/dx against central differences (±1 µm) of the coenergy and linkage over the sweep's own positions, moving the mover or the stator, along +z or −z | 7e-9 relative (the difference's truncation) |
+| The stator moved by x against the mover moved by −x | The same energy and linkage, the stator's thrust the mover's reaction, 1e-13 |
+| The mover one pole pitch on, no current, slotted stator | Coenergy and cogging force repeat and every linkage and back-EMF changes sign (the magnets' images are reversed); two pitches repeat everything; 1e-13 |
+| The tubular pitch's thrust and back-EMF over 21 positions against FEMM, one geometry per offset (`Magnetic_Validation/run_xfemm.py --cases tubular_motion`) | Loaded thrust 0.85% then 0.11% of the peak (coarse, fine); no-load back-EMF 0.2% then 0.08% of the peak against the spectral derivative of FEMM's linkages. The no-load force, exactly zero for this slotless stator, is 2e-4 N against FEMM's 7e-3 N. See `Magnetic_Validation/README.md`. |
+
 ```text
 SUBCASE 1
   LABEL = COGGING
@@ -950,7 +985,8 @@ MOTION,1,20,0,ROTATE,0.,.5,121      $ 0 to 60 degrees in 0.5 degree steps
 ```
 
 **Results.** The F06 SOLUTION section gains a `Motion` row (the moving
-ESET's elements and grids, the axis, which circle turns and the positions)
+ESET's elements and grids, the axis or direction of travel, which side
+moves and the positions)
 and, per MOTION subcase, the positions, total Newton iterations, their range
 per position and the largest residual. The subcase block gives the torque's
 mean, peak-to-peak and ripple (peak-to-peak as a percentage of the mean's
@@ -958,12 +994,14 @@ magnitude). When no source carries current at any position it gives the
 cogging peak-to-peak instead of a ripple: cogging averages to zero over its
 period, so its mean is only sampling residue and no base for a percentage. With `MSTEP = ALL` it adds a table of position, torque,
 energy, coenergy, Newton iterations, residual and each closed circuit's
-linkage. The HDF5 subcase group holds the same summary (see
-[Results](#results-and-angle-sweeps)), and with `MSTEP = ALL` every
-per-position value.
+linkage. A TRANSLATE subcase reports force in N against position in m
+(`Force on ESET 20 along the direction of travel (N)`, `POSITION(m)`,
+`FORCE(N)`, `DLAMBDA/DX (V s/m)`). The HDF5 subcase group holds the same
+summary (see [Results](#results-and-angle-sweeps)), and with `MSTEP = ALL`
+every per-position value.
 
 In `name.mag.vtkhdf`, MOTION fields make the collection a time series whose
-time is the position in degrees, which ParaView animates with its time
+time is the position in degrees (metres for TRANSLATE), which ParaView animates with its time
 controls: the moving points turn, and the gap elements show the AGE field
 in the fixed frame.
 
@@ -985,7 +1023,9 @@ between its own positions. Some consequences:
 A held state is not copied. The topology is written once, and each time
 step's offsets point at the state it shows.
 
-**Limits.** One moving part (one AGE gap); rotation only; planar only.
+**Limits.** One moving part (one AGE gap); 2D only (MAG2D, or MAGAXI for
+TRANSLATE); rotation in an annulus, or translation along a strip or tube
+(no sliding band along a line yet).
 Currents are fixed by LOAD at every position unless `DRIVE` sets the phase
 currents from the position (next section). A probe in the moving part stays
 in space while the rotor's cells pass under it.
@@ -1381,7 +1421,9 @@ MPERIOD,1,ANTI,1,2,0,6,.02    $ one 20 mm pole pitch standing for six
 - **Air gap.** `PAIRGAP` AGE solves the strip (MAG2D) or tube (MAGAXI)
   between the moving and fixed parts exactly; see
   [Gaps along a line](#gaps-along-a-line-strip-and-tube).
-- **Not yet with SHIFT**: the sliding band (`PAIRGAP` BAND) and MOTION.
+- **Motion.** `MOTION ... TRANSLATE` slides a part along the shift through
+  the gap; see [Motion](#motion-motion).
+- **Not yet with SHIFT**: the sliding band (`PAIRGAP` BAND) and DRIVE.
 
 **What a pitch stands for.** The pitch model is a machine of SECTORS
 pitches whose ends join: SECTORS copies of the pitch's mesh, each moved by
@@ -1658,15 +1700,20 @@ solving. The file has two top-level groups:
 
   - A MOTION subcase's group has instead the attributes `id`, `iterations`
     (the total), `residual` (the largest), `bh_extrapolated` (at any
-    position), `motion`, `positions`, `start_deg`, `step_deg`,
-    `torque_mean_Nm`, `torque_peak_to_peak_Nm`, `torque_ripple_percent` (NaN
-    for a zero mean or a current-free sweep) and `current_free`. With `MSTEP = ALL` it also has the
-    datasets `positions_deg`, `iterations`, `residual`, `energy_J`,
+    position), `motion`, `motion_type` (`ROTATE` or `TRANSLATE`),
+    `positions`, `start_deg`, `step_deg`, `torque_mean_Nm`,
+    `torque_peak_to_peak_Nm`, `torque_ripple_percent` (NaN for a zero mean
+    or a current-free sweep) and `current_free`. With `MSTEP = ALL` it also
+    has the datasets `positions_deg`, `iterations`, `residual`, `energy_J`,
     `coenergy_J`, `bh_extrapolated` and `motion/torque_Nm`, one row per
     position, and the `sources/`, `circuits/`, `forces/` and `probes/`
     tables above with a leading position axis (e.g. `forces/torque_Nm` is
     [positions, surfaces, 3]). With `SPEED` the group has the attribute
     `speed_rpm`, and with `MSTEP = ALL` `motion/emf_V` [positions, circuits].
+    A TRANSLATE subcase names them in metres and newtons: `start_m`,
+    `step_m`, `force_mean_N`, `force_peak_to_peak_N`,
+    `force_ripple_percent`, `positions_m`, `motion/force_N` and
+    `speed_m_per_s`; its `circuits/linkage_rate_Wb_per_m` is per metre.
   - A DRIVE subcase's group also has a `drive/` group with the attributes
     `id`, `wave` (`SINE` or `SIX`), `pole_pairs`, `current_peak_A`,
     `gamma_deg`, `theta0_deg`, `theta0_auto` and the means over the
@@ -1693,7 +1740,8 @@ Output requests select what is written. `BFIELD=ALL` (default), `NONE` or an
 ESET ID writes the subcase field block for every cell, none, or only that set
 (points are compacted to the set's cells). `BFIELD(EVERY=n)` writes a MOTION
 subcase's fields at every n-th position; with MOTION fields the VTKHDF
-collection is a time series in degrees ([Motion](#motion-motion)). A selected ESET must reference
+collection is a time series in degrees, or metres for TRANSLATE
+([Motion](#motion-motion)). A selected ESET must reference
 existing field elements; CWIRE IDs are not field elements. `MPROBE=ALL|NONE`
 keeps or drops the subcase's `probes` group. Both may be global or set per
 subcase; a subcase value overrides the global one. `MSOURCE=ALL|NONE` is

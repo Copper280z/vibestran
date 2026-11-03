@@ -1,0 +1,327 @@
+// tests/unit/test_line_motion.cpp
+// MOTION TRANSLATE: a part sliding along the strip or tube air gap of a
+// model that repeats along a line. Each position is checked against the
+// static deck with the part moved by hand, the thrust and back-EMF against
+// the slopes of the coenergy and linkage over the positions, moving the
+// stator against moving the mover back, a pole pitch of an anti-periodic
+// stack against reversed magnets, and the results' units and the errors.
+
+#include "tube_deck.hpp"
+#ifdef VIBESTRAN_HAS_HDF5
+#include "../common/hdf5_results.hpp"
+#endif
+#include <gtest/gtest.h>
+#include <filesystem>
+#include <fstream>
+#include <regex>
+#include <sstream>
+
+using namespace tube_deck;
+
+namespace {
+// The tubular (or flat) stack t with MOTION 1 moving `part` (the mover, PIDs
+// 4 to 6, or with stator the coils, sleeve and outer air) to `positions`
+// metres along the axis: in MAGAXI along the z axis of CID 0, in MAG2D along
+// the x axis of CID 8 (basic z), or of CID 7 (basic -z) with reversed.
+struct Travel {
+  double start{0}, step{0};
+  int count{1};
+  bool stator{false}, reversed{false};
+  double speed{0};
+};
+Axi travelling(const Tube &t, const Travel &v) {
+  Axi g = tube(t);
+  const int cid = v.reversed ? 7 : t.planar ? 8 : 0;
+  if (v.reversed)
+    g.cards += t.planar ? "CORD2R,7,0,0.,0.,0.,0.,1.,0.\n,0.,0.,-1.\n"
+                        : "CORD2R,7,0,0.,0.,0.,0.,0.,-1.\n,1.,0.,0.\n";
+  std::string stator = ",1,2";
+  for (int k = 0; k < 3 * t.pitches; ++k)
+    stator += std::format(",{}", 10 + k);
+  g.cards += std::format("ESET,40,PROP{}\nMOTION,1,40,{},TRANSLATE,{:.17g},{:.17g},{}\n",
+                         v.stator ? stator : ",4,5,6", cid, v.start, v.step, v.count);
+  if (v.speed != 0)
+    g.cards += std::format(",{:.17g}\n", v.speed);
+  g.control += "MOTION = 1\nMSTEP = ALL\n";
+  return g;
+}
+// The one subcase of a solved deck, kept with its results.
+CaseResults only(const Axi &g) {
+  const auto r = solved(parsed(g));
+  EXPECT_EQ(r.cases.size(), 1U);
+  return r.cases.empty() ? CaseResults{} : r.cases.front();
+}
+} // namespace
+
+TEST(LineMotion, EachPositionIsTheStaticDeckMovedByHand) {
+  // A position is the static deck with the mover's grids moved by hand
+  // (the gap's elements, which the element does not use, sheared): the same
+  // model, solved by the same code, so with linear materials energy,
+  // coenergy, linkage, thrust and back-EMF agree to round-off. Positions
+  // off the mesh rows, and beyond a pitch, where no grid of the mover lines
+  // up with the stator's and its sides lie past the stator's.
+  const std::vector<double> positions{.37 * pitch / 48, 13.6 * pitch / 48, 1.3 * pitch};
+  for (bool planar : {false, true}) {
+    SCOPED_TRACE(planar ? "strip" : "tube");
+    const Tube base{.offset = 5, .layers = 0, .current = 3, .gap = true, .planar = planar};
+    for (bool reversed : {false, true}) {
+      SCOPED_TRACE(reversed ? "along -z" : "along +z");
+      const double sign = reversed ? -1 : 1;
+      Travel v{.count = 3, .reversed = reversed};
+      v.start = sign * positions[0];
+      v.step = sign * (positions[1] - positions[0]);
+      // The third position is not on the sweep's line; solve it alone.
+      auto steps = only(travelling(base, v)).steps;
+      ASSERT_EQ(steps.size(), 3U);
+      steps.pop_back();
+      Travel far = v;
+      far.start = sign * positions[2];
+      far.count = 1;
+      const auto alone = only(travelling(base, far)).steps;
+      ASSERT_EQ(alone.size(), 1U);
+      steps.push_back(alone[0]);
+      for (size_t k = 0; k < positions.size(); ++k) {
+        SCOPED_TRACE(positions[k]);
+        Tube by_hand = base;
+        by_hand.move = positions[k];
+        const auto s = only(tube(by_hand));
+        const auto &m = steps[k];
+        EXPECT_NEAR(m.position, sign * positions[k], 1e-18);
+        EXPECT_NEAR(m.energy, s.energy, 1e-11 * std::abs(s.energy));
+        EXPECT_NEAR(m.coenergy, s.coenergy, 1e-11 * std::abs(s.coenergy));
+        // The thrust is along the travel: the static force along +z, signed.
+        EXPECT_GT(std::abs(s.gap_force), 1.);
+        EXPECT_NEAR(m.torque, sign * s.gap_force, 1e-9 * std::abs(s.gap_force));
+        for (size_t c = 0; c < 3; ++c) {
+          const auto i = static_cast<Eigen::Index>(c);
+          EXPECT_NEAR(m.circuits[c].linkage, s.circuits[c].linkage,
+                      1e-10 * std::abs(s.circuits[0].linkage));
+          EXPECT_NEAR(m.linkage_rate[i], sign * s.linkage_rate[i],
+                      1e-9 * std::abs(s.linkage_rate[0]));
+        }
+      }
+    }
+  }
+}
+
+TEST(LineMotion, SaturatedPositionsAgreeWithTheDeckMovedByHandToNewtonsTolerance) {
+  // With a B-H curve each position starts Newton from the previous one's
+  // potential, the static deck from zero: both stop within MAGTOL (1e-11)
+  // of the solution, so they agree to that tolerance.
+  const Tube base{.offset = 5, .saturating = true, .layers = 0, .current = 6, .gap = true};
+  const double step = 7.3 * pitch / 48;
+  const auto sweep = only(travelling(base, {.step = step, .count = 3}));
+  ASSERT_EQ(sweep.steps.size(), 3U);
+  for (int k = 1; k < 3; ++k) {
+    Tube by_hand = base;
+    by_hand.move = k * step;
+    const auto s = only(tube(by_hand));
+    const auto &m = sweep.steps[static_cast<size_t>(k)];
+    EXPECT_GT(s.iterations, 2);
+    EXPECT_NEAR(m.coenergy, s.coenergy, 1e-9 * std::abs(s.coenergy));
+    EXPECT_NEAR(m.torque, s.gap_force, 1e-7 * std::abs(s.gap_force));
+    for (size_t c = 0; c < 3; ++c)
+      EXPECT_NEAR(m.circuits[c].linkage, s.circuits[c].linkage,
+                  1e-8 * std::abs(s.circuits[0].linkage));
+  }
+}
+
+TEST(LineMotion, ThrustAndBackEmfAreTheSlopesOfCoenergyAndLinkageAlongTheTravel) {
+  // At fixed currents the thrust on the moving part toward increasing
+  // positions is dW'/dx, and each circuit's back-EMF per unit speed is
+  // dlambda/dx: central differences over the sweep's own positions -dx, 0,
+  // +dx. Moving the mover along +z, along -z (a CID whose x axis is basic
+  // -z), and moving the stator (the gap's outer side) instead: each sign of
+  // the side and the direction.
+  constexpr double dx = 1e-6;
+  for (bool planar : {false, true})
+    for (bool stator : {false, true})
+      for (bool reversed : {false, true}) {
+        SCOPED_TRACE(std::format("{}, {} along {}", planar ? "strip" : "tube",
+                                 stator ? "stator" : "mover", reversed ? "-z" : "+z"));
+        const Tube t{.offset = 5, .layers = 0, .current = 3, .gap = true, .planar = planar};
+        const Travel v{.start = -dx, .step = dx, .count = 3, .stator = stator,
+                       .reversed = reversed};
+        const auto c = only(travelling(t, v));
+        ASSERT_EQ(c.steps.size(), 3U);
+        const auto &mid = c.steps[1];
+        const double thrust = (c.steps[2].coenergy - c.steps[0].coenergy) / (2 * dx);
+        EXPECT_GT(std::abs(thrust), 1.);
+        EXPECT_NEAR(mid.torque, thrust, 1e-6 * std::abs(thrust));
+        for (size_t k = 0; k < 3; ++k) {
+          const double rate =
+              (c.steps[2].circuits[k].linkage - c.steps[0].circuits[k].linkage) / (2 * dx);
+          EXPECT_NEAR(mid.linkage_rate[static_cast<Eigen::Index>(k)], rate,
+                      1e-6 * std::abs(mid.linkage_rate[0]))
+              << k;
+        }
+      }
+}
+
+TEST(LineMotion, MovingTheStatorIsMovingTheMoverBack) {
+  // Only the relative position matters: the stator moved by x is the mover
+  // moved by -x, the stack as a whole shifted. The element sees it as the
+  // same phase difference between its sides, the same discrete problem, so
+  // energy and linkage agree to round-off and the force on the stator is
+  // the mover's reaction.
+  for (bool planar : {false, true}) {
+    SCOPED_TRACE(planar ? "strip" : "tube");
+    const Tube t{.offset = 5, .layers = 0, .current = 3, .gap = true, .planar = planar};
+    const double x = 9.4 * pitch / 48;
+    const auto a = only(travelling(t, {.start = x, .stator = true}));
+    const auto b = only(travelling(t, {.start = -x}));
+    ASSERT_EQ(a.steps.size(), 1U);
+    ASSERT_EQ(b.steps.size(), 1U);
+    const auto &s = a.steps[0], &m = b.steps[0];
+    EXPECT_NEAR(s.coenergy, m.coenergy, 1e-11 * std::abs(m.coenergy));
+    EXPECT_GT(std::abs(m.torque), 1.);
+    // Both toward +z: the stator's force is minus the mover's.
+    EXPECT_NEAR(s.torque, -m.torque, 1e-9 * std::abs(m.torque));
+    for (size_t c = 0; c < 3; ++c) {
+      EXPECT_NEAR(s.circuits[c].linkage, m.circuits[c].linkage,
+                  1e-10 * std::abs(m.circuits[0].linkage));
+      EXPECT_NEAR(s.linkage_rate[static_cast<Eigen::Index>(c)],
+                  -m.linkage_rate[static_cast<Eigen::Index>(c)],
+                  1e-9 * std::abs(m.linkage_rate[0]));
+    }
+  }
+}
+
+TEST(LineMotion, APolePitchReversesTheMagnetsOfAnAntiPeriodicStack) {
+  // In one anti-periodic pitch the mover a pitch on sits where its
+  // magnets' images are reversed: without current the field is the
+  // magnets', so the stator's potential, and every coil's linkage and
+  // back-EMF, change sign while the coenergy and the cogging force of the
+  // slotted stator, which are quadratic in it, repeat. Two pitches are the
+  // gap's whole period: everything repeats. Each to round-off.
+  for (bool planar : {false, true}) {
+    SCOPED_TRACE(planar ? "strip" : "tube");
+    const Tube t{.offset = 5, .layers = 0, .gap = true, .planar = planar, .teeth = 1};
+    const double x = 3.7 * pitch / 48;
+    const auto c = only(travelling(t, {.start = x, .step = pitch, .count = 3}));
+    ASSERT_EQ(c.steps.size(), 3U);
+    const auto &first = c.steps[0];
+    EXPECT_GT(std::abs(first.torque), 1e-3);
+    EXPECT_GT(std::abs(first.circuits[0].linkage), 1e-4);
+    for (size_t k = 1; k < 3; ++k) {
+      SCOPED_TRACE(k);
+      const auto &s = c.steps[k];
+      const double sign = k == 1 ? -1 : 1;
+      EXPECT_NEAR(s.coenergy, first.coenergy, 1e-11 * std::abs(first.coenergy));
+      EXPECT_NEAR(s.torque, first.torque, 1e-9 * std::abs(first.torque));
+      for (size_t i = 0; i < 3; ++i) {
+        EXPECT_NEAR(s.circuits[i].linkage, sign * first.circuits[i].linkage,
+                    1e-10 * std::abs(first.circuits[0].linkage));
+        EXPECT_NEAR(s.linkage_rate[static_cast<Eigen::Index>(i)],
+                    sign * first.linkage_rate[static_cast<Eigen::Index>(i)],
+                    1e-9 * std::abs(first.linkage_rate[0]));
+      }
+    }
+  }
+}
+
+TEST(LineMotion, ResultsAreInMetresNewtonsAndVoltsPerMetrePerSecond) {
+  const Tube t{.offset = 5, .layers = 0, .current = 3, .gap = true};
+  const double step = pitch / 12;
+  const auto m = parsed(travelling(t, {.step = step, .count = 4, .speed = 1.5}));
+  const auto results = solved(m);
+  ASSERT_EQ(results.cases.size(), 1U);
+  const auto &c = results.cases[0];
+  ASSERT_EQ(c.steps.size(), 4U);
+#ifdef VIBESTRAN_HAS_HDF5
+  const auto directory = std::filesystem::temp_directory_path() / "vibestran_line_motion";
+  std::filesystem::create_directories(directory);
+  ASSERT_FALSE(write_results(m, results, directory / "tube.F06").has_value());
+  const auto file = directory / "tube.mag.vtkhdf";
+  using vibestran::test::h5_attribute, vibestran::test::h5_exists, vibestran::test::h5_table;
+  const std::string group = "/MAGSTAT/subcases/1";
+  EXPECT_NEAR(h5_attribute(file, group, "step_m"), step, 1e-18);
+  EXPECT_NEAR(h5_attribute(file, group, "speed_m_per_s"), 1.5, 0);
+  EXPECT_FALSE(h5_exists(file, group + "/positions_deg"));
+  const auto positions = h5_table(file, group + "/positions_m");
+  const auto force = h5_table(file, group + "/motion/force_N");
+  const auto emf = h5_table(file, group + "/motion/emf_V");
+  ASSERT_EQ(positions.rows(), 4U);
+  ASSERT_EQ(force.rows(), 4U);
+  ASSERT_EQ(emf.values.size(), 12U);
+  double mean = 0;
+  for (size_t k = 0; k < 4; ++k) {
+    EXPECT_NEAR(positions.at(k), static_cast<double>(k) * step, 1e-18);
+    EXPECT_EQ(force.at(k), c.steps[k].torque);
+    mean += force.at(k) / 4;
+    // e = v dlambda/dx: volts at 1.5 m/s.
+    for (size_t i = 0; i < 3; ++i)
+      EXPECT_NEAR(emf.at(k, i), 1.5 * c.steps[k].linkage_rate[static_cast<Eigen::Index>(i)],
+                  1e-15);
+  }
+  EXPECT_NEAR(h5_attribute(file, group, "force_mean_N"), mean, 1e-12 * std::abs(mean));
+  EXPECT_TRUE(h5_exists(file, group + "/circuits/linkage_rate_Wb_per_m"));
+  std::ifstream in(directory / "tube.F06");
+  std::stringstream f06;
+  f06 << in.rdbuf();
+  for (const std::string text :
+       {"MOTION 1 moves ESET 40 (336 elements, 392 grids) along (0, 0, 1), the z axis of "
+        "CID 0, sliding the",
+        "inner side of PAIRGAP 9: 4 positions from 0 to 0.005 m",
+        "MOTION 1: 4 positions from 0 to 0.005 m along the z axis of CID 0",
+        "Force on ESET 40 along the direction of travel (N): mean ",
+        "  STEP     POSITION(m)            FORCE(N)           ENERGY(J)",
+        "         EMF      1(V)"})
+    EXPECT_NE(f06.str().find(text), std::string::npos) << text << "\n" << f06.str();
+  std::filesystem::remove_all(directory);
+#else
+  GTEST_SKIP() << "MAGSTAT results need HDF5";
+#endif
+}
+
+TEST(LineMotion, CardsNameWhatFails) {
+  const auto message = [](const Axi &g, const std::string &from = "",
+                          const std::string &to = "") {
+    std::string text = deck(g);
+    if (!from.empty())
+      text = std::regex_replace(text, std::regex(from), to);
+    auto m = parse_string(text);
+    if (const auto *e = std::get_if<vibestran::Error>(&m))
+      return e->message;
+    return error_of(solve(std::get<Model>(m)));
+  };
+  const auto contains = [](const std::string &text, const std::string &part) {
+    return text.find(part) != std::string::npos;
+  };
+  const Tube tube_t{.offset = 5, .layers = 0, .gap = true};
+  const Tube strip_t{.offset = 5, .layers = 0, .gap = true, .planar = true};
+  const Axi tube_g = travelling(tube_t, {.step = .001, .count = 2});
+  const Axi strip_g = travelling(strip_t, {.step = .001, .count = 2});
+  // ROTATE in a model that repeats along a line.
+  std::string e = message(strip_g, "TRANSLATE", "ROTATE");
+  EXPECT_TRUE(contains(e, "MOTION 1 ROTATE turns the part about an axis, but MPERIOD 1 "
+                          "repeats the model along a line, where the gap is a strip"))
+      << e;
+  e = message(tube_g, "TRANSLATE", "ROTATE");
+  EXPECT_TRUE(contains(e, "MOTION 1 ROTATE in a MAGAXI model")) << e;
+  // The direction of travel: MAGAXI's along the axis, MAG2D's in the plane
+  // and along the gap. CID 6's x axis is basic y, the plane normal; CID 9's
+  // is basic x, across the strip.
+  e = message(tube_g, "MOTION,1,40,0,", "CORD2R,6,0,0.,0.,0.,1.,0.,0.\n,0.,0.,1.\nMOTION,1,40,6,");
+  EXPECT_TRUE(contains(e, "MOTION 1: the z axis of CID 6, the direction of travel, must be "
+                          "parallel to the MAGAXI symmetry axis"))
+      << e;
+  e = message(strip_g, "MOTION,1,40,8,", "CORD2R,6,0,0.,0.,0.,1.,0.,0.\n,0.,1.,0.\nMOTION,1,40,6,");
+  EXPECT_TRUE(contains(e, "MOTION 1: the x axis of CID 6, the direction of travel, must lie "
+                          "in the MAG2D plane"))
+      << e;
+  e = message(strip_g, "MOTION,1,40,8,", "MOTION,1,40,9,");
+  EXPECT_TRUE(contains(e, "MOTION 1: the direction of travel, the x axis of CID 9 (1, 0, 0), "
+                          "is not along PAIRGAP 9's lines (0, 0, 1), the MPERIOD shift"))
+      << e;
+  // The moving part on both sides of the gap.
+  e = message(tube_g, "ESET,40,PROP,4,5,6", "ESET,40,PROP,4,5,6,2");
+  EXPECT_TRUE(contains(e, "MOTION 1: grid ")) << e;
+  // DRIVE follows a rotation for now.
+  Axi driven = strip_g;
+  driven.cards += "DRIVE,1,SINE,1,1.,0.,0.\n,1,2,3\n";
+  driven.control += "DRIVE = 1\n";
+  e = message(driven);
+  EXPECT_TRUE(contains(e, "Subcase 1: DRIVE 1 with MOTION 1 TRANSLATE is not available yet"))
+      << e;
+}

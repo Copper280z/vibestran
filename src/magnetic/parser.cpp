@@ -509,11 +509,9 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       motion.set = r.integer(2);
       motion.coordinates = r.integer(3);
       const auto type = upper(r.get(4));
-      if (type == "TRANSLATE")
-        return Error{r.where + ": MOTION TRANSLATE is not supported yet; it needs "
-                               "the linear air-gap element. Use ROTATE"};
-      if (type != "ROTATE")
-        return Error{r.where + ": MOTION TYPE must be ROTATE"};
+      if (type != "ROTATE" && type != "TRANSLATE")
+        return Error{r.where + ": MOTION TYPE must be ROTATE or TRANSLATE"};
+      motion.translate = type == "TRANSLATE";
       motion.start = r.real(5);
       motion.step = r.real(6);
       motion.count = r.integer(7, 1);
@@ -943,7 +941,7 @@ Status validate(const Model &m) {
     return Error{"MAGSTAT requires at least one subcase"};
   // Periodic sectors and NORMAL faces are planar; say so before anything
   // else about a 3D deck that uses them.
-  // Motion along the axis is not built yet.
+  // DRIVE along the axis is not built yet.
   if (m.options.axisymmetric) {
     const auto missing = [](std::string_view what) {
       return Error{std::format("{} is not available for MAGAXI models yet", what)};
@@ -954,8 +952,6 @@ Status validate(const Model &m) {
           "air-gap element solves only in a model that repeats along it: it needs "
           "MPERIOD with SHIFT. METHOD=MESH solves the gap as air",
           m.air_gaps.begin()->first)};
-    if (!m.motions.empty())
-      return missing(std::format("MOTION {}", m.motions.begin()->first));
     if (!m.drives.empty())
       return missing(std::format("DRIVE {}", m.drives.begin()->first));
   }
@@ -1275,8 +1271,8 @@ Status validate(const Model &m) {
   }
   for (const auto &[id, motion] : m.motions) {
     if (!m.options.planar)
-      return Error{std::format("MOTION {} requires MAG2D; 3D motion is not "
-                               "supported",
+      return Error{std::format("MOTION {} requires MAG2D or MAGAXI; 3D motion is "
+                               "not supported",
                                id)};
     if (!m.element_sets.contains(motion.set))
       return Error{std::format("MOTION {} references undefined ESET {}", id,
@@ -1295,13 +1291,44 @@ Status validate(const Model &m) {
       return Error{std::format("MOTION {} requires COUNT >= 1, and a nonzero "
                                "STEP when COUNT > 1",
                                id)};
-    const Vector axis =
-        motion.coordinates
-            ? Vector(coordinate_axes(m.coordinates.at(motion.coordinates)).col(2))
-            : Vector(Vector::UnitZ());
-    if (axis.cross(plane_normal).norm() > 1e-9)
+    const Matrix axes = motion.coordinates
+                            ? coordinate_axes(m.coordinates.at(motion.coordinates))
+                            : Matrix::Identity();
+    if (m.options.axisymmetric && !motion.translate)
+      return Error{std::format(
+          "MOTION {} ROTATE in a MAGAXI model: the field is the same at every "
+          "angle about the axis, so turning a part about it changes nothing. A "
+          "part slides along the axis with TRANSLATE",
+          id)};
+    // A translation slides along a gap that is a line, in a model that
+    // repeats along it; a rotation turns in an annulus.
+    const bool line = m.period && m.period->shift != 0;
+    if (motion.translate && !line)
+      return Error{std::format(
+          "MOTION {} TRANSLATE slides the part along a gap that is a line, which "
+          "a model has when it repeats along it: it needs MPERIOD with SHIFT{}",
+          id, m.period ? std::format(" (MPERIOD {} repeats about an axis)", m.period->id)
+                       : "")};
+    if (!motion.translate && line)
+      return Error{std::format(
+          "MOTION {} ROTATE turns the part about an axis, but MPERIOD {} repeats "
+          "the model along a line, where the gap is a {}: a part slides along "
+          "it with TRANSLATE",
+          id, m.period->id, m.options.axisymmetric ? "tube" : "strip")};
+    if (!motion.translate && axes.col(2).cross(plane_normal).norm() > 1e-9)
       return Error{std::format("MOTION {}: the z axis of CID {} must be parallel "
                                "to the MAG2D plane normal, the axis of rotation",
+                               id, motion.coordinates)};
+    if (motion.translate && m.options.axisymmetric &&
+        axes.col(2).cross(plane_axes.col(2)).norm() > 1e-9)
+      return Error{std::format("MOTION {}: the z axis of CID {}, the direction of "
+                               "travel, must be parallel to the MAGAXI symmetry "
+                               "axis",
+                               id, motion.coordinates)};
+    if (motion.translate && !m.options.axisymmetric &&
+        std::abs(axes.col(0).dot(plane_normal)) > 1e-9)
+      return Error{std::format("MOTION {}: the x axis of CID {}, the direction of "
+                               "travel, must lie in the MAG2D plane",
                                id, motion.coordinates)};
     if (m.air_gaps.empty() && !m.meshed_air_gaps.empty())
       return Error{std::format(
@@ -1372,10 +1399,6 @@ Status validate(const Model &m) {
             "available in a model that repeats along a line yet; METHOD=AGE "
             "solves the gap exactly, METHOD=MESH as air",
             period->id, id)};
-    if (translation && !m.motions.empty())
-      return Error{std::format("MPERIOD {} with SHIFT: MOTION {} is not available "
-                               "in a model that repeats along a line yet",
-                               period->id, m.motions.begin()->first)};
   }
   for (const auto &[id, bc] : m.boundaries) {
     if (const auto missing = std::ranges::find_if(
@@ -1449,6 +1472,10 @@ Status validate(const Model &m) {
                                "subcase: the phase currents follow the rotor "
                                "position",
                                sc.id, sc.drive)};
+    if (m.motions.at(sc.motion).translate)
+      return Error{std::format("Subcase {}: DRIVE {} with MOTION {} TRANSLATE is not "
+                               "available yet; a DRIVE follows a rotation",
+                               sc.id, sc.drive, sc.motion)};
     const auto &drive = m.drives.at(sc.drive);
     const auto &factors = std::get<std::map<int, double>>(r);
     const auto loaded = std::find_if(m.currents.begin(), m.currents.end(),
