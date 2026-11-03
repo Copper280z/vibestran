@@ -1380,6 +1380,53 @@ consistency checks, like the rotary example's; the motor's static thrust
 and back-EMF were compared with FEMM in `Magnetic_Validation` (the
 `tubular_pitch` and `tubular_motion` cases, without the teeth).
 
+### Worked example: a finite tubular motor
+
+`tools/magnetic_tubular_finite_example.py` models the same motor as a real
+one with ends. One set of three coils (A, −C, B: one pole pitch of stator)
+rides on a rod of five magnets. `--no-steel` leaves out the teeth and the
+shell, so the coils sit in air; the coils and the rod do not change.
+
+MOTION slides a part only along a gap in a model that repeats along that
+line, so the motor sits in a 200 mm slice of space that repeats along the
+axis (`MPERIOD ... PERIODIC ... SHIFT 0.2`, one sector). The slice is long
+enough that each motor hardly feels its copies. The air around the motor
+reaches 50 mm, more than the field needs, so the plots show the field lines
+closing around the rod's ends. The gap is a `PAIRGAP` tube over the whole
+200 mm. The moving part is everything inside the gap: the magnets, their
+tube, and the air beyond the rod's ends, which slides with them. The
+deck needs no other cards or settings for a finite motor.
+
+```sh
+.venv/bin/python tools/magnetic_tubular_finite_example.py /tmp/finite [--no-steel]
+```
+
+Both subcases sweep the rod over one electrical period, −20 mm to 20 mm in
+48 positions: no load (`DRIVE` at 0 A, for THETA0 AUTO and the back-EMF)
+and 15 A peak on q. The script writes `field_<subcase>_<position>.png` (|B|
+and flux lines through the axis, mirrored, at −20 mm and 0) and `curves.png`
+(the force on the rod in both subcases, and the no-load back-EMF at 1 m/s).
+The mesh has 38152 triangles (8311 in the gap). The solve takes 38 s with
+steel and 27 s without; the whole script takes about a minute.
+
+| | With steel | No steel |
+|---|---|---|
+| Thrust at 15 A on q: mean (range) | 37.7 N (21.3 to 54.1 N) | 22.4 N (22.0 to 22.8 N) |
+| No-load force (range) | −17.6 to 17.6 N | −0.006 to 0.006 N |
+| No-load back-EMF peak, A / C (middle) / B | 2.197 / 2.221 / 2.197 V | 1.126 / 1.125 / 1.126 V |
+| λ_d (no load) | 10.75 mWb | 6.31 mWb |
+
+The no-steel model is the check: with no current and nothing magnetic
+around the rod, the force on it is zero, and the computed force is within
+0.006 N. With steel, the no-load force is the teeth pulling toward the
+rod's magnet joints. It changes sign sharply wherever a joint passes an end
+tooth, at 0 and ±20 mm. The rated thrust is that force plus a nearly steady
+thrust. The three back-EMFs differ in shape, not only in phase: the middle
+coil sits between two others, and the end coils see the rod's fringing
+field. The mean thrust is within 0.5% of (3/2)(π/τ)λ_d i_q (37.6 and
+22.3 N). That relation is exact only for sinusoidal linkages, which a
+finite motor does not have.
+
 ### Sector models (MPERIOD) and flux-normal faces (MBC NORMAL)
 
 Most machines repeat around the shaft. In a 12-slot, 14-pole motor, turning
