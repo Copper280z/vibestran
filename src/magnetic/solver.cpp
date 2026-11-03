@@ -1556,12 +1556,14 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
     const auto &g = *mesh.air_gap;
     const bool tube = g.shape == GapShape::Tube;
     const int finer = std::max(own_harmonics(g.inner), own_harmonics(g.outer));
+    const bool band = g.band_points > 0;
     solution.add(
         "Air gap",
-        std::format("PAIRGAP {}, air-gap element (AGE) in place of its {} elements: "
-                    "{}, {} + {} grids over a {:.6g} m period, {} coupled harmonics, "
-                    "{} on the finer side{}, largest deviation {:.1e} of the {}",
-                    g.property, g.elements.size(),
+        std::format("PAIRGAP {}, {} in place of its {} elements: "
+                    "{}, {} + {} grids over a {:.6g} m period, {}, largest deviation "
+                    "{:.1e} of the {}",
+                    g.property, band ? "sliding band (BAND)" : "air-gap element (AGE)",
+                    g.elements.size(),
                     tube ? std::format("the tube from radius {:.6g} to {:.6g} m about "
                                        "the axis",
                                        g.inner.radius, g.outer.radius)
@@ -1570,16 +1572,21 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
                                        g.outer.radius - g.inner.radius, g.u.x(), g.u.y(),
                                        g.u.z()),
                     g.inner.nodes.size(), g.outer.nodes.size(), g.length,
-                    coupled_harmonics(g), finer,
-                    g.harmonics < finer ? std::format(", the gap field's to {}", g.harmonics)
-                                        : "",
+                    band ? std::format("{} band points in {} layer{}", g.band_points,
+                                       g.band_layers, g.band_layers == 1 ? "" : "s")
+                         : std::format("{} coupled harmonics, {} on the finer side{}",
+                                       coupled_harmonics(g), finer,
+                                       g.harmonics < finer
+                                           ? std::format(", the gap field's to {}",
+                                                         g.harmonics)
+                                           : ""),
                     g.deviation, tube ? "larger of the pitch and the radius" : "pitch"));
     if (g.sectors > 1)
       solution.add("Air gap",
                    std::format("the pitch's lines ({} + {} grids) continued over two "
-                               "pitches, changing sign in the second: even harmonics "
-                               "of the period vanish",
-                               g.inner.nodes.size() / 2 + 1, g.outer.nodes.size() / 2 + 1));
+                               "pitches, changing sign in the second{}",
+                               g.inner.nodes.size() / 2 + 1, g.outer.nodes.size() / 2 + 1,
+                               band ? "" : ": even harmonics of the period vanish"));
   } else if (mesh.air_gap) {
     const auto &g = *mesh.air_gap;
     // Round-off in the fitted center prints as zero.

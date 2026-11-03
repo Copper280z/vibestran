@@ -108,6 +108,14 @@ private:
 // mean, ln r term. For harmonic n one layer is too stiff by about
 // (n ln(r2/r1))^4 / 45 in self energy, and M layers divide the error by
 // about M^2. Fields in the gap are AirGapSeries's, from the traces.
+//
+// Along a line the band's points are uniform in the phase 2 pi s / length
+// from AirGap::center, and a move of a part slides its trace under them. A
+// strip is the annulus's rectangle with thickness 2 pi (r2 - r1) / length
+// (the AGE's conformal map). A tube's points hold the flux function r A,
+// bilinear in r^2 and the phase, which makes its mean field (a uniform
+// axial field, and 1/r) exact; its interior unknowns are A at their ring's
+// radius, the rings equally spaced in r^2.
 
 // What a gap stiffness acts on: the unknown and its sign for each inner
 // circle entry, each outer one, and for a band its interior point rings 1
@@ -119,7 +127,8 @@ private:
 [[nodiscard]] Eigen::SparseMatrix<double> band_stiffness(const AirGap &gap);
 // -dW/d(delta) of the band's energy for a rigid rotation delta of the inner
 // part, its traces sampled at the turned angles, per unit depth (whole
-// machine in a sector model).
+// machine in a sector model). Along a strip or tube it is the force along u
+// for a move delta along u, as air_gap_torque's.
 [[nodiscard]] double band_torque(const AirGap &gap, const Eigen::VectorXd &a);
 // The gradient of band_torque with respect to a; band_torque is bilinear,
 // so gradient . a is twice the torque.

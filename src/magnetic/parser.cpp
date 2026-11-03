@@ -1390,15 +1390,6 @@ Status validate(const Model &m) {
       return Error{std::format("MPERIOD {}: the z axis of CID {} must be parallel "
                                "to the MAG2D plane normal, the sector axis",
                                period->id, period->coordinates)};
-    // The sliding band along a line is not built yet.
-    for (const auto &[id, gap] : m.air_gaps)
-      if (translation &&
-          m.options.air_gap_method.value_or(gap.method) == AirGapMethod::Band)
-        return Error{std::format(
-            "MPERIOD {} with SHIFT: the sliding band (BAND) of PAIRGAP {} is not "
-            "available in a model that repeats along a line yet; METHOD=AGE "
-            "solves the gap exactly, METHOD=MESH as air",
-            period->id, id)};
   }
   for (const auto &[id, bc] : m.boundaries) {
     if (const auto missing = std::ranges::find_if(

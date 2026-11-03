@@ -136,7 +136,9 @@ inline double relative(double a, double b) { return std::abs(a - b) / std::abs(b
 // element, or as air with mesh; refine divides every radial interval that
 // many times; planar makes it the flat stack of the same section (MAG2D,
 // r along basic x). With teeth, the cells within that many rows of a coil's
-// ends are the sleeve's steel: a slotted stator, which cogs.
+// ends are the sleeve's steel: a slotted stator, which cogs. With band the
+// gap is a sliding band of band_points points in band_layers layers (blank
+// for 0).
 inline constexpr double pitch = .02;
 struct Tube {
   int pitches{1}, machine{4}, rows{48}; // rows: per pitch
@@ -147,6 +149,8 @@ struct Tube {
   double move{0};    // the mover (r < 6.75 mm) moved along z, the gap sheared
   bool gap{false}, mesh{false}, planar{false};
   int refine{1}, teeth{0};
+  bool band{false};
+  int band_points{0}, band_layers{0};
   // MFORCE 1 on the stator (coils and sleeve) instead: a flat stack's
   // magnets reach the edge at x = 0, where an axisymmetric stack has its axis.
   bool stator_body{false};
@@ -206,8 +210,12 @@ inline Axi tube(const Tube &t) {
   for (size_t k = 0; k < 3; ++k)
     if (!circuits[k].empty())
       g.cards += std::format("CIRCUIT,{},1{}\n", k + 1, circuits[k]);
+  const auto blank = [](int n) { return n > 0 ? std::to_string(n) : std::string(); };
   if (t.gap)
-    g.cards += t.mesh ? "PAIRGAP,9\nPARAM,AIRGAP,MESH\n" : "PAIRGAP,9\n";
+    g.cards += t.mesh   ? "PAIRGAP,9\nPARAM,AIRGAP,MESH\n"
+               : t.band ? std::format("PAIRGAP,9,BAND,,{},{}\n", blank(t.band_points),
+                                      blank(t.band_layers))
+                        : "PAIRGAP,9\n";
   g.control = "MAGBC = 1\n";
   if (t.current != 0) {
     g.control += "LOAD = 5\n";

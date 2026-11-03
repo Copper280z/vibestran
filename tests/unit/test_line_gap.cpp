@@ -5,7 +5,8 @@
 // checked against the field energy of the series, exact harmonic fields
 // (Bessel functions in the tube) and the limits of the tube's coefficients;
 // solves against the same gap meshed as air, a stack moved by whole rows and
-// the derivatives of the coenergy and linkage as the mover moves.
+// the derivatives of the coenergy and linkage as the mover moves. The
+// sliding band along the line against the element.
 
 #include "magnetic/air_gap.hpp"
 #include "tube_deck.hpp"
@@ -14,6 +15,7 @@
 #endif
 #include <gtest/gtest.h>
 #include <Eigen/Eigenvalues>
+#include <Eigen/SparseCholesky>
 #include <unsupported/Eigen/SpecialFunctions>
 #include <filesystem>
 #include <fstream>
@@ -146,6 +148,33 @@ Exact exact_field(const AirGap &g) {
 }
 
 const char *name(GapShape shape) { return shape == GapShape::Tube ? "tube" : "strip"; }
+
+// line_gap's sides with a sliding band of n points in `layers` layers, its
+// interior rings the unknowns after the sides'.
+AirGap line_band(GapShape shape, double r1, double r2, double length, int n_inner,
+                 int n_outer, int n, int layers) {
+  AirGap g = line_gap(shape, r1, r2, length, n_inner, n_outer);
+  g.band_points = n;
+  g.band_layers = layers;
+  g.band_first = n_inner + n_outer;
+  return g;
+}
+
+// The band's unknowns for the traces on the sides (unknowns 0..sides-1)
+// with its interior rings minimizing the energy, and that energy.
+std::pair<Eigen::VectorXd, double> condensed(const AirGap &g, const Eigen::VectorXd &traces) {
+  const Eigen::SparseMatrix<double> k = band_stiffness(g);
+  const Eigen::Index sides = traces.size(), interior = k.rows() - sides;
+  Eigen::VectorXd a(k.rows());
+  a.head(sides) = traces;
+  if (interior > 0) {
+    const Eigen::SparseMatrix<double> kii = k.bottomRightCorner(interior, interior),
+                                      kis = k.bottomLeftCorner(interior, sides);
+    Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solve(kii);
+    a.tail(interior) = -solve.solve(Eigen::VectorXd(kis * traces));
+  }
+  return {a, .5 * a.dot(k * a)};
+}
 
 } // namespace
 
@@ -365,6 +394,124 @@ TEST(LineGapForce, IsMinusTheEnergysDerivativeForAMoveOfTheInnerSide) {
   }
 }
 
+TEST(LineGapBand, SymmetricWithTheNullSpaceAndTheMeanFieldExact) {
+  // A strip's constants are field-free, a tube's c / r. A constant on each
+  // side is the mean field (a uniform field across a strip; a r + b / r in a
+  // tube, whose flux function r A the band holds, linear in r^2): exact with
+  // any layers, the interior rings free, so the energy is the AGE's (exact,
+  // LineGapStiffness). A tube's uniform axial field, A = B0 r / 2 at every
+  // ring, has W = B0^2 / (2 mu0) pi (r2^2 - r1^2) length.
+  const double r1 = .00675, r2 = .00775, length = .04, b0 = 1.3;
+  for (GapShape shape : {GapShape::Strip, GapShape::Tube})
+    for (int layers : {1, 3}) {
+      SCOPED_TRACE(std::format("{}, {} layers", name(shape), layers));
+      const AirGap g = line_band(shape, r1, r2, length, 40, 57, 90, layers);
+      const Eigen::SparseMatrix<double> sparse = band_stiffness(g);
+      const Eigen::MatrixXd k(sparse);
+      const Eigen::Index size = 97 + (layers - 1) * 90;
+      ASSERT_EQ(k.rows(), size);
+      EXPECT_LT((k - k.transpose()).norm(), 1e-12 * k.norm());
+      const Eigen::VectorXd eigenvalues =
+          Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd>(k).eigenvalues();
+      EXPECT_GT(eigenvalues.minCoeff(), -1e-10 * eigenvalues.maxCoeff());
+      // Local: a grid's trace reaches the band points of its two segments,
+      // which couple to their neighbours.
+      for (int j = 0; j < sparse.outerSize(); ++j)
+        EXPECT_LE(sparse.col(j).nonZeros(), 20) << j;
+      const bool tube = shape == GapShape::Tube;
+      auto ring_radius = [&](Eigen::Index i) {
+        return i < 40 ? r1 : i < 97 ? r2
+                               : std::sqrt(r1 * r1 + static_cast<double>((i - 97) / 90 + 1) *
+                                                         (r2 * r2 - r1 * r1) / layers);
+      };
+      Eigen::VectorXd null(size), uniform(size);
+      for (Eigen::Index i = 0; i < size; ++i) {
+        null[i] = tube ? 1 / ring_radius(i) : 1;
+        uniform[i] = b0 * ring_radius(i) / 2;
+      }
+      EXPECT_LT((k * null).norm(), 1e-12 * k.norm() * null.norm());
+      Eigen::VectorXd traces(97);
+      traces.head(40).setConstant(.7);
+      traces.tail(57).setConstant(-.2);
+      const double age = .5 * traces.dot(air_gap_stiffness(g) * traces);
+      EXPECT_NEAR(condensed(g, traces).second, age, 1e-12 * age);
+      if (tube) {
+        const double expected = b0 * b0 / (2 * mu0) * pi * (r2 * r2 - r1 * r1) * length;
+        EXPECT_NEAR(.5 * uniform.dot(k * uniform), expected, 1e-12 * expected);
+      }
+    }
+}
+
+TEST(LineGapBand, EnergyAndForceConvergeToTheAgesAtSecondOrder) {
+  // Harmonic 3 of the period on each side, the outer one shifted by 0.4 rad,
+  // on fine graded grids: the AGE's energy and force are exact for those
+  // traces. The band's (its interior rings condensed out) converge to them
+  // at O(h^2) as its points and layers double together, smoothly: the
+  // averaged traces move continuously under the band. Its energy is low:
+  // each point's hat average damps harmonic m's amplitude by about
+  // (m h)^2 / 12 (h the points' phase spacing), more than the bilinear
+  // elements stiffen it (measured 2.4%, 0.62% and 0.15%).
+  const double r1 = .00675, r2 = .00775, length = .04;
+  for (GapShape shape : {GapShape::Strip, GapShape::Tube}) {
+    SCOPED_TRACE(name(shape));
+    double previous[2] = {1, 1};
+    for (int n : {64, 128, 256}) {
+      SCOPED_TRACE(n);
+      const AirGap g = line_band(shape, r1, r2, length, 512, 613, n, n / 32);
+      const Eigen::VectorXd traces = sample(g, [&](const Vector &x) {
+        const double s = 2 * pi * x.dot(g.u) / length;
+        return x.dot(g.v) < (r1 + r2) / 2 ? std::cos(3 * s) : .6 * std::cos(3 * s + .4);
+      });
+      const double age = .5 * traces.dot(air_gap_stiffness(g) * traces),
+                   age_force = air_gap_torque(g, traces);
+      const auto [a, band] = condensed(g, traces);
+      const double energy = std::abs(band - age) / age,
+                   force = std::abs(band_torque(g, a) - age_force) / std::abs(age_force);
+      EXPECT_LT(band, age);
+      EXPECT_LT(energy, previous[0] / 3.5);
+      EXPECT_LT(force, previous[1] / 3.5);
+      previous[0] = energy;
+      previous[1] = force;
+    }
+    EXPECT_LT(previous[0], 2e-3);
+    EXPECT_LT(previous[1], 2e-3);
+  }
+}
+
+TEST(LineGapBand, ForceIsMinusTheEnergysDerivativeForAMoveOfTheInnerSide) {
+  // The energy for the inner grids moved by delta along the gap (their
+  // potentials and the band's interior rings held), by central differences:
+  // the band averages the moved trace, so this is the force band_torque
+  // returns, per unit length of the move.
+  for (GapShape shape : {GapShape::Strip, GapShape::Tube}) {
+    SCOPED_TRACE(name(shape));
+    const AirGap g = line_band(shape, .00675, .00775, .04, 37, 52, 60, 2);
+    Eigen::VectorXd a(149);
+    for (int i = 0; i < 149; ++i)
+      a[i] = std::sin(1.3 * i) + .2 * std::cos(.4 * i);
+    auto energy = [&](double move) {
+      AirGap moved = g;
+      std::ranges::transform(moved.inner.angles, moved.inner.angles.begin(),
+                             [&](double angle) { return angle + 2 * pi * move / g.length; });
+      return .5 * a.dot(band_stiffness(moved) * a);
+    };
+    const double h = 1e-8, force = band_torque(g, a);
+    const double expected = -(energy(h) - energy(-h)) / (2 * h);
+    EXPECT_GT(std::abs(force), 1e3);
+    EXPECT_NEAR(force, expected, 1e-6 * std::abs(expected));
+    const Eigen::VectorXd gradient = band_torque_gradient(g, a);
+    EXPECT_NEAR(gradient.dot(a), 2 * force, 1e-10 * std::abs(force));
+    for (int i : {0, 5, 36, 37, 88, 89, 148}) {
+      Eigen::VectorXd up = a, down = a;
+      up[i] += 1e-4;
+      down[i] -= 1e-4;
+      EXPECT_NEAR(gradient[i], (band_torque(g, up) - band_torque(g, down)) / 2e-4,
+                  1e-6 * gradient.norm())
+          << i;
+    }
+  }
+}
+
 TEST(LineGapSolve, AgeConvergesToTheMeshedGap) {
   // The tubular and flat stacks, loaded, with the gap solved by the element
   // and as meshed air (refined with the rest of the mesh): energy, linkage
@@ -500,6 +647,22 @@ TEST(LineGapSolve, ResultsRecordTheGap) {
         "back-EMF and air-gap force are the whole",
         "Air-gap force on the part on the gap's inner side, along the axis (N): "})
     EXPECT_NE(f06.str().find(text), std::string::npos) << text << "\n" << f06.str();
+  // The same gap as a sliding band.
+  Tube band = t;
+  band.band = true;
+  const auto banded = parsed(tube(band));
+  ASSERT_FALSE(write_results(banded, solved(banded), directory / "band.F06").has_value());
+  std::ifstream band_in(directory / "band.F06");
+  std::stringstream band_f06;
+  band_f06 << band_in.rdbuf();
+  for (const char *text :
+       {"PAIRGAP 9, sliding band (BAND) in place of its 192 elements: the tube from "
+        "radius 0.00675 to 0.00775",
+        "96 + 96 grids over a 0.04 m period, 106 band points in 3 layers",
+        "continued over two pitches, changing sign in the second\n"})
+    EXPECT_NE(band_f06.str().find(text), std::string::npos) << text << "\n" << band_f06.str();
+  EXPECT_NEAR(h5_attribute(directory / "band.mag.vtkhdf", "/MAGSTAT/air_gap", "band_points"),
+              106, 0);
   std::filesystem::remove_all(directory);
 #else
   GTEST_SKIP() << "MAGSTAT results need HDF5";
@@ -525,12 +688,13 @@ TEST(LineGapCards, ChecksNameWhatFails) {
                                      "axis"),
             std::string::npos)
       << message(unperiodic);
-  // The sliding band along a line is not built yet.
+  // An anti-periodic band's two pitches sample their traces alike.
   const std::string band =
-      std::regex_replace(base, std::regex("PAIRGAP,9\n"), "PAIRGAP,9,BAND\n");
-  EXPECT_NE(message(band).find("the sliding band (BAND) of PAIRGAP 9 is not available"),
+      std::regex_replace(base, std::regex("PAIRGAP,9\n"), "PAIRGAP,9,BAND,,75\n");
+  EXPECT_NE(solve_message(band).find("PAIRGAP 9: NBAND 75 is not even; an anti-periodic "
+                                     "model's lines continue over two pitches"),
             std::string::npos)
-      << message(band);
+      << solve_message(band);
   // A grid of the outer side (ring 11, at 7.75 mm) off the cylinder.
   const int rings = static_cast<int>(tube(t).r.size()), grid = 12 + rings * 10;
   const std::string bent = std::regex_replace(

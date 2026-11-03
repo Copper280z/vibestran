@@ -443,8 +443,8 @@ tangential uniform field is not axisymmetric. On the axis, where A_φ / r is
 - **Motion.** `MOTION ... TRANSLATE` slides a part along the axis through
   the tube (see [Motion](#motion-motion)); ROTATE is an error, since
   turning about the axis changes nothing.
-- **Not yet available** with MAGAXI: the sliding band (`PAIRGAP` BAND) and
-  `DRIVE`. They are the next steps toward tubular linear motors.
+- **Not yet available** with MAGAXI: `DRIVE`, the next step toward
+  tubular linear motors.
 
 HDF5 `/MAGSTAT` carries `axisymmetric = 1` (`dimension` is 2, `depth_m` 1),
 and the planar blocks' nodal potential is A_φ.
@@ -465,8 +465,8 @@ PAIRGAP,PID,METHOD,NHARM,NBAND,NLAYER
 | `PID` | Property ID of the gap elements. It must not also be a PSOLID, PMAG or PMAG2D ID, and at least one element must use it. |
 | `METHOD` | `AGE` (blank is AGE): replace the gap elements by the air-gap element. `BAND`: replace them by a sliding band of elements (sparse; see below). `MESH`: solve them as ordinary meshed air. |
 | `NHARM` | The harmonics of the gap field reported for AGE and BAND (probes in the gap, drawn gap cells): each circle's harmonics up to its own resolution, at most NHARM. Blank uses half the grid count of the finer circle, all of them; at most that. It does not change the solution: the AGE's energy always sums every harmonic the circles resolve (see below). Ignored by MESH. |
-| `NBAND` | BAND: points around the band, at least 3 and a multiple of a sector model's sectors. Blank uses the smallest prime count of at least the finer circle's grid count, per sector in a sector model (the sectors times the smallest prime of at least the unfolded count over the sectors). Avoid a count with a factor in common with the poles of the turning part (see below). Ignored otherwise. |
-| `NLAYER` | BAND: rings of band elements across the gap, at least 1. Blank makes the elements about square: ⌈NBAND ln(r₂/r₁) / 2π⌉. Ignored otherwise. |
+| `NBAND` | BAND: points around the band (along a strip or tube: over its period, even when the model is anti-periodic), at least 3 and a multiple of a sector model's sectors. Blank uses the smallest prime count of at least the finer circle's grid count, per sector in a sector model (the sectors times the smallest prime of at least the unfolded count over the sectors). Avoid a count with a factor in common with the poles of the turning part (see below). Ignored otherwise. |
+| `NLAYER` | BAND: rings of band elements across the gap, at least 1. Blank makes the elements about square: ⌈NBAND ln(r₂/r₁) / 2π⌉ (along a line ⌈NBAND (r₂ − r₁) / Λ⌉, Λ the gap's period). Ignored otherwise. |
 
 There is no material field: a gap is air (relative permeability 1, no
 remanence, no B–H table). Under the AGE the gap elements are not field cells,
@@ -702,10 +702,10 @@ parallel to the shift, the gap of a flat linear machine; in MAGAXI a
 **tube** between two cylinders about the axis, the gap of a tubular one.
 `PAIRGAP` with METHOD=AGE solves either exactly, by an air-gap element that
 is the Laplace field of the strip or tube matching the potential on both of
-its sides. METHOD=MESH solves it as air, as for an annulus, and is the
-cross-check. The sliding band (BAND) is not available along a line yet, and
-MAGAXI has no gap other than the tube: a MAGAXI PAIRGAP without SHIFT is an
-error, unless METHOD=MESH.
+its sides. METHOD=BAND couples the sides through a sliding band along the
+line instead (below), and METHOD=MESH solves it as air, as for an annulus,
+and is the cross-check. MAGAXI has no gap other than the tube: a MAGAXI
+PAIRGAP without SHIFT is an error, unless METHOD=MESH.
 
 ```text
 MAGAXI,0
@@ -757,6 +757,28 @@ A shift of the inner part by δ along the gap turns each harmonic's
 (cos, sin) pair by κδ, as a turn by φ turns an annulus's by nφ, and only the
 coupling depends on it.
 
+**The sliding band along a line.** METHOD=BAND lays NLAYER rows of NBAND
+bilinear elements along the gap's period, its points uniform in the phase
+2πs/Λ from a fixed origin (a tube's on its axis, a strip's at the MPERIOD's
+CID origin), so a moving part's trace slides under them while they stay in
+place. As around an annulus each side's band point takes the trace averaged
+over its hat function, and the interior rows are unknowns. A strip's band
+is the annulus's rectangle with thickness 2πg/Λ, the same conformal map as
+the AGE's. A tube's points hold the flux function ψ = rA, bilinear in ρ = r²
+and the phase, whose energy over the tube is
+(π / 2μ₀) ∫∫ ((2π/Λ) ψ_θ² / ρ + 4 (Λ/2π) ψ_ρ²) dρ dθ (B_r = −ψ_s / r,
+B_z = 2ψ_ρ): the mean field, ψ linear in ρ (a uniform axial field, and 1/r,
+which has none), is exact, and the rows are equally spaced in r². Its
+interior unknowns are A at their row's radius. An anti-periodic model's
+band runs over two pitches, the second the first with the opposite sign,
+so NBAND must be even. Blank, it is the smallest prime of at least the
+finer side's grid count over the period (anti-periodic: twice the smallest
+prime of at least half of it). The air-gap force is the
+derivative of the band's energy for a move of the inner part's traces with
+the band held, the slope of the coenergy the band solves. Like the
+annulus's, the band carries a ripple at its point spacing as a part slides
+under it, about 1e-4 of the thrust on the tubular stack below.
+
 **Results.** The F06 `Air gap` row describes the strip (its width and
 direction) or tube (its radii), the grid counts over the period, and the
 coupled harmonics; an anti-periodic model adds that the pitch's lines are
@@ -788,6 +810,11 @@ the flat stack of the same section (MAG2D):
 | AGE against the gap meshed as air, refined with the rest of the mesh | Differences fall at O(h²): tube coenergy 1.5e-4, 3.8e-5; linkage 9.3e-5, 2.3e-5; force 7.2e-4, 1.7e-4 (48 and 96 rows a pitch). Strip coenergy 3.6e-5, 9.3e-6; linkage 8.3e-5, 2.1e-5; force 2.2e-4, 5.5e-5 |
 | The mover moved one row (the gap's elements sheared) | The stack whose magnets start a row later: energy, linkage and force 1e-10 |
 | Air-gap force and dλ/dδ | Central differences of the coenergy and linkage as the mover moves: 1e-6 |
+| Band stiffness (strip and tube, 1 and 3 layers) | Symmetric, semidefinite, local (at most 20 couplings an entry); null space the constant (strip) or 1/r (tube); a constant on each side the AGE's mean energy, and a tube's uniform axial field, 1e-12 |
+| Band energy and force for harmonic traces on fine sides, points and layers doubled together | The AGE's at O(h²): energy 2.4%, 0.62%, 0.15% (64, 128, 256 points), low (the hat averages damp each harmonic) |
+| Band force, and its gradient in the potentials | Central differences of the band's energy for a move of the inner side: 1e-6 |
+| BAND (blank NBAND and NLAYER) against the AGE over a loaded MOTION sweep, refined with the mesh | Coenergy and linkage at O(h²) (about 3.3 times closer per halving, to 7e-5 and 1.5e-4 at 96 rows a pitch); thrust within 2e-4 of its peak, a ripple at the band's point spacing that does not fall smoothly (`test_line_motion.cpp`) |
+| A BAND position moved by hand; its thrust and dλ/dx | The static deck to 1e-11 (the band stays in place); the slopes of the coenergy and linkage over the sweep, 1e-6 |
 
 ### Motion (MOTION)
 
@@ -1023,9 +1050,9 @@ between its own positions. Some consequences:
 A held state is not copied. The topology is written once, and each time
 step's offsets point at the state it shows.
 
-**Limits.** One moving part (one AGE gap); 2D only (MAG2D, or MAGAXI for
-TRANSLATE); rotation in an annulus, or translation along a strip or tube
-(no sliding band along a line yet).
+**Limits.** One moving part (one AGE or BAND gap); 2D only (MAG2D, or
+MAGAXI for TRANSLATE); rotation in an annulus, or translation along a strip
+or tube.
 Currents are fixed by LOAD at every position unless `DRIVE` sets the phase
 currents from the position (next section). A probe in the moving part stays
 in space while the rotor's cells pass under it.
@@ -1423,7 +1450,7 @@ MPERIOD,1,ANTI,1,2,0,6,.02    $ one 20 mm pole pitch standing for six
   [Gaps along a line](#gaps-along-a-line-strip-and-tube).
 - **Motion.** `MOTION ... TRANSLATE` slides a part along the shift through
   the gap; see [Motion](#motion-motion).
-- **Not yet with SHIFT**: the sliding band (`PAIRGAP` BAND) and DRIVE.
+- **Not yet with SHIFT**: DRIVE.
 
 **What a pitch stands for.** The pitch model is a machine of SECTORS
 pitches whose ends join: SECTORS copies of the pitch's mesh, each moved by

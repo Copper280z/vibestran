@@ -155,7 +155,9 @@ Status line_sides(AirGap &gap, std::vector<Loop> &loops, const Mesh &mesh, int p
     gap.u = mesh.axis;
     gap.v = mesh.radial;
   } else {
-    gap.center = mesh.nodes.front();
+    // Fixed in the plane (a sliding band's points stay where they are as a
+    // part moves): the MPERIOD's origin.
+    gap.center = period.origin;
     gap.u = period.shift / pitch;
     gap.v = mesh.normal.cross(gap.u);
   }
@@ -332,6 +334,16 @@ Harmonics coefficients(const AirGap &gap, const Eigen::VectorXd &a, int harmonic
   };
   return {gap_transform(gap.inner, harmonics) * values(gap.inner),
           gap_transform(gap.outer, harmonics) * values(gap.outer)};
+}
+
+// The thickness of the band's rectangle in its own coordinates, against an
+// angular period of 2 pi: ln(r2 / r1) around an annulus, and along a line
+// 2 pi (r2 - r1) / length, a strip's conformal thickness (and a tube's
+// element shape: square elements are as thick as they are long).
+double band_thickness(const AirGap &gap) {
+  return gap.shape == GapShape::Annulus
+             ? std::log(gap.outer.radius / gap.inner.radius)
+             : 2 * pi * (gap.outer.radius - gap.inner.radius) / gap.length;
 }
 
 Result<AirGap> band_and_harmonics(AirGap gap, const Mesh &mesh, const Model &model,
@@ -578,10 +590,6 @@ Result<AirGap> band_and_harmonics(AirGap gap, const Mesh &mesh, const Model &mod
   const AirGapProperty &property = model.air_gaps.at(pid);
   const bool band =
       model.options.air_gap_method.value_or(property.method) == AirGapMethod::Band;
-  if (band && gap.shape != GapShape::Annulus)
-    return Error{std::format("PAIRGAP {}: the sliding band (BAND) of a gap along a "
-                             "line is not available yet; METHOD=AGE solves it",
-                             pid)};
   if (band) {
     // Blank NBAND: per sector, the smallest prime count of at least the
     // finer circle's. The band's error repeats with its point spacing, and
@@ -594,8 +602,8 @@ Result<AirGap> band_and_harmonics(AirGap gap, const Mesh &mesh, const Model &mod
                           : gap.sectors * prime_at_least(static_cast<int>(
                                               (fine + gap.sectors - 1) / gap.sectors));
     // Blank NLAYER: about square elements, the layer's thickness in ln r
-    // no more than an element's angle.
-    const double thickness = std::log(gap.outer.radius / gap.inner.radius);
+    // (along a line, in phase) no more than an element's angle.
+    const double thickness = band_thickness(gap);
     gap.band_layers = property.band_layers > 0
                           ? property.band_layers
                           : std::max(1, static_cast<int>(std::ceil(
@@ -605,10 +613,15 @@ Result<AirGap> band_and_harmonics(AirGap gap, const Mesh &mesh, const Model &mod
     // Each sector then samples its traces at the same points, so the
     // unfolded band is the sector's, repeated.
     if (gap.band_points % gap.sectors != 0)
-      return Error{std::format(
-          "PAIRGAP {}: NBAND {} is not a multiple of the {} sectors of the "
-          "unfolded gap",
-          pid, gap.band_points, gap.sectors)};
+      return Error{
+          gap.shape == GapShape::Annulus
+              ? std::format("PAIRGAP {}: NBAND {} is not a multiple of the {} sectors "
+                            "of the unfolded gap",
+                            pid, gap.band_points, gap.sectors)
+              : std::format("PAIRGAP {}: NBAND {} is not even; an anti-periodic "
+                            "model's lines continue over two pitches, which must "
+                            "sample their traces at the same points",
+                            pid, gap.band_points)};
   }
   const int requested = property.harmonics;
   if (requested > static_cast<int>(fine / 2))
@@ -875,8 +888,9 @@ BandRows band_rows(const AirGap &gap, const GapCircle &c) {
     const double u = c.angles[static_cast<size_t>(j)],
                  w = next ? c.angles[static_cast<size_t>(next)] : c.angles[0] + 2 * pi;
     // The segment's pieces within each band element [k h, (k + 1) h],
-    // unrolled from psi = 0 by whole turns.
-    for (double shift : {-2 * pi, 0.0, 2 * pi}) {
+    // unrolled from psi = 0 by whole turns (a line's phases start anywhere).
+    const double base = 2 * pi * std::floor(c.angles[0] / (2 * pi));
+    for (double shift : {-base - 2 * pi, -base, -base + 2 * pi}) {
       const double from = std::max(u + shift, 0.0), to = std::min(w + shift, 2 * pi);
       if (to <= from)
         continue;
@@ -919,33 +933,76 @@ BandRows band_rows(const AirGap &gap, const GapCircle &c) {
   return out;
 }
 
+// Integrals over a layer [a, a + w] (a > 0) of the products of its falling
+// and rising linear functions divided by rho: c J with c = w / a and
+// J_k = integral_0^1 t^k / (1 + c t) dt, by its series for a thin layer
+// (the closed form cancels) and in closed form otherwise.
+std::array<std::array<double, 2>, 2> over_rho(double a, double w) {
+  const double c = w / a;
+  double j[3];
+  if (c <= .5) {
+    for (int k = 0; k < 3; ++k) {
+      j[k] = 0;
+      double power = 1;
+      for (int n = 0; std::abs(power) > 1e-18; ++n, power *= -c)
+        j[k] += power / (n + k + 1);
+    }
+  } else {
+    j[0] = std::log1p(c) / c;
+    j[1] = (1 - j[0]) / c;
+    j[2] = (.5 - j[1]) / c;
+  }
+  const double off = c * (j[1] - j[2]);
+  return {{{c * (j[0] - 2 * j[1] + j[2]), off}, {off, c * j[2]}}};
+}
+
 // The band's stiffness per unit depth over its (M + 1) N point values,
 // ring r (0 on the inner circle, M on the outer) at r N + k. The energy
 // density in (xi, theta) is (1/(2 mu0)) ((1/L) A_xi^2 + L A_theta^2),
 // L = ln(r2/r1), and each element is the bilinear rectangle
-// [r/M, (r+1)/M] x [psi_k, psi_k+1].
+// [r/M, (r+1)/M] x [psi_k, psi_k+1]. A strip is the same rectangle with
+// L = 2 pi (r2 - r1) / length (band_thickness), in phase psi = 2 pi s /
+// length.
+//
+// A tube's points hold the flux function psi = r A, bilinear in rho = r^2
+// (M layers of equal width in rho) and the phase: B_r = -(1/r) dpsi/ds and
+// B_z = 2 dpsi/drho, so the energy over the tube is
+// (pi / (2 mu0)) integral ((2 pi / length) psi_theta^2 / rho
+// + 4 (length / (2 pi)) psi_rho^2) drho dtheta. The mean field, psi linear
+// in rho (a uniform axial field and 1/r, which has none), is exact.
 Eigen::SparseMatrix<double> ring_stiffness(const AirGap &gap) {
   const int n = gap.band_points, m = gap.band_layers;
-  const double l = std::log(gap.outer.radius / gap.inner.radius), h = 2 * pi / n;
+  const double l = band_thickness(gap), h = 2 * pi / n;
   // 1-D stiffness [1 -1; -1 1] / w and mass w [1/3 1/6; 1/6 1/3] on an
   // interval of width w: 1/M radially, h in angle.
   const double stiff[2][2] = {{1, -1}, {-1, 1}}, mass[2][2] = {{1. / 3, 1. / 6}, {1. / 6, 1. / 3}};
+  const bool tube = gap.shape == GapShape::Tube;
+  const double rho1 = gap.inner.radius * gap.inner.radius,
+               width = (gap.outer.radius * gap.outer.radius - rho1) / m;
   std::vector<Eigen::Triplet<double>> t;
   t.reserve(16 * static_cast<size_t>(n) * static_cast<size_t>(m));
-  for (int ring = 0; ring < m; ++ring)
+  for (int ring = 0; ring < m; ++ring) {
+    const auto inverse = tube ? over_rho(rho1 + ring * width, width)
+                              : std::array<std::array<double, 2>, 2>{};
     for (int k = 0; k < n; ++k) {
       const int around[2] = {k, (k + 1) % n};
       for (int ri = 0; ri < 2; ++ri)
         for (int ai = 0; ai < 2; ++ai)
           for (int rj = 0; rj < 2; ++rj)
             for (int aj = 0; aj < 2; ++aj) {
-              const double value = (stiff[ri][rj] * m * mass[ai][aj] * h / l +
-                                    l * mass[ri][rj] / m * stiff[ai][aj] / h) /
-                                   mu0;
+              const double value =
+                  tube ? pi *
+                             (2 * gap.length / pi * stiff[ri][rj] / width * mass[ai][aj] * h +
+                              2 * pi / gap.length * inverse[ri][rj] * stiff[ai][aj] / h) /
+                             mu0
+                       : (stiff[ri][rj] * m * mass[ai][aj] * h / l +
+                          l * mass[ri][rj] / m * stiff[ai][aj] / h) /
+                             mu0;
               t.emplace_back((ring + ri) * n + around[ai], (ring + rj) * n + around[aj],
                              value);
             }
     }
+  }
   Eigen::SparseMatrix<double> k((m + 1) * n, (m + 1) * n);
   k.setFromTriplets(t.begin(), t.end());
   return k;
@@ -953,7 +1010,9 @@ Eigen::SparseMatrix<double> ring_stiffness(const AirGap &gap) {
 
 // The band's map from gap_entries to its point values, and the derivative
 // of those values for a turn of the inner part (its interior rings, fixed
-// in space, held).
+// in space, held): per radian around an annulus, per unit length of a move
+// along a strip or tube. A tube's points hold r A, its interior unknowns A
+// at their ring's radius.
 struct Band {
   Eigen::SparseMatrix<double> map, turn;
 };
@@ -963,19 +1022,31 @@ Band band_map(const AirGap &gap) {
   const auto ni = static_cast<int>(gap.inner.nodes.size()),
              no = static_cast<int>(gap.outer.nodes.size());
   const int columns = ni + no + (m - 1) * n;
+  const bool tube = gap.shape == GapShape::Tube;
+  const double rho1 = gap.inner.radius * gap.inner.radius,
+               width = (gap.outer.radius * gap.outer.radius - rho1) / m;
+  const auto ring_radius = [&](int ring) {
+    return !tube ? 1.0
+           : ring == 0 ? gap.inner.radius
+           : ring == m ? gap.outer.radius
+                       : std::sqrt(rho1 + ring * width);
+  };
+  const double rate = gap.shape == GapShape::Annulus ? 1 : 2 * pi / gap.length;
   std::vector<Eigen::Triplet<double>> map, turn;
   for (int k = 0; k < inner.value.outerSize(); ++k)
     for (Eigen::SparseMatrix<double>::InnerIterator it(inner.value, k); it; ++it)
-      map.emplace_back(static_cast<int>(it.row()), static_cast<int>(it.col()), it.value());
+      map.emplace_back(static_cast<int>(it.row()), static_cast<int>(it.col()),
+                       ring_radius(0) * it.value());
   for (int k = 0; k < outer.value.outerSize(); ++k)
     for (Eigen::SparseMatrix<double>::InnerIterator it(outer.value, k); it; ++it)
       map.emplace_back(m * n + static_cast<int>(it.row()), ni + static_cast<int>(it.col()),
-                       it.value());
+                       ring_radius(m) * it.value());
   for (int p = 0; p < (m - 1) * n; ++p)
-    map.emplace_back(n + p, ni + no + p, 1.0);
+    map.emplace_back(n + p, ni + no + p, ring_radius(1 + p / n));
   for (int k = 0; k < inner.turn.outerSize(); ++k)
     for (Eigen::SparseMatrix<double>::InnerIterator it(inner.turn, k); it; ++it)
-      turn.emplace_back(static_cast<int>(it.row()), static_cast<int>(it.col()), it.value());
+      turn.emplace_back(static_cast<int>(it.row()), static_cast<int>(it.col()),
+                        rate * ring_radius(0) * it.value());
   Band out{Eigen::SparseMatrix<double>((m + 1) * n, columns),
            Eigen::SparseMatrix<double>((m + 1) * n, columns)};
   out.map.setFromTriplets(map.begin(), map.end());
