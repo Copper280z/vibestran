@@ -38,6 +38,11 @@ Cases:
   back-EMF per unit speed at each position against tubular_pitch's FEMM
   solves (and vibestran's with the gap meshed), which it runs first if
   OUTPUT does not hold them.
+- tubular_finite: tools/magnetic_tubular_finite_example.py's finite motor
+  (one coil set, a rod of five magnets) in a 200 mm periodic slice, with
+  and without steel: vibestran's one MOTION TRANSLATE deck through the
+  tube air-gap element against FEMM's solve of each of 21 positions, for
+  the force on the rod, phase linkages and the no-load back-EMF.
 
 vibestran runs locally; femmcli runs on --femm-host over ssh. Results go to
 OUTPUT/results.json, OUTPUT/summary.md and plots. femmcli must be built with
@@ -637,11 +642,11 @@ def femm_age_band(g, r_in, r_out, half, size):
     return dataclasses.replace(g, points=points, segments=segments, arcs=arcs, labels=labels)
 
 
-def femm_drawing(g, depth, half, size, axisymmetric=False, pitch=False):
+def femm_drawing(g, depth, half, size, axisymmetric=False, pitch=False, periodic=False):
     """Lua that draws g, with its materials, circuits and boundaries.
     axisymmetric: FEMM's axi problem, g's x and y being r and z. half: g is
     the half above y = 0, anti-periodic across the cut; pitch: g's side 2
-    is side 1 moved along y, anti-periodic."""
+    is side 1 moved along y, anti-periodic, or periodic with periodic."""
     # Only the materials in use.
     used = {lab[2].material for lab in g.labels}
     definitions = {
@@ -673,7 +678,7 @@ def femm_drawing(g, depth, half, size, axisymmetric=False, pitch=False):
             image = sorted(-x for x in span(s)) if half else span(s)
             match = [t for t in g.segments if t[2] == "side2" and span(t) == image]
             assert len(match) == 1, s
-            out.append(f'mi_addboundprop("ap{k}", 0, 0, 0, 0, 0, 0, 0, 0, 5)')
+            out.append(f'mi_addboundprop("ap{k}", 0, 0, 0, 0, 0, 0, 0, 0, {4 if periodic else 5})')
             pairs += [(s, f"ap{k}"), (match[0], f"ap{k}")]
     named = {id(s): name for s, name in pairs}
     for s in g.segments:
@@ -1029,6 +1034,138 @@ def tubular_motion_case(level, out, args):
     return results
 
 
+# The finite tubular motor of tools/magnetic_tubular_finite_example.py: one
+# set of three coils (A, -C, B; z -10 to 10 mm, 88 turns, r 7.75 to 12.5 mm)
+# on a rod of five alternating magnets (z -50 to 50 mm at offset 0) in the
+# 0.75 mm tube, in a 200 mm slice of space that repeats along the axis
+# (vibestran MPERIOD PERIODIC SHIFT 0.2, FEMM periodic boundaries), r < 50 mm
+# held at A = 0. "steel": 1 mm teeth either side of each coil and a 1.5 mm
+# shell (r 12.5 to 14 mm), the dense steel curve; "air": the coils in air.
+FINITE_PERIOD = 0.2
+FINITE_OUTER = 0.05
+FINITE_OFFSETS = [k * 2e-3 for k in range(-10, 11)]       # one electrical period, 2 mm apart
+FINITE_CURRENTS = {"A": 15.0, "B": -7.5, "C": -7.5}      # the loaded state, A
+FINITE_VARIANTS = ("steel", "air")
+# FEMM's back-EMF at each position: a central difference of its no-load
+# linkages, the rod moved this far either way and solved again (truncation
+# about 0.1% of the peak; 2 mm differences of the sweep itself, 5 to 8%).
+FINITE_EMF_STEP = 0.25e-3
+
+
+def tubular_finite_geometry(scale, offset, steel, gap=False):
+    """The finite motor with the rod at offset. gap: the gap's air (r 6.75 to
+    7.75 mm, the whole period) is the air-gap element's (PAIRGAP 9). The
+    moving part is everything inside the gap: magnets, tube and the air
+    beyond the rod's ends."""
+    gmsh.initialize()
+    gmsh.option.setNumber("General.Verbosity", 2)
+    gmsh.model.add("tubular_finite")
+    b = Builder()
+    mm, half, width = 1e-3, FINITE_PERIOD / 2, TUBE_POLE / 3
+    e = [(b.rectangle(0, -half, FINITE_OUTER, half), 1, Role("air", "air")),
+         (b.rectangle(0, -half, 6.75 * mm, half), 2, Role("air", "rod air", moving=True)),
+         (b.rectangle(6.75 * mm, -half, 7.75 * mm, half), 3,
+          Role("gap", "gap") if gap else Role("air", "gap air")),
+         (b.rectangle(6 * mm, -50 * mm + offset, 6.75 * mm, 50 * mm + offset), 3,
+          Role("air", "tube", moving=True, body=True))]
+    if steel:
+        e.append((b.rectangle(7.75 * mm, -1.5 * width - 0.5 * mm, 14 * mm, 1.5 * width + 0.5 * mm), 3,
+                  Role("steel", "stator")))
+    for k, (phase, sign) in enumerate([("A", 1), ("C", -1), ("B", 1)]):
+        z0 = -1.5 * width + k * width + 0.5 * mm
+        e.append((b.rectangle(7.75 * mm, z0, 12.5 * mm, z0 + width - 1 * mm), 4,
+                  Role("air", f"coil{k}", phase, sign * TUBE_TURNS)))
+    for j in range(5):
+        z0 = -50 * mm + j * TUBE_POLE + offset
+        e.append((b.rectangle(0, z0, 6 * mm, z0 + TUBE_POLE), 5,
+                  Role("magnet", f"magnet{j}", magnet="axial+" if j % 2 == 0 else "axial-",
+                       moving=True, body=True)))
+    expr = f"{scale} * Min(2.5e-3, 2.5e-4 + 0.15 * Max(0, Max(6e-3 - x, x - 7.75e-3)))"
+    g = build(e, (lambda x, y: tubular_size(x, y, scale), expr), pitch=(-half, FINITE_PERIOD))
+    gmsh.finalize()
+    return g
+
+
+def tubular_finite_case(variant, level, out, args):
+    """The finite motor at FINITE_OFFSETS, without current and with
+    FINITE_CURRENTS: vibestran's one MOTION TRANSLATE deck through the tube
+    air-gap element (thrust and linkage rate at each position) against
+    FEMM's solve of each offset's own geometry (the weighted stress tensor
+    force on the magnets and tube). FEMM's no-load back-EMF per unit speed
+    at each position is the central difference of its linkages at
+    +-FINITE_EMF_STEP, two more geometries and solves."""
+    scale = LEVELS[level]
+    steel = variant == "steel"
+    results = {"offsets": FINITE_OFFSETS, "vibestran": [], "femm": []}
+    g = tubular_finite_geometry(scale, 0.0, steel, gap=True)
+    workdir = out / f"tubular_finite_{variant}_{level}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    step = FINITE_OFFSETS[1] - FINITE_OFFSETS[0]
+    control = ["MOTION = 1", "MSTEP = ALL", "BFIELD = NONE",
+               "SUBCASE 1", "  LABEL = NOLOAD", "SUBCASE 2", "  LABEL = LOADED", "  LOAD = 1"]
+    bulk = ["PARAM,MAGTOL,1e-10",
+            f"MOTION,1,20,0,TRANSLATE,{FINITE_OFFSETS[0]:.17g},{step:.17g},{len(FINITE_OFFSETS)}"]
+    period = f"MPERIOD,1,PERIODIC,31,32,0,1,{FINITE_PERIOD:.17g}"
+    deck, circuit_ids = vibestran_deck(g, control, bulk, motion_sets=True, period=period,
+                                       axisymmetric=True)
+    loads = [f"ICIRC,1,{circuit_ids[c]},{i:.17g}" for c, i in FINITE_CURRENTS.items()]
+    deck = deck.replace("ENDDATA", "\n".join(loads) + "\nENDDATA")
+    path = workdir / "tubular_finite.bdf"
+    path.write_text(deck)
+    with run_vibestran(path, args.vibestran) as h5:
+        for k, state in enumerate(("noload", "loaded"), start=1):
+            sub = h5[f"MAGSTAT/subcases/{k}"]
+            assert np.allclose(sub["positions_m"][()], FINITE_OFFSETS, atol=1e-15)
+            force = sub["motion/force_N"][()]
+            linkage = sub["circuits/linkage_Wb_turn"][()]       # (positions, circuits)
+            rate = sub["circuits/linkage_rate_Wb_per_m"][()]
+            for j, offset in enumerate(FINITE_OFFSETS):
+                results["vibestran"].append({
+                    "offset": offset, "state": state, "force_z": float(force[j]),
+                    "linkage": {c: float(linkage[j, circuit_ids[c] - 1]) for c in "ABC"},
+                    "rate": {c: float(rate[j, circuit_ids[c] - 1]) for c in "ABC"}})
+    results["cells"] = len(g.cells)
+    results["seconds"] = float((workdir / "seconds.txt").read_text())
+    femm_seconds = 0.0
+    for offset in FINITE_OFFSETS:
+        g = tubular_finite_geometry(scale, offset, steel)
+        where = out / f"tubular_finite_{variant}_{level}_{round(offset * 1e3):+03d}mm"
+        where.mkdir(parents=True, exist_ok=True)
+        lua = femm_drawing(g, 0, False, lambda x, y: tubular_size(x, y, scale), axisymmetric=True,
+                           pitch=True, periodic=True)
+        lua.append(LUA_PRELUDE)
+        for state, currents in (("noload", {c: 0.0 for c in "ABC"}), ("loaded", FINITE_CURRENTS)):
+            lua += [f'mi_modifycircprop("{c}", 1, {i:.17g})' for c, i in currents.items()]
+            lua += ["solve()", 'ia, va, fa = mo_getcircuitproperties("A")',
+                    'ib, vb, fb = mo_getcircuitproperties("B")', 'ic, vc, fc = mo_getcircuitproperties("C")',
+                    "mo_groupselectblock(1)", "fz = mo_blockintegral(19)", "mo_clearblock()",
+                    f'put("{state}", fz, fa, fb, fc, mo_numelements())', "mo_close()"]
+        lua += ["closefile(results)", "quit()"]
+        raw, seconds = run_femm(lua, where, args)
+        femm_seconds += seconds
+        shifted = []
+        for shift in (-FINITE_EMF_STEP, FINITE_EMF_STEP):
+            g = tubular_finite_geometry(scale, offset + shift, steel)
+            there = out / f"{where.name}_{'minus' if shift < 0 else 'plus'}"
+            there.mkdir(parents=True, exist_ok=True)
+            lua = femm_drawing(g, 0, False, lambda x, y: tubular_size(x, y, scale), axisymmetric=True,
+                               pitch=True, periodic=True)
+            lua += [LUA_PRELUDE, "solve()", 'ia, va, fa = mo_getcircuitproperties("A")',
+                    'ib, vb, fb = mo_getcircuitproperties("B")', 'ic, vc, fc = mo_getcircuitproperties("C")',
+                    'put("noload", fa, fb, fc)', "mo_close()", "closefile(results)", "quit()"]
+            raw_shift, seconds = run_femm(lua, there, args)
+            femm_seconds += seconds
+            shifted.append(raw_shift["noload"][0])
+        for state in ("noload", "loaded"):
+            fz, fa, fb, fc, elements = raw[state][0]
+            results["femm"].append({"offset": offset, "state": state, "force_z": fz,
+                                    "linkage": {"A": fa, "B": fb, "C": fc}, "cells": int(elements)})
+        results["femm"][-2]["emf"] = {c: -(shifted[1][k] - shifted[0][k]) / (2 * FINITE_EMF_STEP)
+                                      for k, c in enumerate("ABC")}
+    results["femm_seconds"] = femm_seconds
+    return results
+
+
 # --------------------------------------------------------------------------
 # Motor.
 # --------------------------------------------------------------------------
@@ -1365,6 +1502,66 @@ def tubular_motion_report(data):
     return lines
 
 
+def tubular_finite_report(data):
+    """The finite motor's MOTION sweep against FEMM's solve per offset, for
+    each variant and level."""
+    lines = []
+    for variant in FINITE_VARIANTS:
+        for level in (lvl for lvl in LEVELS if f"tubular_finite_{variant}_{lvl}" in data):
+            r = data[f"tubular_finite_{variant}_{level}"]
+            offsets = np.array(r["offsets"])
+
+            def rows(solver, state, quantity, phase=None):
+                return np.array([(x[quantity][phase] if phase else x[quantity])
+                                 for x in r[solver] if x["state"] == state])
+            peak = np.abs(rows("femm", "loaded", "force_z")).max()
+            lines += [f"### {'With steel' if variant == 'steel' else 'No steel'}, {level} mesh "
+                      f"({r['cells']} vibestran cells, the gap's included; "
+                      f"{r['femm'][0]['cells']} FEMM triangles at offset 0)", "",
+                      f"Force on the rod (magnets and tube) at the {len(offsets)} positions, "
+                      f"vibestran minus FEMM; percentages of FEMM's largest loaded |F_z| "
+                      f"({peak:.3f} N).", "",
+                      "| state | FEMM range (N) | vibestran range (N) | largest difference |",
+                      "|---|---:|---:|---:|"]
+            for state in ("noload", "loaded"):
+                v, f = rows("vibestran", state, "force_z"), rows("femm", state, "force_z")
+                diff = np.abs(v - f).max()
+                lines.append(f"| {'no load' if state == 'noload' else 'loaded'} | "
+                             f"{f.min():.3f} to {f.max():.3f} | {v.min():.3f} to {v.max():.3f} | "
+                             f"{diff:.4f} N, {100 * diff / peak:.2f}% |")
+            lines += ["", "Phase linkages (largest difference over the positions, in percent of "
+                      "FEMM's largest |linkage| of the phase), and the no-load back-EMF per unit "
+                      "speed, -d lambda / dz, at each position: vibestran's linkage rate from the "
+                      "position's own solve, against FEMM's central difference of its linkages with "
+                      f"the rod moved {FINITE_EMF_STEP * 1e3:g} mm either way (largest difference in "
+                      "percent of FEMM's peak).", "",
+                      "| phase | linkage, no load | linkage, loaded | back-EMF peak (V per m/s) | "
+                      "back-EMF difference |", "|---|---:|---:|---:|---:|"]
+            for c in "ABC":
+                cells = []
+                for state in ("noload", "loaded"):
+                    v, f = rows("vibestran", state, "linkage", c), rows("femm", state, "linkage", c)
+                    cells.append(f"{100 * np.abs(v - f).max() / np.abs(f).max():.3f}%")
+                ref = rows("femm", "noload", "emf", c)
+                rate = -rows("vibestran", "noload", "rate", c)
+                top = np.abs(ref).max()
+                lines.append(f"| {c} | {cells[0]} | {cells[1]} | {top:.4g} | "
+                             f"{100 * np.abs(rate - ref).max() / top:.3f}% |")
+            lines += ["", f"Wall time: vibestran's MOTION deck {r['seconds']:.1f} s for "
+                      f"{len(offsets)} positions in two subcases (local); FEMM "
+                      f"{r['femm_seconds']:.0f} s for its {4 * len(offsets)} solves.", ""]
+            if level == "fine" and f"tubular_finite_{variant}_coarse" in data:
+                c = data[f"tubular_finite_{variant}_coarse"]
+                for solver, name in (("vibestran", "vibestran"), ("femm", "FEMM")):
+                    fine = rows(solver, "loaded", "force_z")
+                    coarse = np.array([x["force_z"] for x in c[solver] if x["state"] == "loaded"])
+                    change = np.abs(fine - coarse).max()
+                    lines.append(f"- Coarse to fine change of {name}'s loaded force: largest "
+                                 f"{change:.4f} N, {100 * change / peak:.2f}%.")
+                lines.append("")
+    return lines
+
+
 def motor_metrics(r, half_femm_scale=1.0):
     """Scalar measures of one solver's motor results. half_femm_scale
     multiplies FEMM's linkage in a half model (its circuits hold half the
@@ -1676,6 +1873,45 @@ def plots(data, out):
         fig.savefig(out / "tubular_motion.png", dpi=150)
         written.append("tubular_motion.png")
         plt.close(fig)
+    finite_level = next((lvl for lvl in ("fine", "coarse")
+                         if all(f"tubular_finite_{v}_{lvl}" in data for v in FINITE_VARIANTS)), None)
+    if finite_level:
+        runs = {v: data[f"tubular_finite_{v}_{finite_level}"] for v in FINITE_VARIANTS}
+        fig = plt.figure(figsize=(9, 6.6), facecolor=SURFACE)
+        axes = styled_axes(fig, 2, 2)
+        offsets = np.array(FINITE_OFFSETS) * 1e3
+        for column, variant in enumerate(FINITE_VARIANTS):
+            r = runs[variant]
+            ax = axes[0, column]
+            for state, solver, name in (("loaded", "vibestran", "vibestran MOTION, loaded"),
+                                        ("loaded", "femm", "FEMM, loaded"),
+                                        ("noload", "vibestran", "vibestran MOTION, no load"),
+                                        ("noload", "femm", "FEMM, no load")):
+                y = [x["force_z"] for x in r[solver] if x["state"] == state]
+                series(ax, offsets, y, "FEMM" if solver == "femm" else "vibestran", name)
+                if state == "noload":
+                    ax.lines[-1].set_alpha(0.5)
+            ax.set_title(f"force on the rod, {'with steel' if variant == 'steel' else 'no steel'} (N)",
+                         loc="left")
+            ax.legend(fontsize=7)
+            ax = axes[1, column]
+            for c, color in zip("ABC", PHASE_COLORS):
+                rate = -np.array([x["rate"][c] for x in r["vibestran"] if x["state"] == "noload"])
+                femm = [x["emf"][c] for x in r["femm"] if x["state"] == "noload"]
+                ax.plot(offsets, rate, color=color, linewidth=2, label=f"{c}, vibestran rate")
+                ax.plot(offsets, femm, color=color, linewidth=2, linestyle="--", marker="s",
+                        markersize=4, markerfacecolor="none", label=f"{c}, FEMM, +-0.25 mm")
+            ax.set_title(f"no-load back-EMF, {'with steel' if variant == 'steel' else 'no steel'} "
+                         "(V per m/s)", loc="left")
+            ax.legend(fontsize=7, ncol=2)
+        for ax in axes.flat:
+            ax.set_xlabel("rod position (mm)")
+        fig.suptitle(f"Finite tubular motor (one coil set, five magnets), {finite_level} mesh: loaded "
+                     "A 15 A, B = C -7.5 A", x=0.01, ha="left", color=INK)
+        fig.tight_layout(rect=(0, 0, 1, 0.97))
+        fig.savefig(out / "tubular_finite.png", dpi=150)
+        written.append("tubular_finite.png")
+        plt.close(fig)
     key = next((k for k in (f"motor_whole_{lvl}" for lvl in ("graded", "fine", "coarse")) if k in data), None)
     if key:
         r = data[key]
@@ -1740,6 +1976,16 @@ def report(data, out):
                   "above of each offset's own geometry: FEMM's, and vibestran's with the gap meshed. "
                   "vibestran's thrust is the element's, its back-EMF the element's linkage rate.", "",
                   *body]
+    body = tubular_finite_report(data)
+    if body:
+        lines += ["## A finite tubular motor (MOTION TRANSLATE, a long period)", "",
+                  "tools/magnetic_tubular_finite_example.py's motor: one set of three coils on a rod "
+                  "of five magnets, in a 200 mm slice of space that repeats along the axis (vibestran "
+                  "MPERIOD PERIODIC SHIFT 0.2, FEMM periodic boundaries), with and without the steel "
+                  "teeth and shell. vibestran: one deck at offset 0 whose MOTION TRANSLATE slides "
+                  "everything inside the tube air-gap element through the 21 positions; FEMM: a "
+                  "geometry and solve per position, its gap meshed. No load, and A = 15 A, "
+                  "B = C = -7.5 A.", "", *body]
     body = motor_report(data)
     if body:
         lines += ["## 12-slot, 14-pole motor", "",
@@ -1758,7 +2004,7 @@ def main():
     parser.add_argument("--report-only", action="store_true",
                         help="rewrite summary.md and the plots from OUTPUT/results.json")
     parser.add_argument("--cases", nargs="+", default=["core", "magnet", "motor", "tubular", "tubular_pitch",
-                                                       "tubular_motion"])
+                                                       "tubular_motion", "tubular_finite"])
     parser.add_argument("--levels", nargs="+", default=list(MOTOR_LEVELS),
                         help="mesh levels; graded is the motor's only (the core cases skip it)")
     parser.add_argument("--airgap", nargs="+", default=["AGE"], choices=["AGE", "BAND"],
@@ -1789,6 +2035,12 @@ def main():
                         print(f"tubular_pitch {level}", flush=True)
                         data[f"tubular_pitch_{level}"] = tubular_case(level, args.output, args, pitch=True)
                     data[f"{case}_{level}"] = tubular_motion_case(level, args.output, args)
+                elif case == "tubular_finite":
+                    for variant in FINITE_VARIANTS:
+                        print(f"tubular_finite {variant} {level}", flush=True)
+                        data[f"{case}_{variant}_{level}"] = tubular_finite_case(variant, level, args.output,
+                                                                                args)
+                        store.write_text(json.dumps(data, indent=1))
                 elif case.startswith("tubular"):
                     data[f"{case}_{level}"] = tubular_case(level, args.output, args,
                                                            pitch=case == "tubular_pitch")

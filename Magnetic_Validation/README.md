@@ -147,6 +147,7 @@ interpolants differ little; the exterior is A = 0 on a box or circle.
 | tubular | the static tubular stack (MAGAXI against FEMM axi): axial force on the mover, phase linkages, back-EMF, energy and gap B at 21 mover offsets over a pole pitch, without and with current, and a field map at offset 0. |
 | tubular_pitch | one anti-periodic pitch of the endless tubular stack (MPERIOD SHIFT against FEMM anti-periodic boundaries): the same quantities, per pitch. |
 | tubular_motion | the pitch with vibestran's gap as the air-gap element and one MOTION TRANSLATE deck sliding the mover through the 21 offsets: the element's thrust and back-EMF per unit speed at each position against tubular_pitch's FEMM solves (run first if missing). |
+| tubular_finite | the finite tubular motor of `tools/magnetic_tubular_finite_example.py` (one coil set, a five-magnet rod, a 200 mm periodic slice), with and without steel: one MOTION TRANSLATE deck through the air-gap element against FEMM's solve of each of 21 positions. Force on the rod, phase linkages, no-load back-EMF (FEMM's from ±0.25 mm central differences). |
 | motor | the 12-slot, 14-pole motor of `tools/magnetic_motor_example.py`: rated torque and phase linkage over an electrical period (DRIVE), no-load linkage and gap B_r, cogging over a cogging period. The whole machine (PAIRGAP; FEMM periodic AGE) and its anti-periodic half (MPERIOD ANTI; FEMM anti-periodic boundaries and AGE). |
 
 ```sh
@@ -377,6 +378,62 @@ differences, as in the sections above, the difference's own truncation,
   with FEMM as closely as the meshed-gap vibestran does.
 - One MOTION deck of 21 positions and two subcases ran in 1.8 s against
   3.2 s for the 21 meshed decks (fine; local Mac, Accelerate).
+
+#### A finite tubular motor (2026-11-03)
+
+`--cases tubular_finite` compares the motor of
+`tools/magnetic_tubular_finite_example.py`, with and without steel. It is a
+finite motor: one set of three coils (A, −C, B) over a rod of five
+magnets. The motor sits in a 200 mm slice of space that repeats along the
+axis: vibestran `MPERIOD,1,PERIODIC,...,0.2` and FEMM periodic boundaries,
+with the air held at A = 0 out to r = 50 mm. The "steel" variant has 1 mm
+teeth beside each coil and a 1.5 mm shell, with the dense steel curve. In
+the "air" variant the coils sit in air.
+
+vibestran solves one deck at offset 0. Its gap (r 6.75 to 7.75 mm, the
+whole period) is the air-gap element. MOTION TRANSLATE slides everything
+inside the gap through 21 positions, −20 to 20 mm (one electrical period):
+the magnets, the tube and the air beyond the rod's ends. FEMM draws and
+solves each position, with its gap meshed. Both run with no current and
+with A = 15 A, B = C = −7.5 A.
+
+The force is on the rod: vibestran's from the air-gap element, FEMM's from
+its weighted stress tensor. FEMM's back-EMF at each position is a central
+difference of its linkages with the rod moved 0.25 mm either way, which
+takes two more solves. vibestran's is the linkage rate from the position's
+own solve.
+
+All figures are the largest difference over the 21 positions, in percent
+of FEMM's peak. Back-EMF peaks are about 2.2 V per m/s with steel and
+1.1 V per m/s without.
+
+| quantity | steel, coarse (39k / 25k) | steel, fine (149k / 82k) | air, coarse (39k / 25k) | air, fine (149k / 81k) |
+|---|---:|---:|---:|---:|
+| loaded force (peak 50.3 N steel, 22.6 N air) | 0.45% | 0.11% | 0.63% | 0.14% |
+| no-load force | 0.65% | 0.11% | 0.65% | 0.15% |
+| phase linkages, no load and loaded | 0.28 to 0.34% | 0.11 to 0.14% | 0.10 to 0.15% | 0.07 to 0.11% |
+| no-load back-EMF | 0.87 to 0.99% | 0.31 to 0.52% | 0.34 to 0.94% | 0.18 to 0.23% |
+
+The cell counts in the column headings are vibestran's cells (the gap's
+included) and FEMM's triangles.
+
+- Every difference shrinks with refinement, the forces by 4 to 6 times.
+  From coarse to fine, vibestran's loaded force changes by 0.13% (steel)
+  and 0.20% (air) of the peak. FEMM's changes by 0.44% and 0.69%.
+- Without steel, the no-load force is exactly zero. vibestran's largest
+  is 0.004 N coarse and 0.001 N fine. FEMM's stress tensor gives 0.15 N
+  and 0.035 N: FEMM's error, not the difference.
+- With steel, the no-load force swings ±18 N as the rod's magnet joints
+  pass the end teeth, and the two solvers trace it to 0.06 N on the fine
+  mesh.
+- The back-EMF difference is at the level of FEMM's own reference.
+  FEMM's 0.5 mm difference of two remeshed solves carries its remeshing
+  noise and about 0.1% truncation.
+- Wall time on the fine mesh: vibestran's MOTION deck took 85 s (steel) and
+  46 s (air) for 21 positions in two subcases, on the local Mac. FEMM took
+  171 s and 67 s for 84 solves on bob-desktop.
+
+`tubular_finite.png` plots the force and back-EMF curves of both variants.
 
 These are comparisons of the same 2D (planar or axisymmetric) problem. They
 do not cover end effects beyond the modeled domain or the 3D formulation.
