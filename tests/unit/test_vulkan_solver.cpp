@@ -25,7 +25,9 @@ TEST(VulkanAmgTest, ResidentAndBudgetedHierarchyPreserveMaterialInterface) {
     auto context = VulkanContext::create();
     if (!context || !context->device_info().supports_float64) GTEST_SKIP() << "Vulkan fp64 unavailable";
     const auto problem = test::pcg_partition_problem(50003);
-    for (std::size_t budget : {0U, 1024U, 1024U * 1024U, 8U * 1024U * 1024U}) {
+        // 1 KiB and 1 MiB are below the fixed device state (host hierarchy);
+    // 13 MiB leaves about half of the fine rows on the CPU.
+    for (std::size_t budget : {0U, 1024U, 1024U * 1024U, 13U * 1024U * 1024U}) {
         VulkanSolverConfig cfg;
         cfg.min_dofs_for_gpu = 0;
         cfg.device_memory_budget = budget;
@@ -37,6 +39,48 @@ TEST(VulkanAmgTest, ResidentAndBudgetedHierarchyPreserveMaterialInterface) {
         for (std::size_t i = 0; i < x.size(); ++i) EXPECT_NEAR(x[i], problem.exact[i], 2e-8) << i;
         const auto zero = backend->solve(problem.matrix.expanded_symmetric(), std::vector<double>(x.size(), 0));
         for (double v : zero) EXPECT_EQ(v, 0);
+    }
+}
+
+TEST(VulkanAmgTest, FactorSolvesEveryColumnAndRefactorUploadsTheNewValues) {
+    // The device hierarchy and recorded command buffers are reused across
+    // right-hand sides and a same-pattern refactor(): a solve that still
+    // used the old values would miss the stiffened network's solution by
+    // O(1) at the interface.
+    auto context = VulkanContext::create();
+    if (!context || !context->device_info().supports_float64) GTEST_SKIP() << "Vulkan fp64 unavailable";
+    const auto problem = test::pcg_partition_problem(50003);
+    const auto stiffer = test::stiffened(problem, 30.0);
+    const auto k = problem.matrix.expanded_symmetric();
+    const auto n = std::size_t(k.n);
+    // Resident, host hierarchy, and about half of the fine rows on the CPU.
+    for (std::size_t budget : {0U, 1024U * 1024U, 13U * 1024U * 1024U}) {
+        VulkanSolverConfig cfg;
+        cfg.min_dofs_for_gpu = 0;
+        cfg.device_memory_budget = budget;
+        auto backend = VulkanSolverBackend::try_create(cfg);
+        ASSERT_TRUE(backend);
+        auto made = backend->factor(k);
+        ASSERT_TRUE(std::holds_alternative<std::unique_ptr<LinearFactor>>(made)) << std::get<Error>(made).message;
+        auto factor = std::get<std::unique_ptr<LinearFactor>>(std::move(made));
+        EXPECT_EQ(factor->method(), "amg-pcg");
+        std::vector<double> B(2 * n);
+        for (std::size_t i = 0; i < n; ++i) { B[i] = problem.rhs[i]; B[n + i] = -3 * problem.rhs[i]; }
+        auto X = factor->solve(B, 2);
+        ASSERT_TRUE(std::holds_alternative<std::vector<double>>(X)) << budget << ": " << std::get<Error>(X).message;
+        const auto& x = std::get<std::vector<double>>(X);
+        for (std::size_t i = 0; i < n; ++i) {
+            EXPECT_NEAR(x[i], problem.exact[i], 2e-8) << budget << " row=" << i;
+            EXPECT_NEAR(x[n + i], -3 * problem.exact[i], 6e-8) << budget << " row=" << i;
+        }
+        EXPECT_EQ(backend->last_solve_was_full_gpu(), budget == 0);
+        ASSERT_FALSE(factor->refactor(stiffer.matrix.expanded_symmetric()).has_value());
+        X = factor->solve(stiffer.rhs, 1);
+        ASSERT_TRUE(std::holds_alternative<std::vector<double>>(X)) << budget << ": " << std::get<Error>(X).message;
+        const auto& y = std::get<std::vector<double>>(X);
+        for (std::size_t i = 0; i < n; ++i) EXPECT_NEAR(y[i], stiffer.exact[i], 2e-8) << budget << " row=" << i;
+        EXPECT_EQ(factor->stats().symbolic_analyses, 1);
+        EXPECT_EQ(factor->stats().solves, 3);
     }
 }
 

@@ -1,0 +1,27 @@
+// Coarsest AMG level: y = C f with the dense inverse, one workgroup per row.
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+#extension GL_GOOGLE_include_directive : require
+#define STATE_BINDING 3
+#include "amg_state.glsl"
+
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC { uint n; } pc;
+layout(set = 0, binding = 0) readonly buffer C { double c[]; };
+layout(set = 0, binding = 1) readonly buffer F { double f[]; };
+layout(set = 0, binding = 2) buffer Y { double y[]; };
+shared double s[256];
+
+void main() {
+    if (st.flags != 0) return;
+    const uint tid = gl_LocalInvocationID.x, row = gl_WorkGroupID.x;
+    double sum = 0;
+    for (uint j = tid; j < pc.n; j += 256u) sum += c[row * pc.n + j] * f[j];
+    s[tid] = sum;
+    barrier();
+    for (uint k = 128u; k > 0u; k >>= 1u) {
+        if (tid < k) s[tid] += s[tid + k];
+        barrier();
+    }
+    if (tid == 0u) y[row] = s[0];
+}

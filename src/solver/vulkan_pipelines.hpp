@@ -6,6 +6,7 @@
 #include "solver/vulkan_context.hpp"
 #include "solver/vulkan_solver_backend.hpp"
 #include <array>
+#include <memory>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -25,9 +26,8 @@ enum PipelineId : int {
     PL_DOT_REDUCE_D  = 5,
     PL_AXPBY_D       = 6,
     PL_JACOBI_D      = 7,
-    PL_AMG_VECTOR_D  = 8,
-    PL_AMG_GATHER_D  = 9,
-    PL_COUNT         = 10,
+    PL_AMG_GATHER_D  = 8,
+    PL_COUNT         = 9,
 };
 
 using Pipelines = VulkanSolverBackend::Pipelines;
@@ -40,6 +40,9 @@ struct VulkanSolverBackend::Pipelines {
     std::array<VkPipeline,            PL_COUNT> pipeline{};
     VkDescriptorPool pool{VK_NULL_HANDLE};
     VkDevice         device{VK_NULL_HANDLE}; // non-owning
+    // AMG kernels (vulkan_amg.cpp), created on first use and kept with the
+    // other pipelines so repeated solves do not rebuild them.
+    std::unique_ptr<void, void (*)(void*)> amg{nullptr, nullptr};
 
     ~Pipelines();
 
@@ -66,7 +69,6 @@ struct PCJacobi { uint32_t n; };
 //   double alpha (offset 0), double beta (offset 8), uint n (offset 16),
 //   uint _pad (offset 20) → total 24 bytes, aligned to 8.
 struct PCAxpbyD { double alpha; double beta; uint32_t n; uint32_t _pad; };
-struct PCAmgVector { double alpha, beta, gamma; uint32_t n, operation; };
 
 // ── Dispatch helpers (float32) ────────────────────────────────────────────────
 

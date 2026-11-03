@@ -5,7 +5,7 @@
 #include "vulkan_pcg_internal.hpp"
 #include "vulkan_commands.hpp"
 #include "partitioned_pcg.hpp"
-#include "amg_hybrid.hpp"
+#include "amg_pcg.hpp"
 #include <spdlog/spdlog.h>
 #include <type_traits>
 
@@ -101,14 +101,11 @@ std::unique_ptr<VulkanPcgWorkspace> make_partitioned_pcg(VulkanContext& ctx, Pip
     return std::make_unique<PartitionedPcg<float>>(ctx, pl, K, budget);
 }
 
-std::vector<double> solve_vulkan_hybrid_amg(VulkanContext& ctx, Pipelines& pl,
-    const SparseMatrixBuilder::CsrData& k, const std::vector<double>& rhs,
-    std::size_t budget, double tolerance, int max_iterations, int& iterations, RefinementReport& report) {
-    auto result = detail::solve_hybrid_amg(k, rhs, tolerance, max_iterations,
-        [&](const auto& matrix) { return std::make_unique<PartitionedPcg<double>>(ctx, pl, matrix, budget); });
-    iterations = result.iterations;
-    report = result.refinement;
-    return std::move(result.solution);
+std::function<std::unique_ptr<detail::AmgSpmv>(const SparseMatrixBuilder::CsrData&)>
+vulkan_partitioned_spmv(VulkanContext& ctx, Pipelines& pl, std::size_t budget) {
+    return [&ctx, &pl, budget](const SparseMatrixBuilder::CsrData& matrix) {
+        return std::make_unique<PartitionedPcg<double>>(ctx, pl, matrix, budget);
+    };
 }
 } // namespace vibestran
 #endif

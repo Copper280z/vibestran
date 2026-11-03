@@ -59,17 +59,6 @@ private:
     PcgPinnedBuffer<double> host_p_, host_ap_;
 };
 
-static std::vector<double> solve_cuda_hybrid_amg(CudaPCGContext& ctx,
-    const SparseMatrixBuilder::CsrData& k, const std::vector<double>& f, std::size_t budget) {
-    auto result = detail::solve_hybrid_amg(k, f, ctx.tolerance, ctx.max_iters,
-        [&](const auto& matrix) { return std::make_unique<CudaAmgSpmv>(matrix, budget); });
-    ctx.last_iters = result.iterations;
-    ctx.last_refinement = result.refinement;
-    ctx.last_rel_res = result.refinement.relative_residual;
-    require_refined(ctx, "cuda-pcg partitioned AMG");
-    return std::move(result.solution);
-}
-
 // Fixed GPU row prefix and CPU suffix. cudaMallocHost buffers persist for all
 // iterations/refinement solves; CPU work overlaps the asynchronous GPU work.
 template<class T>

@@ -36,10 +36,7 @@
 #include "solver/pcg_memory.hpp"
 #include "partitioned_pcg.hpp"
 #include "pcg_coloring.hpp"
-#include "amg_pcg.hpp"
-#include "amg_coarse.hpp"
-#include "amg_hybrid.hpp"
-#include <amgcl/backend/cuda.hpp>
+#include "amg_factor.hpp"
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -2288,66 +2285,87 @@ static std::vector<double> solve_cuda_pcg_colored(
     return solution;
 }
 
-struct CudaAmgCoarse : detail::AmgCoarseFactor {
-    mutable std::vector<double> rhs, solution;
-    template<class Matrix, class Params>
-    CudaAmgCoarse(const Matrix& a, const Params&) : detail::AmgCoarseFactor(*a),
-        rhs(amgcl::backend::rows(*a)), solution(rhs.size()) {}
-    template<class X, class Y> void operator()(const X& b, Y& x) const {
-        thrust::copy(b.begin(), b.end(), rhs.begin());
-        detail::AmgCoarseFactor::operator()(rhs, solution);
-        thrust::copy(solution.begin(), solution.end(), x.begin());
-    }
-};
-
 } // namespace vibestran
-#include "cuda_device_amg.hpp"
+#include "cuda_amg.hpp"
 namespace vibestran {
 
-// Keep the Krylov operator and reductions in fp64. Only the multigrid
-// preconditioner uses fp32; conversions stay on the device between cycles.
-class CudaMixedAmg {
-    using FloatBackend = amgcl::backend::cuda<float, CudaAmgCoarse>;
-    using DoubleBackend = amgcl::backend::cuda<double, CudaAmgCoarse>;
-    using FloatAmg = detail::PcgAmg<FloatBackend>;
+template<class T>
+class CudaAmgEngine final : public detail::AmgEngine {
 public:
-    using params = FloatAmg::params;
-    template<class Matrix>
-    CudaMixedAmg(const Matrix& a, const params& p, const DoubleBackend::params& bp)
-        : preconditioner_(a, p, FloatBackend::params(bp.cusparse_handle)),
-          matrix_(DoubleBackend::copy_matrix(
-              std::make_shared<amgcl::backend::builtin<double>::matrix>(a), bp)),
-          rhs_(amgcl::backend::rows(a)), solution_(rhs_.size()) {}
-    const DoubleBackend::matrix& system_matrix() const { return *matrix_; }
-    template<class X, class Y> void apply(const X& b, Y& x) const {
-        thrust::copy(b.begin(), b.end(), rhs_.begin());
-        preconditioner_.apply(rhs_, solution_);
-        thrust::copy(solution_.begin(), solution_.end(), x.begin());
+    CudaAmgEngine(const detail::AmgHierarchy& h, std::optional<detail::AmgDevicePartition> partition, int max_iterations)
+        : solver_(h, std::move(partition)), max_iterations_(max_iterations) {}
+    std::pair<int, double> solve(const std::vector<double>& b, double tolerance, std::vector<double>& x) override {
+        return solver_.solve(b, tolerance, max_iterations_, x);
     }
+    void values_changed() override { solver_.update_values(); }
 private:
-    FloatAmg preconditioner_;
-    std::shared_ptr<DoubleBackend::matrix> matrix_;
-    mutable FloatBackend::vector rhs_, solution_;
+    cuda_amg::Solver<T> solver_;
+    int max_iterations_;
 };
+
+// AMG PCG for n >= 50000. Mixed precision keeps an fp32 hierarchy; CG and
+// its operator stay fp64. A budget partitions the fp64 fine operator
+// (mixed solves share that path), or falls back to the host hierarchy when
+// even the fixed device state does not fit.
+static detail::AmgSystem::EngineFactory cuda_amg_engines(const CudaPCGContext& ctx,
+    std::optional<std::size_t> budget, bool mixed) {
+    return [&ctx, budget, mixed](const detail::ScaledAmgMatrix& scaled, const detail::AmgHierarchy& h)
+        -> std::unique_ptr<detail::AmgEngine> {
+        const auto& fine = *h.levels.front().A;
+        std::optional<detail::AmgDevicePartition> partition;
+        if (budget) {
+            const auto fixed = cuda_amg::Solver<double>::fixed_bytes(h);
+            if (*budget >= fine.nrows * 80) partition = detail::AmgDevicePartition::plan(fine, *budget, fixed);
+            if (!partition) {
+                log_debug(std::format("[cuda device AMG] workspace does not fit: fixed={} budget={} bytes; using host hierarchy", fixed, *budget));
+                return std::make_unique<detail::HostAmgEngine>(scaled, h,
+                    [b = *budget](const auto& matrix) { return std::make_unique<CudaAmgSpmv>(matrix, b); }, ctx.max_iters);
+            }
+            detail::log_amg_device_plan("cuda", fine, *partition, fixed, *budget);
+        }
+        if (partition || !mixed) return std::make_unique<CudaAmgEngine<double>>(h, std::move(partition), ctx.max_iters);
+        return std::make_unique<CudaAmgEngine<float>>(h, std::nullopt, ctx.max_iters);
+    };
+}
+
+static void record_amg(CudaPCGContext& ctx, const detail::AmgPcgResult& result) {
+    ctx.last_iters = result.iterations;
+    ctx.last_refinement = result.refinement;
+    ctx.last_rel_res = result.refinement.relative_residual;
+}
+
+static std::vector<double> solve_cuda_amg(CudaPCGContext& ctx, const SparseMatrixBuilder::CsrData& k,
+    const std::vector<double>& rhs, std::optional<std::size_t> budget, bool mixed, const char* label) {
+    detail::AmgSystem system(k, ctx.tolerance, cuda_amg_engines(ctx, budget, mixed));
+    auto result = system.solve(k, rhs);
+    record_amg(ctx, result);
+    require_refined(ctx, label);
+    return std::move(result.solution);
+}
+
+// factor() for n >= 50000: the hierarchy and device workspace persist across
+// right-hand sides and same-pattern refactor() calls.
+static std::unique_ptr<LinearFactor> make_cuda_amg_factor(CudaPCGContext& ctx,
+    const SparseMatrixBuilder::CsrData& k, bool mixed, const char* label) {
+    validate_pcg_inputs(k, std::vector<double>(k.n));
+    return std::make_unique<detail::AmgFactor>(k,
+        [&ctx, mixed](const SparseMatrixBuilder::CsrData& matrix) {
+            const auto budget = mixed ? cuda_pcg_spill_budget<float>(ctx, matrix) : cuda_pcg_spill_budget<double>(ctx, matrix);
+            return std::make_unique<detail::AmgSystem>(matrix, ctx.tolerance, cuda_amg_engines(ctx, budget, mixed));
+        },
+        [&ctx, label](const detail::AmgPcgResult& result) -> Status {
+            record_amg(ctx, result);
+            try { require_refined(ctx, label); } catch (const SolverError& e) { return Error{e.what()}; }
+            return std::nullopt;
+        });
+}
 
 static std::vector<double> solve_cuda_pcg_stable(
     CudaPCGContext& ctx, const SparseMatrixBuilder::CsrData& K, const std::vector<double>& F) {
     validate_pcg_inputs(K, F);
-    if (const auto budget = cuda_pcg_spill_budget<double>(ctx, K))
-        return K.n >= 50000 ? solve_cuda_device_amg(ctx, K, F, *budget)
-                           : solve_cuda_partitioned<double>(ctx, K, F, *budget);
-    if (K.n >= 50000) {
-        using Backend = amgcl::backend::cuda<double, CudaAmgCoarse>;
-        auto result = detail::solve_amg_pcg<Backend>(K, F, ctx.tolerance, ctx.max_iters,
-            typename Backend::params(ctx.cusparse),
-            [](const auto& host, auto& device) { thrust::copy(host.begin(), host.end(), device.begin()); },
-            [](const auto& device, auto& host) { thrust::copy(device.begin(), device.end(), host.begin()); });
-        ctx.last_iters = result.iterations;
-        ctx.last_refinement = result.refinement;
-        ctx.last_rel_res = result.refinement.relative_residual;
-        require_refined(ctx, "cuda-pcg AMG");
-        return std::move(result.solution);
-    }
+    const auto budget = cuda_pcg_spill_budget<double>(ctx, K);
+    if (K.n >= 50000) return solve_cuda_amg(ctx, K, F, budget, false, "cuda-pcg AMG");
+    if (budget) return solve_cuda_partitioned<double>(ctx, K, F, *budget);
     return solve_cuda_pcg_colored(ctx, K, F, solve_cuda_pcg_stable_ordered, "cuda-pcg");
 }
 
@@ -2446,22 +2464,9 @@ static std::vector<double> solve_cuda_pcg_mixed_ordered(
 static std::vector<double> solve_cuda_pcg_mixed(
     CudaPCGContext& ctx, const SparseMatrixBuilder::CsrData& K, const std::vector<double>& F) {
     validate_pcg_inputs(K, F);
-    if (const auto budget = cuda_pcg_spill_budget<float>(ctx, K))
-        return K.n >= 50000 ? solve_cuda_device_amg(ctx, K, F, *budget)
-                           : solve_cuda_partitioned<float>(ctx, K, F, *budget);
-    if (K.n >= 50000) {
-        using Backend = amgcl::backend::cuda<double, CudaAmgCoarse>;
-        auto result = detail::solve_amg_pcg<Backend>(K, F, ctx.tolerance, ctx.max_iters,
-            typename Backend::params(ctx.cusparse),
-            [](const auto& host, auto& device) { thrust::copy(host.begin(), host.end(), device.begin()); },
-            [](const auto& device, auto& host) { thrust::copy(device.begin(), device.end(), host.begin()); },
-            std::type_identity<CudaMixedAmg>{});
-        ctx.last_iters = result.iterations;
-        ctx.last_refinement = result.refinement;
-        ctx.last_rel_res = result.refinement.relative_residual;
-        require_refined(ctx, "cuda-pcg mixed AMG");
-        return std::move(result.solution);
-    }
+    const auto budget = cuda_pcg_spill_budget<float>(ctx, K);
+    if (K.n >= 50000) return solve_cuda_amg(ctx, K, F, budget, true, "cuda-pcg mixed AMG");
+    if (budget) return solve_cuda_partitioned<float>(ctx, K, F, *budget);
     return solve_cuda_pcg_colored(ctx, K, F, solve_cuda_pcg_mixed_ordered, "cuda-pcg-mixed");
 }
 

@@ -1,0 +1,40 @@
+// CG reductions over a fixed 256-workgroup grid, so the summation order is
+// independent of timing. op 0: partial a.b; op 1: u += alpha a, r -= alpha b,
+// partial r.r.
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+#extension GL_GOOGLE_include_directive : require
+#define STATE_BINDING 5
+#include "amg_state.glsl"
+
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC { uint n, op; } pc;
+layout(set = 0, binding = 0) readonly buffer A { double a[]; };
+layout(set = 0, binding = 1) readonly buffer B { double b[]; };
+layout(set = 0, binding = 2) buffer U { double u[]; };
+layout(set = 0, binding = 3) buffer R { double r[]; };
+layout(set = 0, binding = 4) buffer Partial { double partial[]; };
+shared double s[256];
+
+void main() {
+    if (st.flags != 0) return;
+    const uint tid = gl_LocalInvocationID.x;
+    double sum = 0;
+    const double alpha = st.alpha;
+    for (uint i = gl_WorkGroupID.x * 256u + tid; i < pc.n; i += 65536u) {
+        if (pc.op == 0u) sum += a[i] * b[i];
+        else {
+            u[i] += alpha * a[i];
+            const double ri = r[i] - alpha * b[i];
+            r[i] = ri;
+            sum += ri * ri;
+        }
+    }
+    s[tid] = sum;
+    barrier();
+    for (uint k = 128u; k > 0u; k >>= 1u) {
+        if (tid < k) s[tid] += s[tid + k];
+        barrier();
+    }
+    if (tid == 0u) partial[gl_WorkGroupID.x] = s[0];
+}

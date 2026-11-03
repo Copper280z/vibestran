@@ -1,0 +1,42 @@
+// CG scalar steps in one workgroup: reduces the 256 partial sums.
+// op 0: start (r.r); 1: rho = r.z, beta; 2: alpha = rho / p.q; 3: check r.r.
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+#extension GL_GOOGLE_include_directive : require
+#define STATE_BINDING 1
+#include "amg_state.glsl"
+
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC { uint op; } pc;
+layout(set = 0, binding = 0) readonly buffer Partial { double partial[]; };
+shared double s[256];
+
+void main() {
+    if (pc.op != 0u && st.flags != 0) return;
+    const uint tid = gl_LocalInvocationID.x;
+    s[tid] = partial[tid];
+    barrier();
+    for (uint k = 128u; k > 0u; k >>= 1u) {
+        if (tid < k) s[tid] += s[tid + k];
+        barrier();
+    }
+    if (tid != 0u) return;
+    const double total = s[0];
+    if (pc.op == 0u) {
+        st.norm_b = sqrt(total);
+        st.rr = total;
+        st.iterations = 0;
+        st.flags = (st.max_iterations <= 0 || !(st.norm_b > st.target * st.norm_b)) ? 1 : 0;
+    } else if (pc.op == 1u) {
+        st.beta = st.iterations != 0 ? total / st.rho : 0.0;
+        st.rho = total;
+    } else if (pc.op == 2u) {
+        if (!(total > 0.0)) st.flags |= 2;
+        else st.alpha = st.rho / total;
+    } else {
+        st.rr = total;
+        st.iterations += 1;
+        if (!(sqrt(total) > st.target * st.norm_b)) st.flags |= 1;
+        else if (st.iterations >= st.max_iterations) st.flags |= 4;
+    }
+}

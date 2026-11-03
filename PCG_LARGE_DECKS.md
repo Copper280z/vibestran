@@ -1,11 +1,12 @@
 # PCG tests on decks with more than 200000 grids
 
-CUDA fp64, CUDA mixed and Vulkan now pass the large physical matrix replays
-with GPU-owned iterative state in spill mode. At 90% fine-matrix row residency,
-the 1.58-million-equation plate takes **7.90 s CUDA / 9.34 s Vulkan**, versus
-**48.07 / 63.00 s** with the earlier host-based method. Independent solution
-error remains below **1.86e-9** at the unchanged **1e-8** target. Lower residency
-still carries substantial CPU matrix work; small-budget host fallback remains.
+CUDA fp64, CUDA mixed and Vulkan pass the large physical matrix replays with
+GPU-owned iterative state. After the AMG engine rewrite below, the
+1.58-million-equation plate solves in **4.29 s CUDA / 4.82 s Vulkan** resident
+and **5.38 / 5.72 s** with 90% of its fine-matrix rows on the GPU, versus
+**6.44 / 8.28 s** and **7.95 / 9.41 s** before it. Independent solution error
+remains below **1.86e-9** at the unchanged **1e-8** target. The complete
+nonlinear motor now runs faster than CPU direct on every GPU backend.
 
 Measured on 2026-11-02 on bob-desktop.local: Ryzen 7 5700, eight physical cores
 (`taskset -c 0-7`, `OMP_NUM_THREADS=8`), 32 GiB RAM, TITAN V 12 GiB,
@@ -42,9 +43,138 @@ heat source crossing that interface. It extends the repository's thermal
 generator. The structural case is the existing `plate262k.bdf`, unchanged.
 All replay loads come from FE assembly; none use manufactured right-hand sides.
 
-## Device-owned spill: current implementation
+## AMG engine rewrite and factor reuse
 
-Large CUDA/Vulkan spill solves now keep PCG vectors, reductions, smoothing
+The hierarchy is still AMGCL 1.5.0's smoothed aggregation with SPAI-0
+smoothing (coarse_enough 256), but AMGCL now only builds it. Each backend runs
+its own V-cycle and CG:
+
+- **Zero-guess cycle.** The first pre-smoothing step of every level starts
+  from zero, so it is a diagonal scaling rather than a product: one fewer
+  sparse product per level and cycle. Iterates match AMGCL's own
+  amg + cg to rounding (`PcgAmgTest.ZeroGuessVcycleIsAmgclsPreconditioner`);
+  iteration counts are unchanged.
+- **CUDA.** All CG scalars stay in device memory, with deterministic
+  fixed-grid reductions. Residual, smoothing and accumulation are fused into
+  SpMV epilogues, with 4–32 lanes per row chosen from the average row length.
+  One iteration is a captured CUDA graph, launched eight times per host poll
+  when resident and once per iteration when spilling. CPU rows run in a
+  captured host node on a side branch.
+- **Vulkan.** Pre-recorded command buffers are replayed, with device-side CG
+  state and specialised SpMV pipelines. Subgroup reduction is used where the
+  device supports relative shuffles; otherwise shared memory. Pipelines are
+  cached per context. Spill solves split the recording at each fine product
+  so the CPU rows run between submissions.
+- **Factor reuse.** `factor()` on the CUDA PCG, CUDA mixed and Vulkan backends
+  (n ≥ 50,000) returns a factor that keeps the equilibrated matrix, hierarchy
+  and device workspace across right-hand sides. `refactor()` with an unchanged
+  pattern keeps the aggregates and transfer operators and recomputes only the
+  Galerkin operators, smoothers and coarse inverse (AMGCL's rebuild). A new
+  pattern, or a rebuilt hierarchy needing more than twice the iterations of
+  its fresh build, builds again. The nonlinear motor builds once and rebuilds
+  values for the other 11 tangents.
+- **CUDA spill ordering.** The gather of CPU-row inputs runs before the fork
+  to the CPU branch. As its own branch it waited for SMs behind the large
+  prefix product, so the CPU rows effectively ran after that product instead of
+  alongside it. On the plate at 90% this cut the CPU-callback gaps from
+  4.24 s to 2.19 s and the solve from 7.58 s to 5.50 s.
+- **Refinement.** The compensated residual and ‖K‖∞ are evaluated
+  row-parallel. Lower-triangular storage uses a transposed index built once
+  per refinement. Every row is summed in the serial order, so results are
+  bitwise identical; on the plate, 243 ms of serial work becomes about 130 ms.
+
+Times are **median seconds of three solves**, measured as before (affinity
+0–7, eight threads, no warmup, setup and refinement included). Row fractions
+use the production planner's exact 50/75/90% budgets. The logged GPU/CPU split
+of every repeat is checked against the target. Arrows show commit `f13d5cc`
+→ this change, both measured in the same session:
+
+| System | Backend | 50% GPU rows | 75% GPU rows | 90% GPU rows | Resident |
+|---|---|---:|---:|---:|---:|
+| Thermal | CUDA fp64 | 0.880 → 0.609 | 0.417 → 0.265 | 0.377 → 0.193 | 0.360 → 0.192 |
+| Thermal | CUDA mixed | | | | 0.402 → 0.180 |
+| Thermal | Vulkan | 1.019 → 0.665 | 0.570 → 0.339 | 0.551 → 0.304 | 0.500 → 0.278 |
+| Motor, first tangent | CUDA fp64 | 0.869 → 0.618 | 0.780 → 0.455 | 0.539 → 0.356 | 0.471 → 0.199 |
+| Motor, first tangent | CUDA mixed | | | | 0.440 → 0.220 |
+| Motor, first tangent | Vulkan | 1.136 → 0.698 | 0.937 → 0.567 | 0.781 → 0.485 | 0.603 → 0.359 |
+| Motor, late tangent | CUDA fp64 | 0.568 → 0.414 | 0.464 → 0.307 | 0.317 → 0.207 | 0.287 → 0.145 |
+| Motor, late tangent | CUDA mixed | | | | 0.296 → 0.132 |
+| Motor, late tangent | Vulkan | 0.781 → 0.487 | 0.633 → 0.398 | 0.543 → 0.321 | 0.429 → 0.259 |
+| Plate | CUDA fp64 | 28.816 → 20.916 | 15.801 → 11.236 | 7.945 → 5.385 | 6.443 → 4.294 |
+| Plate | CUDA mixed | | | | 6.163 → 4.269 |
+| Plate | Vulkan | 30.981 → 21.330 | 17.361 → 11.610 | 9.407 → 5.723 | 8.283 → 4.824 |
+
+CUDA mixed spills through the fp64 engine, so its spill times are CUDA
+fp64's. The 50% plate remains bound by the CPU rows: about 5.9 ms per
+product for 788k rows, close to host memory bandwidth, plus 12.7 MB of
+transfers. The plate keeps **872 iterations** (mixed resident: 1016). All 72
+timed configurations, old and new, pass the 1e-8 reference check; the
+maximum reference error is **1.856e-9**. The new code's fixed device state
+is the same for CUDA and Vulkan, so their row budgets now coincide (plate
+90%: 677.98 MiB).
+
+Factor reuse on the late motor tangent (median of five runs):
+
+| Backend | Solve, with setup | Factor solve | Same-pattern refactor + solve |
+|---|---:|---:|---:|
+| CUDA fp64 | 0.149 | 0.106 | 0.123 |
+| Vulkan | 0.279 | 0.150 | 0.177 |
+
+The refactored hierarchy is built from the first tangent's aggregates and
+needs 277 iterations, against 279 for a fresh one. Each further plate
+right-hand side takes 3.69 s CUDA / 3.95 s Vulkan.
+
+Measured and rejected (plate, CUDA resident, single runs; 4.44 s with the defaults):
+
+| Variant | Time (s) |
+|---|---:|
+| Node block aggregation, block size 6 | 5.96 |
+| Block 6 with a rigid-body near-nullspace | 14.80 |
+| Block size 3 | 23.10 |
+| Spectral radius estimate | 4.88 |
+| eps_strong 0.02 | 9.66 |
+| First inner tolerance 1e-10 | 4.58 |
+| First inner tolerance 1e-12 | 4.37 |
+| Correction tolerance 1e-2 | 5.04 |
+| Correction tolerance 1e-4 | 5.28 |
+| Blocking-sync poll wait while spilling, 90% | 5.53 (vs 5.50) |
+
+Block size 2 failed coarse Cholesky. The 1e-12 first tolerance is within
+noise of 1e-8 and was not adopted.
+
+All **18 complete GPU analyses pass** (single runs, seconds; spill budgets are
+the new 90% budgets rounded up to whole MiB: 78, 52 and 678). Arrows show the
+previous section's runs → this change:
+
+| Deck | CPU direct | CUDA resident | CUDA spill | Mixed resident | Mixed spill | Vulkan resident | Vulkan spill |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Thermal | 10.02 | 3.84 → 3.63 | 3.92 → 3.62 | 3.80 → 3.60 | 3.77 → 3.59 | 3.99 → 3.87 | 4.04 → 3.78 |
+| Full nonlinear motor | 16.72 | 18.21 → 14.88 | 18.81 → 15.66 | 16.73 → 14.54 | 17.31 → 14.99 | 20.46 → 15.88 | 22.75 → 17.14 |
+| Plate | 26.71 | 21.58 → 19.62 | 23.00 → 20.50 | 21.45 → 19.05 | 23.10 → 20.56 | 24.15 → 20.24 | 25.55 → 21.20 |
+
+The six motor runs converge in **11 Newton iterations**. Compared with CPU
+direct, their fields and circuits have maximum relative error
+**2.357e-12**, and torque differs by at most **3.065e-14**. All pass
+`tools/verify_pcg_motor_outputs.py` at 1e-8.
+
+New tests cover the zero-guess cycle, same-pattern and changed-pattern
+refactor, multi-column factor solves, and far-off-diagonal transposed
+entries in the parallel residual. CUDA and Vulkan factor tests run resident,
+with about half the fine rows on the CPU (13 MiB) and with the host-hierarchy
+fallback (1 MiB). `unit_tests` (680), `cuda_tests` and `vulkan_tests` pass on
+the GPU host. Run concurrently with the GPU suites, `unit_tests` exceeds
+meson's 60 s limit; alone it takes 37 s. The local suite passes.
+`ninja cppcheck` reports 18 existing unused-function findings, all in
+unchanged files. The earlier Vulkan AMG test's 8 MiB budget fell below the
+fixed device state and so tested the host fallback; it now uses 13 MiB.
+
+[Samples, baseline runs, experiments, complete analyses and motor comparisons](benchmarks/pcg/titan-v-amg-engine-20261102.json)
+are retained. `tools/pcg_benchmark --factor` and `--refactor-from FILE` time
+factor reuse.
+
+## Device-owned spill: previous implementation
+
+Large CUDA/Vulkan spill solves keep PCG vectors, reductions, smoothing
 updates, restriction/prolongation and the coarse AMG operators on the GPU.
 Only the small terminal coarse factor/solve remains on the CPU. The fine
 matrix is partitioned after reserving this working state. CPU rows download

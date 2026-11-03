@@ -6,6 +6,7 @@
 #include "solver/solver_backend.hpp"
 #include "solver/pcg_memory.hpp"
 #include "vulkan_pcg_internal.hpp"
+#include "amg_result.hpp"
 #include "vulkan_pipelines.hpp"
 #include "core/exceptions.hpp"
 #include <algorithm>
@@ -115,6 +116,37 @@ static Pipelines* ensure_pipelines(const VulkanContext& ctx,
 
 // ── solve ─────────────────────────────────────────────────────────────────────
 
+Status VulkanSolverBackend::accept_amg(const detail::AmgPcgResult& result) {
+    last_iters_ = result.iterations;
+    last_residual_ = result.refinement.relative_residual;
+    last_refinement_ = result.refinement;
+    if (result.refinement.converged) return std::nullopt;
+    return Error{std::format("Vulkan AMG PCG: estimated error {:.3e} exceeds {:.3e} after {} iterations and {} corrections (n={})",
+        result.refinement.estimated_error, cfg_.tolerance, result.iterations, result.refinement.corrections,
+        result.solution.size())};
+}
+
+std::size_t VulkanSolverBackend::device_budget() const {
+    auto available = static_cast<std::size_t>(
+        static_cast<double>(ctx_.available_memory()) * (1.0 - cfg_.vram_headroom));
+    if (cfg_.device_memory_budget) available = std::min(available, cfg_.device_memory_budget);
+    return available;
+}
+
+Result<std::unique_ptr<LinearFactor>>
+VulkanSolverBackend::factor(const SparseMatrixBuilder::CsrData& K, const FactorOptions& options) {
+    if (K.n < 50000 || K.n < cfg_.min_dofs_for_gpu || !ctx_.device_info().supports_float64)
+        return SolverBackend::factor(K, options);
+    try {
+        Pipelines* pl = ensure_pipelines(ctx_, pipelines_);
+        return make_vulkan_amg_factor(ctx_, *pl, K, cfg_.tolerance, cfg_.max_iterations,
+            [this] { return device_budget(); }, last_full_gpu_,
+            [this](const detail::AmgPcgResult& result) { return accept_amg(result); });
+    } catch (const std::exception& e) {
+        return Error{std::format("{}: {}", name(), e.what())};
+    }
+}
+
 std::vector<double>
 VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
                             const std::vector<double>& F,
@@ -175,22 +207,13 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
     spdlog::debug("[vulkan] pipeline init: {:.3f} ms", ms_since(t_pipelines));
 
     const size_t vram_total = ctx_.device_info().vram_bytes;
-    size_t available  = static_cast<size_t>(
-        static_cast<double>(ctx_.available_memory()) * (1.0 - cfg_.vram_headroom));
-    if (cfg_.device_memory_budget) available = std::min(available, cfg_.device_memory_budget);
+    const size_t available = device_budget();
 
     // A multilevel preconditioner removes the low-frequency error that Jacobi
     // leaves behind on refined meshes. Leave conservative hierarchy headroom.
     if (n >= 50000 && ctx_.device_info().supports_float64) {
-        RefinementReport report;
-        auto u = solve_vulkan_amg(ctx_, *pl, K, F, cfg_.tolerance, cfg_.max_iterations,
-            last_iters_, report, available, last_full_gpu_);
-        last_residual_ = report.relative_residual;
-        last_refinement_ = report;
-        if (!report.converged)
-            throw SolverError(std::format("Vulkan AMG PCG: estimated error {:.3e} exceeds {:.3e} after {} iterations and {} corrections (n={})",
-                report.estimated_error, cfg_.tolerance, last_iters_, report.corrections, n));
-        return u;
+        return solve_vulkan_amg(ctx_, *pl, K, F, cfg_.tolerance, cfg_.max_iterations, available, last_full_gpu_,
+            [this](const detail::AmgPcgResult& result) { return accept_amg(result); });
     }
 
     enum class Path { Float32, Float64, Partitioned32, Partitioned64 };

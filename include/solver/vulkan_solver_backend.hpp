@@ -33,6 +33,10 @@
 
 namespace vibestran {
 
+namespace detail {
+struct AmgPcgResult;
+}
+
 struct VulkanSolverConfig {
   int max_iterations = 10000;
   /// Target relative error of the solution.  The GPU PCG solves are refined
@@ -80,6 +84,12 @@ public:
         const std::vector<double> &F,
         const FactorRatioCheckPolicy *factor_ratio_policy = nullptr) override;
 
+  /// Large systems (n >= 50000) on fp64 devices keep the AMG hierarchy and
+  /// device workspace for every right-hand side and same-pattern refactor();
+  /// other systems use the default adapter of solve().
+  [[nodiscard]] Result<std::unique_ptr<LinearFactor>> factor(
+      const SparseMatrixBuilder::CsrData& K, const FactorOptions& options = {}) override;
+
   [[nodiscard]] std::string_view name() const noexcept override;
   [[nodiscard]] std::vector<std::pair<std::string, std::string>> details() const override;
   // cppcheck-suppress unusedFunction -- queried via SolverBackend in linear_static.cpp
@@ -115,6 +125,13 @@ private:
   /// Returns true if K + working vectors fit in available VRAM.
   [[nodiscard]] bool
   fits_in_vram(const SparseMatrixBuilder::CsrData &K, std::size_t available) const noexcept;
+
+  /// Device memory available to one solve: the driver budget less headroom,
+  /// capped by the configured budget.
+  [[nodiscard]] std::size_t device_budget() const;
+
+  /// Records an AMG solve's diagnostics; an error when it missed the target.
+  [[nodiscard]] Status accept_amg(const detail::AmgPcgResult &result);
 
   VulkanContext ctx_;
   VulkanSolverConfig cfg_;

@@ -3,7 +3,12 @@
 #include "partitioned_pcg.hpp"
 #include "pcg_coloring.hpp"
 #include "solver/iterative_refinement.hpp"
-#include "amg_hybrid.hpp"
+#include "amg_factor.hpp"
+#include <amgcl/adapter/crs_tuple.hpp>
+#include <amgcl/amg.hpp>
+#include <amgcl/make_solver.hpp>
+#include <amgcl/relaxation/spai0.hpp>
+#include <amgcl/solver/cg.hpp>
 #include "amg_device_spill.hpp"
 
 using namespace vibestran;
@@ -100,4 +105,126 @@ TEST(PcgPartitionTest, SymmetricColorPermutationPreservesLowerAndFullOperators) 
         for (int i = 0; i < k.n; ++i) EXPECT_NEAR(flux[colored->new_index[i]], problem.rhs[i], 1e-11) << i;
         EXPECT_EQ(colored->matrix.nnz, k.nnz);
     }
+}
+
+namespace {
+std::unique_ptr<detail::AmgSystem> host_amg_system(const SparseMatrixBuilder::CsrData& k) {
+    return std::make_unique<detail::AmgSystem>(k, 1e-10, [](const detail::ScaledAmgMatrix& scaled, const detail::AmgHierarchy& h) {
+        return std::make_unique<detail::HostAmgEngine>(scaled, h, detail::AmgSpmvFactory{}, 1000);
+    });
+}
+} // namespace
+
+TEST(PcgAmgTest, ZeroGuessVcycleIsAmgclsPreconditioner) {
+    // The cycle skips the product of the first pre-smoothing step, whose
+    // input is zero. Five CG iterations with it and with AMGCL's own
+    // amg<smoothed_aggregation, spai0> + cg must give the same iterate up to
+    // rounding: a wrong term in any level's smoothing, transfer or coarse
+    // solve changes the preconditioner, and with it the iterate, at O(1).
+    const auto problem = test::pcg_partition_problem(4099);
+    const detail::ScaledAmgMatrix scaled(problem.matrix);
+    std::vector<double> b(problem.rhs.size());
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = problem.rhs[i] * scaled.scale[i];
+
+    const detail::AmgHierarchy h(scaled.matrix);
+    ASSERT_GE(h.levels.size(), 3U) << h.describe();
+    ASSERT_TRUE(h.coarse_direct());
+    detail::HostAmg ours(h, nullptr);
+    std::vector<double> x(b.size());
+    EXPECT_EQ(ours.solve(b, 0.0, 5, x).first, 5);
+
+    using Backend = amgcl::backend::builtin<double>;
+    using Reference = amgcl::make_solver<
+        amgcl::amg<Backend, amgcl::coarsening::smoothed_aggregation, amgcl::relaxation::spai0>,
+        amgcl::solver::cg<Backend>>;
+    Reference::params prm;
+    prm.precond.coarse_enough = detail::kAmgCoarseEnough;
+    prm.solver.tol = 0;
+    prm.solver.maxiter = 5;
+    const Reference reference(*scaled.matrix, prm);
+    std::vector<double> expected(b.size(), 0.0);
+    const auto [iterations, residual] = reference(b, expected);
+    EXPECT_EQ(iterations, 5U);
+
+    double scale = 0, difference = 0;
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        scale = std::max(scale, std::abs(expected[i]));
+        difference = std::max(difference, std::abs(x[i] - expected[i]));
+    }
+    EXPECT_LT(difference, 1e-10 * scale);
+}
+
+TEST(PcgAmgTest, RefactorWithTheSamePatternKeepsTheTransferOperatorsAndSolvesTheNewMatrix) {
+    const auto problem = test::pcg_partition_problem(4099);
+    const auto stiffer = test::stiffened(problem, 30.0);
+    auto system = host_amg_system(problem.matrix);
+    const auto* transfer = system->hierarchy().levels.front().P.get();
+    const auto fine_nnz = system->hierarchy().levels.front().A->nnz;
+    ASSERT_TRUE(system->solve(problem.matrix, problem.rhs).refinement.converged);
+
+    ASSERT_TRUE(system->refactor(stiffer.matrix));
+    EXPECT_EQ(system->hierarchy().levels.front().P.get(), transfer);
+    const auto result = system->solve(stiffer.matrix, stiffer.rhs);
+    ASSERT_TRUE(result.refinement.converged);
+    for (int i = 0; i < stiffer.matrix.n; ++i) EXPECT_NEAR(result.solution[i], stiffer.exact[i], 2e-8) << i;
+    // The rebuilt Galerkin operators are those of the new matrix: the same
+    // number of iterations as a hierarchy built for it from scratch, give or
+    // take a few for the aggregates chosen on the old values.
+    const auto fresh = host_amg_system(stiffer.matrix)->solve(stiffer.matrix, stiffer.rhs);
+    EXPECT_LE(std::abs(result.iterations - fresh.iterations), fresh.iterations / 5 + 2)
+        << result.iterations << " vs " << fresh.iterations;
+
+    // A dropped entry changes the pattern: the hierarchy is built again.
+    auto pruned = stiffer;
+    auto& k = pruned.matrix;
+    const int row = k.n - 1, j = k.row_ptr[row];
+    ASSERT_NE(k.col_ind[j], row);
+    const double dropped = k.values[j];
+    const int c = k.col_ind[j];
+    pruned.rhs[row] -= dropped * pruned.exact[c];
+    pruned.rhs[c] -= dropped * pruned.exact[row];
+    k.col_ind.erase(k.col_ind.begin() + j);
+    k.values.erase(k.values.begin() + j);
+    for (int i = row + 1; i <= k.n; ++i) --k.row_ptr[i];
+    --k.nnz;
+    EXPECT_FALSE(system->refactor(k));
+    EXPECT_EQ(system->hierarchy().levels.front().A->nnz, fine_nnz - 2);
+    const auto rebuilt = system->solve(k, pruned.rhs);
+    ASSERT_TRUE(rebuilt.refinement.converged);
+    for (int i = 0; i < k.n; ++i) EXPECT_NEAR(rebuilt.solution[i], pruned.exact[i], 2e-8) << i;
+}
+
+TEST(PcgAmgTest, FactorSolvesEveryColumnAndCountsOneAnalysisPerPattern) {
+    const auto problem = test::pcg_partition_problem(4099);
+    const auto stiffer = test::stiffened(problem, 0.1);
+    const auto n = std::size_t(problem.matrix.n);
+    detail::AmgFactor factor(problem.matrix, [](const SparseMatrixBuilder::CsrData& k) { return host_amg_system(k); },
+        [](const detail::AmgPcgResult& r) -> Status {
+            if (r.refinement.converged) return std::nullopt;
+            return Error{"not converged"};
+        });
+    // Columns: F, -2 F and a zero load.
+    std::vector<double> B(3 * n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) { B[i] = problem.rhs[i]; B[n + i] = -2 * problem.rhs[i]; }
+    auto X = factor.solve(B, 3);
+    ASSERT_TRUE(std::holds_alternative<std::vector<double>>(X));
+    auto x = std::get<std::vector<double>>(X);
+    for (std::size_t i = 0; i < n; ++i) {
+        EXPECT_NEAR(x[i], problem.exact[i], 2e-8) << i;
+        EXPECT_NEAR(x[n + i], -2 * problem.exact[i], 4e-8) << i;
+        EXPECT_EQ(x[2 * n + i], 0.0) << i;
+    }
+    EXPECT_FALSE(factor.refactor(stiffer.matrix).has_value());
+    X = factor.solve(stiffer.rhs, 1);
+    ASSERT_TRUE(std::holds_alternative<std::vector<double>>(X));
+    x = std::get<std::vector<double>>(X);
+    for (std::size_t i = 0; i < n; ++i) EXPECT_NEAR(x[i], stiffer.exact[i], 2e-8) << i;
+    const auto stats = factor.stats();
+    EXPECT_EQ(stats.symbolic_analyses, 1);
+    EXPECT_EQ(stats.numeric_factorizations, 2);
+    EXPECT_EQ(stats.solves, 4);
+
+    auto smaller = test::pcg_partition_problem(4098);
+    EXPECT_TRUE(factor.refactor(smaller.matrix).has_value());
+    EXPECT_TRUE(std::holds_alternative<Error>(factor.solve(std::vector<double>(n - 1), 1)));
 }

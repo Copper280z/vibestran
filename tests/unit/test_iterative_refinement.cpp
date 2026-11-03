@@ -63,6 +63,43 @@ TEST(RefinementTest, LowerStorageIsReadAsSymmetric) {
   EXPECT_EQ(r[1], -e);
 }
 
+TEST(RefinementTest, LowerStorageEntriesFarBelowTheDiagonalCountInBothRows) {
+  // The rows are evaluated in parallel blocks, the transposed entries of row
+  // j coming from rows thousands below it, in other blocks.  Integer K and x
+  // keep K x exact, so F = K x + d, with d below the integers' last bit but
+  // representable, must give r = d exactly: an entry lost, counted twice or
+  // credited to the wrong row would change r by at least 1.
+  const int n = 3 * 4096 + 123;
+  std::vector<std::vector<std::pair<int, double>>> rows(static_cast<std::size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    auto &row = rows[static_cast<std::size_t>(i)];
+    if (i >= 12000) row.emplace_back(i - 12000, 3.0);
+    if (i >= 5000) row.emplace_back(i - 5000, -2.0);
+    if (i >= 1) row.emplace_back(i - 1, -1.0);
+    row.emplace_back(i, 6.0);
+  }
+  const auto K = csr(n, rows, SymmetryStorage::Lower);
+  std::vector<double> x(static_cast<std::size_t>(n)), Kx(static_cast<std::size_t>(n), 0.0);
+  for (int i = 0; i < n; ++i)
+    x[static_cast<std::size_t>(i)] = double(i % 13 - 6);
+  for (int i = 0; i < n; ++i)
+    for (const auto &[j, v] : rows[static_cast<std::size_t>(i)]) {
+      Kx[static_cast<std::size_t>(i)] += v * x[static_cast<std::size_t>(j)];
+      if (j != i) Kx[static_cast<std::size_t>(j)] += v * x[static_cast<std::size_t>(i)];
+    }
+  std::vector<double> F(Kx), d(static_cast<std::size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    d[static_cast<std::size_t>(i)] = std::ldexp(double(i % 7 + 1), -40);
+    F[static_cast<std::size_t>(i)] += d[static_cast<std::size_t>(i)];
+  }
+  const auto r = compensated_residual(K, x, F);
+  ASSERT_EQ(r.size(), d.size());
+  int mismatches = 0;
+  for (std::size_t i = 0; i < r.size(); ++i)
+    mismatches += r[i] != d[i];
+  EXPECT_EQ(mismatches, 0);
+}
+
 using test::max_error_from_one;
 using test::scaled_hilbert;
 

@@ -18,7 +18,6 @@
 #include "dot_reduce_d_spv.h"
 #include "axpby_d_spv.h"
 #include "jacobi_precond_d_spv.h"
-#include "amg_vector_d_spv.h"
 #include "amg_gather_d_spv.h"
 
 namespace vibestran {
@@ -155,7 +154,6 @@ VulkanSolverBackend::Pipelines* build_pipelines(const VulkanContext& ctx) {
         { dot_reduce_d_spv,     dot_reduce_d_spv_len,     3, sizeof(PCDot)     },
         { axpby_d_spv,          axpby_d_spv_len,          2, sizeof(PCAxpbyD)  },
         { jacobi_precond_d_spv, jacobi_precond_d_spv_len, 3, sizeof(PCJacobi)  },
-        { amg_vector_d_spv, amg_vector_d_spv_len, 3, sizeof(PCAmgVector) },
         { amg_gather_d_spv, amg_gather_d_spv_len, 3, sizeof(PCDot) },
     };
 

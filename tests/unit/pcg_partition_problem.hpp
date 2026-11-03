@@ -1,5 +1,6 @@
 #pragma once
 #include "core/sparse_matrix.hpp"
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -32,6 +33,24 @@ inline PcgPartitionProblem pcg_partition_problem(int n = 8192) {
         }
     }
     out.matrix = builder.build_csr();
+    return out;
+}
+
+// The problem with every coupling inside the stiffer half scaled by factor:
+// the same sparsity pattern, a different operator, and loads for the same
+// exact solution.
+inline PcgPartitionProblem stiffened(const PcgPartitionProblem& problem, double factor) {
+    auto out = problem;
+    std::fill(out.rhs.begin(), out.rhs.end(), 0.0);
+    auto& k = out.matrix;
+    const bool lower = k.stores_lower_triangle_only();
+    for (int i = 0; i < k.n; ++i)
+        for (int j = k.row_ptr[i]; j < k.row_ptr[i + 1]; ++j) {
+            const int c = k.col_ind[j];
+            if (i >= k.n / 2 && c >= k.n / 2) k.values[j] *= factor;
+            out.rhs[i] += k.values[j] * out.exact[c];
+            if (lower && c != i) out.rhs[c] += k.values[j] * out.exact[i];
+        }
     return out;
 }
 }

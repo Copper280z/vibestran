@@ -189,12 +189,14 @@ have_vulkan_backend = vulkan_dep.found() and glslc.found()
 
 if have_vulkan_backend
   shader_names = ['spmv', 'dot_reduce', 'axpby', 'jacobi_precond',
-                  'spmv_d', 'dot_reduce_d', 'axpby_d', 'jacobi_precond_d', 'amg_vector_d', 'amg_gather_d']
+                  'spmv_d', 'dot_reduce_d', 'axpby_d', 'jacobi_precond_d', 'amg_gather_d',
+                  'amg_spmv_d', 'amg_ops_d', 'amg_cg_d', 'amg_scalar_d', 'amg_dense_d']
   foreach name : shader_names
     spv = custom_target(name + '_spv',
       input   : 'shaders' / name + '.comp',
       output  : name + '.spv',
       command : [glslc, '--target-env=vulkan1.1', '-O', '@INPUT@', '-o', '@OUTPUT@'],
+      depend_files : files('shaders/amg_state.glsl'),
     )
     hdr = custom_target(name + '_hdr',
       input   : spv,
@@ -510,8 +512,8 @@ precise_lib = static_library(
   'vibestran_precise',
   files('src/solver/iterative_refinement.cpp'),
   include_directories : [inc],
-  dependencies        : [eigen_dep, spdlog_dep],
-  cpp_args            : precise_args,
+  dependencies        : [eigen_dep, spdlog_dep, tbb_dep],
+  cpp_args            : precise_args + tbb_args,
   install             : false,
 )
 
@@ -744,7 +746,8 @@ endif
 if have_cuda_backend
   cuda_tests = executable(
     'cuda_tests',
-    files('tests/unit/test_cuda_solver.cpp', 'tests/unit/test_cuda_factor.cpp'),
+    files('tests/unit/test_cuda_solver.cpp', 'tests/unit/test_cuda_factor.cpp',
+          'tests/unit/test_cuda_pcg_amg.cpp'),
     dependencies        : [solver_lib_dep, gtest_dep],
     include_directories : inc,
   )

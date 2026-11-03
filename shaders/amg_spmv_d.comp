@@ -1,0 +1,49 @@
+// CSR product with the AMG cycle's fused updates. LANES invocations per row.
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+#extension GL_KHR_shader_subgroup_shuffle_relative : enable
+#extension GL_GOOGLE_include_directive : require
+#define STATE_BINDING 7
+#include "amg_state.glsl"
+
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const uint LANES = 8;
+// Subgroup shuffles when the device supports them for LANES <= subgroup size.
+layout(constant_id = 1) const bool SUBGROUP = false;
+layout(push_constant) uniform PC { uint row_start, rows, mode; } pc;
+layout(set = 0, binding = 0) readonly buffer RowPtr { int rp[]; };
+layout(set = 0, binding = 1) readonly buffer ColInd { int ci[]; };
+layout(set = 0, binding = 2) readonly buffer Values { double v[]; };
+layout(set = 0, binding = 3) readonly buffer X { double x[]; };
+layout(set = 0, binding = 4) buffer Y { double y[]; };
+layout(set = 0, binding = 5) readonly buffer F { double f[]; };
+layout(set = 0, binding = 6) readonly buffer M { double m[]; };
+shared double partial[256];
+
+// mode 0: y = Ax; 1: y += Ax; 2: y = f - Ax; 3: y = x + m (f - Ax)
+void main() {
+    if (st.flags != 0) return;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint lane = tid % LANES;
+    const uint local = (gl_WorkGroupID.x * 256u + tid) / LANES;
+    const uint row = pc.row_start + local;
+    double sum = 0;
+    if (local < pc.rows)
+        for (int j = rp[row] + int(lane); j < rp[row + 1]; j += int(LANES)) sum += v[j] * x[ci[j]];
+    if (SUBGROUP) {
+        for (uint d = LANES / 2u; d > 0u; d >>= 1u) sum += subgroupShuffleDown(sum, d);
+    } else {
+        partial[tid] = sum;
+        barrier();
+        for (uint s = LANES / 2u; s > 0u; s >>= 1u) {
+            if (lane < s) partial[tid] += partial[tid + s];
+            barrier();
+        }
+        sum = partial[tid];
+    }
+    if (lane != 0u || local >= pc.rows) return;
+    if (pc.mode == 0u) y[row] = sum;
+    else if (pc.mode == 1u) y[row] += sum;
+    else if (pc.mode == 2u) y[row] = f[row] - sum;
+    else y[row] = x[row] + m[row] * (f[row] - sum);
+}

@@ -46,7 +46,7 @@ public:
     /// does not expose VK_EXT_memory_budget. Query before allocating a solve.
     [[nodiscard]] uint64_t available_memory() const noexcept;
     [[nodiscard]] VkDevice               device()               const noexcept;
-    [[nodiscard]] VkPhysicalDevice       physical_device()      const noexcept; // only used in tests
+    [[nodiscard]] VkPhysicalDevice       physical_device()      const noexcept;
     [[nodiscard]] VkQueue                compute_queue()        const noexcept;
     [[nodiscard]] VkCommandPool          command_pool()         const noexcept;
     [[nodiscard]] uint32_t               compute_queue_family() const noexcept; // only used in tests

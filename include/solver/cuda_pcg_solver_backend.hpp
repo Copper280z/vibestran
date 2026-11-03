@@ -59,6 +59,12 @@ public:
         const std::vector<double>& F,
         const FactorRatioCheckPolicy* factor_ratio_policy = nullptr) override;
 
+    /// Large systems (n >= 50000) keep the AMG hierarchy and device workspace
+    /// for every right-hand side and same-pattern refactor(); smaller ones
+    /// use the default adapter of solve().
+    [[nodiscard]] Result<std::unique_ptr<LinearFactor>> factor(
+        const SparseMatrixBuilder::CsrData& K, const FactorOptions& options = {}) override;
+
     [[nodiscard]] std::string_view name() const noexcept override;
     [[nodiscard]] std::vector<std::pair<std::string, std::string>> details() const override;
 

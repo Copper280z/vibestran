@@ -40,6 +40,16 @@ CudaMixedPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
     return u;
 }
 
+Result<std::unique_ptr<LinearFactor>>
+CudaMixedPCGSolverBackend::factor(const SparseMatrixBuilder::CsrData& K, const FactorOptions& options) {
+    if (K.n < 50000) return SolverBackend::factor(K, options);
+    try {
+        return make_cuda_amg_factor(*ctx_, K, true, "cuda-pcg mixed AMG");
+    } catch (const std::exception& e) {
+        return Error{std::format("{}: {}", name(), e.what())};
+    }
+}
+
 std::vector<std::pair<std::string, std::string>> CudaMixedPCGSolverBackend::details() const {
     return {{"Device", ctx_->device_name},
             {"Method", "conjugate gradient; smoothed-aggregation AMG for large systems, IC0/ILU0 for small resident systems"},

@@ -4,10 +4,16 @@
 #include "solver/iterative_refinement.hpp"
 #include "core/exceptions.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <format>
 #include <limits>
+#include <memory>
 #include <numeric>
+#ifdef HAVE_TBB
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+#endif
 
 namespace vibestran {
 
@@ -29,19 +35,94 @@ double two_norm(std::span<const double> v) {
       std::accumulate(v.begin(), v.end(), 0.0, [](double s, double x) { return s + x * x; }));
 }
 
-/// ||K||_inf, reading lower-triangular storage as symmetric.
-double matrix_inf_norm(const SparseMatrixBuilder::CsrData &K) {
-  std::vector<double> rows(static_cast<std::size_t>(K.n), 0.0);
-  const bool lower = K.stores_lower_triangle_only();
-  for (int i = 0; i < K.n; ++i)
-    for (int p = K.row_ptr[static_cast<std::size_t>(i)];
-         p < K.row_ptr[static_cast<std::size_t>(i) + 1]; ++p) {
-      const int j = K.col_ind[static_cast<std::size_t>(p)];
-      const double a = std::abs(K.values[static_cast<std::size_t>(p)]);
-      rows[static_cast<std::size_t>(i)] += a;
-      if (lower && j != i)
-        rows[static_cast<std::size_t>(j)] += a;
+template <class Body> void for_rows(std::size_t n, const Body &body) {
+#ifdef HAVE_TBB
+  tbb::parallel_for(tbb::blocked_range<std::size_t>(0, n, 4096),
+                    [&](const tbb::blocked_range<std::size_t> &r) {
+                      for (std::size_t i = r.begin(); i != r.end(); ++i)
+                        body(i);
+                    });
+#else
+  for (std::size_t i = 0; i < n; ++i)
+    body(i);
+#endif
+}
+
+/// The rows of K as stored and, for lower-triangular storage, its strictly
+/// lower entries by column: row i of the symmetric matrix is row i as stored
+/// followed by column i below the diagonal.  Each row is then accumulated by
+/// one thread in the order a serial sweep of the stored rows would use, so
+/// the parallel results equal the serial ones bit for bit.
+class SymmetricRows {
+public:
+  explicit SymmetricRows(const SparseMatrixBuilder::CsrData &K) : K_(K) {
+    if (!K.stores_lower_triangle_only())
+      return;
+    const auto n = static_cast<std::size_t>(K.n);
+    std::vector<int> count(n + 1, 0);
+    for_rows(n, [&](std::size_t i) {
+      for (int p = K.row_ptr[i]; p < K.row_ptr[i + 1]; ++p) {
+        const auto j = static_cast<std::size_t>(K.col_ind[static_cast<std::size_t>(p)]);
+        if (j != i)
+          std::atomic_ref<int>(count[j + 1]).fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+    std::partial_sum(count.begin(), count.end(), count.begin());
+    start_ = count;
+    // Not zeroed: the fill below touches every entry, in parallel.
+    below_ = std::make_unique_for_overwrite<Entry[]>(static_cast<std::size_t>(start_[n]));
+    for_rows(n, [&](std::size_t i) {
+      for (int p = K.row_ptr[i]; p < K.row_ptr[i + 1]; ++p) {
+        const auto j = static_cast<std::size_t>(K.col_ind[static_cast<std::size_t>(p)]);
+        if (j != i) {
+          const int at = std::atomic_ref<int>(count[j]).fetch_add(1, std::memory_order_relaxed);
+          below_[static_cast<std::size_t>(at)] = {static_cast<int>(i), p};
+        }
+      }
+    });
+    // Positions increase with the row, as in a serial sweep.  A column holds
+    // a few dozen entries at most, so insertion sort.
+    for_rows(n, [&](std::size_t j) {
+      Entry *first = below_.get() + start_[j], *last = below_.get() + start_[j + 1];
+      for (Entry *e = first + (first != last); e < last; ++e)
+        for (Entry *f = e; f > first && f[-1].position > f->position; --f)
+          std::swap(f[-1], *f);
+    });
+  }
+
+  /// f(value, column) for each entry of row i of the symmetric matrix.
+  template <class F> void row(std::size_t i, const F &f) const {
+    for (int p = K_.row_ptr[i]; p < K_.row_ptr[i + 1]; ++p)
+      f(K_.values[static_cast<std::size_t>(p)],
+        static_cast<std::size_t>(K_.col_ind[static_cast<std::size_t>(p)]));
+    if (start_.empty())
+      return;
+    for (int q = start_[i]; q < start_[i + 1]; ++q) {
+      const Entry &e = below_[static_cast<std::size_t>(q)];
+      f(K_.values[static_cast<std::size_t>(e.position)], static_cast<std::size_t>(e.row));
     }
+  }
+
+  const SparseMatrixBuilder::CsrData &matrix() const { return K_; }
+
+private:
+  struct Entry {
+    int row;
+    int position;
+  };
+  const SparseMatrixBuilder::CsrData &K_;
+  std::vector<int> start_;
+  std::unique_ptr<Entry[]> below_;
+};
+
+/// ||K||_inf, reading lower-triangular storage as symmetric.
+double matrix_inf_norm(const SymmetricRows &K) {
+  std::vector<double> rows(static_cast<std::size_t>(K.matrix().n), 0.0);
+  for_rows(rows.size(), [&](std::size_t i) {
+    double sum = 0.0;
+    K.row(i, [&](double a, std::size_t) { sum += std::abs(a); });
+    rows[i] = sum;
+  });
   return inf_norm(rows);
 }
 
@@ -68,36 +149,39 @@ inline void subtract_product(double &s, double &c, double a, double x) {
 
 } // namespace
 
-std::vector<double> compensated_residual(const SparseMatrixBuilder::CsrData &K,
-                                         std::span<const double> x,
+namespace {
+
+std::vector<double> compensated_residual(const SymmetricRows &rows, std::span<const double> x,
                                          std::span<const double> F) {
-  const auto n = static_cast<std::size_t>(K.n);
+  const auto n = static_cast<std::size_t>(rows.matrix().n);
   if (x.size() != n || F.size() != n)
     throw SolverError(std::format("compensated_residual: sizes {} / {} do not match the "
                                   "{}x{} matrix",
                                   x.size(), F.size(), n, n));
-  std::vector<double> s(F.begin(), F.end()); // running sums
-  std::vector<double> c(n, 0.0);             // accumulated rounding errors
-  const bool lower = K.stores_lower_triangle_only();
-  for (std::size_t i = 0; i < n; ++i)
-    for (int p = K.row_ptr[i]; p < K.row_ptr[i + 1]; ++p) {
-      const auto j = static_cast<std::size_t>(K.col_ind[static_cast<std::size_t>(p)]);
-      const double a = K.values[static_cast<std::size_t>(p)];
-      subtract_product(s[i], c[i], a, x[j]);
-      if (lower && j != i)
-        subtract_product(s[j], c[j], a, x[i]);
-    }
-  for (std::size_t i = 0; i < n; ++i)
-    s[i] += c[i];
-  return s;
+  std::vector<double> r(n);
+  for_rows(n, [&](std::size_t i) {
+    double s = F[i]; // running sum
+    double c = 0.0;  // accumulated rounding errors
+    rows.row(i, [&](double a, std::size_t j) { subtract_product(s, c, a, x[j]); });
+    r[i] = s + c;
+  });
+  return r;
 }
 
+} // namespace
+
+std::vector<double> compensated_residual(const SparseMatrixBuilder::CsrData &K,
+                                         std::span<const double> x,
+                                         std::span<const double> F) {
+  return compensated_residual(SymmetricRows(K), x, F);
+}
 
 RefinementReport refine_solution(const SparseMatrixBuilder::CsrData &K, std::span<const double> F,
                                  std::vector<double> &u, const CorrectionSolve &solve,
                                  const RefinementOptions &options) {
   RefinementReport rep;
-  const double normK = matrix_inf_norm(K);
+  const SymmetricRows rows(K);
+  const double normK = matrix_inf_norm(rows);
   const double normF_inf = inf_norm(F);
   const double normF_2 = two_norm(F);
   const auto backward_error = [&](const std::vector<double> &r, std::span<const double> x) {
@@ -111,7 +195,7 @@ RefinementReport refine_solution(const SparseMatrixBuilder::CsrData &K, std::spa
     rep.epsilon = uF != 0.0 ? ur / uF : (ur == 0.0 ? 0.0 : 1.0);
     return rep;
   };
-  std::vector<double> r = compensated_residual(K, u, F);
+  std::vector<double> r = compensated_residual(rows, u, F);
   if (!std::isfinite(inf_norm(r))) { // the solve produced Inf or NaN
     rep.initial_error = rep.estimated_error = std::numeric_limits<double>::quiet_NaN();
     return finish(r);
@@ -155,7 +239,7 @@ RefinementReport refine_solution(const SparseMatrixBuilder::CsrData &K, std::spa
       return finish(r);
     for (std::size_t i = 0; i < u.size(); ++i)
       next[i] = u[i] + d[i];
-    std::vector<double> r_next = compensated_residual(K, next, F);
+    std::vector<double> r_next = compensated_residual(rows, next, F);
     const double bw_next = backward_error(r_next, next);
     // A correction that makes the backward error grow beyond rounding noise
     // made the solution worse, however small ||d|| / ||u|| looks: an inner

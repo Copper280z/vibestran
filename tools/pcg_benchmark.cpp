@@ -38,11 +38,11 @@ using Csr = SparseMatrixBuilder::CsrData;
 
 namespace {
 struct Options {
-    std::string backend{"cpu-pcg"}, matrix, rhs, reference, capture_deck, capture_prefix;
+    std::string backend{"cpu-pcg"}, matrix, rhs, reference, capture_deck, capture_prefix, refactor_from;
     int side{24}, repeats{3}, warmups{1};
     double contrast{1.0};
     double budget_mib{0};
-    bool tiled{false}, fp64{false}, profile{false};
+    bool tiled{false}, fp64{false}, profile{false}, factor{false};
 };
 
 template<class T> bool number(std::string_view s, T& out) {
@@ -57,6 +57,7 @@ std::optional<Options> parse(int argc, char** argv) {
         if (a == "--tiled") { o.tiled = true; continue; }
         if (a == "--fp64") { o.fp64 = true; continue; }
         if (a == "--profile") { o.profile = true; continue; }
+        if (a == "--factor") { o.factor = true; continue; }
         if (++i == argc) return {};
         const std::string_view v(argv[i]);
         if (a == "--backend") o.backend = v;
@@ -65,6 +66,7 @@ std::optional<Options> parse(int argc, char** argv) {
         else if (a == "--reference") o.reference = v;
         else if (a == "--capture-deck") o.capture_deck = v;
         else if (a == "--capture-prefix") o.capture_prefix = v;
+        else if (a == "--refactor-from") { o.refactor_from = v; o.factor = true; }
         else if (a == "--side") { if (!number(v, o.side)) return {}; }
         else if (a == "--repeats") { if (!number(v, o.repeats)) return {}; }
         else if (a == "--warmups") { if (!number(v, o.warmups)) return {}; }
@@ -244,6 +246,9 @@ int main(int argc, char** argv) {
                      "[--side N] [--contrast K] [--matrix symmetric.mtx] [--repeats N] "
                      "[--rhs load.mtx --reference solution.mtx] "
                      "[--warmups N] [--budget-mib N] [--tiled] [--fp64] [--profile]\n"
+                     "                     [--factor | --refactor-from other_tangent.mtx]\n"
+                     "       --factor times solves of one factor(); --refactor-from factors another\n"
+                     "       matrix of the same pattern first and times refactor() plus each solve\n"
                      "       pcg_benchmark --capture-deck thermal_or_magnetic.bdf --capture-prefix path\n";
         return 2;
     }
@@ -270,10 +275,30 @@ int main(int argc, char** argv) {
     if (solver->requires_full_symmetric_csr()) k = k.expanded_symmetric();
     std::cerr << "Backend: " << solver->name() << "; n=" << k.n << "; nnz=" << k.nnz << '\n';
     std::cout << "backend,n,nnz,budget_mib,run,seconds,iterations,corrections,relative_error,relative_residual,estimated_error\n";
+    std::unique_ptr<LinearFactor> factor;
+    if (opts->factor) {
+        auto base = opts->refactor_from.empty() ? std::optional<Csr>(k) : read_matrix(opts->refactor_from);
+        if (!base) { std::cerr << "Could not read " << opts->refactor_from << '\n'; return 2; }
+        if (solver->requires_full_symmetric_csr()) *base = base->expanded_symmetric();
+        const auto start = std::chrono::steady_clock::now();
+        auto made = solver->factor(*base);
+        if (auto* e = std::get_if<Error>(&made)) { std::cerr << "factor() failed: " << e->message << '\n'; return 1; }
+        factor = std::get<std::unique_ptr<LinearFactor>>(std::move(made));
+        std::cerr << "factor_seconds=" << std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() << '\n';
+    }
     try {
         for (int run = -opts->warmups; run < opts->repeats; ++run) {
             const auto start = std::chrono::steady_clock::now();
-            auto u = solver->solve(k, f);
+            std::vector<double> u;
+            if (factor) {
+                if (!opts->refactor_from.empty())
+                    if (auto e = factor->refactor(k)) { std::cerr << "refactor() failed: " << e->message << '\n'; return 1; }
+                auto solved = factor->solve(f);
+                if (auto* e = std::get_if<Error>(&solved)) { std::cerr << "factor solve failed: " << e->message << '\n'; return 1; }
+                u = std::get<std::vector<double>>(std::move(solved));
+            } else {
+                u = solver->solve(k, f);
+            }
             const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
             const auto residual = compensated_residual(k, u, f);
             double error = 0, scale = 0, rr = 0, ff = 0;
