@@ -15,6 +15,7 @@
 #include "amg_cg_d_spv.h"
 #include "amg_scalar_d_spv.h"
 #include "amg_dense_d_spv.h"
+#include <algorithm>
 #include <map>
 
 namespace vibestran::detail {
@@ -193,10 +194,12 @@ public:
     }
     // Every buffer must fit one storage-buffer descriptor.
     static bool bindable(const AmgHierarchy& h, std::size_t limit) {
-        for (const auto& level : h.levels)
-            for (const auto* a : {level.A.get(), level.P.get(), level.R.get()})
-                if (a && (a->nnz * 8 > limit || (a->nrows + 1) * 8 > limit)) return false;
-        return h.coarse_inverse.size() * 8 <= limit;
+        const auto fits = [limit](const AmgHostCsr* a) {
+            return !a || (a->nnz * 8 <= limit && (a->nrows + 1) * 8 <= limit);
+        };
+        return std::ranges::all_of(h.levels, [&](const AmgLevel& level) {
+                   return fits(level.A.get()) && fits(level.P.get()) && fits(level.R.get());
+               }) && h.coarse_inverse.size() * 8 <= limit;
     }
 
     Solver(VulkanContext& ctx, Pipelines& pl, const AmgHierarchy& h, std::optional<AmgDevicePartition> partition)
@@ -207,13 +210,13 @@ public:
           state_host_(host(sizeof(CgState))), staging_(host(std::size_t(n_) * 8)) {
         for (std::size_t l = 0; l < h.levels.size(); ++l) {
             const auto& level = h.levels[l];
-            const auto rows = level.A->nrows;
+            const auto count = level.A->nrows;
             Level d;
-            if (l) { d.f = buffer(rows * 8); d.y = buffer(rows * 8); }
-            d.x = buffer(rows * 8);
+            if (l) { d.f = buffer(count * 8); d.y = buffer(count * 8); }
+            d.x = buffer(count * 8);
             d.m = buffer(std::max<std::size_t>(level.smoother.size(), 1) * 8);
             if (!level.smoother.empty()) upload(d.m, level.smoother);
-            d.a = csr(*level.A, l == 0 && partition_ ? partition_->gpu_rows : int(rows));
+            d.a = csr(*level.A, l == 0 && partition_ ? partition_->gpu_rows : int(count));
             if (level.P) { d.p = csr(*level.P, int(level.P->nrows)); d.r = csr(*level.R, int(level.R->nrows)); }
             levels_.push_back(std::move(d));
         }

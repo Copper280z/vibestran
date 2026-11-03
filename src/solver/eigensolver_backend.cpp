@@ -38,6 +38,7 @@
 #endif
 #ifdef EIGEN_CHOLMOD_SUPPORT
 #include <Eigen/CholmodSupport>
+#include "cholmod_status.hpp"
 #endif
 
 namespace vibestran {
@@ -194,7 +195,12 @@ public:
             "Accelerate factorization failed for K - sigma*M with sigma={:.16g}",
             sigma));
 #elif defined(EIGEN_CHOLMOD_SUPPORT)
-        cholmod_.compute(shift_);
+        // Not compute(): a failed analysis leaves no factor, which Eigen's
+        // factorize() would dereference.
+        cholmod_.analyzePattern(shift_);
+        throw_on_cholmod_failure("symbolic analysis", sigma);
+        cholmod_.factorize(shift_);
+        throw_on_cholmod_failure("numeric factorization", sigma);
         if (cholmod_.info() == Eigen::Success) {
             active_backend_ = ActiveBackend::Cholmod;
             backend_label_ = "cholmod";
@@ -313,6 +319,20 @@ private:
         SimplicialLLT,
         SimplicialLDLT,
     };
+
+#if defined(EIGEN_CHOLMOD_SUPPORT) && !defined(HAVE_ACCELERATE)
+    // A failed CHOLMOD step (memory, index range) is not a definiteness
+    // problem that the simplicial LDL^T fallback could solve.
+    void throw_on_cholmod_failure(std::string_view step, Scalar sigma) {
+        if (auto e = detail::cholmod_failure(cholmod_.cholmod(), "cholmod", step,
+                                             static_cast<long>(shift_.rows()),
+                                             static_cast<long>(shift_.nonZeros()))) {
+            active_backend_ = ActiveBackend::None;
+            throw SolverError(std::format("{} for K - sigma*M with sigma={:.16g}",
+                                          e->message, sigma));
+        }
+    }
+#endif
 
     const SparseMatrix& K_;
     const SparseMatrix& M_;

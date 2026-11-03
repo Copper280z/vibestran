@@ -83,10 +83,11 @@ public:
     // Positions increase with the row, as in a serial sweep.  A column holds
     // a few dozen entries at most, so insertion sort.
     for_rows(n, [&](std::size_t j) {
-      Entry *first = below_.get() + start_[j], *last = below_.get() + start_[j + 1];
-      for (Entry *e = first + (first != last); e < last; ++e)
-        for (Entry *f = e; f > first && f[-1].position > f->position; --f)
-          std::swap(f[-1], *f);
+      const auto first = static_cast<std::size_t>(start_[j]);
+      const auto last = static_cast<std::size_t>(start_[j + 1]);
+      for (std::size_t e = first + 1; e < last; ++e)
+        for (std::size_t f = e; f > first && below_[f - 1].position > below_[f].position; --f)
+          std::swap(below_[f - 1], below_[f]);
     });
   }
 

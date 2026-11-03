@@ -8,6 +8,7 @@
 // fresh one did, builds the hierarchy again.
 #include "amg_pcg.hpp"
 #include "solver/solver_backend.hpp"
+#include <algorithm>
 #include <functional>
 
 namespace vibestran::detail {
@@ -61,7 +62,6 @@ public:
     }
 
     const AmgHierarchy& hierarchy() const { return *hierarchy_; }
-    AmgEngine& engine() { return *engine_; }
 
 private:
     void build(const SparseMatrixBuilder::CsrData& k) {
@@ -138,8 +138,8 @@ public:
             }
             ++stats_.solves;
             if (auto e = accept_(result)) return *e;
-            for (double v : result.solution)
-                if (!std::isfinite(v)) return Error{"AMG PCG produced a nonfinite solution"};
+            if (!std::ranges::all_of(result.solution, [](double v) { return std::isfinite(v); }))
+                return Error{"AMG PCG produced a nonfinite solution"};
             X.insert(X.end(), result.solution.begin(), result.solution.end());
         }
         return X;

@@ -164,8 +164,10 @@ with about half the fine rows on the CPU (13 MiB) and with the host-hierarchy
 fallback (1 MiB). `unit_tests` (680), `cuda_tests` and `vulkan_tests` pass on
 the GPU host. Run concurrently with the GPU suites, `unit_tests` exceeds
 meson's 60 s limit; alone it takes 37 s. The local suite passes.
-`ninja cppcheck` reports 18 existing unused-function findings, all in
-unchanged files. The earlier Vulkan AMG test's 8 MiB budget fell below the
+`ninja cppcheck` reports no errors: 18 existing unused-function findings
+locally, and 101 findings on the GPU host, the same count as before this
+change. The host build also analyses the CUDA and CHOLMOD code, which the
+local Accelerate build compiles out. The earlier Vulkan AMG test's 8 MiB budget fell below the
 fixed device state and so tested the host fallback; it now uses 13 MiB.
 
 [Samples, baseline runs, experiments, complete analyses and motor comparisons](benchmarks/pcg/titan-v-amg-engine-20261102.json)

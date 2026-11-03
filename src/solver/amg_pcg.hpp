@@ -158,7 +158,6 @@ public:
     // Dense inverse of the coarsest operator, row-major (it is symmetric).
     std::vector<double> coarse_inverse;
 
-    std::size_t coarse_rows() const { return levels.back().A->nrows; }
     bool coarse_direct() const { return !coarse_inverse.empty(); }
     std::string describe() const {
         std::string out;
@@ -251,7 +250,7 @@ AmgPcgResult refine_amg(const SparseMatrixBuilder::CsrData& original, const std:
             norm = std::max(norm, std::abs(host[i]));
         }
         if (norm == 0) return std::vector<double>(n, 0);
-        for (double& v : host) v /= norm;
+        std::ranges::transform(host, host.begin(), [norm](double v) { return v / norm; });
         const double target = first ? std::min(tolerance, 1e-8) : kAmgCorrectionTolerance;
         first = false;
         std::vector<double> x(n);

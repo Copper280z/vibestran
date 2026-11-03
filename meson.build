@@ -108,6 +108,9 @@ endif
 _ss_opt      = get_option('use_suitesparse')
 _ss_required = _ss_opt.enabled()
 _cholmod_lib = cxx.find_library('cholmod', required : _ss_required)
+# CHOLMOD links it itself; callers of SuiteSparse_config_* (the CHOLMOD
+# allocation-failure test) need it directly.
+_ss_config_lib = cxx.find_library('suitesparseconfig', required : _ss_required)
 
 # Build a list of candidate SuiteSparse header directories by platform
 _ss_candidates = []
@@ -141,7 +144,7 @@ cholmod_incdirs  = []
 if have_cholmod
   cholmod_args     = ['-DEIGEN_CHOLMOD_SUPPORT']
   cholmod_lib_deps = [declare_dependency(
-    dependencies        : _cholmod_lib,
+    dependencies        : [_cholmod_lib, _ss_config_lib],
     include_directories : _cholmod_inc,
   )]
   cholmod_incdirs = _have_ss_inc ? [_cholmod_inc] : []

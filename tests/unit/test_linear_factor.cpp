@@ -11,7 +11,12 @@
 #include <Eigen/Dense>
 #include <cmath>
 #include <cstdlib>
+#include <format>
 #include <limits>
+#include <string>
+#if defined(EIGEN_CHOLMOD_SUPPORT) && !defined(HAVE_ACCELERATE)
+#include <SuiteSparse_config.h>
+#endif
 
 using namespace vibestran;
 
@@ -296,6 +301,82 @@ TEST(LinearFactor, FailedRefactorCannotReturnTheOldSolution) {
     ASSERT_FALSE(factor->refactor(to_csr(A)));
     EXPECT_LT(relative_error(solved(factor->solve(columns(s.B), 1)), s.X), 1e-12);
 }
+
+#if defined(EIGEN_CHOLMOD_SUPPORT) && !defined(HAVE_ACCELERATE)
+namespace {
+// SuiteSparse's allocator, failing while armed: cholmod_analyze() then returns
+// no factor, as it does for a problem too large for memory or for its index
+// range.
+bool g_fail_allocations = false;
+void *(*g_malloc)(size_t) = nullptr;
+void *(*g_calloc)(size_t, size_t) = nullptr;
+void *(*g_realloc)(void *, size_t) = nullptr;
+void *failing_malloc(size_t size) { return g_fail_allocations ? nullptr : g_malloc(size); }
+void *failing_calloc(size_t count, size_t size) {
+    return g_fail_allocations ? nullptr : g_calloc(count, size);
+}
+void *failing_realloc(void *p, size_t size) {
+    return g_fail_allocations ? nullptr : g_realloc(p, size);
+}
+
+class FailingCholmodAllocator {
+public:
+    FailingCholmodAllocator() {
+        g_malloc = SuiteSparse_config_malloc_func_get();
+        g_calloc = SuiteSparse_config_calloc_func_get();
+        g_realloc = SuiteSparse_config_realloc_func_get();
+        SuiteSparse_config_malloc_func_set(failing_malloc);
+        SuiteSparse_config_calloc_func_set(failing_calloc);
+        SuiteSparse_config_realloc_func_set(failing_realloc);
+    }
+    ~FailingCholmodAllocator() {
+        g_fail_allocations = false;
+        SuiteSparse_config_malloc_func_set(g_malloc);
+        SuiteSparse_config_calloc_func_set(g_calloc);
+        SuiteSparse_config_realloc_func_set(g_realloc);
+    }
+    FailingCholmodAllocator(const FailingCholmodAllocator &) = delete;
+    FailingCholmodAllocator &operator=(const FailingCholmodAllocator &) = delete;
+    void arm(bool fail) { g_fail_allocations = fail; }
+};
+} // namespace
+
+TEST(LinearFactor, CholmodAnalysisFailureIsAnErrorAndRecoverable) {
+    // Eigen's wrapper reports success for an analysis that produced no
+    // factor and then dereferences it in factorize(): the 16.9M-equation
+    // plate segfaulted this way. The failure must be an error naming the
+    // step and cause, with no LDL^T fallback, and the factor must work
+    // again once memory is available.
+    const Eigen::MatrixXd A = test::gap_like(50, 0);
+    Eigen::MatrixXd A2 = A;
+    A2(0, A.rows() - 1) = A2(A.rows() - 1, 0) = -0.5; // a new pattern
+    const System s = system_for(A, 1), s2 = system_for(A2, 1);
+    EigenSolverBackend backend;
+    FailingCholmodAllocator allocator;
+
+    allocator.arm(true);
+    auto made = backend.factor(to_csr(A), {.minimum_degree = true});
+    allocator.arm(false);
+    ASSERT_TRUE(std::holds_alternative<Error>(made));
+    const auto &message = std::get<Error>(made).message;
+    EXPECT_NE(message.find("cholmod symbolic analysis failed: out of memory"), std::string::npos)
+        << message;
+    EXPECT_NE(message.find(std::format("n={}", A.rows())), std::string::npos) << message;
+
+    auto factor = take(backend.factor(to_csr(A), {.minimum_degree = true}));
+    ASSERT_TRUE(factor);
+    allocator.arm(true);
+    const auto failed = factor->refactor(to_csr(A2));
+    allocator.arm(false);
+    ASSERT_TRUE(failed.has_value());
+    EXPECT_NE(failed->message.find("symbolic analysis failed"), std::string::npos) << failed->message;
+    EXPECT_EQ(factor->method(), "cholmod");
+    EXPECT_TRUE(std::holds_alternative<Error>(factor->solve(columns(s2.B), 1)));
+    ASSERT_FALSE(factor->refactor(to_csr(A2)));
+    EXPECT_LT(relative_error(solved(factor->solve(columns(s2.B), 1)), s2.X), 1e-11);
+    EXPECT_LT(relative_error(solved(take(backend.factor(to_csr(A), {}))->solve(columns(s.B), 1)), s.X), 1e-11);
+}
+#endif
 
 TEST(LinearFactor, ShapeErrorsAreReported) {
     const Eigen::MatrixXd A = tridiagonal(10, 0.0);

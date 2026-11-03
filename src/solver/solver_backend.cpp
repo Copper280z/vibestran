@@ -16,6 +16,7 @@
 #endif
 #ifdef EIGEN_CHOLMOD_SUPPORT
 #include <Eigen/CholmodSupport>
+#include "cholmod_status.hpp"
 #endif
 #include <format>
 #include <spdlog/spdlog.h>
@@ -247,6 +248,12 @@ public:
       llt_analyzed_ = llt_.info() == Eigen::Success;
 #if defined(EIGEN_CHOLMOD_SUPPORT) && !defined(HAVE_ACCELERATE)
       if constexpr (kCholmod) {
+        // No factor to try LDL^T with either: the failure is the problem's
+        // size or the memory, not its definiteness.
+        if (auto e = cholmod_step_failure("symbolic analysis", A)) {
+          llt_analyzed_ = false;
+          return e;
+        }
         const auto &common = llt_.cholmod();
         order_label_ = common.selected >= 0
                            ? cholmod_order_label(common.method[common.selected].ordering)
@@ -259,6 +266,11 @@ public:
       llt_.factorize(A);
       ++stats_.numeric_factorizations;
       factored = llt_.info() == Eigen::Success;
+#if defined(EIGEN_CHOLMOD_SUPPORT) && !defined(HAVE_ACCELERATE)
+      if constexpr (kCholmod)
+        if (auto e = cholmod_step_failure("numeric factorization", A))
+          return e;
+#endif
     }
     use_ldlt_ = false;
     label_ = primary_label_;
@@ -314,6 +326,13 @@ public:
   }
 
 private:
+#if defined(EIGEN_CHOLMOD_SUPPORT) && !defined(HAVE_ACCELERATE)
+  [[nodiscard]] Status cholmod_step_failure(std::string_view step, const ESM &A) {
+    return detail::cholmod_failure(llt_.cholmod(), primary_label_, step, A.rows(),
+                                   A.nonZeros());
+  }
+#endif
+
   [[nodiscard]] bool same_pattern(const CsrData &K) const {
     return n_ == K.n && lower_only_ == K.stores_lower_triangle_only() &&
            row_ptr_ == K.row_ptr && col_ind_ == K.col_ind;
