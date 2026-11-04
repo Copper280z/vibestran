@@ -28,6 +28,7 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <random>
 #include <span>
 #include <vector>
 
@@ -100,12 +101,14 @@ struct ScaledAmgMatrix {
 
 // Without modes, the hierarchy AMGCL's amg<smoothed_aggregation, spai0> builds
 // with coarse_enough = 256 (scalar aggregation, eps_strong 0.08, relaxation 1, no
-// spectral radius estimate), for scalar fields. With modes, ModeAggregation.
+// spectral radius estimate), with the weights bounded for stability where SPAI-0
+// passes kAmgSmootherBound. With modes, ModeAggregation.
 inline constexpr unsigned kAmgCoarseEnough = 256;
 
 struct AmgLevel {
     std::shared_ptr<AmgHostCsr> A, P, R;
-    // SPAI-0 diagonal: a_ii / sum_j a_ij^2 (empty on a directly solved level).
+    // Diagonal smoother weights, within kAmgSmootherBound (empty on a directly
+    // solved level).
     std::vector<double> smoother;
 };
 
@@ -117,12 +120,12 @@ public:
     // With modes (of K; scale is the equilibration of fine), aggregates are
     // whole grid points and carry the modes down the levels.
     explicit AmgHierarchy(std::shared_ptr<AmgHostCsr> fine, const NearNullspace* modes = nullptr,
-        std::span<const double> scale = {}) {
+        std::span<const double> scale = {}, unsigned coarse_enough = kAmgCoarseEnough)
+        : coarse_enough_(coarse_enough), system_(modes != nullptr) {
         std::optional<ModeAggregation> by_mode;
         if (modes) by_mode.emplace(*modes, scale);
-        system_ = modes != nullptr;
         std::shared_ptr<AmgHostCsr> a = std::move(fine);
-        while (a->nrows > kAmgCoarseEnough) {
+        while (a->nrows > coarse_enough_) {
             AmgLevel level{a, nullptr, nullptr, smoother(*a)};
             try {
                 std::tie(level.P, level.R) = by_mode ? by_mode->transfer_operators(*a, level.smoother)
@@ -168,37 +171,30 @@ public:
     bool coarse_direct() const { return !coarse_inverse.empty(); }
     std::string describe() const {
         std::string out;
-        std::size_t nnz = 0;
+        std::size_t operators = 0, transfers = 0, rows = 0;
         for (const auto& l : levels) {
-            out += std::format("{}{}x{} ({} nnz)", out.empty() ? "" : ", ", l.A->nrows, l.A->ncols, l.A->nnz);
-            nnz += l.A->nnz + (l.P ? l.P->nnz + l.R->nnz : 0);
+            out += std::format("{}{}x{} ({} nnz", out.empty() ? "" : ", ", l.A->nrows, l.A->ncols, l.A->nnz);
+            if (l.P) out += std::format(", P {} nnz, R {} nnz", l.P->nnz, l.R->nnz);
+            out += ")";
+            operators += l.A->nnz;
+            transfers += l.P ? l.P->nnz + l.R->nnz : 0;
+            rows += l.A->nrows;
         }
-        return std::format("{} levels: {}; operator+transfer nnz/fine nnz={:.3f}; coarse {}",
-            levels.size(), out, double(nnz) / double(levels.front().A->nnz),
+        const auto fine_nnz = double(levels.front().A->nnz);
+        return std::format("{} levels: {}; operator+transfer nnz/fine nnz={:.3f}; operator complexity={:.3f}, "
+            "transfer complexity={:.3f}, grid complexity={:.3f}; coarse {}",
+            levels.size(), out, double(operators + transfers) / fine_nnz, double(operators) / fine_nnz,
+            double(transfers) / fine_nnz, double(rows) / double(levels.front().A->nrows),
             coarse_direct() ? "dense inverse" : "smoothed");
     }
 
 private:
-    std::vector<double> smoother(const AmgHostCsr& a) const { return system_ ? l1_jacobi_weights(a) : spai0(a); }
-
-    static std::vector<double> spai0(const AmgHostCsr& a) {
-        std::vector<double> m(a.nrows);
-#pragma omp parallel for schedule(static)
-        for (std::ptrdiff_t i = 0; i < std::ptrdiff_t(a.nrows); ++i) {
-            double num = 0, den = 0;
-            for (int j = a.ptr[i]; j < a.ptr[i + 1]; ++j) {
-                den += a.val[j] * a.val[j];
-                if (a.col[j] == i) num += a.val[j];
-            }
-            m[i] = num / den;
-        }
-        return m;
-    }
+    std::vector<double> smoother(const AmgHostCsr& a) const { return system_ ? l1_jacobi_weights(a) : bounded_spai0_weights(a); }
 
     void factor_coarse() {
         const auto& a = *levels.back().A;
         const auto n = Eigen::Index(a.nrows);
-        if (a.nrows > kAmgCoarseEnough) {
+        if (a.nrows > coarse_enough_) {
             levels.back().smoother = smoother(a);
             coarse_inverse.clear();
             return;
@@ -215,7 +211,8 @@ private:
     }
 
     amgcl::coarsening::smoothed_aggregation<amgcl::backend::builtin<double, int, int>> coarsening_;
-    bool system_{false};
+    unsigned coarse_enough_;
+    bool system_;
 };
 
 // One V-cycle with one pre- and one post-smoothing step, starting from a zero
@@ -338,6 +335,13 @@ public:
         each(w.y.size(), [&](std::ptrdiff_t i) { w.y[i] = w.x[i] + m[i] * (w.f[i] - w.t[i]); });
     }
 
+    // z = B f: one application of the preconditioner. z is valid until the next.
+    const std::vector<double>& cycle(const std::vector<double>& f) {
+        work_[0].f = f;
+        amg_vcycle(*this, h_.levels.size());
+        return work_[0].y;
+    }
+
     // PCG on the equilibrated fine operator from x = 0, as AMGCL's CG.
     std::pair<int, double> solve(const std::vector<double>& b, double tolerance, int max_iterations,
                                  std::vector<double>& x) {
@@ -348,9 +352,7 @@ public:
         double res = norm_b, rho = 0;
         int it = 0;
         for (; it < max_iterations && res > tolerance * norm_b; ++it) {
-            work_[0].f = r;
-            amg_vcycle(*this, h_.levels.size());
-            const auto& z = work_[0].y;
+            const auto& z = cycle(r);
             const double rho_new = dot(r, z);
             const double beta = it ? rho_new / rho : 0.0;
             rho = rho_new;
@@ -389,6 +391,63 @@ private:
     std::unique_ptr<AmgSpmv> fine_;
     std::vector<Work> work_;
 };
+
+// Bilinear-form checks of the applied cycle B on a system too large to form it.
+// With rho(M A) < 2 on every level and an SPD coarse solve, B is SPD and the
+// eigenvalues of B A lie in (0, 1], so E = I - B A has A-norm below 1. Each number
+// is the worst seen, on fixed pseudo-random vectors.
+struct AmgCycleProbe {
+    double asymmetry{0};     // |x'B y - y'B x| / sqrt(x'B x y'B y)
+    double min_energy{1e300}; // x'B x / x'x; positive
+    double max_energy{0};    // z'A z / f'z with z = B f; at most 1
+    double contraction{0};   // ||E x||_A / ||x||_A over repeated cycles; at most 1
+    double last_contraction{0}; // the same on the last cycle: the multigrid rate
+
+    [[nodiscard]] bool valid(double tolerance = 1e-8) const {
+        return asymmetry <= tolerance && min_energy > 0 && max_energy <= 1 + tolerance && contraction <= 1 + tolerance;
+    }
+};
+
+inline AmgCycleProbe probe_amg_cycle(const AmgHierarchy& h, int vectors = 4, int cycles = 12) {
+    HostAmg amg(h, nullptr);
+    const auto n = h.levels.front().A->nrows;
+    const auto dot = [](const std::vector<double>& a, const std::vector<double>& b) {
+        return std::inner_product(a.begin(), a.end(), b.begin(), 0.0);
+    };
+    std::mt19937_64 random(20261103);
+    std::normal_distribution<double> normal;
+    const auto vector = [&] {
+        std::vector<double> v(n);
+        std::ranges::generate(v, [&] { return normal(random); });
+        return v;
+    };
+    AmgCycleProbe out;
+    std::vector<double> az(n);
+    for (int v = 0; v < vectors; ++v) {
+        const auto x = vector(), y = vector();
+        const auto bx = amg.cycle(x);
+        const auto by = amg.cycle(y);
+        const double xbx = dot(x, bx), yby = dot(y, by);
+        out.asymmetry = std::max(out.asymmetry, std::abs(dot(x, by) - dot(y, bx)) / std::sqrt(std::abs(xbx * yby)));
+        out.min_energy = std::min(out.min_energy, xbx / dot(x, x));
+        amg.multiply(0, bx, az);
+        out.max_energy = std::max(out.max_energy, dot(bx, az) / xbx);
+    }
+    // Multigrid iteration on A e = 0 from a random error.
+    auto e = vector();
+    amg.multiply(0, e, az);
+    double energy = dot(e, az);
+    for (int c = 0; c < cycles; ++c) {
+        const auto& correction = amg.cycle(az);
+        std::transform(e.begin(), e.end(), correction.begin(), e.begin(), std::minus<>{});
+        amg.multiply(0, e, az);
+        const double next = dot(e, az);
+        out.last_contraction = std::sqrt(next / energy);
+        out.contraction = std::max(out.contraction, out.last_contraction);
+        energy = next;
+    }
+    return out;
+}
 
 // The factory's matrix outlives the returned product.
 using AmgSpmvFactory = std::function<std::unique_ptr<AmgSpmv>(const SparseMatrixBuilder::CsrData&)>;

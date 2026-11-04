@@ -52,6 +52,9 @@ TEST(VulkanAmgTest, RigidBodyModesConvergeResidentAndBudgeted) {
     ASSERT_TRUE(r.modes);
     const auto full = r.k.expanded_symmetric();
     const double top = test::largest_magnitude(r.u);
+    // The device cycle applies the operator test_amg_vcycle.cpp proves SPD on the
+    // host, so CG sees the same iterations, up to rounding.
+    const int host_iterations = test::host_amg_iterations(r);
     for (const std::size_t budget : {std::size_t(0), std::size_t(120) * 1024 * 1024, std::size_t(1024) * 1024}) {
         SCOPED_TRACE(budget);
         VulkanSolverConfig cfg;
@@ -65,7 +68,14 @@ TEST(VulkanAmgTest, RigidBodyModesConvergeResidentAndBudgeted) {
         ASSERT_TRUE(backend->last_refinement()->converged);
         EXPECT_EQ(backend->last_solve_was_full_gpu(), budget == 0);
         EXPECT_LE(backend->last_iteration_count(), 120);
+        EXPECT_NEAR(double(backend->last_iteration_count()), double(host_iterations), 0.15 * host_iterations + 2);
         for (std::size_t i = 0; i < x.size(); ++i) ASSERT_NEAR(x[i], r.u[i], 1e-6 * top) << i;
+        const auto report = backend->last_amg_device_report();
+        ASSERT_TRUE(report);
+        EXPECT_EQ(report->execution == AmgDeviceReport::Execution::Resident, budget == 0);
+        EXPECT_EQ(report->execution == AmgDeviceReport::Execution::Host, budget == 1024 * 1024);
+        EXPECT_LE(report->planned_bytes, report->budget_bytes);
+        EXPECT_EQ(report->gpu_rows + report->cpu_rows, full.n);
     }
 }
 

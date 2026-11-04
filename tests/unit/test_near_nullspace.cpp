@@ -25,6 +25,8 @@ using namespace vibestran;
 using vibestran::test::assemble;
 using vibestran::test::hex_bar;
 using vibestran::test::kSteel;
+using vibestran::test::mixed_assembly;
+using vibestran::test::shell_sheet;
 using vibestran::test::RecordingBackend;
 
 namespace {
@@ -159,63 +161,6 @@ TEST(AmgModes, ChoicePrecedence) {
 
 namespace {
 
-// A thin CQUAD4 cantilever sheet bending under an edge load.
-std::string shell_sheet(int n) {
-    std::ostringstream out;
-    out << kSteel;
-    const auto node = [&](int i, int j) { return 1 + i + (n + 1) * j; };
-    for (int j = 0; j <= n; ++j)
-        for (int i = 0; i <= n; ++i) out << std::format("GRID,{},,{},{},0.\n", node(i, j), double(i) / n, double(j) / n);
-    int eid = 1;
-    for (int j = 0; j < n; ++j)
-        for (int i = 0; i < n; ++i)
-            out << std::format("CQUAD4,{},2,{},{},{},{}\n", eid++, node(i, j), node(i + 1, j), node(i + 1, j + 1), node(i, j + 1));
-    for (int j = 0; j <= n; ++j) {
-        out << "SPC1,1,123456," << node(0, j) << "\n";
-        out << std::format("FORCE,2,{},0,1.,0.,0.,-1.\n", node(n, j));
-    }
-    return out.str();
-}
-
-// CHEXA8 blocks tied to a clamped CQUAD4 plate with RBE2 spiders: mixed grids,
-// partial constraints and dense rows from one system.
-std::string mixed_assembly(int n) {
-    std::ostringstream out;
-    out << kSteel;
-    const auto plate = [&](int i, int j) { return 1 + i + (n + 1) * j; };
-    for (int j = 0; j <= n; ++j)
-        for (int i = 0; i <= n; ++i) out << std::format("GRID,{},,{},{},0.\n", plate(i, j), 2.0 * i / n, 2.0 * j / n);
-    int eid = 1;
-    for (int j = 0; j < n; ++j)
-        for (int i = 0; i < n; ++i)
-            out << std::format("CQUAD4,{},2,{},{},{},{}\n", eid++, plate(i, j), plate(i + 1, j), plate(i + 1, j + 1), plate(i, j + 1));
-    for (int i = 0; i <= n; ++i) out << "SPC1,1,123456," << plate(i, 0) << "," << plate(i, n) << "\n";
-    for (int j = 1; j < n; ++j) out << "SPC1,1,3," << plate(0, j) << "\n";
-    const int m = n / 2;
-    int first = plate(n, n) + 1;
-    int rbe = 1000000;
-    for (int b = 0; b < 2; ++b) {
-        const auto node = [&](int i, int j, int k) { return first + i + (m + 1) * (j + (m + 1) * k); };
-        for (int k = 0; k <= m; ++k)
-            for (int j = 0; j <= m; ++j)
-                for (int i = 0; i <= m; ++i)
-                    out << std::format("GRID,{},,{},{},{}\n", node(i, j, k), .25 + b + .5 * i / m, .75 + .5 * j / m, .1 + .5 * k / m);
-        for (int k = 0; k < m; ++k)
-            for (int j = 0; j < m; ++j)
-                for (int i = 0; i < m; ++i)
-                    out << std::format("CHEXA,{},1,{},{},{},{},{},{},+\n+,{},{}\n", eid++, node(i, j, k), node(i + 1, j, k),
-                                       node(i + 1, j + 1, k), node(i, j + 1, k), node(i, j, k + 1), node(i + 1, j, k + 1),
-                                       node(i + 1, j + 1, k + 1), node(i, j + 1, k + 1));
-        const int anchor = plate((1 + 2 * b) * n / 4, n / 2);
-        for (int j = 0; j <= m; ++j)
-            for (int i = 0; i <= m; ++i)
-                out << std::format("RBE2,{},{},123,{}\n", rbe++, anchor, node(i, j, 0));
-        out << std::format("FORCE,2,{},0,1000.,0.,0.,-1.\n", node(m / 2, m / 2, m));
-        first = node(m, m, m) + 1;
-    }
-    return out.str();
-}
-
 detail::AmgPcgResult host_solve(const RecordingBackend::Record& r, bool modes) {
     return detail::solve_hybrid_amg(r.k, r.f, 1e-9, 5000, {}, modes ? r.modes : nullptr);
 }
@@ -264,7 +209,7 @@ TEST(ModeAggregation, WholeGridPointsHoldEveryModeExactly) {
 
 // A V-cycle is positive definite, as conjugate gradients needs, only if its
 // smoother converges: the largest eigenvalue of M A stays below 2 on every level.
-TEST(RigidBodyAmg, SmootherConvergesOnEveryLevelWhereSpai0DoesNot) {
+TEST(AmgSmoother, ConvergesOnEveryLevelOfAStructureWhereSpai0DoesNot) {
     const auto r = assemble(hex_bar(4));
     const detail::ScaledAmgMatrix scaled(r.k);
     const auto largest = [](const detail::AmgHostCsr& a, const std::vector<double>& m) {
@@ -282,9 +227,30 @@ TEST(RigidBodyAmg, SmootherConvergesOnEveryLevelWhereSpai0DoesNot) {
         // Not so timid that it stops smoothing: the weights use the spectrum.
         EXPECT_GT(top, 1.0) << "level " << l;
     }
+    EXPECT_GT(largest(*scaled.matrix, detail::spai0_weights(*scaled.matrix)), 2.0)
+        << "SPAI-0 no longer diverges on elasticity: the reason for the bound has gone";
     const detail::AmgHierarchy scalar(scaled.matrix);
-    EXPECT_GT(largest(*scalar.levels[0].A, scalar.levels[0].smoother), 2.0)
-        << "SPAI-0 no longer diverges on elasticity: the reason for l1_jacobi_weights() has gone";
+    for (std::size_t l = 0; l + 1 < scalar.levels.size(); ++l)
+        EXPECT_LE(largest(*scalar.levels[l].A, scalar.levels[l].smoother), detail::kAmgSmootherBound) << "level " << l;
+}
+
+// The estimate of rho(G^-1 A) only tunes the weight. This SPD matrix has a true
+// rho of 1, but the power iterations start nearly orthogonal to its top
+// eigenvector and report about 0.5, which unbounded would give rho(M A) = 2.67.
+TEST(AmgSmoother, AnUnderestimatedSpectrumCannotBreakTheBound) {
+    const auto a = std::make_shared<detail::AmgHostCsr>();
+    a->set_size(2, 2, false);
+    a->set_nonzeros(4);
+    a->ptr[0] = 0, a->ptr[1] = 2, a->ptr[2] = 4;
+    a->col[0] = 0, a->col[1] = 1, a->col[2] = 0, a->col[3] = 1;
+    a->val[0] = 1.8905764746872613, a->val[1] = a->val[2] = 0.34549150281252616, a->val[3] = 0.6545084971874738;
+    const auto m = detail::l1_jacobi_weights(*a);
+    Eigen::Matrix2d dense = Eigen::Matrix2d::Zero();
+    for (int i = 0; i < 2; ++i)
+        for (int j = a->ptr[i]; j < a->ptr[i + 1]; ++j)
+            dense(i, a->col[j]) = std::sqrt(m[std::size_t(i)]) * a->val[j] * std::sqrt(m[std::size_t(a->col[j])]);
+    const double top = Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d>(dense).eigenvalues().maxCoeff();
+    EXPECT_LE(top, detail::kAmgSmootherBound * (1 + 1e-14));
 }
 
 TEST(RigidBodyAmg, DenseRowsDoNotWeakenOtherRows) {

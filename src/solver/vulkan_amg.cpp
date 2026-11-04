@@ -489,8 +489,8 @@ private:
 namespace vibestran {
 namespace {
 std::unique_ptr<detail::AmgSystem> make_vulkan_amg(VulkanContext& ctx, Pipelines& pl,
-    const SparseMatrixBuilder::CsrData& k, double tolerance, int max_iterations, std::size_t budget,
-    bool& fully_resident, std::shared_ptr<const NearNullspace> modes = nullptr) {
+    const SparseMatrixBuilder::CsrData& k, double tolerance, int max_iterations, std::function<std::size_t()> budget,
+    bool& fully_resident, std::optional<AmgDeviceReport>& report, std::shared_ptr<const NearNullspace> modes = nullptr) {
     using namespace detail;
     const int max = max_iterations > 0 ? max_iterations : 10000;
     class Engine final : public AmgEngine {
@@ -507,21 +507,28 @@ std::unique_ptr<detail::AmgSystem> make_vulkan_amg(VulkanContext& ctx, Pipelines
         int max_;
     };
     return std::make_unique<AmgSystem>(k, tolerance,
-        [&ctx, &pl, budget, max, &fully_resident](const ScaledAmgMatrix& scaled, const AmgHierarchy& h)
+        [&ctx, &pl, budget = std::move(budget), max, &fully_resident, &report](const ScaledAmgMatrix& scaled, const AmgHierarchy& h)
             -> std::unique_ptr<AmgEngine> {
+            using Report = AmgDeviceReport;
             const auto& fine = *h.levels.front().A;
+            const auto rows = int(fine.nrows);
             const auto limit = ctx.device_info().max_storage_buffer_range;
             const auto fixed = Solver::fixed_bytes(h);
+            // Queried now: the previous hierarchy of a refactor is gone and setup took time.
+            const auto available = budget();
             std::optional<AmgDevicePartition> partition;
-            if (budget >= fine.nrows * 80 && fine.nrows * 8 <= limit &&
+            if (available >= fine.nrows * 80 && fine.nrows * 8 <= limit &&
                 (fine.nrows + 255) / 256 <= ctx.device_info().max_workgroup_count_x && Solver::bindable(h, limit))
-                partition = AmgDevicePartition::plan(fine, budget, fixed, limit);
+                partition = AmgDevicePartition::plan(fine, available, fixed, limit);
             fully_resident = false;
             if (!partition) {
-                log_debug(std::format("[vulkan device AMG] workspace does not fit: fixed={} budget={} bytes; using host hierarchy", fixed, budget));
-                return std::make_unique<HostAmgEngine>(scaled, h, vulkan_partitioned_spmv(ctx, pl, budget), max);
+                log_debug(std::format("[vulkan device AMG] workspace does not fit: fixed={} budget={} bytes; using host hierarchy", fixed, available));
+                report = Report{Report::Execution::Host, 0, rows, 0, available, 0};
+                return std::make_unique<HostAmgEngine>(scaled, h, vulkan_partitioned_spmv(ctx, pl, available), max);
             }
-            log_amg_device_plan("vulkan", fine, *partition, fixed, budget);
+            log_amg_device_plan("vulkan", fine, *partition, fixed, available);
+            report = Report{partition->gpu_rows == rows ? Report::Execution::Resident : Report::Execution::FineRowSpill,
+                partition->gpu_rows, rows - partition->gpu_rows, partition->device_bytes, available, 0};
             auto engine = std::make_unique<Engine>(ctx, pl, h, std::move(partition), max);
             fully_resident = engine->fully_resident();
             return engine;
@@ -531,19 +538,21 @@ std::unique_ptr<detail::AmgSystem> make_vulkan_amg(VulkanContext& ctx, Pipelines
 
 std::vector<double> solve_vulkan_amg(VulkanContext& ctx, Pipelines& pl,
     const SparseMatrixBuilder::CsrData& k, const std::vector<double>& rhs, double tolerance,
-    int max_iterations, std::size_t budget, bool& fully_resident, const VulkanAmgAccept& accept,
+    int max_iterations, const std::function<std::size_t()>& budget, bool& fully_resident,
+    std::optional<AmgDeviceReport>& report, const VulkanAmgAccept& accept,
     std::shared_ptr<const NearNullspace> modes) {
-    auto result = make_vulkan_amg(ctx, pl, k, tolerance, max_iterations, budget, fully_resident, modes)->solve(k, rhs);
+    auto result = make_vulkan_amg(ctx, pl, k, tolerance, max_iterations, budget, fully_resident, report, modes)->solve(k, rhs);
     if (auto e = accept(result)) throw SolverError(e->message);
     return std::move(result.solution);
 }
 
 std::unique_ptr<LinearFactor> make_vulkan_amg_factor(VulkanContext& ctx, Pipelines& pl,
     const SparseMatrixBuilder::CsrData& k, double tolerance, int max_iterations,
-    std::function<std::size_t()> budget, bool& fully_resident, VulkanAmgAccept accept) {
+    std::function<std::size_t()> budget, bool& fully_resident,
+    std::optional<AmgDeviceReport>& report, VulkanAmgAccept accept) {
     return std::make_unique<detail::AmgFactor>(k,
-        [&ctx, &pl, tolerance, max_iterations, budget = std::move(budget), &fully_resident](const SparseMatrixBuilder::CsrData& matrix) {
-            return make_vulkan_amg(ctx, pl, matrix, tolerance, max_iterations, budget(), fully_resident);
+        [&ctx, &pl, tolerance, max_iterations, budget = std::move(budget), &fully_resident, &report](const SparseMatrixBuilder::CsrData& matrix) {
+            return make_vulkan_amg(ctx, pl, matrix, tolerance, max_iterations, budget, fully_resident, report);
         },
         std::move(accept));
 }

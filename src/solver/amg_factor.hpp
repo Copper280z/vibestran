@@ -9,6 +9,7 @@
 #include "amg_pcg.hpp"
 #include "solver/solver_backend.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <functional>
 
 namespace vibestran::detail {
@@ -80,6 +81,14 @@ private:
         fresh_iterations_ = -1;
         stale_ = rebuilt_ = false;
         setup_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        // A diagnostic for the model-class suite, on request: a dozen host cycles, not
+        // counted as setup.
+        if (std::getenv("VIBESTRAN_AMG_PROBE")) {
+            const auto probe = probe_amg_cycle(*hierarchy_);
+            log_debug(std::format("[amg-pcg] cycle probe: valid={} asymmetry={:.3e} min_energy={:.3e} max_energy={:.6f} "
+                "contraction={:.6f} last_contraction={:.6f}", probe.valid(), probe.asymmetry, probe.min_energy,
+                probe.max_energy, probe.contraction, probe.last_contraction));
+        }
     }
 
     double tolerance_;

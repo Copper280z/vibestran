@@ -19,19 +19,22 @@ struct AmgPcgResult;
 
 // AMG PCG for n >= 50000 on fp64 devices (vulkan_amg.cpp): device hierarchy
 // and CG with a fine-row prefix under the budget, or the host hierarchy when
-// the fixed device state does not fit. fully_resident is set whenever the
-// hierarchy is (re)built. accept() records each solve's diagnostics and
-// returns an error for one that missed the accuracy target.
+// the fixed device state does not fit. budget() is queried whenever a hierarchy
+// is built, and the plan comes from its exact storage. fully_resident and report
+// are set then too. accept() records each solve's diagnostics and returns an
+// error for one that missed the accuracy target.
 using VulkanAmgAccept = std::function<Status(const detail::AmgPcgResult&)>;
 std::vector<double> solve_vulkan_amg(VulkanContext& ctx, Pipelines& pl,
     const SparseMatrixBuilder::CsrData& k, const std::vector<double>& rhs, double tolerance,
-    int max_iterations, std::size_t budget, bool& fully_resident, const VulkanAmgAccept& accept,
+    int max_iterations, const std::function<std::size_t()>& budget, bool& fully_resident,
+    std::optional<AmgDeviceReport>& report, const VulkanAmgAccept& accept,
     std::shared_ptr<const NearNullspace> modes = nullptr);
 // The hierarchy and workspace persist across right-hand sides and
-// same-pattern refactor(); budget() is queried whenever it is built.
+// same-pattern refactor().
 std::unique_ptr<LinearFactor> make_vulkan_amg_factor(VulkanContext& ctx, Pipelines& pl,
     const SparseMatrixBuilder::CsrData& k, double tolerance, int max_iterations,
-    std::function<std::size_t()> budget, bool& fully_resident, VulkanAmgAccept accept);
+    std::function<std::size_t()> budget, bool& fully_resident,
+    std::optional<AmgDeviceReport>& report, VulkanAmgAccept accept);
 
 // Fine products for the host hierarchy: a GPU row prefix within the budget
 // (vulkan_pcg_tiled.cpp).

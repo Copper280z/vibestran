@@ -1,6 +1,7 @@
 #pragma once
 // Smoothed aggregation for systems: it carries a near-nullspace, with aggregates
-// of whole grid points, and a smoother that is stable on any matrix.
+// of whole grid points, and the smoother weights with a bound that holds for any
+// SPD matrix.
 //
 // Three things differ from AMGCL's scalar defaults, each needed on structures:
 //  - AMGCL's block aggregation needs every point to own the same number of
@@ -11,10 +12,9 @@
 //    diagonal. That preserves the constant vector, whose row sums stay zero, but
 //    not a rigid rotation: the lumped row gains sum a_ij (B_j - B_i), which grows
 //    with the lever arm. Here P is smoothed with the whole matrix.
-//  - SPAI-0 weights a_ii / sum a_ij^2 exceed 2 / lambda_max on a system, whose
-//    many small couplings keep the denominator small while lambda_max grows, so
-//    the smoother amplifies high frequencies and the V-cycle is not positive
-//    definite, which conjugate gradients need. See l1_jacobi_weights().
+//  - SPAI-0 weights exceed 2 / lambda_max on a system, so the smoother amplifies
+//    high frequencies and the V-cycle is not positive definite. See
+//    kAmgSmootherBound and l1_jacobi_weights().
 //
 // The strength graph, the greedy aggregates and the QR of the modes on each
 // aggregate are AMGCL's.
@@ -35,20 +35,35 @@
 
 namespace vibestran::detail {
 
-// Per-row Jacobi weights m_i = (4/3) / (rho g_i), g_i = sum_j |a_ij|. The l1
-// norm keeps a dense row (an RBE's independent grid) from weakening every other
-// row, as a global spectral radius would. By Gershgorin rho(G^-1 A) <= 1, but it
-// is often far less on shells, so it is measured: rho comes from a few power
-// iterations, and the margin of 4/3 against the limit of 2 covers their
-// underestimate. The start vector and the serial sums make the weights
-// independent of the thread count.
+// A V-cycle with one pre- and one post-smoothing step and an SPD coarse solve is
+// SPD, as conjugate gradients needs, when rho(M A) < 2 on every level. For SPD A
+// and g_i = sum_j |a_ij|, Gershgorin gives rho(G^-1 A) <= 1, and for diagonal M
+//   rho(M A) = max y'A y / y'M^-1 y <= w rho(G^-1 A) <= w   whenever m_i <= w / g_i.
+// So this bound certifies any weights below it, whatever the matrix.
+inline constexpr double kAmgSmootherBound = 1.9;
+
+inline std::vector<double> amg_row_l1_norms(const amgcl::backend::builtin<double, int, int>::matrix& a) {
+    std::vector<double> g(a.nrows, 0.0);
+#pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t i = 0; i < std::ptrdiff_t(a.nrows); ++i)
+        for (int j = a.ptr[i]; j < a.ptr[i + 1]; ++j) g[std::size_t(i)] += std::abs(a.val[j]);
+    return g;
+}
+
+// Per-row Jacobi weights m_i = w / g_i. The l1 norm keeps a dense row (an RBE's
+// independent grid) from weakening every other row, as a global spectral radius
+// would. rho(G^-1 A) is often far below 1 on structures, and w = (4/3) / rho
+// smooths best, so rho comes from a few power iterations. They only tune w: an
+// underestimate cannot pass kAmgSmootherBound, and rho <= 1 is a floor of 4/3.
+// The start vector and the serial sums make the weights independent of the
+// thread count.
 inline std::vector<double> l1_jacobi_weights(const amgcl::backend::builtin<double, int, int>::matrix& a) {
     constexpr int kPowerIterations = 15;
     const auto n = std::ptrdiff_t(a.nrows);
-    std::vector<double> g(a.nrows, 0.0), x(a.nrows), y(a.nrows), m(a.nrows);
+    const std::vector<double> g = amg_row_l1_norms(a);
+    std::vector<double> x(a.nrows), y(a.nrows), m(a.nrows);
 #pragma omp parallel for schedule(static)
     for (std::ptrdiff_t i = 0; i < n; ++i) {
-        for (int j = a.ptr[i]; j < a.ptr[i + 1]; ++j) g[std::size_t(i)] += std::abs(a.val[j]);
         // Quasi-random, so no mode of a structured mesh is missed by symmetry.
         const double golden = 0.6180339887498949 * double(i + 1);
         x[std::size_t(i)] = golden - std::floor(golden) - 0.5;
@@ -68,8 +83,38 @@ inline std::vector<double> l1_jacobi_weights(const amgcl::backend::builtin<doubl
         rho = norm(y);
         x.swap(y);
     }
+    // In this order a rho of zero or NaN also lands on the bound.
+    const double w = std::min(kAmgSmootherBound, (4.0 / 3.0) / std::min(rho, 1.0));
 #pragma omp parallel for schedule(static)
-    for (std::ptrdiff_t i = 0; i < n; ++i) m[std::size_t(i)] = (4.0 / 3.0) / (rho * g[std::size_t(i)]);
+    for (std::ptrdiff_t i = 0; i < n; ++i) m[std::size_t(i)] = w / g[std::size_t(i)];
+    return m;
+}
+
+// SPAI-0 weights a_ii / sum_j a_ij^2. These suit a scalar Laplacian, but on a
+// system many small couplings keep the denominator small while lambda_max grows:
+// m lambda_max reaches 2.9 on a hexahedral bar.
+inline std::vector<double> spai0_weights(const amgcl::backend::builtin<double, int, int>::matrix& a) {
+    std::vector<double> m(a.nrows);
+#pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t i = 0; i < std::ptrdiff_t(a.nrows); ++i) {
+        double num = 0, den = 0;
+        for (int j = a.ptr[i]; j < a.ptr[i + 1]; ++j) {
+            den += a.val[j] * a.val[j];
+            if (a.col[j] == i) num += a.val[j];
+        }
+        m[std::size_t(i)] = num / den;
+    }
+    return m;
+}
+
+// SPAI-0 where it is within kAmgSmootherBound, which on a diagonally dominant
+// row it always is: a_ii m_i <= 1 while g_i <= 2 a_ii.
+inline std::vector<double> bounded_spai0_weights(const amgcl::backend::builtin<double, int, int>::matrix& a) {
+    std::vector<double> m = spai0_weights(a);
+    const std::vector<double> g = amg_row_l1_norms(a);
+#pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t i = 0; i < std::ptrdiff_t(a.nrows); ++i)
+        m[std::size_t(i)] = std::min(m[std::size_t(i)], kAmgSmootherBound / g[std::size_t(i)]);
     return m;
 }
 

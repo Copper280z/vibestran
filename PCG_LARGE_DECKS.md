@@ -33,9 +33,9 @@ were each necessary; none pays off alone:
   lambda_max grows. On a hexahedral bar m lambda_max reached 2.9, above the limit
   of 2, so the smoother amplified high frequencies. The V-cycle was then indefinite
   (eigenvalues of M A down to -0.67), and CG needs it positive definite. The
-  replacement is `l1_jacobi_weights()`, m_i = (4/3) / (rho g_i) with
-  g_i = sum_j |a_ij| and rho(G^-1 A) from power iterations. Engines needed no
-  change: they read a per-level diagonal.
+  replacement is `l1_jacobi_weights()`, m_i = w / g_i with g_i = sum_j |a_ij|; see
+  the certified bound under "Validity and the Priority 0 baseline". Engines needed
+  no change: they read a per-level diagonal.
 - **Rigid-body modes on aggregates of whole grid points.** Modes come from the
   reduced index and grid positions, in basic axes (K is assembled in basic axes
   whatever the grid's CD), and K * mode vanishes on free-free models of every
@@ -65,8 +65,9 @@ above the accuracy target. Constant ran only the two coarsest levels, within
 | **shell-membrane (t/L 10)** | 61k / 241k / 962k | **202 / 353** | **634 / 1213 / 2167** | 0.84 | 0.2 / 1.1 / 6.7 | 2.8 |
 | **space-frame** | 61k / 229k / 876k | **80 / 97** | **133 / 147 / 160** | 0.19 | 0.04 / 0.1 / 0.5 | 7.5-8.0 |
 
-Solutions agree with a direct solve to the F06's printed precision at the
-coarsest level of every class, and between modes.
+This table predates the certified smoother bound, and its p column predates
+refinement-parameter exponents. The current numbers and the stricter comparison with
+a direct solve are under "Validity and the Priority 0 baseline".
 
 **The last two rows regress.** Plate262k is `shell-membrane`: 902 iterations in
 3.43 s with constant, 2556 in 12.27 s with rigid. Its ν = 0 and t/L = 10 nearly
@@ -118,9 +119,146 @@ changes: `magnetic-motor` 79 / 112 / 147 and `magnetic-coil`
 Reproduce, on the benchmark machine:
 
 ```bash
-python3 tools/amg_model_suite.py run --binary build/vibestran --work /tmp/amg-suite --results r.jsonl --modes rigid --direct
+python3 tools/amg_model_suite.py run --binary build/vibestran --work /tmp/amg-suite --results r.jsonl --modes rigid,constant --direct --require-solved rigid
 python3 tools/amg_model_suite.py report r.jsonl
 ```
+
+## Validity and the Priority 0 baseline
+
+Measured on 2026-11-03 on the Titan V in fp64. The script and manifest (commit, compiler
+flags and dependency versions, and the hashes of the binary and the working-tree
+patch) are in `benchmarks/pcg/amg-baseline-20261103/`. Per-run results with deck and
+matrix hashes, commands and budgets, the patch, the logs, the full-precision solutions
+and the reference K and F stay in `~/pcg-perf/baseline-20261103/` on the benchmark
+machine: the repository holds no binaries or test data. Timings are single runs, and
+failures and timeouts are recorded as outcomes.
+
+**A certified smoother bound, on every hierarchy.** A V(1,1) cycle with R = P',
+A_c = P'A P of full rank, rho(M A) < 2 on every level and an SPD coarse solve is
+SPD, with the eigenvalues of B A in (0, 1]. For SPD A and g_i = sum_j |a_ij|,
+rho(G^-1 A) <= 1, so any diagonal M with m_i <= w / g_i has rho(M A) <= w. The bound
+`kAmgSmootherBound` is w = 1.9, and the weights respect it for any matrix:
+
+- Rigid: w = min(1.9, (4/3) / rho), with rho from the power iterations. They now
+  only tune w, so a wrong estimate cannot break stability. The 2 x 2 matrix on which
+  they report 0.5 for a true 1 would otherwise give rho(M A) = 2.67.
+- Constant: SPAI-0, limited to 1.9 / g_i. On a diagonally dominant row SPAI-0 is
+  already below that, so scalar fields barely change.
+
+Other rules were measured and not adopted. w = 4/3 (rho = 1, no estimate) costs about
+50% more iterations: shell-thin 723 to 1133, solid-hex 39 to 60. A limit of 1.98 gains
+almost nothing over 1.9. A tighter certified estimate from the squared iteration
+matrix recovers iterations but costs setup: on the largest CTETRA10 deck it took
+67 iterations to 59 and setup from 5.1 s to 11.2 s.
+
+Iterations per solve against the commit before the bound: the coarsest two levels
+before, and all three levels now. "fail" means the iteration limit was reached.
+
+| Class | Constant before | Constant now | Rigid before | Rigid now |
+|---|---:|---:|---:|---:|
+| solid-hex | 100000 / fail | 407 / 617 / 949 | 39 / 40 | 41 / 41 / 41 |
+| solid-tet10 | 6155 / 22693 | 686 / 1019 / 2030 | 63 / 60 | 69 / 68 / 67 |
+| solid-contrast | fail / fail | 596 / 889 / 1624 | 70 / 71 | 70 / 71 / 98 |
+| solid-thin | fail / fail | fail / fail / fail | 16873 / 4856 | 17138 / 6106 / 3457 |
+| shell-thin | 29598 / 58023 | 39413 / 69161 / timeout | 723 / 612 | 722 / 612 / 567 |
+| shell-thick | 145 / 243 | 147 / 252 / 521 | 30 / 31 | 30 / 31 / 35 |
+| shell-membrane | 202 / 353 | 206 / 358 / 710 | 634 / 1213 | 634 / 1213 / 2167 |
+| shell-cylinder-cd | 4258 / 5269 | 3751 / 5764 / 11460 | 580 / 833 | 581 / 1159 / 1452 |
+| shell-foundation | 1969 / 7077 | 1982 / 7671 / 6380 | 104 / 101 | 106 / 100 / 130 |
+| stiffened-panel | 100000 / fail | 100000 / fail / fail | 309 / 644 | 309 / 645 / 1413 |
+| space-frame | 80 / 97 | 79 / 97 / 115 | 133 / 147 | 134 / 148 / 160 |
+| rbe-assembly | fail / fail | 19343 / 12880 / 29154 | 1409 / 2616 | 1413 / 2614 / 4234 |
+| Complete rover (mean of subcases) | 7954 | 3749 | 332 | 329 |
+| Four-wheel rover (mean of subcases) | 2932 | 3465 | 404 | 404 |
+| thermal-hex | 122 / 200 | 117 / 197 / 283 | | |
+| magnetic-motor (mean per solve) | 79 / 112 | 79 / 112 / 147 | | |
+| magnetic-coil (per solve) | 1991 / 2601 | 1990 / 2597 / 3253 | | |
+
+The bound helps the scalar hierarchy far more than it costs: solids go from failing
+or tens of thousands of iterations to hundreds or low thousands, at no memory cost.
+It costs iterations where SPAI-0 was above the limit yet happened to work: shell-thin
++19-33% and the four-wheel rover +18%. On the rigid hierarchy the cost is up to 13% on
+CTETRA10 and 26% on solid-thin, and 39% at one cylinder level, whose neighbours do
+not move (580 to 581 coarser, and 1451 to 1452 finer).
+
+**What the default still does not do.** `constant` remains the default for its
+memory and for the classes it wins, but it is not robust: it fails solid-thin at
+every level and stiffened-panel above the coarsest, where it needs 100000 iterations,
+and shell-thin at 955k equations exceeded the 150 s limit. Total solver time (setup
+plus iterations) and planned device memory at the finest level of each class:
+
+| Class | Equations | Constant s | Rigid s | Constant MiB | Rigid MiB |
+|---|---:|---:|---:|---:|---:|
+| solid-hex | 807k | 5.5 | 4.1 | 941 | 1870 |
+| solid-tet10 | 694k | 9.9 | 5.9 | 865 | 1881 |
+| solid-contrast | 807k | 8.5 | 6.2 | 919 | 2085 |
+| solid-thin | 924k | fail | 23.6 | 832 | 1541 |
+| shell-thin | 955k | timeout | 3.0 | - | 826 |
+| shell-thick | 955k | 1.7 | 1.3 | 445 | 820 |
+| shell-membrane | 962k | 2.1 | 7.8 | 460 | 813 |
+| shell-membrane (plate262k) | 1.58M | 4.1 | 14.0 | 715 | 1292 |
+| shell-cylinder-cd | 995k | 49 | 9.0 | 873 | 1178 |
+| shell-foundation | 965k | 16 | 1.7 | 453 | 833 |
+| stiffened-panel | 999k | fail | 6.7 | 504 | 957 |
+| space-frame | 876k | 0.7 | 1.9 | 414 | 927 |
+| rbe-assembly | 939k | 133 | 33 | 923 | 1820 |
+| Complete rover (both subcases) | 61k | 2.0 | 0.44 | 34 | 62 |
+| Four-wheel rover (both subcases) | 69k | 2.0 | 0.55 | 39 | 70 |
+
+Rigid solved all 39 structural runs; constant solved 33, failed 5 and timed out once.
+Rigid is at worst 3.6 times slower than constant here and needs about twice the
+memory. These are resident times. How the two compare at equal budgets is the next
+measurement, and it should settle the default.
+
+**The applied cycle is tested, not only its parts.** `test_amg_vcycle.cpp` forms B
+explicitly on small assembled systems, with and without modes, in basic, shifted,
+rotated and millimetre coordinates: a partly constrained solid, a 10^6:1 material
+interface, a partly constrained shell, offset stiffeners, a solid and shell coupled
+by RBE2 and RBE3, and lines of bars, whose modes lose rank on an aggregate. It checks
+R = P', the Galerkin product, SPD coarse operators, rho(M A) <= 1.9 on each level, B
+symmetric, and the eigenvalues of B A in (0, 1]. Unbounded SPAI-0 fails these checks.
+Larger systems use bilinear-form probes. `VIBESTRAN_AMG_PROBE=1` logs them, and the
+suite ran them on every hierarchy: all valid, with relative asymmetry at most 1.1e-12
+and ||E||_A at most 0.973. Three things are not checked directly: the device cycles,
+which are tied to the host cycle by iteration count; the fp32 cycle of the mixed
+hierarchy, which has only unit tests; and Vulkan and mixed precision in this baseline,
+which also have only unit tests.
+
+Rotating a deck can change iterations, by up to 2.1 times on lines of bars, because
+the point graph uses each block's largest entry, which depends on the axes.
+
+**Every hierarchy has a plan.** After it is built, against the memory free at that
+moment, each hierarchy is planned from its exact storage as resident, fine-row spill
+or host. The earlier estimate, four times the fine nonzeros, could skip this, and a
+space frame's matrix-plus-transfer complexity reaches 8. Across the 86 device runs,
+the memory measured after the first solve was within +48 / -21 MiB of the plan, up to
+2.1 GiB. The headroom is now at least 256 MiB, because a fraction of free memory alone
+fails on a nearly full device: with about 100 MiB reported free, 39 MiB allocations
+failed on the Titan V. An allocation probe before the buffers turns a race with
+another process into a change of plan. Starting a device context takes about 300 MiB,
+so below that the backend does not start and says so. The CUDA tests hold real device
+memory to force each transition. Vulkan plans the same way, without the probe, and a
+failed buffer there is a reported error.
+
+**Acceptance now means something.** `tools/amg_model_suite.py` requires complete
+matching equations and reactions, an identical assembled K and F (by hash), finite
+values, and explicit limits, separately for translations and rotations, on strain
+energy, on the residual and on reactions. It exits nonzero when a required check
+fails. `tools/test_amg_model_suite.py` feeds it wrong answers.
+
+The first run of these checks failed solid-thin and stiffened-panel against a plain
+direct solve. An extended-precision refinement showed the PCG solutions were right,
+5.8e-10 and 4.8e-13 from the refined answer, and the direct solve wrong, by 1.1e-6
+and 1.9e-8. Agreement "to F06 precision" could not have shown this. The reference is
+now a direct solve with `--refine`. Against it, every solved run at the coarsest
+levels agrees within the 1e-8 limit: at worst 1.7e-9 for constant and 4.3e-11 for
+rigid on displacements. On an ill-conditioned K even an accurate solution has a large
+residual (8.9e-6 relative for rigid on solid-thin), so the reference's own residual
+sets the floor of that limit.
+
+Growth exponents now come from the refinement parameter, and classes that are not
+h-refinement say so: space-frame grows its domain at fixed bay length, and solid-thin's
+aspect ratio improves as it refines. rbe-assembly's p is 1.19 by this measure.
 
 ## Physical decks
 

@@ -625,6 +625,7 @@ unit_test_sources = files(
   'tests/unit/test_pcg_solver.cpp',
   'tests/unit/test_pcg_partition.cpp',
   'tests/unit/test_near_nullspace.cpp',
+  'tests/unit/test_amg_vcycle.cpp',
   'tests/unit/test_output_writers.cpp',
   'tests/unit/test_coord_sys.cpp',
   'tests/unit/test_mpc_handler.cpp',
@@ -677,6 +678,15 @@ if hdf5_dep.found()
   # .venv when present; reported as skipped (exit 77) otherwise.
   test('magnetic_vtkhdf', python,
     args    : [files('tools/magnetic_vtkhdf_check.py'), vibestran_exe],
+    timeout : 120,
+    suite   : 'e2e',
+  )
+endif
+
+# The AMG suite's acceptance checks reject wrong answers. Needs NumPy.
+if run_command(python, '-c', 'import numpy', check: false).returncode() == 0
+  test('amg_model_suite', python,
+    args    : [files('tools/test_amg_model_suite.py')],
     timeout : 120,
     suite   : 'e2e',
   )
@@ -740,7 +750,7 @@ endif
 if have_vulkan_backend
   vulkan_tests = executable(
     'vulkan_tests',
-    files('tests/unit/test_vulkan_solver.cpp'),
+    files('tests/unit/test_vulkan_solver.cpp', 'tests/unit/amg_host_iterations.cpp'),
     dependencies        : [solver_lib_dep, gtest_dep],
     include_directories : [inc, src_inc],
   )
@@ -755,7 +765,8 @@ if have_cuda_backend
   cuda_tests = executable(
     'cuda_tests',
     files('tests/unit/test_cuda_solver.cpp', 'tests/unit/test_cuda_factor.cpp',
-          'tests/unit/test_cuda_pcg_amg.cpp'),
+          'tests/unit/test_cuda_pcg_amg.cpp', 'tests/unit/cuda_device_hold.cu',
+          'tests/unit/amg_host_iterations.cpp'),
     dependencies        : [solver_lib_dep, gtest_dep],
     include_directories : inc,
   )

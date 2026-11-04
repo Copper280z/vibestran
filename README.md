@@ -190,7 +190,8 @@ Nastran, and is assessed with a residual computed in compensated
 SOL 101 on the GPU PCG backends the model's rigid-body modes, which converges on
 far more structures but needs more device memory. `constant`, the default, uses
 the scalar hierarchy, which needs less memory and suits nearly decoupled fields
-but fails to converge on many structures, so try `rigid` when it does. The choice
+but does not converge on some structures, such as stiffened panels and thin solids,
+so try `rigid` when it does not. The choice
 changes speed and memory, not the solution, which refinement accepts against the
 assembled stiffness either way. See `PCG_LARGE_DECKS.md`.
 

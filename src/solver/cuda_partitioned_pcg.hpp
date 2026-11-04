@@ -125,27 +125,27 @@ static std::vector<double> solve_cuda_partitioned(CudaPCGContext& ctx,
     return solution;
 }
 
+// Free device memory less headroom for what the solver does not count, within
+// any explicit budget. Reported free memory is not all allocatable, and kernel
+// code loads on first launch, which a fraction of a nearly full device would not
+// cover: with 100 MiB reported free, 39 MiB allocations failed on a Titan V.
+static std::size_t cuda_device_budget(const CudaPCGContext& ctx) {
+    constexpr std::size_t kMinimumHeadroom = std::size_t(256) * 1024 * 1024;
+    std::size_t free_bytes = 0, total_bytes = 0;
+    throw_if_cuda_failed(cudaMemGetInfo(&free_bytes, &total_bytes), "query device memory");
+    const auto headroom = std::max(free_bytes / 5, kMinimumHeadroom);
+    const auto available = free_bytes > headroom ? free_bytes - headroom : 0;
+    return ctx.device_memory_budget ? std::min(ctx.device_memory_budget, available) : available;
+}
+
+// Below the AMG size. AMG plans from its hierarchy instead (cuda_amg_engines).
 template<class T>
 static std::optional<std::size_t> cuda_pcg_spill_budget(const CudaPCGContext& ctx,
     const SparseMatrixBuilder::CsrData& k) {
-    std::size_t free_bytes = 0, total_bytes = 0;
-    throw_if_cuda_failed(cudaMemGetInfo(&free_bytes, &total_bytes), "query device memory");
-    const auto available = free_bytes - free_bytes / 5;
-    const auto budget = ctx.device_memory_budget ? std::min(ctx.device_memory_budget, available) : available;
-    // Explicit AMG budgets use the exact workspace/hierarchy planner even when
-    // the conservative resident estimate would fit.
-    if (k.n >= 50000 && ctx.device_memory_budget) return budget;
+    const auto budget = cuda_device_budget(ctx);
     // Conservative allowance for matrix, IC0, SpMV/SpSV scratch and vectors.
-    std::size_t estimate = std::size_t(k.nnz) * (4 * sizeof(T) + 4 * sizeof(int)) +
+    const std::size_t estimate = std::size_t(k.nnz) * (4 * sizeof(T) + 4 * sizeof(int)) +
         std::size_t(k.n) * (12 * sizeof(T) + 8 * sizeof(int)) + 1048576;
-    if (k.n >= 50000) {
-        // AMG uses full CSR on several levels, transfer operators, and both
-        // initial/correction workspaces. Mixed AMG also keeps the fp64 operator.
-        const auto full_nnz = k.stores_lower_triangle_only()
-            ? 2 * std::size_t(k.nnz) - std::size_t(k.n) : std::size_t(k.nnz);
-        estimate = 4 * full_nnz * (sizeof(double) + sizeof(int)) +
-            std::size_t(k.n) * 24 * sizeof(double) + 1048576;
-    }
     if (estimate > budget) return budget;
     return {};
 }

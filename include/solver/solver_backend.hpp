@@ -13,6 +13,7 @@
 #include "core/sparse_matrix.hpp"
 #include "solver/iterative_refinement.hpp"
 #include "solver/near_nullspace.hpp"
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <span>
@@ -24,6 +25,23 @@
 namespace vibestran {
 
 struct FactorRatioCheckPolicy;
+
+/// The execution chosen for an AMG hierarchy, planned from its exact device
+/// storage once it is built and against the memory free at that moment.
+struct AmgDeviceReport {
+    enum class Execution {
+        Resident,     ///< The whole hierarchy and CG on the device.
+        FineRowSpill, ///< A suffix of the fine operator's rows on the CPU.
+        Host,         ///< The hierarchy on the host; the fixed state did not fit.
+    };
+    Execution execution{Execution::Host};
+    int gpu_rows{0};             ///< Fine rows on the device (not reported for Host).
+    int cpu_rows{0};             ///< Fine rows on the CPU.
+    std::size_t planned_bytes{0}; ///< Device bytes of the plan (0 for Host).
+    std::size_t budget_bytes{0};  ///< Free memory less headroom, within any explicit budget.
+    /// Device memory the engine took, measured after its first solve; 0 until then.
+    std::size_t measured_bytes{0};
+};
 
 /// Options for SolverBackend::factor().
 struct FactorOptions {
@@ -146,6 +164,11 @@ public:
     /// when it was not refined (a direct solve without set_refinement(true);
     /// see iterative_refinement.hpp).
     [[nodiscard]] virtual std::optional<RefinementReport> last_refinement() const noexcept {
+        return std::nullopt;
+    }
+
+    /// Where the last AMG hierarchy ran; empty if the last solve built none.
+    [[nodiscard]] virtual std::optional<AmgDeviceReport> last_amg_device_report() const noexcept {
         return std::nullopt;
     }
 

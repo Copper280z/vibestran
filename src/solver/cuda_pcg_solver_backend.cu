@@ -48,6 +48,10 @@ std::optional<RefinementReport> CudaPCGSolverBackend::last_refinement() const no
     return ctx_->last_refinement;
 }
 
+std::optional<AmgDeviceReport> CudaPCGSolverBackend::last_amg_device_report() const noexcept {
+    return ctx_->last_amg_device;
+}
+
 std::string_view CudaPCGSolverBackend::device_name() const noexcept {
     return ctx_->device_name;
 }

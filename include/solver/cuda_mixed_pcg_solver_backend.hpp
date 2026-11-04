@@ -55,6 +55,7 @@ public:
     [[nodiscard]] int last_iteration_count() const noexcept override;
     [[nodiscard]] double last_estimated_error() const noexcept override;
     [[nodiscard]] std::optional<RefinementReport> last_refinement() const noexcept override;
+    [[nodiscard]] std::optional<AmgDeviceReport> last_amg_device_report() const noexcept override;
     [[nodiscard]] std::string_view device_name() const noexcept;
 
 private:

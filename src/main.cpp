@@ -127,7 +127,7 @@ make_backend(BackendChoice backend_choice,
     auto cu = vibestran::CudaSolverBackend::try_create(precision);
     if (cu.has_value())
       return std::make_unique<vibestran::CudaSolverBackend>(std::move(*cu));
-    spdlog::error("CUDA backend requested but no CUDA device found");
+    spdlog::error("CUDA backend requested but no usable CUDA device found (none present, or too little free device memory to start)");
 #else
     spdlog::error("CUDA backend was not compiled into this build");
 #endif
@@ -138,7 +138,7 @@ make_backend(BackendChoice backend_choice,
     auto cu = vibestran::CudaPCGSolverBackend::try_create();
     if (cu.has_value())
       return std::make_unique<vibestran::CudaPCGSolverBackend>(std::move(*cu));
-    spdlog::error("CUDA PCG backend requested but no CUDA device found");
+    spdlog::error("CUDA PCG backend requested but no usable CUDA device found (none present, or too little free device memory to start)");
 #else
     spdlog::error("CUDA PCG backend was not compiled into this build");
 #endif
@@ -150,7 +150,7 @@ make_backend(BackendChoice backend_choice,
     if (cu.has_value())
       return std::make_unique<vibestran::CudaMixedPCGSolverBackend>(
           std::move(*cu));
-    spdlog::error("CUDA mixed PCG backend requested but no CUDA device found");
+    spdlog::error("CUDA mixed PCG backend requested but no usable CUDA device found (none present, or too little free device memory to start)");
 #else
     spdlog::error("CUDA mixed PCG backend was not compiled into this build");
 #endif
@@ -556,7 +556,7 @@ int main(int argc, const char *argv[]) {
 #ifdef HAVE_CUDA_EIGENSOLVER
         auto cu_eig = vibestran::CudaEigensolverBackend::try_create();
         if (!cu_eig.has_value()) {
-          spdlog::error("CUDA eigensolver requested but no CUDA device found");
+          spdlog::error("CUDA eigensolver requested but no usable CUDA device found (none present, or too little free device memory to start)");
           return 1;
         }
         eig_backend = std::make_unique<vibestran::CudaEigensolverBackend>(

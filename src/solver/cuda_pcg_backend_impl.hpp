@@ -2110,6 +2110,7 @@ struct CudaPCGContext {
     int    last_iters   = 0;
     double last_rel_res = 0.0;
     std::optional<vibestran::RefinementReport> last_refinement;
+    std::optional<vibestran::AmgDeviceReport> last_amg_device;
     /// Preconditioner fallbacks of the solves since the backend last took them.
     std::vector<std::string> notices;
 };
@@ -2294,39 +2295,87 @@ namespace vibestran {
 template<class T>
 class CudaAmgEngine final : public detail::AmgEngine {
 public:
-    CudaAmgEngine(const detail::AmgHierarchy& h, std::optional<detail::AmgDevicePartition> partition, int max_iterations)
-        : solver_(h, std::move(partition)), max_iterations_(max_iterations) {}
+    // free_before: free device memory before this engine allocated anything.
+    CudaAmgEngine(CudaPCGContext& ctx, const detail::AmgHierarchy& h, std::optional<detail::AmgDevicePartition> partition,
+        int max_iterations, std::size_t free_before)
+        : ctx_(ctx), solver_(h, std::move(partition)), max_iterations_(max_iterations), free_before_(free_before) {}
     std::pair<int, double> solve(const std::vector<double>& b, double tolerance, std::vector<double>& x) override {
-        return solver_.solve(b, tolerance, max_iterations_, x);
+        auto result = solver_.solve(b, tolerance, max_iterations_, x);
+        // Allocations and the captured graph are all in place after the first solve.
+        if (std::exchange(measure_, false) && ctx_.last_amg_device) {
+            std::size_t free_bytes = 0, total_bytes = 0;
+            throw_if_cuda_failed(cudaMemGetInfo(&free_bytes, &total_bytes), "query device memory");
+            ctx_.last_amg_device->measured_bytes = free_before_ > free_bytes ? free_before_ - free_bytes : 0;
+            log_debug(std::format("[cuda device AMG] planned={} measured={} bytes",
+                ctx_.last_amg_device->planned_bytes, ctx_.last_amg_device->measured_bytes));
+        }
+        return result;
     }
     void values_changed() override { solver_.update_values(); }
 private:
+    CudaPCGContext& ctx_;
     cuda_amg::Solver<T> solver_;
     int max_iterations_;
+    std::size_t free_before_;
+    bool measure_{true};
 };
 
-// AMG PCG for n >= 50000. Mixed precision keeps an fp32 hierarchy; CG and
-// its operator stay fp64. A budget partitions the fp64 fine operator
-// (mixed solves share that path), or falls back to the host hierarchy when
-// even the fixed device state does not fit.
-static detail::AmgSystem::EngineFactory cuda_amg_engines(const CudaPCGContext& ctx,
-    std::optional<std::size_t> budget, bool mixed) {
-    return [&ctx, budget, mixed](const detail::ScaledAmgMatrix& scaled, const detail::AmgHierarchy& h)
+// Whether the driver will give this many bytes now. Between the free-memory
+// query and the buffers another process can take memory; asking first turns
+// that race into a choice of plan rather than a failed allocation halfway.
+static bool cuda_device_can_allocate(std::size_t bytes) {
+    void* probe = nullptr;
+    if (cudaMalloc(&probe, bytes) != cudaSuccess) {
+        (void)cudaGetLastError();
+        return false;
+    }
+    throw_if_cuda_failed(cudaFree(probe), "free probe allocation");
+    return true;
+}
+
+// AMG PCG for n >= 50000. Every hierarchy gets a plan from its exact storage,
+// against the memory free once it is built: resident, a suffix of the fine rows
+// on the CPU, or the host hierarchy when even the fixed device state does not
+// fit. Mixed precision keeps an fp32 hierarchy when that is resident; otherwise
+// it shares the fp64 path.
+static detail::AmgSystem::EngineFactory cuda_amg_engines(CudaPCGContext& ctx, bool mixed) {
+    return [&ctx, mixed](const detail::ScaledAmgMatrix& scaled, const detail::AmgHierarchy& h)
         -> std::unique_ptr<detail::AmgEngine> {
+        using Report = AmgDeviceReport;
         const auto& fine = *h.levels.front().A;
-        std::optional<detail::AmgDevicePartition> partition;
-        if (budget) {
-            const auto fixed = cuda_amg::Solver<double>::fixed_bytes(h);
-            if (*budget >= fine.nrows * 80) partition = detail::AmgDevicePartition::plan(fine, *budget, fixed);
-            if (!partition) {
-                log_debug(std::format("[cuda device AMG] workspace does not fit: fixed={} budget={} bytes; using host hierarchy", fixed, *budget));
-                return std::make_unique<detail::HostAmgEngine>(scaled, h,
-                    [b = *budget](const auto& matrix) { return std::make_unique<CudaAmgSpmv>(matrix, b); }, ctx.max_iters);
+        const auto rows = int(fine.nrows);
+        auto budget = cuda_device_budget(ctx);
+        std::size_t free_bytes = 0, total_bytes = 0;
+        throw_if_cuda_failed(cudaMemGetInfo(&free_bytes, &total_bytes), "query device memory");
+        if (mixed) {
+            const auto fixed = cuda_amg::Solver<float>::fixed_bytes(h);
+            const auto planned = fixed + detail::amg_csr_bytes(fine, rows);
+            if (planned <= budget && cuda_device_can_allocate(planned)) {
+                log_debug(std::format("[cuda device AMG] fp32 hierarchy resident: {} GPU rows, 0 CPU rows; fixed={} planned={} budget={} bytes",
+                    rows, fixed, planned, budget));
+                ctx.last_amg_device = Report{Report::Execution::Resident, rows, 0, planned, budget, 0};
+                return std::make_unique<CudaAmgEngine<float>>(ctx, h, std::nullopt, ctx.max_iters, free_bytes);
             }
-            detail::log_amg_device_plan("cuda", fine, *partition, fixed, *budget);
         }
-        if (partition || !mixed) return std::make_unique<CudaAmgEngine<double>>(h, std::move(partition), ctx.max_iters);
-        return std::make_unique<CudaAmgEngine<float>>(h, std::nullopt, ctx.max_iters);
+        const auto fixed = cuda_amg::Solver<double>::fixed_bytes(h);
+        std::optional<detail::AmgDevicePartition> partition;
+        if (budget >= fine.nrows * 80) partition = detail::AmgDevicePartition::plan(fine, budget, fixed);
+        if (partition && !cuda_device_can_allocate(partition->device_bytes)) {
+            log_warn(std::format("[cuda device AMG] {} planned bytes are no longer available; using host hierarchy", partition->device_bytes));
+            partition.reset();
+            budget = 0;
+        }
+        if (!partition) {
+            log_debug(std::format("[cuda device AMG] workspace does not fit: fixed={} budget={} bytes; using host hierarchy", fixed, budget));
+            ctx.last_amg_device = Report{Report::Execution::Host, 0, rows, 0, budget, 0};
+            return std::make_unique<detail::HostAmgEngine>(scaled, h,
+                [budget](const auto& matrix) { return std::make_unique<CudaAmgSpmv>(matrix, budget); }, ctx.max_iters);
+        }
+        detail::log_amg_device_plan("cuda", fine, *partition, fixed, budget);
+        const auto gpu_rows = partition->gpu_rows;
+        ctx.last_amg_device = Report{gpu_rows == rows ? Report::Execution::Resident : Report::Execution::FineRowSpill,
+            gpu_rows, rows - gpu_rows, partition->device_bytes, budget, 0};
+        return std::make_unique<CudaAmgEngine<double>>(ctx, h, std::move(partition), ctx.max_iters, free_bytes);
     };
 }
 
@@ -2337,8 +2386,8 @@ static void record_amg(CudaPCGContext& ctx, const detail::AmgPcgResult& result) 
 }
 
 static std::vector<double> solve_cuda_amg(CudaPCGContext& ctx, const SparseMatrixBuilder::CsrData& k,
-    const std::vector<double>& rhs, std::optional<std::size_t> budget, bool mixed, const char* label) {
-    detail::AmgSystem system(k, ctx.tolerance, cuda_amg_engines(ctx, budget, mixed), ctx.near_nullspace);
+    const std::vector<double>& rhs, bool mixed, const char* label) {
+    detail::AmgSystem system(k, ctx.tolerance, cuda_amg_engines(ctx, mixed), ctx.near_nullspace);
     auto result = system.solve(k, rhs);
     record_amg(ctx, result);
     require_refined(ctx, label);
@@ -2352,8 +2401,7 @@ static std::unique_ptr<LinearFactor> make_cuda_amg_factor(CudaPCGContext& ctx,
     validate_pcg_inputs(k, std::vector<double>(k.n));
     return std::make_unique<detail::AmgFactor>(k,
         [&ctx, mixed](const SparseMatrixBuilder::CsrData& matrix) {
-            const auto budget = mixed ? cuda_pcg_spill_budget<float>(ctx, matrix) : cuda_pcg_spill_budget<double>(ctx, matrix);
-            return std::make_unique<detail::AmgSystem>(matrix, ctx.tolerance, cuda_amg_engines(ctx, budget, mixed));
+            return std::make_unique<detail::AmgSystem>(matrix, ctx.tolerance, cuda_amg_engines(ctx, mixed));
         },
         [&ctx, label](const detail::AmgPcgResult& result) -> Status {
             record_amg(ctx, result);
@@ -2365,8 +2413,8 @@ static std::unique_ptr<LinearFactor> make_cuda_amg_factor(CudaPCGContext& ctx,
 static std::vector<double> solve_cuda_pcg_stable(
     CudaPCGContext& ctx, const SparseMatrixBuilder::CsrData& K, const std::vector<double>& F) {
     validate_pcg_inputs(K, F);
+    if (K.n >= 50000) return solve_cuda_amg(ctx, K, F, false, "cuda-pcg AMG");
     const auto budget = cuda_pcg_spill_budget<double>(ctx, K);
-    if (K.n >= 50000) return solve_cuda_amg(ctx, K, F, budget, false, "cuda-pcg AMG");
     if (budget) return solve_cuda_partitioned<double>(ctx, K, F, *budget);
     return solve_cuda_pcg_colored(ctx, K, F, solve_cuda_pcg_stable_ordered, "cuda-pcg");
 }
@@ -2466,8 +2514,8 @@ static std::vector<double> solve_cuda_pcg_mixed_ordered(
 static std::vector<double> solve_cuda_pcg_mixed(
     CudaPCGContext& ctx, const SparseMatrixBuilder::CsrData& K, const std::vector<double>& F) {
     validate_pcg_inputs(K, F);
+    if (K.n >= 50000) return solve_cuda_amg(ctx, K, F, true, "cuda-pcg mixed AMG");
     const auto budget = cuda_pcg_spill_budget<float>(ctx, K);
-    if (K.n >= 50000) return solve_cuda_amg(ctx, K, F, budget, true, "cuda-pcg mixed AMG");
     if (budget) return solve_cuda_partitioned<float>(ctx, K, F, *budget);
     return solve_cuda_pcg_colored(ctx, K, F, solve_cuda_pcg_mixed_ordered, "cuda-pcg-mixed");
 }

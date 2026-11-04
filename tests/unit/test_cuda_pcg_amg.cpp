@@ -24,6 +24,9 @@ TEST(CudaPcgAmg, CudaNotCompiled) {
 }
 #else
 
+void* cuda_test_hold_all_but(std::size_t leave);
+void cuda_test_release(void* held);
+
 namespace {
 
 // 0: resident; 13 MiB: part of the fine rows on the CPU; 1 MiB: below the
@@ -88,6 +91,10 @@ template <class Backend> void check_structure(const char* label) {
     ASSERT_GE(r.k.n, 50000);
     ASSERT_TRUE(r.modes);
     const double top = test::largest_magnitude(r.u);
+    // The host cycle is the one proved SPD with its spectrum in (0, 1] by
+    // test_amg_vcycle.cpp. The device cycles apply the same operator, so CG sees
+    // the same iterations, up to rounding (and fp32 rounding in the mixed hierarchy).
+    const int host_iterations = test::host_amg_iterations(r);
     for (const std::size_t budget : {std::size_t(0), std::size_t(120) * 1024 * 1024, std::size_t(1024) * 1024}) {
         auto backend = create<Backend>(budget);
         if (!backend) GTEST_SKIP() << "CUDA not available on this system";
@@ -97,11 +104,81 @@ template <class Backend> void check_structure(const char* label) {
         const auto x = backend->solve(r.k, r.f);
         ASSERT_TRUE(backend->last_refinement() && backend->last_refinement()->converged);
         EXPECT_LE(backend->last_iteration_count(), 120);
+        EXPECT_NEAR(double(backend->last_iteration_count()), double(host_iterations), 0.15 * host_iterations + 2);
         for (std::size_t i = 0; i < x.size(); ++i) ASSERT_NEAR(x[i], r.u[i], 1e-6 * top) << i;
     }
 }
 
+// Every hierarchy gets a plan from its exact storage, whatever the size of the
+// deck and the memory free: this is what keeps a hierarchy larger than any
+// estimate from the matrix alone off the device, and off an allocation failure.
+template <class Backend> void check_plan(const char* label) {
+    using Execution = AmgDeviceReport::Execution;
+    const auto r = test::assemble(test::hex_bar(17));
+    const double top = test::largest_magnitude(r.u);
+    // With hold, this much memory is left to the solve: starting a device context
+    // takes more than a full device has, so that happens first.
+    const auto solve = [&](std::size_t budget, std::optional<std::size_t> leave = std::nullopt) {
+        auto backend = create<Backend>(budget);
+        EXPECT_TRUE(backend);
+        backend->set_near_nullspace(r.modes);
+        const std::unique_ptr<void, void (*)(void*)> held(leave ? cuda_test_hold_all_but(*leave) : nullptr, cuda_test_release);
+        const auto x = backend->solve(r.k, r.f);
+        EXPECT_TRUE(backend->last_refinement() && backend->last_refinement()->converged);
+        for (std::size_t i = 0; i < x.size(); ++i) EXPECT_NEAR(x[i], r.u[i], 1e-6 * top) << i;
+        const auto report = backend->last_amg_device_report();
+        EXPECT_TRUE(report);
+        return report.value_or(AmgDeviceReport{});
+    };
+    if (!create<Backend>(0)) GTEST_SKIP() << "CUDA not available on this system";
+    SCOPED_TRACE(label);
+    constexpr std::size_t kMiB = 1024 * 1024;
+
+    // No budget given, plenty of memory: planned anyway, and the plan is right.
+    const auto resident = solve(0);
+    EXPECT_EQ(resident.execution, Execution::Resident);
+    EXPECT_EQ(resident.cpu_rows, 0);
+    EXPECT_EQ(resident.gpu_rows, r.k.n);
+    EXPECT_GT(resident.planned_bytes, 0U);
+    EXPECT_LE(resident.planned_bytes, resident.budget_bytes);
+    EXPECT_GE(double(resident.measured_bytes), 0.9 * double(resident.planned_bytes));
+    EXPECT_LE(double(resident.measured_bytes), 1.1 * double(resident.planned_bytes) + double(64 * kMiB));
+
+    // A budget below the resident plan moves fine rows to the CPU, within it.
+    const auto spill = solve(resident.planned_bytes * 9 / 10);
+    EXPECT_EQ(spill.execution, Execution::FineRowSpill);
+    EXPECT_GT(spill.cpu_rows, 0);
+    EXPECT_EQ(spill.gpu_rows + spill.cpu_rows, r.k.n);
+    EXPECT_LE(spill.planned_bytes, spill.budget_bytes);
+    EXPECT_LE(double(spill.measured_bytes), double(spill.budget_bytes) + double(64 * kMiB));
+
+    // Below the fixed state, the host hierarchy.
+    const auto host = solve(kMiB);
+    EXPECT_EQ(host.execution, Execution::Host);
+    EXPECT_EQ(host.gpu_rows, 0);
+
+    // The same, from memory really in use with no budget given. The plan must see
+    // what is free once the hierarchy is built, not what a budget says. What is
+    // left: the headroom plus 75% of the resident plan, then under the headroom.
+    constexpr std::size_t kHeadroom = 256 * kMiB;
+    const auto tight = solve(0, kHeadroom + resident.planned_bytes * 3 / 4);
+    EXPECT_EQ(tight.execution, Execution::FineRowSpill);
+    EXPECT_LE(tight.planned_bytes, tight.budget_bytes);
+    EXPECT_LE(tight.budget_bytes, resident.planned_bytes);
+    const auto full = solve(0, 64 * kMiB);
+    EXPECT_EQ(full.execution, Execution::Host);
+    EXPECT_EQ(full.budget_bytes, 0U);
+}
+
 } // namespace
+
+TEST(CudaPcgAmg, EveryHierarchyIsPlannedFp64) {
+    check_plan<CudaPCGSolverBackend>("fp64");
+}
+
+TEST(CudaPcgAmg, EveryHierarchyIsPlannedMixed) {
+    check_plan<CudaMixedPCGSolverBackend>("mixed");
+}
 
 TEST(CudaPcgAmg, Fp64HierarchyResidentSpilledAndOnTheHost) {
     check_amg<CudaPCGSolverBackend>("cuda-pcg");

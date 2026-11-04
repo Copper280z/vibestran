@@ -127,8 +127,12 @@ Status VulkanSolverBackend::accept_amg(const detail::AmgPcgResult& result) {
 }
 
 std::size_t VulkanSolverBackend::device_budget() const {
-    auto available = static_cast<std::size_t>(
-        static_cast<double>(ctx_.available_memory()) * (1.0 - cfg_.vram_headroom));
+    // Reported free memory is not all allocatable, and a fraction of a nearly
+    // full device does not cover what the driver needs.
+    constexpr std::size_t kMinimumHeadroom = std::size_t(256) * 1024 * 1024;
+    const auto free_bytes = static_cast<std::size_t>(ctx_.available_memory());
+    const auto headroom = std::max(static_cast<std::size_t>(static_cast<double>(free_bytes) * cfg_.vram_headroom), kMinimumHeadroom);
+    auto available = free_bytes > headroom ? free_bytes - headroom : std::size_t(0);
     if (cfg_.device_memory_budget) available = std::min(available, cfg_.device_memory_budget);
     return available;
 }
@@ -140,7 +144,7 @@ VulkanSolverBackend::factor(const SparseMatrixBuilder::CsrData& K, const FactorO
     try {
         Pipelines* pl = ensure_pipelines(ctx_, pipelines_);
         return make_vulkan_amg_factor(ctx_, *pl, K, cfg_.tolerance, cfg_.max_iterations,
-            [this] { return device_budget(); }, last_full_gpu_,
+            [this] { return device_budget(); }, last_full_gpu_, last_amg_device_,
             [this](const detail::AmgPcgResult& result) { return accept_amg(result); });
     } catch (const std::exception& e) {
         return Error{std::format("{}: {}", name(), e.what())};
@@ -217,7 +221,8 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
     // A multilevel preconditioner removes the low-frequency error that Jacobi
     // leaves behind on refined meshes. Leave conservative hierarchy headroom.
     if (n >= 50000 && ctx_.device_info().supports_float64) {
-        return solve_vulkan_amg(ctx_, *pl, K, F, cfg_.tolerance, cfg_.max_iterations, available, last_full_gpu_,
+        return solve_vulkan_amg(ctx_, *pl, K, F, cfg_.tolerance, cfg_.max_iterations,
+            [this] { return device_budget(); }, last_full_gpu_, last_amg_device_,
             [this](const detail::AmgPcgResult& result) { return accept_amg(result); }, near_nullspace());
     }
 

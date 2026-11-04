@@ -111,6 +111,9 @@ public:
   [[nodiscard]] std::optional<RefinementReport> last_refinement() const noexcept override {
     return last_refinement_;
   }
+  [[nodiscard]] std::optional<AmgDeviceReport> last_amg_device_report() const noexcept override {
+    return last_amg_device_;
+  }
   /// Applies to the CPU direct fallback below min_dofs_for_gpu; the GPU PCG
   /// is always refined.
   void set_refinement(bool enabled) noexcept override { refine_direct_ = enabled; }
@@ -141,6 +144,7 @@ private:
   int last_iters_{0};
   double last_residual_{0.0};
   std::optional<RefinementReport> last_refinement_;
+  std::optional<AmgDeviceReport> last_amg_device_;
   bool refine_direct_{false};
 
   std::unique_ptr<Pipelines> pipelines_;
