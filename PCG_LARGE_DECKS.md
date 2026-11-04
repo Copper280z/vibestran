@@ -16,15 +16,16 @@ driver 580.178.04, CUDA 12.8, Release Meson build. cuDSS is unchanged.
 
 Measured on 2026-11-03 on the same machine. The timings in the rest of this
 file predate this section and use the scalar configuration,
-`--amg-modes=constant`, which stays the default. `--amg-modes=rigid` is selected
-explicitly, per deck or per run.
+`--amg-modes=constant`, the default when they were taken. `rigid` became the
+structural default on 2026-11-04: see "The default" below.
 
 Tuning on one deck overfits, so `tools/amg_model_suite.py` judges the AMG setup
 by how iterations grow with refinement in each class of model, iterations ~
 h^-p. Raw results are in `benchmarks/pcg/amg-model-suite-20261103.json`.
 
-Structural solves (SOL 101, 50000 equations or more, GPU PCG backends) can
-select `--amg-modes=rigid` (`PARAM,AMGMODES,RIGID`). Thermal and magnetic solves
+Structural solves (SOL 101, 50000 equations or more, GPU PCG backends) use
+`rigid` unless `--amg-modes=constant` (`PARAM,AMGMODES,CONSTANT`) selects the scalar
+hierarchy. Thermal and magnetic solves
 always use the scalar hierarchy, with unchanged iteration counts. Three changes
 were each necessary; none pays off alone:
 
@@ -104,7 +105,7 @@ equations; the plan's capacity is a linear extrapolation):
 | CTETRA10 | not measured | 2840 | about 3.0M DOF |
 
 The 15.4M-equation stress deck above would no longer be fully resident with
-rigid modes, one reason they are not the default.
+rigid modes: it would spill by default, and stays resident with `constant`.
 
 **Scalar hierarchies have a separate problem, not changed here.** `thermal-hex`
 grows at p = 0.97 with operator complexity 1.04-1.09: 122 / 200 / 308 iterations
@@ -181,8 +182,8 @@ It costs iterations where SPAI-0 was above the limit yet happened to work: shell
 CTETRA10 and 26% on solid-thin, and 39% at one cylinder level, whose neighbours do
 not move (580 to 581 coarser, and 1451 to 1452 finer).
 
-**What the default still does not do.** `constant` remains the default for its
-memory and for the classes it wins, but it is not robust: it fails solid-thin at
+**Why `constant` is not robust.** It needs less memory and wins some classes, but
+it fails solid-thin at
 every level and stiffened-panel above the coarsest, where it needs 100000 iterations,
 and shell-thin at 955k equations exceeded the 150 s limit. Total solver time (setup
 plus iterations) and planned device memory at the finest level of each class:
@@ -207,8 +208,8 @@ plus iterations) and planned device memory at the finest level of each class:
 
 Rigid solved all 39 structural runs; constant solved 33, failed 5 and timed out once.
 Rigid is at worst 3.6 times slower than constant here and needs about twice the
-memory. These are resident times. How the two compare at equal budgets is the next
-measurement, and it should settle the default.
+memory. These are resident times. The equal-budget section below compares the two under
+memory pressure.
 
 **The applied cycle is tested, not only its parts.** `test_amg_vcycle.cpp` forms B
 explicitly on small assembled systems, with and without modes, in basic, shifted,
@@ -440,8 +441,28 @@ complete-deck ratio, paired where repeated:
   with constant (21.08 s and 1648 iterations against 19.14 s and 949) and 1.6% slower
   with rigid, so fp32 gives no general speedup here.
 
+### The default
+
+`rigid` became the structural default on 2026-11-04, by decision after these results
+and not because it passed: neither method meets the criteria on the synthetic classes.
+Constant does not solve shell-thin on CUDA fp64 or Vulkan and times out on rbe-assembly
+with both on the host. Rigid's failures are slowness on shell-membrane and space-frame,
+apart from its Vulkan timeout on rbe-assembly with its fixed state on the host, the one
+budget where it fails and constant solves. Rigid meets the criteria on both realistic
+rover decks, and constant does not.
+
+The costs are about twice the device memory, 4.1-5.4 GiB more host memory on the large
+decks, and up to 11.4x complete-deck time on membrane-like decks under memory pressure.
+`--amg-modes=constant` or `PARAM,AMGMODES,CONSTANT` selects the scalar hierarchy for such
+decks. Nothing changes below 50000 equations, on the CPU backends, or on Vulkan devices
+without fp64, which cannot use the modes.
+
 ### Limits of these results
 
+- `space-frame` is a cubic lattice filling its whole volume: rigid-jointed CBARs between
+  nearest neighbours, with no diagonals, so a lateral load is carried by member bending.
+  It is not a triangulated space frame, whose members carry mostly axial load, so its
+  results should not be read as evidence about those structures.
 - Clear-cut cells were not repeated, including constant's host failures and rigid's
   host runs on membrane, frame and rbe. The rbe-assembly 75% cell had 3 pairs and
   shell-thin both resident had 2.

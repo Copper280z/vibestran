@@ -311,13 +311,13 @@ SolverResults LinearStaticSolver::solve(const Model &model) {
 
 namespace {
 
-/// The command line over PARAM,AMGMODES over the default, the scalar hierarchy.
+/// The command line over PARAM,AMGMODES over the default, the rigid-body modes.
 AmgModes structural_amg_modes(const Model &model, std::optional<AmgModes> override_modes) {
   if (override_modes)
     return *override_modes;
   const auto it = model.params.find("AMGMODES");
   if (it == model.params.end())
-    return AmgModes::Constant;
+    return AmgModes::Rigid;
   const auto parsed = parse_amg_modes(it->second);
   if (!parsed)
     throw SolverError(std::format("PARAM,AMGMODES,{}: expected CONSTANT or RIGID", it->second));

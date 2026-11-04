@@ -40,7 +40,7 @@ using Csr = SparseMatrixBuilder::CsrData;
 
 namespace {
 struct Options {
-    std::string backend{"cpu-pcg"}, matrix, rhs, reference, capture_deck, capture_prefix, refactor_from, structural_deck, amg_modes{"constant"};
+    std::string backend{"cpu-pcg"}, matrix, rhs, reference, capture_deck, capture_prefix, refactor_from, structural_deck, amg_modes{"rigid"};
     int side{24}, repeats{3}, warmups{1};
     double contrast{1.0};
     double budget_mib{0};

@@ -186,12 +186,12 @@ Nastran, and is assessed with a residual computed in compensated
   for an ill-conditioned K it is ~ eps ||K|| ||u|| / ||F|| even for the exact
   solution rounded to double.
 
-`--amg-modes=rigid` (or `PARAM,AMGMODES,RIGID`) gives the AMG preconditioner of
-SOL 101 on the GPU PCG backends the model's rigid-body modes, which converges on
-far more structures but needs more device memory. `constant`, the default, uses
-the scalar hierarchy, which needs less memory and suits nearly decoupled fields
-but does not converge on some structures, such as stiffened panels and thin solids,
-so try `rigid` when it does not. The choice
+On the GPU PCG backends, the AMG preconditioner of SOL 101 uses the model's
+rigid-body modes by default from 50000 equations, which converges on far more
+structures. `--amg-modes=constant` (or `PARAM,AMGMODES,CONSTANT`) uses the scalar
+hierarchy instead, which needs about half the device memory and less host memory,
+and suits nearly decoupled fields such as membrane plates, but does not converge on
+some structures, such as thin shells, stiffened panels and thin solids. The choice
 changes speed and memory, not the solution, which refinement accepts against the
 assembled stiffness either way. See `PCG_LARGE_DECKS.md`.
 

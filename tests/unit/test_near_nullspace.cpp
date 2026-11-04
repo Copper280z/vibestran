@@ -147,12 +147,13 @@ TEST(AmgModes, ChoicePrecedence) {
     const std::string bulk = kSteel +
         "GRID,1,,0.,0.,0.\nGRID,2,,1.,0.,0.\nGRID,3,,1.,1.,0.\nGRID,4,,0.,1.,0.\nCQUAD4,1,2,1,2,3,4\n"
         "SPC1,1,123456,1,2\nFORCE,2,3,0,1.,0.,0.,1.\n";
-    EXPECT_FALSE(assemble(bulk, true, std::nullopt).modes) << "structures default to the scalar hierarchy";
+    EXPECT_TRUE(assemble(bulk, true, std::nullopt).modes) << "structures default to the rigid-body modes";
     EXPECT_FALSE(assemble(bulk, true, std::nullopt, "PARAM,AMGMODES,CONSTANT\n").modes);
     EXPECT_TRUE(assemble(bulk, true, std::nullopt, "PARAM,AMGMODES,RIGID\n").modes);
     EXPECT_TRUE(assemble(bulk, true, AmgModes::Rigid, "PARAM,AMGMODES,CONSTANT\n").modes)
         << "the command line overrides the deck";
-    EXPECT_FALSE(assemble(bulk, true, AmgModes::Constant).modes);
+    EXPECT_FALSE(assemble(bulk, true, AmgModes::Constant, "PARAM,AMGMODES,RIGID\n").modes)
+        << "in both directions";
     EXPECT_THROW((void)assemble(bulk, true, std::nullopt, "PARAM,AMGMODES,BOGUS\n"), SolverError);
     EXPECT_EQ(parse_amg_modes("rigid"), AmgModes::Rigid);
     EXPECT_EQ(parse_amg_modes("Constant"), AmgModes::Constant);

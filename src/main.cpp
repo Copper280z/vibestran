@@ -209,7 +209,7 @@ static void print_usage() {
       "                             (also PARAM,REFINE,YES)\n"
       "  --amg-modes=constant|rigid Near-nullspace of the AMG preconditioner\n"
       "                             for SOL 101 on GPU PCG backends;\n"
-      "                             constant is the default (also\n"
+      "                             rigid is the default (also\n"
       "                             PARAM,AMGMODES)\n"
       "  --dump-system=<prefix>     Write each subcase's reduced K (and M,\n"
       "                             F, u) in Matrix Market format and its\n"
