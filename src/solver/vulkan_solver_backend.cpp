@@ -145,7 +145,7 @@ VulkanSolverBackend::factor(const SparseMatrixBuilder::CsrData& K, const FactorO
         Pipelines* pl = ensure_pipelines(ctx_, pipelines_);
         return make_vulkan_amg_factor(ctx_, *pl, K, cfg_.tolerance, cfg_.max_iterations,
             [this] { return device_budget(); }, last_full_gpu_, last_amg_device_,
-            [this](const detail::AmgPcgResult& result) { return accept_amg(result); });
+            [this](const detail::AmgPcgResult& result) { return accept_amg(result); }, near_nullspace());
     } catch (const std::exception& e) {
         return Error{std::format("{}: {}", name(), e.what())};
     }

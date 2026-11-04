@@ -690,6 +690,11 @@ if run_command(python, '-c', 'import numpy', check: false).returncode() == 0
     timeout : 120,
     suite   : 'e2e',
   )
+  test('amg_budget_study', python,
+    args    : [files('tools/test_amg_budget_study.py')],
+    timeout : 60,
+    suite   : 'e2e',
+  )
 endif
 
 # Integration tests

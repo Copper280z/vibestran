@@ -549,10 +549,10 @@ std::vector<double> solve_vulkan_amg(VulkanContext& ctx, Pipelines& pl,
 std::unique_ptr<LinearFactor> make_vulkan_amg_factor(VulkanContext& ctx, Pipelines& pl,
     const SparseMatrixBuilder::CsrData& k, double tolerance, int max_iterations,
     std::function<std::size_t()> budget, bool& fully_resident,
-    std::optional<AmgDeviceReport>& report, VulkanAmgAccept accept) {
+    std::optional<AmgDeviceReport>& report, VulkanAmgAccept accept, std::shared_ptr<const NearNullspace> modes) {
     return std::make_unique<detail::AmgFactor>(k,
-        [&ctx, &pl, tolerance, max_iterations, budget = std::move(budget), &fully_resident, &report](const SparseMatrixBuilder::CsrData& matrix) {
-            return make_vulkan_amg(ctx, pl, matrix, tolerance, max_iterations, budget, fully_resident, report);
+        [&ctx, &pl, tolerance, max_iterations, budget = std::move(budget), &fully_resident, &report, modes = std::move(modes)](const SparseMatrixBuilder::CsrData& matrix) {
+            return make_vulkan_amg(ctx, pl, matrix, tolerance, max_iterations, budget, fully_resident, report, modes);
         },
         std::move(accept));
 }

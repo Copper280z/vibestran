@@ -2397,11 +2397,11 @@ static std::vector<double> solve_cuda_amg(CudaPCGContext& ctx, const SparseMatri
 // factor() for n >= 50000: the hierarchy and device workspace persist across
 // right-hand sides and same-pattern refactor() calls.
 static std::unique_ptr<LinearFactor> make_cuda_amg_factor(CudaPCGContext& ctx,
-    const SparseMatrixBuilder::CsrData& k, bool mixed, const char* label) {
+    const SparseMatrixBuilder::CsrData& k, bool mixed, const char* label, std::shared_ptr<const NearNullspace> modes) {
     validate_pcg_inputs(k, std::vector<double>(k.n));
     return std::make_unique<detail::AmgFactor>(k,
-        [&ctx, mixed](const SparseMatrixBuilder::CsrData& matrix) {
-            return std::make_unique<detail::AmgSystem>(matrix, ctx.tolerance, cuda_amg_engines(ctx, mixed));
+        [&ctx, mixed, modes = std::move(modes)](const SparseMatrixBuilder::CsrData& matrix) {
+            return std::make_unique<detail::AmgSystem>(matrix, ctx.tolerance, cuda_amg_engines(ctx, mixed), modes);
         },
         [&ctx, label](const detail::AmgPcgResult& result) -> Status {
             record_amg(ctx, result);

@@ -70,7 +70,7 @@ Result<std::unique_ptr<LinearFactor>>
 CudaPCGSolverBackend::factor(const SparseMatrixBuilder::CsrData& K, const FactorOptions& options) {
     if (K.n < 50000) return SolverBackend::factor(K, options);
     try {
-        return make_cuda_amg_factor(*ctx_, K, false, "cuda-pcg AMG");
+        return make_cuda_amg_factor(*ctx_, K, false, "cuda-pcg AMG", near_nullspace());
     } catch (const std::exception& e) {
         return Error{std::format("{}: {}", name(), e.what())};
     }

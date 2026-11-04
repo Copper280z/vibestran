@@ -34,7 +34,7 @@ std::vector<double> solve_vulkan_amg(VulkanContext& ctx, Pipelines& pl,
 std::unique_ptr<LinearFactor> make_vulkan_amg_factor(VulkanContext& ctx, Pipelines& pl,
     const SparseMatrixBuilder::CsrData& k, double tolerance, int max_iterations,
     std::function<std::size_t()> budget, bool& fully_resident,
-    std::optional<AmgDeviceReport>& report, VulkanAmgAccept accept);
+    std::optional<AmgDeviceReport>& report, VulkanAmgAccept accept, std::shared_ptr<const NearNullspace> modes);
 
 // Fine products for the host hierarchy: a GPU row prefix within the budget
 // (vulkan_pcg_tiled.cpp).

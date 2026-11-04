@@ -11,6 +11,7 @@
 #ifdef HAVE_CUDA
 #include "solver/cuda_mixed_pcg_solver_backend.hpp"
 #include "solver/cuda_pcg_solver_backend.hpp"
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <variant>
@@ -106,6 +107,24 @@ template <class Backend> void check_structure(const char* label) {
         EXPECT_LE(backend->last_iteration_count(), 120);
         EXPECT_NEAR(double(backend->last_iteration_count()), double(host_iterations), 0.15 * host_iterations + 2);
         for (std::size_t i = 0; i < x.size(); ++i) ASSERT_NEAR(x[i], r.u[i], 1e-6 * top) << i;
+        // A factor keeps the same hierarchy across solves and a refactor; 2K solves to half.
+        auto made = backend->factor(r.k);
+        ASSERT_TRUE(std::holds_alternative<std::unique_ptr<LinearFactor>>(made));
+        auto factor = std::get<std::unique_ptr<LinearFactor>>(std::move(made));
+        for (const double scale : {1.0, 2.0}) {
+            SCOPED_TRACE(scale);
+            if (scale != 1.0) {
+                auto doubled = r.k;
+                std::transform(doubled.values.begin(), doubled.values.end(), doubled.values.begin(),
+                               [scale](double value) { return value * scale; });
+                ASSERT_FALSE(factor->refactor(doubled));
+            }
+            auto solved = factor->solve(r.f);
+            ASSERT_TRUE(std::holds_alternative<std::vector<double>>(solved));
+            const auto& u = std::get<std::vector<double>>(solved);
+            EXPECT_NEAR(double(backend->last_iteration_count()), double(host_iterations), 0.15 * host_iterations + 2);
+            for (std::size_t i = 0; i < u.size(); ++i) ASSERT_NEAR(u[i], r.u[i] / scale, 1e-6 * top) << i;
+        }
     }
 }
 

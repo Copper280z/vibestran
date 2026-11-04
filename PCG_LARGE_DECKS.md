@@ -260,6 +260,209 @@ Growth exponents now come from the refinement parameter, and classes that are no
 h-refinement say so: space-frame grows its domain at fixed bay length, and solid-thin's
 aspect ratio improves as it refines. rbe-assembly's p is 1.19 by this measure.
 
+## Equal-budget crossover (Priority 1)
+
+Measured on 2026-11-04 on the Titan V at the commit and working-tree patch in the
+manifest. Rigid needs about twice the device memory, so resident times alone flatter
+it. `tools/amg_budget_study.py` runs both methods at identical absolute budgets: both
+resident, rigid at 90, 75 and 50% of its fine rows, rigid's fixed state not fitting,
+and neither fitting. The scripts and manifest are in `benchmarks/pcg/amg-budget-20261104/`;
+every sample, log, the patch and the binaries stay in `~/pcg-perf/budget-20261104/` on
+the benchmark machine. `report` on those files reproduces the tables here.
+
+Criteria, fixed before the measurements: a default must solve every class at every
+budget where either method solves, and at equal budgets stay within 2x of the better
+method's complete-deck time and 4x of its solver time. Budget conditions where neither
+solves within the limit are reported and do not count.
+
+All 498 runs, phase timings included, recorded the execution their budget predicted,
+once the two tool defects noted below were corrected. Every solved complete deck agreed
+with its class's first solved run to at most 8e-7 of the largest displacement, at the
+F06's printed precision.
+Timeouts were 300 s, and 1200 s for the large decks.
+
+### About a million equations, CUDA fp64
+
+Complete-deck seconds, median of the samples; `n` is the number of samples behind the
+rigid column at each repeated cell, and a cell with no `n` is one run. Constant stays
+resident in every column but the last, so its time is one state repeated.
+
+| Class | Method | Both resident | Rigid 90% | Rigid 75% | Rigid 50% | Rigid on host | Both on host |
+|---|---|---:|---:|---:|---:|---:|---:|
+| solid-hex | constant | 19.14 | 19.08 | 19.08 | 19.15 | 19.15 | 94.40 |
+| | rigid | 18.03 (n=6) | 18.07 | 18.56 | 19.17 (n=6) | 20.27 (n=6) | 20.32 |
+| solid-tet10 | constant | 15.44 | 15.36 | 15.36 | 15.45 | 15.43 | 121.82 |
+| | rigid | 11.59 (n=6) | 11.71 | 12.22 | 13.34 (n=6) | 15.20 (n=6) | 15.23 |
+| shell-thin | constant | fails | fails | fails | fails | fails | timeout |
+| | rigid | 8.00 (n=3) | 8.21 | 10.78 | 15.04 | 24.80 | 24.80 |
+| rbe-assembly | constant | 147.80 | 147.80 | 147.77 | 147.71 | 147.80 | timeout |
+| | rigid | 47.78 | 59.44 | 97.03 (n=4) | 182.49 (n=6) | 256.48 | 256.48 |
+| shell-membrane | constant | 6.78 | 6.76 | 6.79 | 6.76 | 6.79 | 28.95 |
+| | rigid | 12.45 (n=6) | 13.21 (n=6) | 22.60 | 38.50 (n=6) | 77.26 | 77.26 |
+| space-frame | constant | 4.66 | 4.64 | 4.61 | 4.68 | 4.61 | 7.68 |
+| | rigid | 5.92 (n=6) | 5.92 (n=6) | 6.25 | 6.95 (n=6) | 12.25 | 12.25 |
+
+Every pair's rigid / constant ratio of complete-deck time was within 2% of its cell's
+median, so these verdicts do not rest on noise:
+
+| Cell | Median | Verdict |
+|---|---:|---|
+| solid-hex both resident | 0.94 | rigid |
+| solid-hex rigid 50% | 1.00 | tie |
+| solid-hex rigid on host | 1.06 | constant |
+| solid-tet10 both resident | 0.75 | rigid |
+| solid-tet10 rigid 50% | 0.86 | rigid |
+| solid-tet10 rigid on host | 0.98 | rigid |
+| rbe-assembly rigid 75% | 0.66 | rigid |
+| rbe-assembly rigid 50% | 1.24 | constant |
+| shell-membrane both resident | 1.84 | constant |
+| shell-membrane rigid 90% | 1.96 | constant |
+| shell-membrane rigid 50% | 5.70 | constant |
+| space-frame both resident | 1.27 | constant |
+| space-frame rigid 90% | 1.28 | constant |
+| space-frame rigid 50% | 1.48 | constant |
+
+Constant fails shell-thin deterministically: three runs at 100000 iterations and 258 s,
+each ending with an estimated error of 1.18e-8 against the 1e-8 target.
+
+Spilling costs in proportion to the iterations, since each one pays the gather and the
+host product. At 41 iterations solid-hex barely notices losing half its rows; at 4279
+rbe-assembly goes from 3 times faster than constant to 24% slower. Neither method meets
+the criteria:
+
+- Constant fails or times out on shell-thin at every budget and times out on
+  rbe-assembly on the host. It is 3.1x slower on rbe-assembly when both are resident,
+  and 4.6x and 8.0x slower on the solids when both are on the host. The Priority 0
+  baseline adds solid-thin and stiffened-panel failures.
+- Rigid solves every cell, but is up to 11.4x slower complete and 33x in the solver on
+  shell-membrane, and 2.7x and 11.7x on space-frame with its hierarchy on the host.
+
+### Realistic decks
+
+The two rover shell assemblies, about 60000 and 69000 equations with two subcases, are
+small enough that their budgets are forced. Rigid meets the criteria on both and
+constant does not. These budgets are near one MiB of granularity, so "50%" holds 55 and
+54% of the rows.
+
+| Deck | Method | Both resident | Rigid 50% | Rigid on host | Both on host |
+|---|---|---:|---:|---:|---:|
+| rover-complete | constant | 7.94 | 7.93 | 7.95 | 24.00 |
+| | rigid | 6.30 | 6.59 | 7.17 | 7.18 |
+| | paired ratio | 0.79 | 0.83 | 0.90 | |
+| rover-static | constant | 8.02 | 8.01 | 8.04 | 24.93 |
+| | rigid | 6.59 | 7.10 | 7.83 | 7.76 |
+| | paired ratio | 0.82 | 0.88 | 0.97, tie | |
+
+### Phases
+
+`pcg_benchmark --structural-deck` times one equation system's phases, n = 5, in seconds.
+The retained solve has a different right-hand side, and the refactor scales K to
+D K D, which the unchanged rigid modes fit only approximately.
+
+| Class | Budget | Method | Factor | First solve | Retained solve | Refactor | Refactored solve |
+|---|---|---|---:|---:|---:|---:|---:|
+| solid-hex | resident | constant | 1.01 | 4.57 | 6.85 | 0.66 | 4.56 |
+| | | rigid | 3.91 | 0.48 | 0.54 | 2.74 | 0.49 |
+| | rigid 50% | rigid | 3.94 | 1.62 | 1.72 | 2.69 | 1.62 |
+| solid-tet10 | resident | constant | 1.15 | 8.60 | 7.95 | 0.74 | 7.51 |
+| | | rigid | 5.45 | 0.67 | 0.73 | 4.25 | 0.66 |
+| | rigid 50% | rigid | 5.54 | 2.36 | 2.52 | 4.22 | 2.35 |
+| shell-membrane | resident | constant | 0.42 | 1.76 | 1.75 | 0.24 | 1.72 |
+| | | rigid | 1.14 | 6.67 | 6.92 | 0.65 | 6.28 |
+| | rigid 50% | rigid | 1.16 | 32.69 | 33.91 | 0.64 | 30.77 |
+| space-frame | resident | constant | 0.43 | 0.29 | 0.33 | 0.30 | 0.29 |
+| | | rigid | 1.40 | 0.53 | 0.57 | 0.94 | 0.51 |
+| | rigid 50% | rigid | 1.39 | 1.53 | 1.63 | 0.95 | 1.51 |
+
+On the solids rigid repays its setup within the first solve when resident. At 50% of
+the rows the first solve breaks even on solid-hex and still pays on solid-tet10, and
+every later solve is about 3 to 13 times faster. A retained factor would widen this, but
+SOL 101 still sets up again for each subcase.
+
+### Large decks at the card's own limit
+
+No forced budget: the backend's own limit, 80% of the memory the card reports free,
+8181 to 8202 MiB with the desktop's 1.4 GiB in use. Two pairs, except one pair at
+shell-membrane 1320. Solid-hex 70 and shell-membrane 1320 were limited by host memory,
+since rigid's RSS approaches the 26 GiB this study allows.
+
+| Deck | Equations | Method | Execution | Complete s | Solver s | Iterations | Measured MiB | Peak VRAM | Peak RSS MiB |
+|---|---:|---|---|---:|---:|---:|---:|---:|---:|
+| solid-hex 65 | 3.40M | constant | resident | 93.0 | 34.6 | 1534 | 4028 | 4352 | 12304 |
+| | | rigid | resident | 78.2 | 19.1 | 52 | 8044 | 8368 | 16454 |
+| solid-hex 70 | 4.23M | constant | resident | 119.0 | 46.1 | 1654 | 5048 | 5372 | 15282 |
+| | | rigid | 49% spill | 105.2 | 31.7 | 50 | 8242 | 8566 | 20602 |
+| shell-membrane 1258 | 9.50M | constant | resident | 103.8 | 59.1 | 2160 | 4778-4805 | 5101-5129 | 11033 |
+| | | rigid | 98% spill | 192.1 | 146.9 | 4248 | 8224 | 8547 | 16056 |
+| shell-membrane 1320 | 10.46M | constant | resident | 130.0 | 80.3 | 2702 | 5274 | 5598 | 12311 |
+| | | rigid | 70% spill | 493.6 | 443.7 | 3825 | 8238 | 8562 | 17848 |
+
+- The forced budgets predicted these runs. The crossover moves toward rigid with size
+  on solids, because its iterations stay flat (41, 52, 50) while constant's grow (949,
+  1534, 1654): 49% of the rows wins by 12% at 4.2M equations where 50% tied at 0.8M.
+  Membrane does not improve: 3.8x at 70% of the rows.
+- Peak VRAM was measured bytes plus 323 or 324 MiB in all 14 runs, from 3.9 to 8.0 GiB.
+  That overhead is a constant, and no transient showed at 200 ms sampling. Measured bytes
+  exceeded the plan by 17 to 70 MiB, at most 1.5%.
+- Allocation never failed and the device never ran out: the 20% headroom keeps about
+  2 GiB in reserve. Nothing here tests the behavior at physical exhaustion.
+- Host memory is a real limit: rigid uses 4.1 to 5.4 GiB more RSS than constant here.
+
+### Other backends
+
+Screens on solid-hex, shell-thin, shell-membrane and rbe-assembly, with five pairs on
+both resident and rigid 50% for solid-hex and shell-membrane. Rigid / constant
+complete-deck ratio, paired where repeated:
+
+| Cell | CUDA fp64 | Vulkan fp64 | CUDA mixed |
+|---|---:|---:|---:|
+| solid-hex both resident | 0.94 | 0.96 | 0.87 |
+| solid-hex rigid 50% | 1.00 | 1.01 | 0.91 |
+| shell-membrane both resident | 1.84 | 1.85 | 1.79 |
+| shell-membrane rigid 50% | 5.70 | 5.61 | 6.18 |
+| rbe-assembly both resident | 0.32 | 0.32 | 0.33 |
+| rbe-assembly rigid 50% | 1.24 | 1.29 | 1.44 |
+
+- Vulkan fp64 reproduces CUDA fp64, 3 to 9% slower with fine rows on the device. Rigid's
+  host runs are 10 to 25% slower, so it times out on rbe-assembly on the host at 300 s
+  (CUDA 256 s). That is the only budget at which rigid fails where constant solves.
+- Mixed accepts a solution at an estimated error of 1e-6 where fp64 asks for 1e-8, so its
+  times are not at the same accuracy as the other two columns' and only its ratios
+  compare. This changes one verdict. Constant's shell-thin, which fp64 misses at 1.18e-8,
+  passes on mixed at 6.5e-7, in 50000 iterations and 115 s against rigid's 7.8 s at
+  6.0e-8: from failure to 14.8x slower.
+- Mixed needs more device memory than fp64, not less, because the fp32 hierarchy adds to
+  the fp64 fine operator refinement needs. Plans in MiB on solid-hex: constant 1366
+  against 941, rigid 1985 against 1870. Below the fp32 plan it uses fp64, so a constant
+  mixed solve can be resident at budgets its fp32 hierarchy could not fit.
+- At that looser target mixed is 8 to 14% faster than fp64 on rbe-assembly and
+  shell-membrane and 2.5% faster with rigid on shell-thin. On solid-hex it is 10% slower
+  with constant (21.08 s and 1648 iterations against 19.14 s and 949) and 1.6% slower
+  with rigid, so fp32 gives no general speedup here.
+
+### Limits of these results
+
+- Clear-cut cells were not repeated, including constant's host failures and rigid's
+  host runs on membrane, frame and rbe. The rbe-assembly 75% cell had 3 pairs and
+  shell-thin both resident had 2.
+- Phases exclude rbe-assembly, whose constant solves would pass the 300 s limit, and
+  shell-thin, which constant does not solve.
+- Mixed and Vulkan were not run on the large decks.
+- Per-level A/P/R bytes in the results are CSR estimates from the logged nonzeros, not
+  device measurements. Transfers are the logged vector bytes per SpMV.
+- No selection policy exists yet, so no selection overhead was measured.
+
+Two defects in the study tool itself gave false alarms and were corrected: a mixed
+solve's plan needs a second run under its fp32 plan to find its fp64 plan, and a spilled
+run logs the partition it chose rather than what staying resident would need. The first
+mixed attempt, which stopped there, is kept in `cuda-pcg-mixed/first-attempt/`; `stage4.sh`
+replaces the mixed part of `stage3.sh`.
+
+Measuring phases also exposed that `factor()` ignored the near-nullspace on CUDA, mixed
+and Vulkan, so a retained factor silently ran constant. Tests on each backend now check
+a factored and refactored solve against the host's iteration count. Logs now flush each
+second, since a run killed at its time limit otherwise left an empty log.
+
 ## Physical decks
 
 | Deck | GRID nodes | Elements | Free equations |

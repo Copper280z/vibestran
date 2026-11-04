@@ -37,6 +37,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -403,6 +404,11 @@ def parse_log(text):
     plan = re.findall(r"device AMG\].*?fixed=(\d+) planned=(\d+) budget=(\d+) bytes", text)
     measured = re.findall(r"device AMG\] planned=\d+ measured=(\d+) bytes", text)
     host = "using host hierarchy" in text
+    row_budgets = re.findall(r"row budgets: 50%=(\d+) 75%=(\d+) 90%=(\d+) bytes", text)
+    vector_bytes = re.findall(r"(\d+) vector bytes/SpMV", text)
+    hierarchy_line = re.search(r"\[amg-pcg\] \d+ levels: .*", text)
+    level_nnz = re.findall(r"(\d+)x\d+ \((\d+) nnz(?:, P (\d+) nnz, R (\d+) nnz)?\)",
+                           hierarchy_line.group(0) if hierarchy_line else "")
     probes = re.findall(r"cycle probe: valid=(\w+) asymmetry=(\S+) min_energy=(\S+) max_energy=(\S+) "
                         r"contraction=(\S+) last_contraction=(\S+)", text)
     out = {
@@ -420,14 +426,26 @@ def parse_log(text):
         out.update(operator_complexity=float(hierarchy.group(3)), transfer_complexity=float(hierarchy.group(4)),
                    grid_complexity=float(hierarchy.group(5)))
     if gpu_rows:
+        out["gpu_rows"] = int(gpu_rows[-1][0])
         out["cpu_rows"] = int(gpu_rows[-1][1])
         out["execution"] = "spill" if out["cpu_rows"] else "resident"
     if host:
         out["execution"] = "host"
+    if "fp32 hierarchy resident" in text:
+        out["fp32_hierarchy"] = True
     if plan:
         out.update(fixed_bytes=int(plan[-1][0]), planned_bytes=int(plan[-1][1]), budget_bytes=int(plan[-1][2]))
     if measured:
         out["measured_bytes"] = int(measured[-1])
+    if row_budgets:
+        out["row_budgets"] = {"50": int(row_budgets[-1][0]), "75": int(row_budgets[-1][1]), "90": int(row_budgets[-1][2])}
+    if vector_bytes:
+        out["vector_bytes_per_spmv"] = int(vector_bytes[-1])
+    if level_nnz:
+        # Host CSR storage of each operator: 8-byte values, 4-byte columns and row pointers.
+        csr = lambda rows, nnz: 12 * nnz + 4 * (rows + 1)
+        out["level_csr_bytes"] = [{"A": csr(int(r), int(a)), "P": csr(int(r), int(p or 0)), "R": csr(int(r), int(t or 0))}
+                                  for r, a, p, t in level_nnz]
     if probes:
         out["cycle_probe"] = {
             "valid": all(p[0] == "true" for p in probes),
@@ -579,9 +597,42 @@ def verify_against(system, reference, reactions, reference_reactions):
     return failures, measures
 
 
-def run_once(binary, deck, backend, modes, args, dump=False):
+def wait_with_usage(process, timeout):
+    """Waits like Popen.wait and also returns the child's peak resident set in bytes."""
+    deadline = time.monotonic() + timeout
+    while True:
+        pid, status, usage = os.wait4(process.pid, os.WNOHANG)
+        if pid:
+            process.returncode = os.waitstatus_to_exitcode(status)
+            return usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+        if time.monotonic() > deadline:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        time.sleep(0.02)
+
+
+def run_and_measure(command, env, timeout, stdout=subprocess.DEVNULL):
+    """Runs a command to its end or the timeout: (outcome, detail, exit, wall s, peak RSS bytes)."""
+    start = time.monotonic()
+    outcome, detail = "solved", ""
+    with tempfile.TemporaryFile("w+") as stderr:
+        process = subprocess.Popen(command, stdout=stdout, stderr=stderr, env=env)
+        try:
+            peak = wait_with_usage(process, timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            peak = wait_with_usage(process, 60)
+            outcome = "timeout"
+        else:
+            if process.returncode != 0:
+                stderr.seek(0)
+                outcome = "crashed" if process.returncode < 0 else "failed"
+                detail = f"exit {process.returncode}: {stderr.read()[-300:]}"
+    return outcome, detail, process.returncode, time.monotonic() - start, peak
+
+
+def run_once(binary, deck, backend, modes, args, dump=False, label=""):
     """One solve. Outputs are returned and deleted; the log can be archived."""
-    stem = deck.with_name(f"{deck.stem}-{backend}-{modes}")
+    stem = deck.with_name(f"{deck.stem}-{backend}-{modes}{label}")
     log, f06 = stem.with_suffix(".log"), stem.with_suffix(".f06")
     dump_prefix = stem.with_name(stem.name + "-dump")
     command = [*args.prefix.split(), str(binary), f"--backend={backend}", f"--log-file={log}"]
@@ -592,22 +643,14 @@ def run_once(binary, deck, backend, modes, args, dump=False):
     if dump:
         command.append(f"--dump-system={dump_prefix}")
     command += [str(deck), str(f06)]
-    env = dict(os.environ, VIBESTRAN_AMG_PROBE="1")
+    env = dict(os.environ)
+    env.pop("VIBESTRAN_AMG_PROBE", None)
+    if not getattr(args, "no_probe", False):
+        env["VIBESTRAN_AMG_PROBE"] = "1"
     if args.budget_mib and modes != "direct":
         env["VIBESTRAN_PCG_DEVICE_MEMORY_MIB"] = str(args.budget_mib)
-    start = time.monotonic()
-    outcome, detail = "solved", ""
-    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env)
-    try:
-        _, stderr = process.communicate(timeout=args.timeout)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        _, stderr = process.communicate()
-        outcome = "timeout"
-    else:
-        if process.returncode != 0:
-            outcome, detail = ("crashed" if process.returncode < 0 else "failed"), f"exit {process.returncode}: {stderr[-300:]}"
-    record = {"outcome": outcome, "exit": process.returncode, "wall_s": time.monotonic() - start,
+    outcome, detail, status, wall, peak = run_and_measure(command, env, args.timeout)
+    record = {"outcome": outcome, "exit": status, "wall_s": wall, "peak_rss_bytes": peak,
               "command": " ".join(command), "budget_mib": args.budget_mib}
     record["status"] = "ok" if outcome == "solved" else (detail or outcome)
     if log.exists():
@@ -624,7 +667,7 @@ def run_once(binary, deck, backend, modes, args, dump=False):
     if args.archive:
         archive = args.archive / deck.parent.name
         archive.mkdir(parents=True, exist_ok=True)
-        tag = f"{backend}-{modes}"
+        tag = f"{backend}-{modes}{label}"
         keep = [log] + ([f06] if dump else []) + sorted(deck.parent.glob(f"{dump_prefix.name}_*"))
         # Only the reference keeps K and F; the checks above show the others match.
         keep = [p for p in keep if p.exists() and (modes == "direct" or not p.name.endswith(("_K.mtx", "_F.mtx")))]
@@ -836,6 +879,7 @@ def main():
     run.add_argument("--direct-backend", default="cpu")
     run.add_argument("--prefix", default="", help="command prefix, such as taskset -c 0-7")
     run.add_argument("--timeout", type=float, default=1200)
+    run.add_argument("--no-probe", action="store_true", help="skip the bilinear-form probes, for timing whole runs")
     run.set_defaults(func=cmd_run)
     report = sub.add_parser("report")
     report.add_argument("results", type=Path)

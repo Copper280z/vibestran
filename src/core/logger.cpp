@@ -5,6 +5,7 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
+#include <chrono>
 #include <memory>
 #include <vector>
 
@@ -33,6 +34,8 @@ void init_logger(const std::filesystem::path& log_file) {
         "vibestran", sinks.begin(), sinks.end());
     logger->set_level(spdlog::level::debug);
     spdlog::set_default_logger(logger);
+    // A long solve that hangs or is killed still leaves what led up to it.
+    spdlog::flush_every(std::chrono::seconds(1));
 }
 
 // cppcheck-suppress unusedFunction -- used from CUDA translation units

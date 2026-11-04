@@ -4,6 +4,7 @@
 #include "solver/solver_backend.hpp"
 #include "solver/iterative_refinement.hpp"
 #include "solver/heat_transfer_steady.hpp"
+#include "solver/linear_static.hpp"
 #include "io/bdf_parser.hpp"
 #include "io/system_dump.hpp"
 #include "magnetic/model.hpp"
@@ -21,6 +22,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <format>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -38,7 +40,7 @@ using Csr = SparseMatrixBuilder::CsrData;
 
 namespace {
 struct Options {
-    std::string backend{"cpu-pcg"}, matrix, rhs, reference, capture_deck, capture_prefix, refactor_from;
+    std::string backend{"cpu-pcg"}, matrix, rhs, reference, capture_deck, capture_prefix, refactor_from, structural_deck, amg_modes{"constant"};
     int side{24}, repeats{3}, warmups{1};
     double contrast{1.0};
     double budget_mib{0};
@@ -67,6 +69,8 @@ std::optional<Options> parse(int argc, char** argv) {
         else if (a == "--capture-deck") o.capture_deck = v;
         else if (a == "--capture-prefix") o.capture_prefix = v;
         else if (a == "--refactor-from") { o.refactor_from = v; o.factor = true; }
+        else if (a == "--structural-deck") o.structural_deck = v;
+        else if (a == "--amg-modes") o.amg_modes = v;
         else if (a == "--side") { if (!number(v, o.side)) return {}; }
         else if (a == "--repeats") { if (!number(v, o.repeats)) return {}; }
         else if (a == "--warmups") { if (!number(v, o.warmups)) return {}; }
@@ -237,6 +241,128 @@ std::unique_ptr<SolverBackend> backend(const Options& o) {
 #endif
     return {};
 }
+
+// A structural deck's system and near-nullspace, as the analysis hands them to
+// a backend. Only the system is wanted, so the solution returned is zero.
+struct StructuralSystem {
+    Csr k;
+    std::vector<double> f;
+    std::shared_ptr<const NearNullspace> modes;
+};
+
+class StructuralCapture final : public SolverBackend {
+public:
+    explicit StructuralCapture(StructuralSystem& system) : system_(system) {}
+    std::string_view name() const noexcept override { return "structural system capture"; }
+    bool uses_near_nullspace(int) const noexcept override { return true; }
+    std::vector<double> solve(const Csr& k, const std::vector<double>& f, const FactorRatioCheckPolicy*) override {
+        system_.k = k;
+        system_.f = f;
+        system_.modes = near_nullspace();
+        return std::vector<double>(f.size(), 0.0);
+    }
+private:
+    StructuralSystem& system_;
+};
+
+double seconds_since(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+
+double relative_residual(const Csr& k, const std::vector<double>& u, const std::vector<double>& f) {
+    const auto residual = compensated_residual(k, u, f);
+    double rr = 0, ff = 0;
+    for (int i = 0; i < k.n; ++i) { rr += residual[i] * residual[i]; ff += f[i] * f[i]; }
+    return std::sqrt(rr / std::max(ff, 1e-300));
+}
+
+const char* execution_name(AmgDeviceReport::Execution execution) {
+    switch (execution) {
+        case AmgDeviceReport::Execution::Resident: return "resident";
+        case AmgDeviceReport::Execution::FineRowSpill: return "spill";
+        case AmgDeviceReport::Execution::Host: return "host";
+    }
+    return "unknown";
+}
+
+// The phases of one factor's life on a structural system, one JSON line: cold
+// setup, the first solve, a retained-factor solve of another load, and a
+// same-pattern refactor with its solve. The new values are D K D, which keeps K
+// SPD and its pattern, as a changed stiffness distribution would.
+int structural_phases(const Options& o) {
+    const auto modes = parse_amg_modes(o.amg_modes);
+    if (!modes) { std::cerr << "Unknown --amg-modes " << o.amg_modes << '\n'; return 2; }
+    StructuralSystem system;
+    {
+        const auto model = BdfParser::parse_file(o.structural_deck);
+        LinearStaticSolver analysis(std::make_unique<StructuralCapture>(system));
+        analysis.set_amg_modes(*modes);
+        const auto results = analysis.solve(model);
+        if (results.subcases.empty()) { std::cerr << "The deck has no subcases\n"; return 1; }
+    }
+    auto solver = backend(o);
+    if (!solver) { std::cerr << "Backend unavailable: " << o.backend << '\n'; return 77; }
+    auto& k = system.k;
+    if (solver->requires_full_symmetric_csr()) k = k.expanded_symmetric();
+    solver->set_near_nullspace(system.modes);
+
+    const auto factor_start = std::chrono::steady_clock::now();
+    auto made = solver->factor(k);
+    if (auto* e = std::get_if<Error>(&made)) { std::cerr << "factor() failed: " << e->message << '\n'; return 1; }
+    auto factor = std::get<std::unique_ptr<LinearFactor>>(std::move(made));
+    const double factor_seconds = seconds_since(factor_start);
+
+    struct Solve { std::vector<double> u; double seconds; int iterations; };
+    const auto solve = [&](const std::vector<double>& f) -> std::optional<Solve> {
+        const auto start = std::chrono::steady_clock::now();
+        auto solved = factor->solve(f);
+        if (auto* e = std::get_if<Error>(&solved)) { std::cerr << "factor solve failed: " << e->message << '\n'; return {}; }
+        const double seconds = seconds_since(start);
+        return Solve{std::get<std::vector<double>>(std::move(solved)), seconds, solver->last_iteration_count()};
+    };
+
+    const auto shape = [&](int i, double amplitude, double waves) {
+        return 1.0 + amplitude * std::sin(2.0 * std::numbers::pi * waves * double(i) / double(k.n));
+    };
+    const auto first = solve(system.f);
+    if (!first) return 1;
+    const double first_residual = relative_residual(k, first->u, system.f);
+
+    std::vector<double> shifted(first->u);
+    for (int i = 0; i < k.n; ++i) shifted[i] *= shape(i, 0.5, 5.0);
+    const auto other_load = k.multiply(shifted);
+    const auto retained = solve(other_load);
+    if (!retained) return 1;
+    const double retained_residual = relative_residual(k, retained->u, other_load);
+
+    Csr changed = k;
+    for (int row = 0; row < changed.n; ++row)
+        for (int entry = changed.row_ptr[row]; entry < changed.row_ptr[row + 1]; ++entry)
+            changed.values[entry] *= shape(row, 0.1, 3.0) * shape(changed.col_ind[entry], 0.1, 3.0);
+    const auto refactor_start = std::chrono::steady_clock::now();
+    if (auto e = factor->refactor(changed)) { std::cerr << "refactor() failed: " << e->message << '\n'; return 1; }
+    const double refactor_seconds = seconds_since(refactor_start);
+    const auto refactored = solve(system.f);
+    if (!refactored) return 1;
+    const double refactored_residual = relative_residual(changed, refactored->u, system.f);
+
+    const auto report = solver->last_amg_device_report();
+    std::cout << std::format(
+        "{{\"n\":{},\"nnz\":{},\"backend\":\"{}\",\"modes\":\"{}\",\"budget_mib\":{},\"execution\":\"{}\","
+        "\"gpu_rows\":{},\"cpu_rows\":{},\"planned_bytes\":{},\"budget_bytes\":{},\"measured_bytes\":{},"
+        "\"factor_s\":{:.6f},\"first_solve_s\":{:.6f},\"first_iterations\":{},\"first_residual\":{:.3e},"
+        "\"retained_solve_s\":{:.6f},\"retained_iterations\":{},\"retained_residual\":{:.3e},"
+        "\"refactor_s\":{:.6f},\"refactored_solve_s\":{:.6f},\"refactored_iterations\":{},\"refactored_residual\":{:.3e},"
+        "\"hierarchy_builds\":{}}}\n",
+        k.n, k.nnz, o.backend, o.amg_modes, o.budget_mib, report ? execution_name(report->execution) : "none",
+        report ? report->gpu_rows : 0, report ? report->cpu_rows : 0, report ? report->planned_bytes : 0,
+        report ? report->budget_bytes : 0, report ? report->measured_bytes : 0,
+        factor_seconds, first->seconds, first->iterations, first_residual,
+        retained->seconds, retained->iterations, retained_residual,
+        refactor_seconds, refactored->seconds, refactored->iterations, refactored_residual,
+        factor->stats().symbolic_analyses);
+    return 0;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -249,11 +375,21 @@ int main(int argc, char** argv) {
                      "                     [--factor | --refactor-from other_tangent.mtx]\n"
                      "       --factor times solves of one factor(); --refactor-from factors another\n"
                      "       matrix of the same pattern first and times refactor() plus each solve\n"
-                     "       pcg_benchmark --capture-deck thermal_or_magnetic.bdf --capture-prefix path\n";
+                     "       pcg_benchmark --capture-deck thermal_or_magnetic.bdf --capture-prefix path\n"
+                     "       pcg_benchmark --structural-deck deck.bdf [--amg-modes constant|rigid] --backend B\n"
+                     "                     [--budget-mib N] [--fp64] times factor, solves and refactor; one JSON line\n";
         return 2;
     }
     spdlog::set_level(opts->profile ? spdlog::level::debug : spdlog::level::warn);
     if (!opts->capture_deck.empty()) return capture(*opts);
+    if (!opts->structural_deck.empty()) {
+        try {
+            return structural_phases(*opts);
+        } catch (const std::exception& e) {
+            std::cerr << "Benchmark solve failed: " << e.what() << '\n';
+            return 1;
+        }
+    }
     auto matrix = opts->matrix.empty() ? std::optional<Csr>(diffusion(opts->side, opts->contrast)) : read_matrix(opts->matrix);
     if (!matrix) { std::cerr << "Could not read matrix\n"; return 2; }
     auto& k = *matrix;
