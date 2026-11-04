@@ -15,6 +15,7 @@
 #include "core/exceptions.hpp"
 #include "core/logger.hpp"
 #include "solver/iterative_refinement.hpp"
+#include "amg_mode_aggregation.hpp"
 #include "amg_result.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
@@ -26,6 +27,7 @@
 #include <functional>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -96,11 +98,9 @@ struct ScaledAmgMatrix {
     }
 };
 
-// The hierarchy AMGCL's amg<smoothed_aggregation, spai0> builds with
-// coarse_enough = 256 (scalar aggregation, eps_strong 0.08, relaxation 1, no
-// spectral radius estimate). Block aggregation by node, a rigid-body near-
-// nullspace, a looser or stronger threshold and the spectral estimate were
-// all slower on the captured plate, motor and thermal matrices.
+// Without modes, the hierarchy AMGCL's amg<smoothed_aggregation, spai0> builds
+// with coarse_enough = 256 (scalar aggregation, eps_strong 0.08, relaxation 1, no
+// spectral radius estimate), for scalar fields. With modes, ModeAggregation.
 inline constexpr unsigned kAmgCoarseEnough = 256;
 
 struct AmgLevel {
@@ -114,12 +114,19 @@ struct AmgLevel {
 // found no strong couplings) it is smoothed only, as AMGCL does.
 class AmgHierarchy {
 public:
-    explicit AmgHierarchy(std::shared_ptr<AmgHostCsr> fine) {
+    // With modes (of K; scale is the equilibration of fine), aggregates are
+    // whole grid points and carry the modes down the levels.
+    explicit AmgHierarchy(std::shared_ptr<AmgHostCsr> fine, const NearNullspace* modes = nullptr,
+        std::span<const double> scale = {}) {
+        std::optional<ModeAggregation> by_mode;
+        if (modes) by_mode.emplace(*modes, scale);
+        system_ = modes != nullptr;
         std::shared_ptr<AmgHostCsr> a = std::move(fine);
         while (a->nrows > kAmgCoarseEnough) {
-            AmgLevel level{a, nullptr, nullptr, spai0(*a)};
+            AmgLevel level{a, nullptr, nullptr, smoother(*a)};
             try {
-                std::tie(level.P, level.R) = coarsening_.transfer_operators(*a);
+                std::tie(level.P, level.R) = by_mode ? by_mode->transfer_operators(*a, level.smoother)
+                                                     : coarsening_.transfer_operators(*a);
             } catch (const amgcl::error::empty_level&) {
                 levels.push_back(std::move(level));
                 return;
@@ -144,7 +151,7 @@ public:
         std::shared_ptr<AmgHostCsr> a = std::move(fine);
         for (auto& level : levels) {
             level.A = a;
-            if (!level.smoother.empty()) level.smoother = spai0(*a);
+            if (!level.smoother.empty()) level.smoother = smoother(*a);
             if (level.P) {
                 a = coarsening_.coarse_operator(*a, *level.P, *level.R);
                 amgcl::backend::sort_rows(*a);
@@ -172,6 +179,8 @@ public:
     }
 
 private:
+    std::vector<double> smoother(const AmgHostCsr& a) const { return system_ ? l1_jacobi_weights(a) : spai0(a); }
+
     static std::vector<double> spai0(const AmgHostCsr& a) {
         std::vector<double> m(a.nrows);
 #pragma omp parallel for schedule(static)
@@ -190,7 +199,7 @@ private:
         const auto& a = *levels.back().A;
         const auto n = Eigen::Index(a.nrows);
         if (a.nrows > kAmgCoarseEnough) {
-            levels.back().smoother = spai0(a);
+            levels.back().smoother = smoother(a);
             coarse_inverse.clear();
             return;
         }
@@ -206,6 +215,7 @@ private:
     }
 
     amgcl::coarsening::smoothed_aggregation<amgcl::backend::builtin<double, int, int>> coarsening_;
+    bool system_{false};
 };
 
 // One V-cycle with one pre- and one post-smoothing step, starting from a zero

@@ -65,6 +65,8 @@ public:
     [[nodiscard]] Result<std::unique_ptr<LinearFactor>> factor(
         const SparseMatrixBuilder::CsrData& K, const FactorOptions& options = {}) override;
 
+    [[nodiscard]] bool uses_near_nullspace(int n) const noexcept override { return n >= 50000; }
+
     [[nodiscard]] std::string_view name() const noexcept override;
     [[nodiscard]] std::vector<std::pair<std::string, std::string>> details() const override;
 

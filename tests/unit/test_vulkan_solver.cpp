@@ -9,6 +9,7 @@
 #include "solver/vulkan_solver_backend.hpp"
 #include "hilbert_system.hpp"
 #include "pcg_partition_problem.hpp"
+#include "structural_system.hpp"
 #include "solver/vulkan_context.hpp"
 #include "solver/solver_backend.hpp"
 #include "core/sparse_matrix.hpp"
@@ -39,6 +40,32 @@ TEST(VulkanAmgTest, ResidentAndBudgetedHierarchyPreserveMaterialInterface) {
         for (std::size_t i = 0; i < x.size(); ++i) EXPECT_NEAR(x[i], problem.exact[i], 2e-8) << i;
         const auto zero = backend->solve(problem.matrix.expanded_symmetric(), std::vector<double>(x.size(), 0));
         for (double v : zero) EXPECT_EQ(v, 0);
+    }
+}
+
+// A structure's rigid-body modes must reach the hierarchy on every engine:
+// without them this bar takes tens of thousands of iterations.
+TEST(VulkanAmgTest, RigidBodyModesConvergeResidentAndBudgeted) {
+    auto context = VulkanContext::create();
+    if (!context || !context->device_info().supports_float64) GTEST_SKIP() << "Vulkan fp64 unavailable";
+    const auto r = test::assemble(test::hex_bar(17));
+    ASSERT_TRUE(r.modes);
+    const auto full = r.k.expanded_symmetric();
+    const double top = test::largest_magnitude(r.u);
+    for (const std::size_t budget : {std::size_t(0), std::size_t(120) * 1024 * 1024, std::size_t(1024) * 1024}) {
+        SCOPED_TRACE(budget);
+        VulkanSolverConfig cfg;
+        cfg.min_dofs_for_gpu = 0;
+        cfg.device_memory_budget = budget;
+        auto backend = VulkanSolverBackend::try_create(cfg);
+        ASSERT_TRUE(backend);
+        ASSERT_TRUE(backend->uses_near_nullspace(full.n));
+        backend->set_near_nullspace(r.modes);
+        const auto x = backend->solve(full, r.f);
+        ASSERT_TRUE(backend->last_refinement()->converged);
+        EXPECT_EQ(backend->last_solve_was_full_gpu(), budget == 0);
+        EXPECT_LE(backend->last_iteration_count(), 120);
+        for (std::size_t i = 0; i < x.size(); ++i) ASSERT_NEAR(x[i], r.u[i], 1e-6 * top) << i;
     }
 }
 

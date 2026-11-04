@@ -309,6 +309,23 @@ SolverResults LinearStaticSolver::solve(const Model &model) {
   return results;
 }
 
+namespace {
+
+/// The command line over PARAM,AMGMODES over the default, the scalar hierarchy.
+AmgModes structural_amg_modes(const Model &model, std::optional<AmgModes> override_modes) {
+  if (override_modes)
+    return *override_modes;
+  const auto it = model.params.find("AMGMODES");
+  if (it == model.params.end())
+    return AmgModes::Constant;
+  const auto parsed = parse_amg_modes(it->second);
+  if (!parsed)
+    throw SolverError(std::format("PARAM,AMGMODES,{}: expected CONSTANT or RIGID", it->second));
+  return *parsed;
+}
+
+} // namespace
+
 SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
                                                  const SubCase &sc,
                                                  SolveSummary &summary) {
@@ -374,6 +391,10 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   const FactorRatioCheckPolicy factor_ratio_policy =
       build_factor_ratio_check_policy(
           model, std::format("[subcase {}]", sc.id), "stiffness matrix");
+  backend_->set_near_nullspace(
+      backend_->uses_near_nullspace(n) && structural_amg_modes(model, amg_modes_) == AmgModes::Rigid
+          ? rigid_body_modes(model, mpc_handler)
+          : nullptr);
   std::vector<double> u_reduced =
       backend_->solve(*solve_csr, F, &factor_ratio_policy);
   const auto t6 = Clock::now();

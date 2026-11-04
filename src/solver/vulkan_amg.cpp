@@ -490,7 +490,7 @@ namespace vibestran {
 namespace {
 std::unique_ptr<detail::AmgSystem> make_vulkan_amg(VulkanContext& ctx, Pipelines& pl,
     const SparseMatrixBuilder::CsrData& k, double tolerance, int max_iterations, std::size_t budget,
-    bool& fully_resident) {
+    bool& fully_resident, std::shared_ptr<const NearNullspace> modes = nullptr) {
     using namespace detail;
     const int max = max_iterations > 0 ? max_iterations : 10000;
     class Engine final : public AmgEngine {
@@ -525,14 +525,15 @@ std::unique_ptr<detail::AmgSystem> make_vulkan_amg(VulkanContext& ctx, Pipelines
             auto engine = std::make_unique<Engine>(ctx, pl, h, std::move(partition), max);
             fully_resident = engine->fully_resident();
             return engine;
-        });
+        }, std::move(modes));
 }
 } // namespace
 
 std::vector<double> solve_vulkan_amg(VulkanContext& ctx, Pipelines& pl,
     const SparseMatrixBuilder::CsrData& k, const std::vector<double>& rhs, double tolerance,
-    int max_iterations, std::size_t budget, bool& fully_resident, const VulkanAmgAccept& accept) {
-    auto result = make_vulkan_amg(ctx, pl, k, tolerance, max_iterations, budget, fully_resident)->solve(k, rhs);
+    int max_iterations, std::size_t budget, bool& fully_resident, const VulkanAmgAccept& accept,
+    std::shared_ptr<const NearNullspace> modes) {
+    auto result = make_vulkan_amg(ctx, pl, k, tolerance, max_iterations, budget, fully_resident, modes)->solve(k, rhs);
     if (auto e = accept(result)) throw SolverError(e->message);
     return std::move(result.solution);
 }

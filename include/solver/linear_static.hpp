@@ -47,9 +47,15 @@ public:
     /// format with this path prefix (io/system_dump.hpp); empty disables.
     void set_system_dump(std::string prefix) { dump_prefix_ = std::move(prefix); }
 
+    /// The near-nullspace for an AMG preconditioner, over PARAM,AMGMODES and
+    /// the default (--amg-modes). See solver/near_nullspace.hpp.
+    // cppcheck-suppress unusedFunction -- called from main.cpp
+    void set_amg_modes(std::optional<AmgModes> modes) { amg_modes_ = modes; }
+
 private:
     std::unique_ptr<SolverBackend> backend_;
     std::string dump_prefix_;
+    std::optional<AmgModes> amg_modes_;
 
     SubCaseResults solve_subcase(const Model& model, const SubCase& sc,
                                  SolveSummary& summary);

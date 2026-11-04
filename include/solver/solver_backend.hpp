@@ -12,6 +12,7 @@
 #include "core/result.hpp"
 #include "core/sparse_matrix.hpp"
 #include "solver/iterative_refinement.hpp"
+#include "solver/near_nullspace.hpp"
 #include <memory>
 #include <optional>
 #include <span>
@@ -160,8 +161,27 @@ public:
         return false;
     }
 
+    /// True when solve() of an n-equation system would use set_near_nullspace().
+    [[nodiscard]] virtual bool uses_near_nullspace(int n) const noexcept {
+        (void)n;
+        return false;
+    }
+
+    /// The near-nullspace of the matrices of later solve() calls, for their
+    /// preconditioner; null for none. factor() does not use it.
+    // cppcheck-suppress unusedFunction -- called from linear_static.cpp
+    void set_near_nullspace(std::shared_ptr<const NearNullspace> modes) noexcept {
+        near_nullspace_ = std::move(modes);
+    }
+
+protected:
+    [[nodiscard]] const std::shared_ptr<const NearNullspace>& near_nullspace() const noexcept {
+        return near_nullspace_;
+    }
+
 private:
     Notices notices_;
+    std::shared_ptr<const NearNullspace> near_nullspace_;
 };
 
 /// CPU backend using Eigen's sparse Cholesky.

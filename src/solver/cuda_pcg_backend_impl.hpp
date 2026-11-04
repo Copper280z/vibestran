@@ -2104,6 +2104,8 @@ struct CudaPCGContext {
     double           tolerance = 0.0;
     int              max_iters = 10000;
     std::size_t      device_memory_budget = 0;
+    /// For the AMG of the next solve (SolverBackend::set_near_nullspace).
+    std::shared_ptr<const NearNullspace> near_nullspace;
 
     int    last_iters   = 0;
     double last_rel_res = 0.0;
@@ -2336,7 +2338,7 @@ static void record_amg(CudaPCGContext& ctx, const detail::AmgPcgResult& result) 
 
 static std::vector<double> solve_cuda_amg(CudaPCGContext& ctx, const SparseMatrixBuilder::CsrData& k,
     const std::vector<double>& rhs, std::optional<std::size_t> budget, bool mixed, const char* label) {
-    detail::AmgSystem system(k, ctx.tolerance, cuda_amg_engines(ctx, budget, mixed));
+    detail::AmgSystem system(k, ctx.tolerance, cuda_amg_engines(ctx, budget, mixed), ctx.near_nullspace);
     auto result = system.solve(k, rhs);
     record_amg(ctx, result);
     require_refined(ctx, label);

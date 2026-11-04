@@ -35,6 +35,7 @@ std::vector<double>
 CudaMixedPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
                                  const std::vector<double>& F,
                                  const FactorRatioCheckPolicy*) {
+    ctx_->near_nullspace = near_nullspace();
     auto u = solve_cuda_pcg_mixed(*ctx_, K, F);
     notices().keep(std::exchange(ctx_->notices, {}));
     return u;

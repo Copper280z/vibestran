@@ -122,6 +122,7 @@ Optional solver backends are detected automatically at configure time.
 vibestran [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg|cuda-pcg-mixed>]
          [--cuda-precision=<fp32|fp64>] [--csv]
          [--log-file=<path>] [--dump-system=<prefix>] [--refine]
+         [--amg-modes=<constant|rigid>]
          <input.bdf|input.inp> [output.f06]
 ```
 
@@ -184,6 +185,14 @@ Nastran, and is assessed with a residual computed in compensated
 - the relative residual ||F − K u|| / ||F||, which is not an accuracy measure:
   for an ill-conditioned K it is ~ eps ||K|| ||u|| / ||F|| even for the exact
   solution rounded to double.
+
+`--amg-modes=rigid` (or `PARAM,AMGMODES,RIGID`) gives the AMG preconditioner of
+SOL 101 on the GPU PCG backends the model's rigid-body modes, which converges on
+far more structures but needs more device memory. `constant`, the default, uses
+the scalar hierarchy, which needs less memory and suits nearly decoupled fields
+but fails to converge on many structures, so try `rigid` when it does. The choice
+changes speed and memory, not the solution, which refinement accepts against the
+assembled stiffness either way. See `PCG_LARGE_DECKS.md`.
 
 `--refine` (or `PARAM,REFINE,YES` in the bulk data) refines direct solves with
 their factorization and compensated residuals until the corrections reach

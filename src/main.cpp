@@ -182,7 +182,7 @@ static void print_usage() {
       "                      [--log-file=<path>] "
       "[--checkmode=lenient]\n"
       "                      [--no-quality-checks] [--dump-system=<prefix>]\n"
-      "                      [--refine]\n"
+      "                      [--refine] [--amg-modes=<constant|rigid>]\n"
       "                      <input.bdf|input.inp> [output.f06]\n"
       "  --backend=cpu              Eigen sparse Cholesky CPU solver "
       "(default)\n"
@@ -207,6 +207,10 @@ static void print_usage() {
       "  --no-quality-checks        Skip all pre-flight quality checks\n"
       "  --refine                   Refine direct solves to full accuracy\n"
       "                             (also PARAM,REFINE,YES)\n"
+      "  --amg-modes=constant|rigid Near-nullspace of the AMG preconditioner\n"
+      "                             for SOL 101 on GPU PCG backends;\n"
+      "                             constant is the default (also\n"
+      "                             PARAM,AMGMODES)\n"
       "  --dump-system=<prefix>     Write each subcase's reduced K (and M,\n"
       "                             F, u) in Matrix Market format and its\n"
       "                             DOF map: <prefix>_sc<N>_K.mtx etc.\n"
@@ -221,6 +225,7 @@ int main(int argc, const char *argv[]) {
   CudaPrecisionChoice cuda_precision = CudaPrecisionChoice::Float64;
   bool force_csv = false;
   bool force_refine = false;
+  std::optional<vibestran::AmgModes> amg_modes;
   bool force_checkmode_lenient = false;
   bool skip_quality_checks = false;
   std::filesystem::path log_file_path;
@@ -248,6 +253,13 @@ int main(int argc, const char *argv[]) {
       force_csv = true;
     } else if (arg == "--refine") {
       force_refine = true;
+    } else if (arg.starts_with("--amg-modes=")) {
+      amg_modes = vibestran::parse_amg_modes(
+          std::string(arg.substr(std::string_view("--amg-modes=").size())));
+      if (!amg_modes) {
+        spdlog::error("--amg-modes expects constant or rigid");
+        return 1;
+      }
     } else if (arg == "--no-quality-checks") {
       skip_quality_checks = true;
     } else if (arg.starts_with("--checkmode=")) {
@@ -587,6 +599,7 @@ int main(int argc, const char *argv[]) {
       spdlog::info("Solving with: {}", backend->name());
       vibestran::LinearStaticSolver solver(std::move(backend));
       solver.set_system_dump(dump_prefix);
+      solver.set_amg_modes(amg_modes);
       vibestran::SolverResults results = solver.solve(model);
 
       auto t1 = std::chrono::steady_clock::now();

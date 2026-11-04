@@ -25,7 +25,8 @@ struct AmgPcgResult;
 using VulkanAmgAccept = std::function<Status(const detail::AmgPcgResult&)>;
 std::vector<double> solve_vulkan_amg(VulkanContext& ctx, Pipelines& pl,
     const SparseMatrixBuilder::CsrData& k, const std::vector<double>& rhs, double tolerance,
-    int max_iterations, std::size_t budget, bool& fully_resident, const VulkanAmgAccept& accept);
+    int max_iterations, std::size_t budget, bool& fully_resident, const VulkanAmgAccept& accept,
+    std::shared_ptr<const NearNullspace> modes = nullptr);
 // The hierarchy and workspace persist across right-hand sides and
 // same-pattern refactor(); budget() is queried whenever it is built.
 std::unique_ptr<LinearFactor> make_vulkan_amg_factor(VulkanContext& ctx, Pipelines& pl,

@@ -147,6 +147,11 @@ VulkanSolverBackend::factor(const SparseMatrixBuilder::CsrData& K, const FactorO
     }
 }
 
+// cppcheck-suppress unusedFunction -- called through SolverBackend from linear_static.cpp
+bool VulkanSolverBackend::uses_near_nullspace(int n) const noexcept {
+    return n >= 50000 && ctx_.device_info().supports_float64;
+}
+
 std::vector<double>
 VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
                             const std::vector<double>& F,
@@ -213,7 +218,7 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
     // leaves behind on refined meshes. Leave conservative hierarchy headroom.
     if (n >= 50000 && ctx_.device_info().supports_float64) {
         return solve_vulkan_amg(ctx_, *pl, K, F, cfg_.tolerance, cfg_.max_iterations, available, last_full_gpu_,
-            [this](const detail::AmgPcgResult& result) { return accept_amg(result); });
+            [this](const detail::AmgPcgResult& result) { return accept_amg(result); }, near_nullspace());
     }
 
     enum class Path { Float32, Float64, Partitioned32, Partitioned64 };

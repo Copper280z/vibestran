@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 #include "solver/solver_backend.hpp"
 #include "pcg_partition_problem.hpp"
+#include "structural_system.hpp"
 #ifdef HAVE_CUDA
 #include "solver/cuda_mixed_pcg_solver_backend.hpp"
 #include "solver/cuda_pcg_solver_backend.hpp"
@@ -77,6 +78,29 @@ template <class Backend> void check_amg(const char* label) {
     }
 }
 
+// A structure with rigid-body modes on every engine: resident, with fine rows
+// on the CPU, and with the host hierarchy. The modes must reach the hierarchy
+// (without them this bar takes tens of thousands of iterations), every engine
+// must converge to the direct solution, and the budget changes where the
+// products run but not the method.
+template <class Backend> void check_structure(const char* label) {
+    const auto r = test::assemble(test::hex_bar(17));
+    ASSERT_GE(r.k.n, 50000);
+    ASSERT_TRUE(r.modes);
+    const double top = test::largest_magnitude(r.u);
+    for (const std::size_t budget : {std::size_t(0), std::size_t(120) * 1024 * 1024, std::size_t(1024) * 1024}) {
+        auto backend = create<Backend>(budget);
+        if (!backend) GTEST_SKIP() << "CUDA not available on this system";
+        SCOPED_TRACE(std::string(label) + " budget=" + std::to_string(budget));
+        ASSERT_TRUE(backend->uses_near_nullspace(r.k.n));
+        backend->set_near_nullspace(r.modes);
+        const auto x = backend->solve(r.k, r.f);
+        ASSERT_TRUE(backend->last_refinement() && backend->last_refinement()->converged);
+        EXPECT_LE(backend->last_iteration_count(), 120);
+        for (std::size_t i = 0; i < x.size(); ++i) ASSERT_NEAR(x[i], r.u[i], 1e-6 * top) << i;
+    }
+}
+
 } // namespace
 
 TEST(CudaPcgAmg, Fp64HierarchyResidentSpilledAndOnTheHost) {
@@ -85,6 +109,14 @@ TEST(CudaPcgAmg, Fp64HierarchyResidentSpilledAndOnTheHost) {
 
 TEST(CudaPcgAmg, MixedHierarchyResidentSpilledAndOnTheHost) {
     check_amg<CudaMixedPCGSolverBackend>("cuda-pcg-mixed");
+}
+
+TEST(CudaPcgAmg, StableBackendCarriesRigidBodyModes) {
+    check_structure<CudaPCGSolverBackend>("stable");
+}
+
+TEST(CudaPcgAmg, MixedBackendCarriesRigidBodyModes) {
+    check_structure<CudaMixedPCGSolverBackend>("mixed");
 }
 
 #endif

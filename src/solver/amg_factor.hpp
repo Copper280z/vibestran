@@ -25,8 +25,14 @@ class AmgSystem {
 public:
     using EngineFactory = std::function<std::unique_ptr<AmgEngine>(const ScaledAmgMatrix&, const AmgHierarchy&)>;
 
-    AmgSystem(const SparseMatrixBuilder::CsrData& k, double tolerance, EngineFactory make)
-        : tolerance_(tolerance), make_(std::move(make)) { build(k); }
+    // modes, when given, describe k's equations (near_nullspace.hpp).
+    AmgSystem(const SparseMatrixBuilder::CsrData& k, double tolerance, EngineFactory make,
+        std::shared_ptr<const NearNullspace> modes = nullptr)
+        : tolerance_(tolerance), make_(std::move(make)), modes_(std::move(modes)) {
+        if (modes_ && modes_->rows() != k.n)
+            throw SolverError(std::format("AMG PCG: near-nullspace of {} equations for a {}-equation matrix", modes_->rows(), k.n));
+        build(k);
+    }
 
     AmgPcgResult solve(const SparseMatrixBuilder::CsrData& k, const std::vector<double>& rhs) {
         const auto start = std::chrono::steady_clock::now();
@@ -68,7 +74,7 @@ private:
         const auto start = std::chrono::steady_clock::now();
         engine_.reset();
         scaled_ = std::make_unique<ScaledAmgMatrix>(k);
-        hierarchy_ = std::make_unique<AmgHierarchy>(scaled_->matrix);
+        hierarchy_ = std::make_unique<AmgHierarchy>(scaled_->matrix, modes_.get(), scaled_->scale);
         log_debug("[amg-pcg] " + hierarchy_->describe());
         engine_ = make_(*scaled_, *hierarchy_);
         fresh_iterations_ = -1;
@@ -78,6 +84,7 @@ private:
 
     double tolerance_;
     EngineFactory make_;
+    std::shared_ptr<const NearNullspace> modes_;
     std::unique_ptr<ScaledAmgMatrix> scaled_;
     std::unique_ptr<AmgHierarchy> hierarchy_;
     std::unique_ptr<AmgEngine> engine_;
@@ -184,11 +191,12 @@ private:
 // Host-hierarchy AMG PCG. The optional factory supplies a partly device-
 // resident fine product; every other operator and vector stays on the host.
 inline AmgPcgResult solve_hybrid_amg(const SparseMatrixBuilder::CsrData& k, const std::vector<double>& f,
-    double tolerance, int max_iterations, AmgSpmvFactory factory) {
+    double tolerance, int max_iterations, AmgSpmvFactory factory,
+    std::shared_ptr<const NearNullspace> modes = nullptr) {
     const int limit = max_iterations > 0 ? max_iterations : 10000;
     AmgSystem system(k, tolerance, [&](const ScaledAmgMatrix& scaled, const AmgHierarchy& h) {
         return std::make_unique<HostAmgEngine>(scaled, h, factory, limit);
-    });
+    }, std::move(modes));
     return system.solve(k, f);
 }
 } // namespace vibestran::detail

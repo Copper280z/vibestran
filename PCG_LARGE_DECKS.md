@@ -12,6 +12,116 @@ Measured on 2026-11-02 on bob-desktop.local: Ryzen 7 5700, eight physical cores
 (`taskset -c 0-7`, `OMP_NUM_THREADS=8`), 32 GiB RAM, TITAN V 12 GiB,
 driver 580.178.04, CUDA 12.8, Release Meson build. cuDSS is unchanged.
 
+## Structural AMG and the model-class suite
+
+Measured on 2026-11-03 on the same machine. The timings in the rest of this
+file predate this section and use the scalar configuration,
+`--amg-modes=constant`, which stays the default. `--amg-modes=rigid` is selected
+explicitly, per deck or per run.
+
+Tuning on one deck overfits, so `tools/amg_model_suite.py` judges the AMG setup
+by how iterations grow with refinement in each class of model, iterations ~
+h^-p. Raw results are in `benchmarks/pcg/amg-model-suite-20261103.json`.
+
+Structural solves (SOL 101, 50000 equations or more, GPU PCG backends) can
+select `--amg-modes=rigid` (`PARAM,AMGMODES,RIGID`). Thermal and magnetic solves
+always use the scalar hierarchy, with unchanged iteration counts. Three changes
+were each necessary; none pays off alone:
+
+- **A stable smoother.** SPAI-0 weights a_ii / sum a_ij^2 suit a scalar Laplacian,
+  but on a system many small couplings keep the denominator small while
+  lambda_max grows. On a hexahedral bar m lambda_max reached 2.9, above the limit
+  of 2, so the smoother amplified high frequencies. The V-cycle was then indefinite
+  (eigenvalues of M A down to -0.67), and CG needs it positive definite. The
+  replacement is `l1_jacobi_weights()`, m_i = (4/3) / (rho g_i) with
+  g_i = sum_j |a_ij| and rho(G^-1 A) from power iterations. Engines needed no
+  change: they read a per-level diagonal.
+- **Rigid-body modes on aggregates of whole grid points.** Modes come from the
+  reduced index and grid positions, in basic axes (K is assembled in basic axes
+  whatever the grid's CD), and K * mode vanishes on free-free models of every
+  element family and RBE tested. AMGCL's block aggregation needs uniform blocks,
+  which a partial SPC breaks, so `ModeAggregation` groups by the model's grids.
+- **P smoothed with the whole matrix.** AMGCL's filter lumps weak couplings into
+  the diagonal. That keeps the constant vector but not a rotation, because the
+  lumped row gains sum a_ij (B_j - B_i), which grows with the lever arm. On the
+  bar this alone took 79 iterations to 33.
+
+CUDA fp64, resident. Each cell lists the mesh levels; "fail" means the solve ended
+above the accuracy target. Constant ran only the two coarsest levels, within
+120 s each. p uses the two finest levels of the rigid run.
+
+| Class | Equations | Constant iterations | Rigid iterations | p | Rigid iterate s | Rigid op. complexity |
+|---|---:|---:|---:|---:|---:|---:|
+| solid-hex | 66k / 227k / 807k | 100000 / fail | 39 / 40 / 36 | -0.25 | 0.04 / 0.1 / 0.5 | 2.4-2.5 |
+| solid-tet10 | 55k / 180k / 694k | 6155 / 22693 | 63 / 60 / 57 | -0.11 | 0.1 / 0.2 / 0.6 | 2.5-2.8 |
+| solid-contrast (10^6:1) | 66k / 227k / 807k | fail / fail | 70 / 71 / 98 | 0.76 | 0.1 / 0.2 / 0.9 | 2.8-2.9 |
+| solid-thin (flat hexahedra) | 58k / 232k / 924k | fail / fail | 16873 / 4856 / 2820 | -0.79 | 6.8 / 6.9 / 17 | 1.9-2.2 |
+| shell-thin (t/L 0.001) | 59k / 238k / 955k | 29598 / 58023 | 723 / 612 / 567 | -0.11 | 0.2 / 0.5 / 2.0 | 2.7 |
+| shell-thick (t/L 0.1) | 59k / 238k / 955k | 145 / 243 | 30 / 31 / 35 | 0.17 | 0.01 / 0.04 / 0.2 | 2.8 |
+| shell-foundation | 61k / 242k / 965k | 1969 / 7077 | 104 / 101 / 131 | 0.38 | 0.03 / 0.1 / 0.5 | 2.7 |
+| shell-cylinder-cd | 62k / 249k / 995k | 4258 / 5269 | 580 / 833 / 1451 | 0.80 | 0.2 / 1.1 / 7.2 | 1.8 |
+| stiffened-panel | 63k / 251k / 999k | 100000 / fail | 309 / 644 / 1412 | 1.14 | 0.1 / 0.7 / 5.4 | 3.0-3.7 |
+| rbe-assembly | 55k / 319k / 939k | fail / fail | 1409 / 2616 / 4260 | 0.90 | 0.5 / 5.6 / 29 | 2.2-2.6 |
+| **shell-membrane (t/L 10)** | 61k / 241k / 962k | **202 / 353** | **634 / 1213 / 2167** | 0.84 | 0.2 / 1.1 / 6.7 | 2.8 |
+| **space-frame** | 61k / 229k / 876k | **80 / 97** | **133 / 147 / 160** | 0.19 | 0.04 / 0.1 / 0.5 | 7.5-8.0 |
+
+Solutions agree with a direct solve to the F06's printed precision at the
+coarsest level of every class, and between modes.
+
+**The last two rows regress.** Plate262k is `shell-membrane`: 902 iterations in
+3.43 s with constant, 2556 in 12.27 s with rigid. Its ν = 0 and t/L = 10 nearly
+decouple the fields, which is close to six scalar problems, and the weak-coupling
+filter that harms rotations helps there: removing it (threshold 0) takes constant's
+120 / 199 iterations to 459 / 833 at n = 48 / 96, worse than rigid's 331 / 625. Such
+decks can use `PARAM,AMGMODES,CONSTANT`. A filter that preserves the modes might
+recover this.
+
+Realistic shell assemblies, the WebMesh rover (CQUAD4, RBE2, RBE3, CBUSH, CONM2;
+two subcases, per subcase, iterate time from the solver log):
+
+| Deck | Equations | Before: iterations | Rigid: iterations | Before: iterate s | Rigid: iterate s | Rigid complexity |
+|---|---:|---:|---:|---:|---:|---:|
+| Complete rover, CUDA | 60,606 | 6867 / 9041 | 331 / 332 | 1.82 / 2.39 | 0.119 / 0.119 | 2.5 |
+| Complete rover, Vulkan | 60,606 | 6891 / 7432 | 331 / 332 | 2.77 / 3.03 | 0.191 / 0.172 | 2.5 |
+| Four-wheel rover, CUDA | 68,730 | 2933 / 2930 | 398 / 411 | 0.80 / 0.80 | 0.150 / 0.153 | 2.6 |
+| Four-wheel rover, Vulkan | 68,730 | 2933 / 2930 | 398 / 411 | 1.14 / 1.13 | 0.230 / 0.232 | 2.6 |
+
+The previous binary and `--amg-modes=constant` give identical CUDA iteration
+counts on both decks. Rigid displacements of both subcases match CHOLMOD within
+the F06's printed precision, 7.9e-9 or better.
+
+**Device memory.** The hierarchy holds more, so fewer equations stay resident.
+At 8.49 GB of usable Titan V memory (planned bytes per equation at about 1M
+equations; the plan's capacity is a linear extrapolation):
+
+| Class | Constant B/DOF | Rigid B/DOF | Rigid resident capacity |
+|---|---:|---:|---:|
+| Shells | 502 | 885-907 | about 9.5M DOF (17M with constant) |
+| Space frame | 495 | 1109 | about 7.7M DOF (17M with constant) |
+| RBE assembly | not measured | 2032 | about 4.2M DOF |
+| Solid hexahedra | not measured | 2416 | about 3.5M DOF |
+| CTETRA10 | not measured | 2840 | about 3.0M DOF |
+
+The 15.4M-equation stress deck above would no longer be fully resident with
+rigid modes, one reason they are not the default.
+
+**Scalar hierarchies have a separate problem, not changed here.** `thermal-hex`
+grows at p = 0.97 with operator complexity 1.04-1.09: 122 / 200 / 308 iterations
+at 66k / 266k / 1.0M. On a uniform Q1 hexahedral Laplacian the off-diagonal
+ratios are 0, 1/16 and 1/32, below `eps_strong = 0.08`, so nearly every coupling
+counts as weak and the coarse levels barely exist. A threshold of 0.04 took 65k
+equations from 126 iterations to 22 on the host cycle. The membrane shows the
+threshold is class-dependent, so it needs the suite's magnetic classes before it
+changes: `magnetic-motor` 79 / 112 / 147 and `magnetic-coil`
+1991 / 2601 / 3273 per solve are this configuration's baseline.
+
+Reproduce, on the benchmark machine:
+
+```bash
+python3 tools/amg_model_suite.py run --binary build/vibestran --work /tmp/amg-suite --results r.jsonl --modes rigid --direct
+python3 tools/amg_model_suite.py report r.jsonl
+```
+
 ## Physical decks
 
 | Deck | GRID nodes | Elements | Free equations |
