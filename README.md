@@ -128,7 +128,7 @@ Optional solver backends are detected automatically at configure time.
 vibestran [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg|cuda-pcg-mixed>]
          [--cuda-precision=<fp32|fp64>] [--csv]
          [--log-file=<path>] [--dump-system=<prefix>] [--refine]
-         [--amg-modes=<constant|rigid>]
+         [--amg-modes=<constant|rigid|drilling>]
          <input.bdf|input.inp> [output.f06]
 ```
 
@@ -199,7 +199,12 @@ hierarchy instead, which needs about half the device memory and less host memory
 and suits nearly decoupled fields such as membrane plates, but does not converge on
 some structures, such as thin shells, stiffened panels and thin solids. The choice
 changes speed and memory, not the solution, which refinement accepts against the
-assembled stiffness either way. See `PCG_LARGE_DECKS.md`.
+assembled stiffness either way. `--amg-modes=drilling` (or `PARAM,AMGMODES,DRILLING`)
+adds two patterns of rotation about the shell normal on CQUAD4 grids. It greatly
+reduces iterations on CQUAD4 shells loaded in their plane, such as membrane plates
+(2167 to 38 at 1M equations), for about a quarter more hierarchy memory on an
+all-CQUAD4 model and about 10% more time on bending-dominated decks. Without CQUAD4
+it is the same as `rigid`. See `PCG_LARGE_DECKS.md`.
 
 `--refine` (or `PARAM,REFINE,YES` in the bulk data) refines direct solves with
 their factorization and compensated residuals until the corrections reach

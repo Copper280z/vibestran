@@ -376,7 +376,7 @@ int main(int argc, char** argv) {
                      "       --factor times solves of one factor(); --refactor-from factors another\n"
                      "       matrix of the same pattern first and times refactor() plus each solve\n"
                      "       pcg_benchmark --capture-deck thermal_or_magnetic.bdf --capture-prefix path\n"
-                     "       pcg_benchmark --structural-deck deck.bdf [--amg-modes constant|rigid] --backend B\n"
+                     "       pcg_benchmark --structural-deck deck.bdf [--amg-modes constant|rigid|drilling] --backend B\n"
                      "                     [--budget-mib N] [--fp64] times factor, solves and refactor; one JSON line\n";
         return 2;
     }

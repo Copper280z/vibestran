@@ -182,7 +182,8 @@ static void print_usage() {
       "                      [--log-file=<path>] "
       "[--checkmode=lenient]\n"
       "                      [--no-quality-checks] [--dump-system=<prefix>]\n"
-      "                      [--refine] [--amg-modes=<constant|rigid>]\n"
+      "                      [--refine]\n"
+      "                      [--amg-modes=<constant|rigid|drilling>]\n"
       "                      <input.bdf|input.inp> [output.f06]\n"
       "  --backend=cpu              Eigen sparse Cholesky CPU solver "
       "(default)\n"
@@ -207,7 +208,8 @@ static void print_usage() {
       "  --no-quality-checks        Skip all pre-flight quality checks\n"
       "  --refine                   Refine direct solves to full accuracy\n"
       "                             (also PARAM,REFINE,YES)\n"
-      "  --amg-modes=constant|rigid Near-nullspace of the AMG preconditioner\n"
+      "  --amg-modes=constant|rigid|drilling\n"
+      "                             Near-nullspace of the AMG preconditioner\n"
       "                             for SOL 101 on GPU PCG backends;\n"
       "                             rigid is the default (also\n"
       "                             PARAM,AMGMODES)\n"
@@ -257,7 +259,7 @@ int main(int argc, const char *argv[]) {
       amg_modes = vibestran::parse_amg_modes(
           std::string(arg.substr(std::string_view("--amg-modes=").size())));
       if (!amg_modes) {
-        spdlog::error("--amg-modes expects constant or rigid");
+        spdlog::error("--amg-modes expects constant, rigid or drilling");
         return 1;
       }
     } else if (arg == "--no-quality-checks") {

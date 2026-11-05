@@ -5,10 +5,14 @@
 #include "core/exceptions.hpp"
 #include "core/model.hpp"
 #include "core/mpc_handler.hpp"
+#include "elements/shell_directors.hpp"
+#include <Eigen/Dense>
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <format>
+#include <unordered_map>
 
 namespace vibestran {
 
@@ -21,6 +25,8 @@ std::optional<AmgModes> parse_amg_modes(const std::string& text) {
         return AmgModes::Constant;
     if (upper == "RIGID")
         return AmgModes::Rigid;
+    if (upper == "DRILLING")
+        return AmgModes::Drilling;
     return std::nullopt;
 }
 
@@ -93,6 +99,140 @@ std::shared_ptr<const NearNullspace> rigid_body_modes(const Model& model,
         throw SolverError(std::format(
             "rigid_body_modes: equation {} of {} belongs to no grid point ({} grids in the model)",
             std::distance(out->point.begin(), missing), n, grids.size()));
+    return out;
+}
+
+namespace {
+
+/// What the drilling columns need to know about one grid of a CQUAD4.
+struct DrillingGrid {
+    Eigen::Vector3d normal{0, 0, 0}; ///< sum of the directors at the grid
+    bool fold{false};
+    std::vector<int> neighbours; ///< across CQUAD4 edges, as indices of the grids
+    int sign{0};                 ///< colour of the alternating pattern; 0 until visited
+};
+
+/// Every grid that a CQUAD4 uses, in ascending ID order so that the result does
+/// not depend on the storage order of the model.
+std::pair<std::vector<NodeId>, std::vector<DrillingGrid>> drilling_grids(const Model& model) {
+    std::vector<NodeId> ids;
+    for (const auto& elem : model.elements)
+        if (elem.type == ElementType::CQUAD4)
+            ids.insert(ids.end(), elem.nodes.begin(), elem.nodes.end());
+    std::ranges::sort(ids, [](NodeId a, NodeId b) { return a.value < b.value; });
+    const auto [last, end] = std::ranges::unique(ids, [](NodeId a, NodeId b) { return a.value == b.value; });
+    ids.erase(last, end);
+
+    std::unordered_map<int, int> index;
+    index.reserve(ids.size());
+    for (std::size_t i = 0; i < ids.size(); ++i)
+        index[ids[i].value] = static_cast<int>(i);
+
+    std::vector<DrillingGrid> grids(ids.size());
+    const double smooth = std::cos(shell_fold_angle(model));
+    std::array<int, 4> corner_grid{};
+    for (const auto& elem : model.elements) {
+        const bool quad = elem.type == ElementType::CQUAD4;
+        if (!quad && elem.type != ElementType::CTRIA3)
+            continue;
+        const auto corners = elem.nodes.size();
+        for (std::size_t c = 0; c < corners; ++c) {
+            const auto found = index.find(elem.nodes[c].value);
+            corner_grid[c] = found == index.end() ? -1 : found->second;
+        }
+        for (std::size_t c = 0; c < corners; ++c) {
+            if (corner_grid[c] < 0)
+                continue;
+            DrillingGrid& grid = grids[static_cast<std::size_t>(corner_grid[c])];
+            // Summed over a smooth grid's elements, the corner normals give the
+            // direction of shell_grid_director(), which would average them all
+            // again at every corner.
+            const int corner = static_cast<int>(c);
+            Eigen::Vector3d director = shell_corner_normal(model, elem, corner);
+            if (model.snorms.contains(elem.nodes[c]))
+                director = shell_grid_director(model, elem, corner, director);
+            if (grid.normal.squaredNorm() > 0) {
+                const Eigen::Vector3d seen = grid.normal.normalized();
+                if (seen.dot(director) < 0)
+                    director = -director;
+                grid.fold = grid.fold || seen.dot(director) < smooth;
+            }
+            grid.normal += director;
+            if (quad) {
+                grid.neighbours.push_back(corner_grid[(c + 1) % corners]);
+                grid.neighbours.push_back(corner_grid[(c + corners - 1) % corners]);
+            }
+        }
+    }
+    return {std::move(ids), std::move(grids)};
+}
+
+} // namespace
+
+// cppcheck-suppress unusedFunction -- called from linear_static.cpp
+std::shared_ptr<const NearNullspace> drilling_modes(const Model& model,
+                                                    const MpcHandler& mpc_handler) {
+    const auto rigid = rigid_body_modes(model, mpc_handler);
+    auto [ids, grids] = drilling_grids(model);
+    if (ids.empty())
+        return rigid;
+
+    // One walk per connected shell. Each grid's normal is turned to agree with
+    // the grid it was reached from, and the colour alternates. A mesh that cannot
+    // be two-coloured, such as a closed ring of an odd number of elements, keeps
+    // whatever the walk reached first: the pattern is then a little stiffer along
+    // that seam, which costs iterations there and nothing else.
+    std::vector<int> queue;
+    for (std::size_t root = 0; root < grids.size(); ++root) {
+        if (grids[root].sign != 0)
+            continue;
+        grids[root].sign = 1;
+        queue.assign(1, static_cast<int>(root));
+        for (std::size_t head = 0; head < queue.size(); ++head) {
+            const DrillingGrid& from = grids[static_cast<std::size_t>(queue[head])];
+            for (const int next : from.neighbours) {
+                DrillingGrid& to = grids[static_cast<std::size_t>(next)];
+                if (to.sign != 0)
+                    continue;
+                to.sign = -from.sign;
+                // A fold has no normal of its own, so it passes on the direction
+                // it was reached with.
+                if (to.fold)
+                    to.normal = from.normal;
+                else if (to.normal.dot(from.normal) < 0)
+                    to.normal = -to.normal;
+                queue.push_back(next);
+            }
+        }
+    }
+
+    constexpr int kExtra = 2;
+    const auto n = static_cast<std::size_t>(rigid->rows());
+    const auto base = static_cast<std::size_t>(rigid->cols);
+    const auto cols = base + kExtra;
+    auto out = std::make_shared<NearNullspace>();
+    out->cols = static_cast<int>(cols);
+    out->optional_cols = kExtra;
+    out->point = rigid->point;
+    out->points = rigid->points;
+    out->modes.assign(n * cols, 0.0);
+    for (std::size_t i = 0; i < n; ++i)
+        std::copy_n(rigid->modes.begin() + static_cast<std::ptrdiff_t>(i * base), base,
+                    out->modes.begin() + static_cast<std::ptrdiff_t>(i * cols));
+    const DofMap& full = mpc_handler.full_dof_map();
+    for (std::size_t g = 0; g < grids.size(); ++g) {
+        if (grids[g].fold)
+            continue;
+        const Eigen::Vector3d axis = grids[g].normal.normalized();
+        for (int c = 0; c < 3; ++c) {
+            const EqIndex eq = mpc_handler.reduced_index(full.eq_index(ids[g], 3 + c));
+            if (eq == CONSTRAINED_DOF)
+                continue;
+            const auto row = static_cast<std::size_t>(eq) * cols + base;
+            out->modes[row] = axis[c];
+            out->modes[row + 1] = grids[g].sign * axis[c];
+        }
+    }
     return out;
 }
 

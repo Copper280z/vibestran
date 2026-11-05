@@ -87,8 +87,8 @@ template <class Backend> void check_amg(const char* label) {
 // (without them this bar takes tens of thousands of iterations), every engine
 // must converge to the direct solution, and the budget changes where the
 // products run but not the method.
-template <class Backend> void check_structure(const char* label) {
-    const auto r = test::assemble(test::hex_bar(17));
+template <class Backend> void check_structure(const char* label, const std::string& deck, AmgModes modes, std::size_t partial_mib) {
+    const auto r = test::assemble(deck, true, modes);
     ASSERT_GE(r.k.n, 50000);
     ASSERT_TRUE(r.modes);
     const double top = test::largest_magnitude(r.u);
@@ -96,7 +96,7 @@ template <class Backend> void check_structure(const char* label) {
     // test_amg_vcycle.cpp. The device cycles apply the same operator, so CG sees
     // the same iterations, up to rounding (and fp32 rounding in the mixed hierarchy).
     const int host_iterations = test::host_amg_iterations(r);
-    for (const std::size_t budget : {std::size_t(0), std::size_t(120) * 1024 * 1024, std::size_t(1024) * 1024}) {
+    for (const std::size_t budget : {std::size_t(0), partial_mib * 1024 * 1024, std::size_t(1024) * 1024}) {
         auto backend = create<Backend>(budget);
         if (!backend) GTEST_SKIP() << "CUDA not available on this system";
         SCOPED_TRACE(std::string(label) + " budget=" + std::to_string(budget));
@@ -208,11 +208,21 @@ TEST(CudaPcgAmg, MixedHierarchyResidentSpilledAndOnTheHost) {
 }
 
 TEST(CudaPcgAmg, StableBackendCarriesRigidBodyModes) {
-    check_structure<CudaPCGSolverBackend>("stable");
+    check_structure<CudaPCGSolverBackend>("stable", test::hex_bar(17), AmgModes::Rigid, 120);
 }
 
 TEST(CudaPcgAmg, MixedBackendCarriesRigidBodyModes) {
-    check_structure<CudaMixedPCGSolverBackend>("mixed");
+    check_structure<CudaMixedPCGSolverBackend>("mixed", test::hex_bar(17), AmgModes::Rigid, 120);
+}
+
+// Aggregates with different numbers of coarse equations reach the device too:
+// without the drilling columns this sheet takes hundreds of iterations.
+TEST(CudaPcgAmg, StableBackendCarriesDrillingModes) {
+    check_structure<CudaPCGSolverBackend>("stable", test::in_plane_sheet(100), AmgModes::Drilling, 62);
+}
+
+TEST(CudaPcgAmg, MixedBackendCarriesDrillingModes) {
+    check_structure<CudaMixedPCGSolverBackend>("mixed", test::in_plane_sheet(100), AmgModes::Drilling, 62);
 }
 
 #endif

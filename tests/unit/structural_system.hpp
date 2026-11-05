@@ -109,6 +109,26 @@ inline std::string shell_sheet(int n) {
     return out.str();
 }
 
+// shell_sheet with its load in the plane of the sheet, which excites the
+// rotations about the normal that drilling_modes() describes.
+// cppcheck-suppress unusedFunction -- called from test_near_nullspace.cpp, test_cuda_pcg_amg.cpp and test_vulkan_solver.cpp, which Eigen stops cppcheck on
+inline std::string in_plane_sheet(int n) {
+    std::ostringstream out;
+    out << kSteel;
+    const auto node = [&](int i, int j) { return 1 + i + (n + 1) * j; };
+    for (int j = 0; j <= n; ++j)
+        for (int i = 0; i <= n; ++i) out << std::format("GRID,{},,{},{},0.\n", node(i, j), double(i) / n, double(j) / n);
+    int eid = 1;
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i)
+            out << std::format("CQUAD4,{},2,{},{},{},{}\n", eid++, node(i, j), node(i + 1, j), node(i + 1, j + 1), node(i, j + 1));
+    for (int i = 0; i <= n; ++i) {
+        out << "SPC1,1,123456," << node(i, 0) << "\n";
+        out << std::format("FORCE,2,{},0,1000.,0.,1.,0.\n", node(i, n));
+    }
+    return out.str();
+}
+
 // CHEXA8 blocks tied to a clamped CQUAD4 plate with RBE2 spiders: mixed grids,
 // partial constraints and dense rows from one system.
 // cppcheck-suppress unusedFunction -- called from test_near_nullspace.cpp and test_amg_vcycle.cpp, which Eigen stops cppcheck on

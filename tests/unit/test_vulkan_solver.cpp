@@ -43,19 +43,17 @@ TEST(VulkanAmgTest, ResidentAndBudgetedHierarchyPreserveMaterialInterface) {
     }
 }
 
-// A structure's rigid-body modes must reach the hierarchy on every engine:
-// without them this bar takes tens of thousands of iterations.
-TEST(VulkanAmgTest, RigidBodyModesConvergeResidentAndBudgeted) {
+static void check_structure(const std::string& deck, AmgModes modes, std::size_t partial_mib) {
     auto context = VulkanContext::create();
     if (!context || !context->device_info().supports_float64) GTEST_SKIP() << "Vulkan fp64 unavailable";
-    const auto r = test::assemble(test::hex_bar(17));
+    const auto r = test::assemble(deck, true, modes);
     ASSERT_TRUE(r.modes);
     const auto full = r.k.expanded_symmetric();
     const double top = test::largest_magnitude(r.u);
     // The device cycle applies the operator test_amg_vcycle.cpp proves SPD on the
     // host, so CG sees the same iterations, up to rounding.
     const int host_iterations = test::host_amg_iterations(r);
-    for (const std::size_t budget : {std::size_t(0), std::size_t(120) * 1024 * 1024, std::size_t(1024) * 1024}) {
+    for (const std::size_t budget : {std::size_t(0), partial_mib * 1024 * 1024, std::size_t(1024) * 1024}) {
         SCOPED_TRACE(budget);
         VulkanSolverConfig cfg;
         cfg.min_dofs_for_gpu = 0;
@@ -95,6 +93,18 @@ TEST(VulkanAmgTest, RigidBodyModesConvergeResidentAndBudgeted) {
             for (std::size_t i = 0; i < u.size(); ++i) ASSERT_NEAR(u[i], r.u[i] / scale, 1e-6 * top) << i;
         }
     }
+}
+
+// A structure's rigid-body modes must reach the hierarchy on every engine:
+// without them this bar takes tens of thousands of iterations.
+TEST(VulkanAmgTest, RigidBodyModesConvergeResidentAndBudgeted) {
+    check_structure(test::hex_bar(17), AmgModes::Rigid, 120);
+}
+
+// Aggregates with different numbers of coarse equations reach the device too:
+// without the drilling columns this sheet takes hundreds of iterations.
+TEST(VulkanAmgTest, DrillingModesConvergeResidentAndBudgeted) {
+    check_structure(test::in_plane_sheet(100), AmgModes::Drilling, 62);
 }
 
 TEST(VulkanAmgTest, FactorSolvesEveryColumnAndRefactorUploadsTheNewValues) {

@@ -71,12 +71,13 @@ refinement-parameter exponents. The current numbers and the stricter comparison 
 a direct solve are under "Validity and the Priority 0 baseline".
 
 **The last two rows regress.** Plate262k is `shell-membrane`: 902 iterations in
-3.43 s with constant, 2556 in 12.27 s with rigid. Its ν = 0 and t/L = 10 nearly
-decouple the fields, which is close to six scalar problems, and the weak-coupling
-filter that harms rotations helps there: removing it (threshold 0) takes constant's
-120 / 199 iterations to 459 / 833 at n = 48 / 96, worse than rigid's 331 / 625. Such
-decks can use `PARAM,AMGMODES,CONSTANT`. A filter that preserves the modes might
-recover this.
+3.43 s with constant, 2556 in 12.27 s with rigid. Its ν = 0 helps constant, because
+the weak-coupling filter that harms rotations helps nearly decoupled fields: removing
+it (threshold 0) takes constant's 120 / 199 iterations to 459 / 833 at n = 48 / 96,
+worse than rigid's 331 / 625. Rigid's own iterations have another cause, measured on
+2026-11-05 at n = 400: t/L does not matter, freezing bending leaves 1658 iterations,
+and freezing the drilling rotation leaves 34 with the same answer. See "Drilling
+modes" below, which fixes this class. `PARAM,AMGMODES,CONSTANT` also remains.
 
 Realistic shell assemblies, the WebMesh rover (CQUAD4, RBE2, RBE3, CBUSH, CONM2;
 two subcases, per subcase, iterate time from the solver log):
@@ -454,8 +455,77 @@ rover decks, and constant does not.
 The costs are about twice the device memory, 4.1-5.4 GiB more host memory on the large
 decks, and up to 11.4x complete-deck time on membrane-like decks under memory pressure.
 `--amg-modes=constant` or `PARAM,AMGMODES,CONSTANT` selects the scalar hierarchy for such
-decks. Nothing changes below 50000 equations, on the CPU backends, or on Vulkan devices
+decks, and "Drilling modes" below is the better option on CQUAD4 membranes. Nothing changes below 50000 equations, on the CPU backends, or on Vulkan devices
 without fp64, which cannot use the modes.
+
+### Drilling modes
+
+`--amg-modes=drilling` (`PARAM,AMGMODES,DRILLING`) adds two columns to the rigid-body
+modes: a uniform rotation about the shell normal, and one that alternates in sign
+between neighbouring grids. A CQUAD4's membrane strain depends only on differences of
+drilling rotation, and on a rectangle both patterns leave those strains at zero, so
+only the drilling penalty resists them. An aggregate carries a column only where it
+isn't zero and isn't in the span of the columns before it, so grids with no CQUAD4 pay
+nothing. A model with no CQUAD4 gets exactly the rigid-body modes. Neither column
+changes the solution, which refinement accepts against the assembled stiffness. It is
+an explicit option, not the default.
+
+CUDA fp64 on the TITAN V with no budget, one run each, measured 2026-11-05. Scripts are
+in `benchmarks/pcg/amg-drilling-20261105/`, and results and logs are in
+`~/pcg-perf/drilling-20261105/` on that machine. Iterations are at the suite's three
+levels, and time is the complete deck at the largest:
+
+| Class | Equations | Rigid iterations | Drilling iterations | Rigid s | Drilling s |
+|---|---|---|---|---:|---:|
+| shell-membrane | 61k / 241k / 962k | 634 / 1213 / 2167 | **30 / 28 / 38** | 12.4 | **6.5** |
+| shell-cylinder-cd | 62k / 249k / 995k | 581 / 1159 / 1452 | **429 / 431 / 395** | 14.8 | **10.4** |
+| rbe-assembly | 55k / 319k / 939k | 1413 / 2614 / 4234 | **826 / 1988 / 2186** | 47.5 | **33.8** |
+| stiffened-panel | 63k / 251k / 999k | **309** / 645 / **1413** | 350 / **643** / 1416 | **11.6** | 13.1 |
+| shell-foundation | 61k / 242k / 965k | 106 / **100 / 130** | 106 / 101 / 133 | **6.6** | 7.2 |
+| shell-thin | 59k / 238k / 955k | **722 / 612 / 567** | 736 / 664 / 626 | **8.0** | 9.0 |
+| shell-thick | 59k / 238k / 955k | 30 / 31 / 35 | 30 / 31 / 35 | **6.1** | 6.7 |
+
+The solid and beam classes have no CQUAD4, so both options run the same hierarchy. Every class's coarsest level agrees with a refined direct solve.
+
+Decks outside the suite, at about a million equations unless noted:
+
+| Deck | Rigid iterations | Drilling iterations | Rigid s | Drilling s |
+|---|---:|---:|---:|---:|
+| Sheet, elements randomly reversed, in-plane load | 1809 | **33** | 11.6 | **6.3** |
+| Sheet, 5% of cells split into triangles, in-plane load | 1773 | **33** | 11.8 | **6.6** |
+| Sheet, half quads and half triangles, in-plane load | 1347 | **45** | 12.2 | **8.5** |
+| Sheet, 32x32 checkerboard of quads and triangles, in-plane load | 4597 | **392** | 22.0 | **9.9** |
+| Sheet, 8x8 checkerboard of quads and triangles, in-plane load | 3640 | **1299** | 19.5 | **13.3** |
+| Unstructured all-quad, in-plane load, 64k / 252k / 988k | 834 / 1799 / 3786 | **125 / 226 / 402** | 19.9 | **8.7** |
+| Unstructured all-quad, transverse load | **363** | 467 | **7.8** | 9.0 |
+| Unstructured quads and triangles, in-plane load, 227k / 902k | 1431 / 3511 | **361 / 1834** | 19.7 | **16.4** |
+| Unstructured quads and triangles, transverse load | 383 | 384 | **9.6** | 11.0 |
+| Unstructured triangles, in-plane load | 43 | 43 | 11.0 | 11.0 |
+| Closed cylinder, axial load, 576 around (two-colourable) | 1993 | **498** | 17.2 | **10.8** |
+| Closed cylinder, axial load, 577 around (not two-colourable) | 1987 | **495** | 17.3 | **10.8** |
+| Rover complete, 61k | **330** | 379 | **6.4** | 6.7 |
+| Rover four-wheel, 69k | 398 | **390** | **6.5** | 6.7 |
+
+`shell-membrane` at 9.5M equations, under the planner's default budget, goes from 4248
+iterations in 189 s to 36 in 69 s, with peak host memory from 16.0 to 19.2 GiB. The
+larger hierarchy puts 7.78M fine rows on the CPU instead of 88k, and it is still faster.
+
+What this shows:
+
+- **Membrane action on regular meshes gains the most.** Iterations stay nearly flat
+  with refinement there. On the unstructured all-quad mesh they fall about ninefold but
+  still grow, so the two patterns don't capture everything on an irregular mesh.
+- **Bending-dominated decks pay.** They get no gain and spend about 10-13% more time,
+  with up to 29% more iterations on the unstructured all-quad deck.
+- **Memory.** The hierarchy's plan grows 27% on an all-CQUAD4 deck (852 to 1080 MB on
+  `shell-membrane` at 962k), and 3% on `rbe-assembly`, whose solids carry no extra
+  columns.
+- **Where triangles meet quads.** Neither pattern has a best set of grids. On the
+  checkerboards, leaving the alternating column off grids that touch a triangle gives
+  432 and 285 iterations against 1299 and 392. On the scattered and half decks it gives
+  232 and 75 against 33 and 45. Both columns on every CQUAD4 grid is the simpler rule
+  and beats rigid on all of them, so that is what's implemented.
+- **It doesn't help `stiffened-panel`,** which is limited by something else.
 
 ### Limits of these results
 

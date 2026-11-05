@@ -16,6 +16,7 @@
 #include <format>
 #include <iostream>
 #include <map>
+#include <numbers>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -252,6 +253,10 @@ TEST(AmgModes, ChoicePrecedence) {
     EXPECT_THROW((void)assemble(bulk, true, std::nullopt, "PARAM,AMGMODES,BOGUS\n"), SolverError);
     EXPECT_EQ(parse_amg_modes("rigid"), AmgModes::Rigid);
     EXPECT_EQ(parse_amg_modes("Constant"), AmgModes::Constant);
+    EXPECT_EQ(parse_amg_modes("drilling"), AmgModes::Drilling);
+    EXPECT_EQ(assemble(bulk, true, std::nullopt, "PARAM,AMGMODES,DRILLING\n").modes->cols, 8);
+    EXPECT_EQ(assemble(bulk, true, AmgModes::Drilling, "PARAM,AMGMODES,RIGID\n").modes->cols, 8)
+        << "the command line overrides the deck";
     EXPECT_FALSE(parse_amg_modes("block"));
 }
 
@@ -428,4 +433,351 @@ TEST(RigidBodyAmg, RefactorKeepsTheStableSmoother) {
     EXPECT_NEAR(double(second.iterations), double(first.iterations), 2.0);
     for (std::size_t i = 0; i < first.solution.size(); i += 97)
         EXPECT_NEAR(second.solution[i], first.solution[i] / 2, 1e-6 * std::abs(first.solution[i]) + 1e-15);
+}
+
+namespace {
+
+// A flat m x m CQUAD4 sheet, 1 by 1, without constraints or loads. reversed(i, j)
+// lists an element's grids the other way round, which flips its normal.
+template <class Reversed>
+std::string rectangle_sheet(int m, Reversed reversed) {
+    std::ostringstream out;
+    const auto grid = [m](int i, int j) { return 1 + i + (m + 1) * j; };
+    for (int j = 0; j <= m; ++j)
+        for (int i = 0; i <= m; ++i)
+            out << std::format("GRID,{},,{},{},0.\n", grid(i, j), double(i) / m, double(j) / m);
+    int eid = 1;
+    for (int j = 0; j < m; ++j)
+        for (int i = 0; i < m; ++i)
+            out << (reversed(i, j)
+                ? std::format("CQUAD4,{},2,{},{},{},{}\n", eid++, grid(i, j), grid(i, j + 1), grid(i + 1, j + 1), grid(i + 1, j))
+                : std::format("CQUAD4,{},2,{},{},{},{}\n", eid++, grid(i, j), grid(i + 1, j), grid(i + 1, j + 1), grid(i, j + 1)));
+    return out.str();
+}
+
+std::string rectangle_sheet(int m) {
+    return rectangle_sheet(m, [](int, int) { return false; });
+}
+
+std::vector<double> column(const NearNullspace& modes, int c) {
+    std::vector<double> out(std::size_t(modes.rows()));
+    for (std::size_t i = 0; i < out.size(); ++i)
+        out[i] = modes.modes[i * std::size_t(modes.cols) + std::size_t(c)];
+    return out;
+}
+
+double dot(const std::vector<double>& a, const std::vector<double>& b) {
+    double sum = 0;
+    for (std::size_t i = 0; i < a.size(); ++i) sum += a[i] * b[i];
+    return sum;
+}
+
+RecordingBackend::Record drilling_system(const std::string& bulk) {
+    return assemble(kSteel + bulk + kFreeFree, false, AmgModes::Drilling);
+}
+
+// P_tent has orthonormal columns and P P^T B = B on every aggregated equation.
+void expect_holds_every_column(const NearNullspace& modes, const detail::ScaledAmgMatrix& scaled,
+                               const detail::ModeAggregation::Aggregates& groups, const detail::AmgHostCsr& p) {
+    const auto n = std::size_t(modes.rows());
+    std::vector<double> coarse(p.ncols);
+    for (int c = 0; c < modes.cols; ++c) {
+        std::vector<double> mode = column(modes, c);
+        double top = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            mode[i] /= scaled.scale[i];
+            if (groups.id[i] >= 0) top = std::max(top, std::abs(mode[i]));
+        }
+        std::ranges::fill(coarse, 0.0);
+        for (std::size_t i = 0; i < n; ++i)
+            for (auto j = p.ptr[i]; j < p.ptr[i + 1]; ++j) coarse[std::size_t(p.col[j])] += p.val[j] * mode[i];
+        for (std::size_t i = 0; i < n; ++i) {
+            if (groups.id[i] < 0) continue;
+            double back = 0;
+            for (auto j = p.ptr[i]; j < p.ptr[i + 1]; ++j) back += p.val[j] * coarse[std::size_t(p.col[j])];
+            ASSERT_NEAR(back, mode[i], 1e-9 * top) << "mode " << c << " equation " << i;
+        }
+    }
+    Eigen::MatrixXd dense = Eigen::MatrixXd::Zero(Eigen::Index(n), Eigen::Index(p.ncols));
+    for (std::size_t i = 0; i < n; ++i)
+        for (auto j = p.ptr[i]; j < p.ptr[i + 1]; ++j) dense(Eigen::Index(i), p.col[j]) = p.val[j];
+    const Eigen::MatrixXd identity = Eigen::MatrixXd::Identity(Eigen::Index(p.ncols), Eigen::Index(p.ncols));
+    EXPECT_LT((dense.transpose() * dense - identity).cwiseAbs().maxCoeff(), 1e-10);
+}
+
+} // namespace
+
+// Why these columns exist: per unit of rotation at the grids, both patterns take
+// a tiny fraction of the energy of a rotation about the normal that varies
+// smoothly across the sheet, and the rigid-body modes cannot represent them.
+TEST(DrillingModes, BothPatternsAreSoftOnARectangleAndNotRigidMotions) {
+    const auto r = drilling_system(rectangle_sheet(12));
+    ASSERT_EQ(r.modes->cols, 8);
+    ASSERT_EQ(r.modes->optional_cols, 2);
+    const auto energy = [&](const std::vector<double>& x) { return dot(x, product(r.k, x)) / dot(x, x); };
+    const auto uniform = column(*r.modes, 6), alternating = column(*r.modes, 7);
+
+    // The smooth comparison: the same rows with a sine across the sheet.
+    std::vector<double> smooth(uniform.size(), 0.0);
+    int rotations = 0;
+    for (std::size_t i = 0; i < smooth.size(); ++i)
+        if (uniform[i] != 0) smooth[i] = std::sin(0.5 * std::numbers::pi * double(rotations++) / 13.0);
+    ASSERT_EQ(rotations, 13 * 13);
+    const double stiff = energy(smooth);
+    EXPECT_LT(energy(uniform), 1e-3 * stiff);
+    EXPECT_LT(energy(alternating), 1e-3 * stiff);
+
+    // Least-squares residual against the rigid-body modes.
+    const auto rows = Eigen::Index(uniform.size());
+    Eigen::MatrixXd rigid(rows, 6);
+    for (Eigen::Index i = 0; i < rows; ++i)
+        for (Eigen::Index c = 0; c < 6; ++c) rigid(i, c) = r.modes->modes[std::size_t(i) * 8 + std::size_t(c)];
+    const Eigen::ColPivHouseholderQR<Eigen::MatrixXd> qr(rigid);
+    for (const auto* mode : {&uniform, &alternating}) {
+        const Eigen::Map<const Eigen::VectorXd> b(mode->data(), rows);
+        EXPECT_GT((b - rigid * qr.solve(b)).norm(), 0.3 * b.norm());
+    }
+    // The rigid columns themselves are the ones of rigid_body_modes().
+    const auto plain = assemble(kSteel + rectangle_sheet(12) + kFreeFree, false, AmgModes::Rigid);
+    for (std::size_t i = 0; i < std::size_t(r.k.n); ++i)
+        for (std::size_t c = 0; c < 6; ++c)
+            EXPECT_EQ(r.modes->modes[i * 8 + c], plain.modes->modes[i * 6 + c]);
+}
+
+TEST(DrillingModes, ColoursAlternateAcrossEveryElementEdge) {
+    constexpr int m = 7;
+    const auto r = drilling_system(rectangle_sheet(m));
+    const auto uniform = column(*r.modes, 6), alternating = column(*r.modes, 7);
+    // Only the rotation about z is present on a flat sheet, one equation per grid,
+    // with the grids in ID order.
+    std::vector<double> sign;
+    for (std::size_t i = 0; i < uniform.size(); ++i)
+        if (uniform[i] != 0) {
+            EXPECT_NEAR(std::abs(uniform[i]), 1.0, 1e-14);
+            sign.push_back(alternating[i] / uniform[i]);
+        }
+    ASSERT_EQ(sign.size(), std::size_t((m + 1) * (m + 1)));
+    for (int j = 0; j <= m; ++j)
+        for (int i = 0; i <= m; ++i) {
+            const auto here = std::size_t(i + (m + 1) * j);
+            if (i < m) EXPECT_EQ(sign[here + 1], -sign[here]);
+            if (j < m) EXPECT_EQ(sign[here + std::size_t(m + 1)], -sign[here]);
+        }
+}
+
+TEST(DrillingModes, ElementOrientationDoesNotMatter) {
+    // Real meshes mix orientations. A checkerboard of reversed elements must give
+    // one uniform rotation, not a pattern that follows each grid's first element.
+    const auto consistent = drilling_system(rectangle_sheet(8));
+    const auto mixed = drilling_system(rectangle_sheet(8, [](int i, int j) { return (i * 3 + j * 5) % 7 < 3; }));
+    ASSERT_EQ(consistent.k.n, mixed.k.n);
+    for (const int c : {6, 7}) {
+        const auto a = column(*consistent.modes, c), b = column(*mixed.modes, c);
+        const double sign = dot(a, b) > 0 ? 1 : -1;
+        for (std::size_t i = 0; i < a.size(); ++i)
+            EXPECT_NEAR(a[i], sign * b[i], 1e-12) << "column " << c << " equation " << i;
+    }
+}
+
+TEST(DrillingModes, TheAxisFollowsACurvedShell) {
+    // A quarter cylinder about z, with rows at theta = 0, 11.25, .. 90 degrees.
+    std::ostringstream deck;
+    constexpr int around = 8, along = 4;
+    const auto grid = [](int i, int j) { return 1 + i + (around + 1) * j; };
+    std::vector<double> theta;
+    for (int j = 0; j <= along; ++j)
+        for (int i = 0; i <= around; ++i) {
+            theta.push_back(0.5 * std::numbers::pi * i / around);
+            deck << std::format("GRID,{},,{:.12f},{:.12f},{}\n", grid(i, j), std::cos(theta.back()), std::sin(theta.back()), 0.2 * j);
+        }
+    int eid = 1;
+    for (int j = 0; j < along; ++j)
+        for (int i = 0; i < around; ++i)
+            deck << std::format("CQUAD4,{},2,{},{},{},{}\n", eid++, grid(i, j), grid(i + 1, j), grid(i + 1, j + 1), grid(i, j + 1));
+    const auto r = drilling_system(deck.str());
+    const auto uniform = column(*r.modes, 6);
+    ASSERT_EQ(uniform.size(), theta.size() * 6);
+    double agreement = 0;
+    for (std::size_t g = 0; g < theta.size(); ++g) {
+        const Eigen::Vector3d axis(uniform[g * 6 + 3], uniform[g * 6 + 4], uniform[g * 6 + 5]);
+        EXPECT_NEAR(axis.norm(), 1.0, 1e-12) << "grid " << g;
+        for (int c = 0; c < 3; ++c) EXPECT_EQ(uniform[g * 6 + std::size_t(c)], 0.0);
+        // Radial up to sign, with one sign over the whole shell.
+        const double radial = axis.dot(Eigen::Vector3d(std::cos(theta[g]), std::sin(theta[g]), 0));
+        EXPECT_GT(std::abs(radial), 0.99) << "grid " << g;
+        if (g == 0) agreement = radial;
+        EXPECT_GT(radial * agreement, 0) << "grid " << g;
+    }
+}
+
+TEST(DrillingModes, ColumnsAreZeroAtFoldsAndAwayFromQuadrilaterals) {
+    // Two sheets meeting at a right angle along x = 1, a triangle beyond the far
+    // edge, a bar and a solid: only smooth CQUAD4 grids take part.
+    const std::string bulk =
+        "GRID,1,,0.,0.,0.\nGRID,2,,1.,0.,0.\nGRID,3,,1.,1.,0.\nGRID,4,,0.,1.,0.\n"
+        "GRID,5,,1.,0.,1.\nGRID,6,,1.,1.,1.\n"
+        "CQUAD4,1,2,1,2,3,4\nCQUAD4,2,2,2,5,6,3\n"
+        "GRID,7,,-1.,0.,0.\nCTRIA3,3,2,1,7,4\n"
+        "GRID,8,,0.,-1.,0.\nCBAR,4,3,1,8,0.,0.,1.\n";
+    const auto r = drilling_system(bulk);
+    ASSERT_EQ(r.modes->cols, 8);
+    std::map<int, std::vector<std::size_t>> rows;
+    for (std::size_t i = 0; i < r.modes->point.size(); ++i) rows[r.modes->point[i]].push_back(i);
+    ASSERT_EQ(rows.size(), 8u) << "grids 1 to 8, in order; the fixture's grid is clamped";
+    const auto magnitude = [&](int point) {
+        double sum = 0;
+        for (const auto i : rows[point])
+            for (std::size_t c = 6; c < 8; ++c) sum += std::abs(r.modes->modes[i * 8 + c]);
+        return sum;
+    };
+    for (const int smooth : {0, 3, 4, 5}) EXPECT_GT(magnitude(smooth), 0) << "point " << smooth;
+    for (const int fold : {1, 2}) EXPECT_EQ(magnitude(fold), 0) << "point " << fold;
+    for (const int other : {6, 7}) EXPECT_EQ(magnitude(other), 0) << "point " << other;
+}
+
+TEST(DrillingModes, AGridWithASnormUsesItAsTheAxis) {
+    // A flat sheet with one grid's normal tilted by SNORM: that grid's rotation
+    // follows the normal the elements use there, and the others stay on z.
+    const auto r = drilling_system(rectangle_sheet(2) + "SNORM,5,0,.6,0.,.8\n");
+    const auto uniform = column(*r.modes, 6);
+    ASSERT_EQ(uniform.size(), 9u * 6u);
+    const auto axis = [&](std::size_t grid, std::size_t c) { return uniform[grid * 6 + 3 + c]; };
+    const double sign = axis(0, 2) > 0 ? 1 : -1;
+    EXPECT_NEAR(sign * axis(4, 0), .6, 1e-12);
+    EXPECT_NEAR(sign * axis(4, 2), .8, 1e-12);
+    for (const std::size_t grid : {std::size_t(0), std::size_t(3), std::size_t(8)})
+        EXPECT_NEAR(sign * axis(grid, 2), 1.0, 1e-12) << "grid " << grid;
+}
+
+TEST(DrillingModes, ARingThatCannotBeTwoColouredStillGivesAUniformRotation) {
+    // Five elements around a closed ring: the colouring conflicts on one seam, but
+    // the normals agree all the way round.
+    std::ostringstream deck;
+    constexpr int around = 5;
+    for (int i = 0; i < around; ++i) {
+        const double angle = 2 * std::numbers::pi * i / around;
+        deck << std::format("GRID,{},,{:.12f},{:.12f},0.\nGRID,{},,{:.12f},{:.12f},1.\n", i + 1, std::cos(angle), std::sin(angle),
+                            i + 11, std::cos(angle), std::sin(angle));
+    }
+    for (int i = 0; i < around; ++i) {
+        const int next = (i + 1) % around;
+        deck << std::format("CQUAD4,{},2,{},{},{},{}\n", i + 1, i + 1, next + 1, next + 11, i + 11);
+    }
+    deck << "PARAM,SNORM,80.\n";
+    const auto r = drilling_system(deck.str());
+    const auto uniform = column(*r.modes, 6);
+    for (int i = 0; i < around; ++i) {
+        const double angle = 2 * std::numbers::pi * i / around;
+        const Eigen::Vector3d radial(std::cos(angle), std::sin(angle), 0);
+        const auto g = std::size_t(i) * 6;
+        const Eigen::Vector3d axis(uniform[g + 3], uniform[g + 4], uniform[g + 5]);
+        EXPECT_GT(axis.dot(radial) * Eigen::Vector3d(uniform[3], uniform[4], uniform[5]).dot(Eigen::Vector3d::UnitX()), 0.9) << "grid " << i;
+    }
+}
+
+TEST(DrillingModes, WithoutCQuad4TheyAreTheRigidBodyModes) {
+    const std::string triangles =
+        "GRID,1,,0.,0.,0.\nGRID,2,,1.,0.,0.\nGRID,3,,1.,1.,0.\nGRID,4,,0.,1.,0.\nCTRIA3,1,2,1,2,3\nCTRIA3,2,2,1,3,4\n";
+    for (const std::string& bulk : {triangles, hex_bar(2)}) {
+        const auto rigid = assemble(kSteel + bulk + kFreeFree, false, AmgModes::Rigid);
+        const auto drilling = assemble(kSteel + bulk + kFreeFree, false, AmgModes::Drilling);
+        EXPECT_EQ(drilling.modes->cols, 6);
+        EXPECT_EQ(drilling.modes->optional_cols, 0);
+        EXPECT_EQ(drilling.modes->modes, rigid.modes->modes);
+    }
+}
+
+// With no optional columns the prolongation must be AMGCL's. Fast-math may round
+// the two call sites differently, so they agree to round-off, not bit for bit.
+TEST(ModeAggregation, RigidProlongationIsAmgcls) {
+    const auto r = assemble(mixed_assembly(8));
+    const detail::ScaledAmgMatrix scaled(r.k);
+    detail::ModeAggregation aggregation(*r.modes, scaled.scale);
+    const auto groups = aggregation.aggregates(*scaled.matrix);
+    const auto ours = aggregation.tentative(groups);
+
+    amgcl::coarsening::nullspace_params nullspace;
+    nullspace.cols = r.modes->cols;
+    nullspace.B = r.modes->modes;
+    for (std::size_t i = 0; i < scaled.scale.size(); ++i)
+        for (std::size_t c = 0; c < 6; ++c) nullspace.B[i * 6 + c] /= scaled.scale[i];
+    const auto theirs = amgcl::coarsening::tentative_prolongation<detail::AmgHostCsr>(
+        scaled.scale.size(), groups.count, groups.id, nullspace, 1);
+    ASSERT_EQ(ours->ncols, theirs->ncols);
+    ASSERT_EQ(ours->nnz, theirs->nnz);
+    EXPECT_TRUE(std::equal(ours->ptr, ours->ptr + ours->nrows + 1, theirs->ptr));
+    EXPECT_TRUE(std::equal(ours->col, ours->col + ours->nnz, theirs->col));
+    for (std::size_t i = 0; i < ours->nnz; ++i) EXPECT_NEAR(ours->val[i], theirs->val[i], 1e-13) << "entry " << i;
+}
+
+TEST(ModeAggregation, SolidAggregatesCarrySixColumnsAndShellAggregatesEight) {
+    const auto r = assemble(mixed_assembly(8), true, AmgModes::Drilling);
+    ASSERT_EQ(r.modes->cols, 8);
+    const detail::ScaledAmgMatrix scaled(r.k);
+    detail::ModeAggregation aggregation(*r.modes, scaled.scale);
+    const auto groups = aggregation.aggregates(*scaled.matrix);
+    const auto p = aggregation.tentative(groups);
+
+    // Sort the aggregates by whether any row carries a drilling column.
+    std::vector<char> shell(groups.count, 0);
+    std::vector<std::size_t> width(groups.count, 0);
+    for (std::size_t i = 0; i < scaled.scale.size(); ++i) {
+        if (groups.id[i] < 0) continue;
+        const auto g = std::size_t(groups.id[i]);
+        width[g] = std::size_t(p->ptr[i + 1] - p->ptr[i]);
+        for (std::size_t c = 6; c < 8; ++c)
+            if (r.modes->modes[i * 8 + c] != 0) shell[g] = 1;
+    }
+    int solids = 0, shells = 0;
+    for (std::size_t g = 0; g < groups.count; ++g) {
+        if (shell[g] != 0) {
+            EXPECT_GE(width[g], 7u) << "aggregate " << g;
+            ++shells;
+        } else {
+            EXPECT_EQ(width[g], 6u) << "aggregate " << g;
+            ++solids;
+        }
+    }
+    EXPECT_GT(solids, 0);
+    EXPECT_GT(shells, 0);
+    expect_holds_every_column(*r.modes, scaled, groups, *p);
+}
+
+TEST(ModeAggregation, AColumnInTheSpanOfTheOthersIsLeftOutButStaysExact) {
+    // With no translation in the plane, a rigid rotation about the normal is the
+    // uniform drilling pattern, so no aggregate can use both.
+    constexpr int m = 16;
+    std::ostringstream spc;
+    for (int g = 1; g <= (m + 1) * (m + 1); ++g) spc << "SPC1,1,12," << g << "\n";
+    const auto r = assemble(kSteel + rectangle_sheet(m) + spc.str() + "SPC1,1,3,1,2,18\nFORCE,2,289,0,1.,0.,0.,1.\n", true, AmgModes::Drilling);
+    const detail::ScaledAmgMatrix scaled(r.k);
+    detail::ModeAggregation aggregation(*r.modes, scaled.scale);
+    const auto groups = aggregation.aggregates(*scaled.matrix);
+    const auto p = aggregation.tentative(groups);
+    ASSERT_GT(groups.count, 1u);
+    for (std::size_t i = 0; i < scaled.scale.size(); ++i)
+        if (groups.id[i] >= 0) EXPECT_LE(p->ptr[i + 1] - p->ptr[i], 7) << "equation " << i;
+    expect_holds_every_column(*r.modes, scaled, groups, *p);
+}
+
+// The purpose of the columns: an in-plane load on a CQUAD4 sheet, where the
+// iterations of the rigid-body hierarchy grow with refinement and these do not.
+TEST(DrillingAmg, InPlaneLoadsStopGrowingWithRefinementAndTheSolutionIsUnchanged) {
+    std::vector<int> rigid, drilling;
+    for (const int m : {24, 48, 96}) {
+        const auto plain = assemble(test::in_plane_sheet(m));
+        const auto extended = assemble(test::in_plane_sheet(m), true, AmgModes::Drilling);
+        const auto with_rigid = detail::solve_hybrid_amg(plain.k, plain.f, 1e-9, 5000, {}, plain.modes);
+        const auto with_drilling = detail::solve_hybrid_amg(extended.k, extended.f, 1e-9, 5000, {}, extended.modes);
+        rigid.push_back(with_rigid.iterations);
+        drilling.push_back(with_drilling.iterations);
+        const double top = test::largest_magnitude(extended.u);
+        for (std::size_t i = 0; i < extended.u.size(); ++i)
+            ASSERT_NEAR(with_drilling.solution[i], extended.u[i], 1e-6 * top) << "m " << m << " equation " << i;
+    }
+    std::cout << std::format("[in-plane sheet] rigid: {} {} {}; drilling: {} {} {}\n", rigid[0], rigid[1], rigid[2],
+                             drilling[0], drilling[1], drilling[2]);
+    EXPECT_LE(double(drilling[2]), 1.3 * drilling[0]);
+    EXPECT_GE(double(rigid[2]), 1.5 * rigid[0]) << "the rigid hierarchy no longer struggles: the reason for the columns has gone";
+    EXPECT_LT(3 * drilling[2], rigid[2]);
 }

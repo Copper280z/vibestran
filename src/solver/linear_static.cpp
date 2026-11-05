@@ -338,7 +338,7 @@ AmgModes structural_amg_modes(const Model &model, std::optional<AmgModes> overri
     return AmgModes::Rigid;
   const auto parsed = parse_amg_modes(it->second);
   if (!parsed)
-    throw SolverError(std::format("PARAM,AMGMODES,{}: expected CONSTANT or RIGID", it->second));
+    throw SolverError(std::format("PARAM,AMGMODES,{}: expected CONSTANT, RIGID or DRILLING", it->second));
   return *parsed;
 }
 
@@ -409,10 +409,20 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   const FactorRatioCheckPolicy factor_ratio_policy =
       build_factor_ratio_check_policy(
           model, std::format("[subcase {}]", sc.id), "stiffness matrix");
-  backend_->set_near_nullspace(
-      backend_->uses_near_nullspace(n) && structural_amg_modes(model, amg_modes_) == AmgModes::Rigid
-          ? rigid_body_modes(model, mpc_handler)
-          : nullptr);
+  std::shared_ptr<const NearNullspace> near_nullspace;
+  if (backend_->uses_near_nullspace(n)) {
+    switch (structural_amg_modes(model, amg_modes_)) {
+    case AmgModes::Constant:
+      break;
+    case AmgModes::Rigid:
+      near_nullspace = rigid_body_modes(model, mpc_handler);
+      break;
+    case AmgModes::Drilling:
+      near_nullspace = drilling_modes(model, mpc_handler);
+      break;
+    }
+  }
+  backend_->set_near_nullspace(std::move(near_nullspace));
   // When the elements have every DOF prescribed there is nothing to solve, and the
   // results follow from those values. A model with no element at all, usually
   // because its cards were unsupported, still goes to the backend, which rejects it.

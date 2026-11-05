@@ -17,11 +17,14 @@
 //    kAmgSmootherBound and l1_jacobi_weights().
 //
 // The strength graph, the greedy aggregates and the QR of the modes on each
-// aggregate are AMGCL's.
+// aggregate are AMGCL's. The tentative prolongation is AMGCL's too, except that
+// an aggregate leaves out a NearNullspace optional column it cannot use, so
+// aggregates can differ in their number of coarse equations.
 #define AMGCL_NO_BOOST
 #include <amgcl/backend/builtin.hpp>
 #include <amgcl/coarsening/plain_aggregates.hpp>
 #include <amgcl/coarsening/tentative_prolongation.hpp>
+#include <amgcl/detail/qr.hpp>
 #include "core/exceptions.hpp"
 #include "solver/near_nullspace.hpp"
 #include <algorithm>
@@ -125,11 +128,12 @@ public:
     // The modes of the matrix equilibrated with scale: D^-1/2 K D^-1/2 has the
     // nullspace D^1/2 B, and scale holds D^-1/2.
     ModeAggregation(const NearNullspace& modes, std::span<const double> scale)
-        : point_(modes.point), points_(modes.points) {
+        : point_(modes.point), points_(modes.points), optional_(modes.optional_cols) {
         const auto n = point_.size();
-        if (modes.cols <= 0 || modes.modes.size() != n * std::size_t(modes.cols) || scale.size() != n)
-            throw SolverError(std::format("ModeAggregation: {} modes of {} values for {} equations and {} scales",
-                modes.cols, modes.modes.size(), n, scale.size()));
+        if (modes.cols <= 0 || modes.optional_cols < 0 || modes.optional_cols > modes.cols ||
+            modes.modes.size() != n * std::size_t(modes.cols) || scale.size() != n)
+            throw SolverError(std::format("ModeAggregation: {} modes ({} optional) of {} values for {} equations and {} scales",
+                modes.cols, modes.optional_cols, modes.modes.size(), n, scale.size()));
         nullspace_.cols = modes.cols;
         nullspace_.B = modes.modes;
 #pragma omp parallel for schedule(static)
@@ -145,8 +149,8 @@ public:
 
     // Grid points connect when their blocks' largest entries do, as in AMGCL's
     // pointwise aggregation; all of a point's equations share its aggregate.
-    // An aggregate with fewer equations than modes cannot hold them and is
-    // dropped, leaving its equations to the smoother.
+    // An aggregate with fewer equations than the modes it has cannot hold them
+    // and is dropped, leaving its equations to the smoother.
     [[nodiscard]] Aggregates aggregates(const Csr& a) const {
         const auto n = std::ptrdiff_t(a.nrows);
         if (point_.size() != std::size_t(n))
@@ -211,9 +215,24 @@ public:
         for (int p = 0; p < points_; ++p)
             if (groups.id[std::size_t(p)] >= 0)
                 size[std::size_t(groups.id[std::size_t(p)])] += start[std::size_t(p) + 1] - start[std::size_t(p)];
+        // How many optional columns are zero on the whole of each aggregate.
+        std::vector<std::ptrdiff_t> absent(groups.count, optional_);
+        if (optional_ > 0) {
+            const auto cols = std::size_t(nullspace_.cols);
+            std::vector<char> seen(groups.count * std::size_t(optional_), 0);
+            for (std::size_t i = 0; i < std::size_t(n); ++i) {
+                const auto g = groups.id[std::size_t(point_[i])];
+                if (g < 0) continue;
+                for (int c = 0; c < optional_; ++c) {
+                    if (nullspace_.B[i * cols + cols - std::size_t(optional_) + std::size_t(c)] == 0.0) continue;
+                    char& flag = seen[std::size_t(g) * std::size_t(optional_) + std::size_t(c)];
+                    if (!flag) { flag = 1; --absent[std::size_t(g)]; }
+                }
+            }
+        }
         Aggregates out;
         for (std::size_t g = 0; g < groups.count; ++g)
-            if (size[g] >= nullspace_.cols) renumber[g] = std::ptrdiff_t(out.count++);
+            if (size[g] >= nullspace_.cols - absent[g]) renumber[g] = std::ptrdiff_t(out.count++);
         out.id.resize(std::size_t(n));
 #pragma omp parallel for schedule(static)
         for (std::ptrdiff_t i = 0; i < n; ++i) {
@@ -224,9 +243,86 @@ public:
     }
 
     // The tentative prolongation: on each aggregate, the Q of the modes' QR,
-    // whose R become the modes of the next level.
+    // whose R become the modes of the next level. Every column of the modes stays
+    // on the next level, so an optional column an aggregate leaves out for being
+    // in the span of the others is still carried there, as its coordinates.
     [[nodiscard]] std::shared_ptr<Csr> tentative(const Aggregates& groups) {
-        return amgcl::coarsening::tentative_prolongation<Csr>(point_.size(), groups.count, groups.id, nullspace_, 1);
+        const auto n = point_.size();
+        const auto cols = std::size_t(nullspace_.cols);
+        // Equations by aggregate, keeping their order within it.
+        std::vector<std::size_t> start(groups.count + 1, 0);
+        for (const auto g : groups.id)
+            if (g >= 0) ++start[std::size_t(g) + 1];
+        std::partial_sum(start.begin(), start.end(), start.begin());
+        std::vector<int> equation(start.back());
+        {
+            auto next = start;
+            for (std::size_t i = 0; i < n; ++i)
+                if (groups.id[i] >= 0) equation[next[std::size_t(groups.id[i])]++] = int(i);
+        }
+        // Each aggregate's columns, then where its coarse equations start.
+        std::vector<std::vector<int>> kept(groups.count);
+#pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t g = 0; g < std::ptrdiff_t(groups.count); ++g)
+            kept[std::size_t(g)] = kept_columns(std::size_t(g), start, equation);
+        coarse_start_.assign(groups.count + 1, 0);
+        for (std::size_t g = 0; g < groups.count; ++g) coarse_start_[g + 1] = coarse_start_[g] + kept[g].size();
+        const auto coarse = coarse_start_.back();
+
+        auto p = std::make_shared<Csr>();
+        p->set_size(n, coarse);
+        p->ptr[0] = 0;
+#pragma omp parallel for schedule(static)
+        for (std::ptrdiff_t i = 0; i < std::ptrdiff_t(n); ++i) {
+            const auto g = groups.id[std::size_t(i)];
+            p->ptr[i + 1] = g < 0 ? 0 : int(kept[std::size_t(g)].size());
+        }
+        p->scan_row_sizes();
+        p->set_nonzeros();
+
+        std::vector<double> next(coarse * cols, 0.0);
+#pragma omp parallel
+        {
+            amgcl::detail::QR<double> qr;
+            std::vector<double> part;
+#pragma omp for schedule(static)
+            for (std::ptrdiff_t ig = 0; ig < std::ptrdiff_t(groups.count); ++ig) {
+                const auto g = std::size_t(ig);
+                const auto& use = kept[g];
+                const auto first = start[g];
+                const auto d = int(start[g + 1] - first), m = int(use.size());
+                const auto value = [&](int r, std::size_t c) {
+                    return nullspace_.B[std::size_t(equation[first + std::size_t(r)]) * cols + c];
+                };
+                part.resize(std::size_t(d) * use.size());
+                for (int k = 0; k < m; ++k)
+                    for (int r = 0; r < d; ++r)
+                        part[std::size_t(r + d * k)] = value(r, std::size_t(use[std::size_t(k)]));
+                qr.factorize(d, m, part.data(), amgcl::detail::col_major);
+                const auto base = coarse_start_[g];
+                for (int k = 0; k < m; ++k)
+                    for (int c = 0; c < m; ++c)
+                        next[(base + std::size_t(k)) * cols + std::size_t(use[std::size_t(c)])] = qr.R(k, c);
+                // The coordinates of the columns the aggregate left out.
+                for (std::size_t c = cols - std::size_t(optional_); c < cols; ++c) {
+                    if (std::ranges::find(use, int(c)) != use.end()) continue;
+                    for (int k = 0; k < m; ++k) {
+                        double sum = 0;
+                        for (int r = 0; r < d; ++r) sum += qr.Q(r, k) * value(r, c);
+                        next[(base + std::size_t(k)) * cols + c] = sum;
+                    }
+                }
+                for (int r = 0; r < d; ++r) {
+                    const auto row = p->ptr[equation[first + std::size_t(r)]];
+                    for (int k = 0; k < m; ++k) {
+                        p->col[row + k] = int(base) + k;
+                        p->val[row + k] = qr.Q(r, k);
+                    }
+                }
+            }
+        }
+        nullspace_.B.swap(next);
+        return p;
     }
 
     // P = (I - M A) P_tent, with M the level's smoother weights.
@@ -235,9 +331,9 @@ public:
         const auto n = std::ptrdiff_t(a.nrows);
         const Aggregates groups = aggregates(a);
         // Coarsening that would not reduce the system leaves nothing to gain.
-        if (groups.count == 0 || groups.count * std::size_t(nullspace_.cols) >= std::size_t(n))
-            throw amgcl::error::empty_level();
+        if (groups.count == 0) throw amgcl::error::empty_level();
         const auto initial = tentative(groups);
+        if (initial->ncols >= std::size_t(n)) throw amgcl::error::empty_level();
 
         Csr smoother;
         smoother.set_size(a.nrows, a.ncols, false);
@@ -251,19 +347,65 @@ public:
         auto p = amgcl::backend::product(smoother, *initial);
         auto r = amgcl::backend::transpose(*p);
 
-        // The next level: each aggregate owns one equation per mode.
-        const auto cols = nullspace_.cols;
-        point_.resize(groups.count * std::size_t(cols));
-        for (std::size_t i = 0; i < point_.size(); ++i) point_[i] = int(i / std::size_t(cols));
+        // The next level: each aggregate owns one equation per column it kept.
+        point_.resize(coarse_start_.back());
+        for (std::size_t g = 0; g < groups.count; ++g)
+            for (std::size_t i = coarse_start_[g]; i < coarse_start_[g + 1]; ++i) point_[i] = int(g);
         points_ = int(groups.count);
         eps_strong_ *= 0.5F;
         return {std::move(p), std::move(r)};
     }
 
 private:
+    // The columns aggregate g carries: all of the required ones, and each
+    // optional one with a part outside the span of the columns before it. The
+    // limit is far above round-off and far below anything a mode can still add.
+    [[nodiscard]] std::vector<int> kept_columns(std::size_t g, const std::vector<std::size_t>& start,
+                                                const std::vector<int>& equation) const {
+        constexpr double kDependent = 1e-8;
+        const auto cols = std::size_t(nullspace_.cols);
+        const auto required = cols - std::size_t(optional_);
+        std::vector<int> kept(cols);
+        std::iota(kept.begin(), kept.end(), 0);
+        if (optional_ == 0) return kept;
+        kept.resize(required);
+        const auto first = start[g], d = start[g + 1] - first;
+        const auto value = [&](std::size_t r, std::size_t c) {
+            return nullspace_.B[std::size_t(equation[first + r]) * cols + c];
+        };
+        // Modified Gram-Schmidt in column order. Nearly zero parts of the required
+        // columns are left out of the basis used for the test.
+        std::vector<std::vector<double>> basis;
+        std::vector<double> part(d);
+        for (std::size_t c = 0; c < cols; ++c) {
+            double norm = 0;
+            for (std::size_t r = 0; r < d; ++r) {
+                part[r] = value(r, c);
+                norm += part[r] * part[r];
+            }
+            for (const auto& q : basis) {
+                double along = 0;
+                for (std::size_t r = 0; r < d; ++r) along += q[r] * part[r];
+                for (std::size_t r = 0; r < d; ++r) part[r] -= along * q[r];
+            }
+            double rest = 0;
+            for (std::size_t r = 0; r < d; ++r) rest += part[r] * part[r];
+            const bool independent = norm > 0 && rest > kDependent * kDependent * norm;
+            if (independent && kept.size() < d) {
+                const double scale = 1 / std::sqrt(rest);
+                for (std::size_t r = 0; r < d; ++r) part[r] *= scale;
+                basis.push_back(part);
+                if (c >= required) kept.push_back(int(c));
+            }
+        }
+        return kept;
+    }
+
     std::vector<int> point_;
     int points_;
+    int optional_;
     amgcl::coarsening::nullspace_params nullspace_;
+    std::vector<std::size_t> coarse_start_;
     float eps_strong_{0.08F};
 };
 
