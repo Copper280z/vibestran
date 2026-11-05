@@ -1,20 +1,24 @@
 // tests/unit/test_cuda_factor.cpp
 // CudaSolverBackend::factor(): cuDSS analysis reuse, multiple right-hand
 // sides, require_spd, recovery after a failed factorization, the dense_block
-// ordering, the LU fallback, fp32 refinement with its switch to fp64, and MAGSTAT on cuDSS.
+// ordering, the LU fallback, fp32 refinement with its switch to fp64, MAGSTAT on cuDSS,
+// and hybrid mode's device limit.
 
 #include <gtest/gtest.h>
 #include "solver/solver_backend.hpp"
 #include "hilbert_system.hpp"
 #include "dense_block_system.hpp"
 #ifdef HAVE_CUDA
+#include "core/exceptions.hpp"
 #include "solver/cuda_solver_backend.hpp"
 #include "magnetic/solver.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <iterator>
 #include <sstream>
+#include <string>
 #endif
 
 using namespace vibestran;
@@ -406,6 +410,238 @@ TEST_F(CudaFactorTest, MagstatOnCudssMatchesTheCpuSolution) {
     EXPECT_NEAR(g.circuit_inductance(0, 0), c.circuit_inductance(0, 0),
                 1e-9 * std::abs(c.circuit_inductance(0, 0)));
     EXPECT_GT(c.circuit_inductance(0, 0), 0.0);
+}
+
+// ── Hybrid mode ───────────────────────────────────────────────────────────────
+
+void* cuda_test_hold_all_but(std::size_t leave);
+void cuda_test_release(void* held);
+
+namespace {
+
+/// VIBESTRAN_CUDSS_DEVICE_MEMORY_MIB for one scope.
+struct DeviceBudget {
+    explicit DeviceBudget(long mib) { setenv("VIBESTRAN_CUDSS_DEVICE_MEMORY_MIB", std::to_string(mib).c_str(), 1); }
+    ~DeviceBudget() { unsetenv("VIBESTRAN_CUDSS_DEVICE_MEMORY_MIB"); }
+    DeviceBudget(const DeviceBudget&) = delete;
+    DeviceBudget& operator=(const DeviceBudget&) = delete;
+};
+
+/// 7-point Laplacian on a cube with a load from a known solution: enough fill
+/// that the factor's device memory is a real amount.
+struct CubeSystem {
+    CsrData K;
+    std::vector<double> exact, F;
+
+    explicit CubeSystem(int m) {
+        const auto node = [m](int i, int j, int k) { return i + m * (j + m * k); };
+        const int n = m * m * m;
+        K.n = n;
+        K.symmetry = SymmetryStorage::Lower;
+        K.row_ptr.reserve(static_cast<std::size_t>(n) + 1);
+        K.row_ptr.push_back(0);
+        for (int k = 0; k < m; ++k)
+            for (int j = 0; j < m; ++j)
+                for (int i = 0; i < m; ++i) {
+                    if (k > 0) push(node(i, j, k - 1), -1.0);
+                    if (j > 0) push(node(i, j - 1, k), -1.0);
+                    if (i > 0) push(node(i - 1, j, k), -1.0);
+                    push(node(i, j, k), 6.1);
+                    K.row_ptr.push_back(static_cast<int>(K.col_ind.size()));
+                }
+        K.nnz = static_cast<int>(K.values.size());
+        exact.resize(static_cast<std::size_t>(n));
+        for (int i = 0; i < n; ++i) exact[static_cast<std::size_t>(i)] = std::sin(0.01 * i) + 2.0;
+        F = product(exact);
+    }
+
+    [[nodiscard]] std::vector<double> product(const std::vector<double>& x) const {
+        std::vector<double> y(x.size(), 0.0);
+        for (int i = 0; i < K.n; ++i)
+            for (int p = K.row_ptr[static_cast<std::size_t>(i)]; p < K.row_ptr[static_cast<std::size_t>(i) + 1]; ++p) {
+                const auto a = static_cast<std::size_t>(i);
+                const auto b = static_cast<std::size_t>(K.col_ind[static_cast<std::size_t>(p)]);
+                y[a] += K.values[static_cast<std::size_t>(p)] * x[b];
+                if (a != b) y[b] += K.values[static_cast<std::size_t>(p)] * x[a];
+            }
+        return y;
+    }
+
+    [[nodiscard]] double error(const std::vector<double>& u) const {
+        double worst = 0.0;
+        for (std::size_t i = 0; i < u.size(); ++i) worst = std::max(worst, std::abs(u[i] - exact[i]));
+        return worst;
+    }
+
+private:
+    void push(int column, double value) {
+        K.col_ind.push_back(column);
+        K.values.push_back(value);
+    }
+};
+
+/// The lowest budget that cuDSS accepts, and what it reports there and at the
+/// next budget refused.
+struct HybridFloor {
+    long lowest_mib = 0;
+    CudssHybridMemory lowest{};
+    bool saw_registration_off = false;
+    std::string refusal;
+};
+
+HybridFloor find_floor(CudaSolverBackend& backend, const CubeSystem& cube, long above_mib) {
+    HybridFloor floor;
+    long high = above_mib, low = 0;
+    while (high - low > 1) {
+        const long middle = (high + low) / 2;
+        const DeviceBudget budget(middle);
+        try {
+            (void)backend.solve(cube.K, cube.F);
+            // Above the factor's own estimate the budget does not call for hybrid mode.
+            if (const auto hybrid = backend.last_hybrid_memory()) {
+                floor.lowest_mib = middle;
+                floor.lowest = *hybrid;
+                floor.saw_registration_off |= !hybrid->host_registration;
+            }
+            high = middle;
+        } catch (const SolverError& e) {
+            floor.refusal = e.what();
+            low = middle;
+        }
+    }
+    return floor;
+}
+
+} // namespace
+
+class CudaHybridTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        auto created = CudaSolverBackend::try_create();
+        if (!created) GTEST_SKIP() << "No CUDA device";
+        backend_.emplace(std::move(*created));
+        cube_ = &cube();
+        floor_ = &shared_floor(*backend_);
+        ASSERT_GT(floor_->lowest_mib, 0) << "no budget was accepted";
+    }
+
+    static const CubeSystem& cube() {
+        static const CubeSystem system(32);
+        return system;
+    }
+    // Finding the minimum takes one analysis per step, so the tests share it.
+    static const HybridFloor& shared_floor(CudaSolverBackend& backend) {
+        static const HybridFloor floor = find_floor(backend, cube(), 512);
+        return floor;
+    }
+
+    std::optional<CudaSolverBackend> backend_;
+    const CubeSystem* cube_ = nullptr;
+    const HybridFloor* floor_ = nullptr;
+};
+
+// The defect this mode had: left to itself, cuDSS sets its limit from the whole card
+// and fails at once when other allocations hold part of it. This runs with no budget,
+// so the limit has to come from what is really free.
+TEST_F(CudaHybridTest, AFactorTooLargeForFreeMemorySolvesWithoutABudget) {
+    // cuDSS 0.7.1 estimates 1317 MiB on the device for this cube, with a minimum of
+    // 643 MiB. A smaller cube leaves no room between the estimate and what the
+    // analysis needs for itself: running that out of memory poisons the CUDA context.
+    const CubeSystem larger(64);
+    const std::size_t leave = std::size_t(1200) * 1024 * 1024;
+    void* held = cuda_test_hold_all_but(leave);
+    std::vector<double> u;
+    std::optional<CudssHybridMemory> hybrid;
+    std::string failure;
+    try {
+        u = backend_->solve(larger.K, larger.F);
+        hybrid = backend_->last_hybrid_memory();
+    } catch (const SolverError& e) {
+        failure = e.what();
+    }
+    cuda_test_release(held);
+    ASSERT_TRUE(failure.empty()) << failure;
+    ASSERT_TRUE(hybrid.has_value()) << "the factor fit in the " << leave / (1024 * 1024) << " MiB left free";
+    EXPECT_LE(hybrid->device_limit_bytes, static_cast<std::int64_t>(leave));
+    EXPECT_GE(hybrid->device_limit_bytes, hybrid->device_minimum_bytes);
+    EXPECT_LT(larger.error(u), 1e-10);
+}
+
+// A budget is the limit cuDSS is given, down to the minimum it reports, and below that
+// the error says so instead of blaming the matrix or trying LU.
+TEST_F(CudaHybridTest, ABudgetSetsTheLimitAndABudgetBelowTheMinimumIsRefused) {
+    EXPECT_EQ(floor_->lowest.device_limit_bytes, floor_->lowest_mib * 1024 * 1024);
+    EXPECT_LE(floor_->lowest.device_minimum_bytes, floor_->lowest.device_limit_bytes);
+    EXPECT_TRUE(floor_->saw_registration_off);
+    EXPECT_NE(floor_->refusal.find("needs at least"), std::string::npos) << floor_->refusal;
+    EXPECT_NE(floor_->refusal.find("VIBESTRAN_CUDSS_DEVICE_MEMORY_MIB"), std::string::npos) << floor_->refusal;
+    EXPECT_NE(floor_->refusal.find("fp32"), std::string::npos) << floor_->refusal;
+
+    const DeviceBudget at_the_floor(floor_->lowest_mib);
+    const auto u = backend_->solve(cube_->K, cube_->F);
+    EXPECT_TRUE(backend_->last_hybrid_memory().has_value());
+    EXPECT_TRUE(backend_->last_solve_used_cholesky());
+    EXPECT_LT(cube_->error(u), 1e-10);
+}
+
+// An fp32 factorization in hybrid mode still refines to double accuracy, and its
+// refusal does not suggest what the run is already doing.
+TEST_F(CudaHybridTest, Fp32InHybridModeRefinesAndItsRefusalDoesNotSuggestFp32) {
+    auto created = CudaSolverBackend::try_create(CudaSolverPrecision::Float32);
+    ASSERT_TRUE(created.has_value());
+    CudaSolverBackend fp32(std::move(*created));
+    {
+        const DeviceBudget budget(floor_->lowest_mib);
+        const auto u = fp32.solve(cube_->K, cube_->F);
+        EXPECT_TRUE(fp32.last_hybrid_memory().has_value());
+        EXPECT_LT(cube_->error(u), 1e-10);
+    }
+    const DeviceBudget too_small(1);
+    try {
+        (void)fp32.solve(cube_->K, cube_->F);
+        ADD_FAILURE() << "a budget of 1 MiB was accepted";
+    } catch (const SolverError& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("needs at least"), std::string::npos) << message;
+        EXPECT_EQ(message.find("fp32"), std::string::npos) << message;
+    }
+}
+
+// The retained factor takes the same path: several right-hand sides after an analysis
+// with one, a refactorization with the same limit, and a refusal as an error value.
+TEST_F(CudaHybridTest, ARetainedFactorInHybridModeSolvesManyRightHandSidesAndRefactors) {
+    {
+        const DeviceBudget budget(floor_->lowest_mib);
+        auto created = backend_->factor(cube_->K);
+        ASSERT_TRUE(std::holds_alternative<std::unique_ptr<LinearFactor>>(created))
+            << std::get<Error>(created).message;
+        auto& factor = *std::get<std::unique_ptr<LinearFactor>>(created);
+        const auto n = static_cast<std::size_t>(cube_->K.n);
+        std::vector<double> B(n * 3);
+        for (std::size_t k = 0; k < 3; ++k)
+            for (std::size_t i = 0; i < n; ++i) B[n * k + i] = cube_->F[i] * static_cast<double>(k + 1);
+        auto solved = factor.solve(B, 3);
+        ASSERT_TRUE(std::holds_alternative<std::vector<double>>(solved)) << std::get<Error>(solved).message;
+        const auto& X = std::get<std::vector<double>>(solved);
+        for (std::size_t k = 0; k < 3; ++k)
+            for (std::size_t i = 0; i < n; i += 97)
+                ASSERT_NEAR(X[n * k + i], cube_->exact[i] * static_cast<double>(k + 1), 1e-9) << "column " << k;
+
+        CsrData doubled = cube_->K;
+        std::transform(doubled.values.begin(), doubled.values.end(), doubled.values.begin(),
+                       [](double v) { return 2.0 * v; });
+        const auto status = factor.refactor(doubled);
+        ASSERT_FALSE(status.has_value()) << status->message;
+        auto again = factor.solve(cube_->F, 1);
+        ASSERT_TRUE(std::holds_alternative<std::vector<double>>(again)) << std::get<Error>(again).message;
+        for (std::size_t i = 0; i < n; i += 97)
+            ASSERT_NEAR(std::get<std::vector<double>>(again)[i], cube_->exact[i] / 2.0, 1e-9);
+    }
+    const DeviceBudget too_small(1);
+    const auto refused = backend_->factor(cube_->K);
+    ASSERT_TRUE(std::holds_alternative<Error>(refused));
+    EXPECT_NE(std::get<Error>(refused).message.find("needs at least"), std::string::npos)
+        << std::get<Error>(refused).message;
 }
 
 #endif // HAVE_CUDA

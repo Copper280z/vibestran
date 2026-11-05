@@ -269,10 +269,22 @@ shift-and-invert linear solver inside the IRL eigensolver for SOL 103.
 
 **Memory management:**
 - After symbolic analysis, cuDSS memory estimates are logged (device/host stable and peak).
-- If the estimated device peak exceeds 85% of free GPU memory, hybrid host/device memory
-  mode is enabled automatically so factor storage spills to host RAM.
-- If analysis itself fails with an allocation error, hybrid mode is retried before giving up.
-- In theory Hybrid mode allows for very large systems to be solved, but in practice that hasn't been achieved (yet).
+- If the estimated device peak exceeds 85% of free GPU memory, or the analysis itself cannot
+  allocate, the solve continues in cuDSS hybrid mode, which keeps the factor in host RAM and
+  moves parts of it to the device as needed. The factor must fit in host RAM: a solve that
+  does not fit can be killed by the operating system rather than report an error.
+- Hybrid mode's device limit is 85% of free GPU memory. Host memory registration is off,
+  which halved the factorization time on the decks measured. When that makes cuDSS's minimum
+  exceed the limit, the analysis is repeated with registration on, which lowers the minimum.
+- If even that minimum does not fit, the solve stops with an error that gives both figures.
+
+`VIBESTRAN_CUDSS_DEVICE_MEMORY_MIB` sets the limit, and uses hybrid mode whenever the
+estimated peak exceeds it. It counts what cuDSS holds on the device, not the matrix buffers
+or the CUDA runtime, and it does not bound the transient peak of the analysis:
+
+```bash
+VIBESTRAN_CUDSS_DEVICE_MEMORY_MIB=4000 vibestran --backend=cuda model.bdf
+```
 
 ```bash
 vibestran --backend=cuda model.bdf

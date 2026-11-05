@@ -13,8 +13,10 @@
 // (ANALYSIS → FACTORIZATION → SOLVE), then copy the solution host←device.
 //
 // For large problems where cuDSS's internal workspace exceeds device memory,
-// fp32 mode halves the device memory footprint by downcasting inputs to float
-// before the solve and upcasting the result back to double.
+// fp32 mode reduces the device memory footprint by downcasting inputs to float
+// before the solve and upcasting the result back to double. When the factor
+// still does not fit, cuDSS hybrid mode keeps it in host memory
+// (analyze_within_device_memory).
 //
 // Note: this file is only compiled when the CUDA backend is enabled in
 // meson (have_cuda_backend=true), so HAVE_CUDA is guaranteed to be defined.
@@ -36,10 +38,15 @@
 #include <cudss.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <format>
 #include <functional>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <type_traits>
@@ -133,6 +140,14 @@ struct CuDSSData {
   }
   CuDSSData(const CuDSSData &) = delete;
   CuDSSData &operator=(const CuDSSData &) = delete;
+
+  /// Releases the analysis and its device memory for a new first analysis.
+  void reset() {
+    cudssDataDestroy(handle, data);
+    data = nullptr;
+    if (cudssDataCreate(handle, &data) != CUDSS_STATUS_SUCCESS)
+      throw SolverError("CUDA solver: cudssDataCreate failed");
+  }
 };
 
 struct CuDSSMatrix {
@@ -235,6 +250,145 @@ static cudssStatus_t cudss_execute(cudssHandle_t handle, cudssPhase_t phase,
 /// factorization in Scalar.
 using FactorSolve = std::function<std::vector<double>(const std::vector<double> &)>;
 
+// ── Device memory and cuDSS hybrid mode
+// ───────────────────────────────────────────────────────────
+//
+// cuDSS behaviour this relies on (measured with cuDSS 0.7.1 on a 12 GiB card):
+//   - Hybrid mode sets its device limit from the card's total memory unless told
+//     otherwise, so with other programs on the GPU the factorization fails with
+//     CUDSS_STATUS_ALLOC_FAILED at once. The limit must be set.
+//   - The limit counts everything cuDSS holds on the device, including what its
+//     analysis keeps, so it is sized from the free memory before the analysis.
+//     It does not bound the transient peak of the analysis itself.
+//   - A limit below CUDSS_DATA_HYBRID_DEVICE_MEMORY_MIN makes the factorization
+//     fail with CUDSS_STATUS_INVALID_VALUE.
+//   - Without host memory registration the factorization took half the time, but
+//     the minimum rose by 20% to 100%.
+
+static constexpr std::int64_t kMiB = 1024 * 1024;
+
+/// VIBESTRAN_CUDSS_DEVICE_MEMORY_MIB in bytes, 0 when unset. Invalid values leave
+/// automatic sizing, as VIBESTRAN_PCG_DEVICE_MEMORY_MIB does.
+static std::int64_t cudss_device_budget() noexcept {
+  const char *env = std::getenv("VIBESTRAN_CUDSS_DEVICE_MEMORY_MIB");
+  if (!env)
+    return 0;
+  const std::string_view text(env);
+  std::int64_t mib = 0;
+  const auto [end, error] =
+      std::from_chars(text.data(), text.data() + text.size(), mib);
+  if (error != std::errc{} || end != text.data() + text.size() || mib <= 0 ||
+      mib > std::numeric_limits<std::int64_t>::max() / kMiB)
+    return 0;
+  return mib * kMiB;
+}
+
+static std::int64_t device_free_bytes() {
+  std::size_t free_bytes = 0, total_bytes = 0;
+  const cudaError_t err = cudaMemGetInfo(&free_bytes, &total_bytes);
+  if (err != cudaSuccess)
+    throw SolverError(std::string("CUDA solver: cudaMemGetInfo failed: ") +
+                      cudaGetErrorString(err));
+  return static_cast<std::int64_t>(free_bytes);
+}
+
+/// What can still be done when cuDSS is out of device memory.
+static std::string memory_advice(bool fp32) {
+  std::string advice = cudss_device_budget() > 0
+                           ? "Raise VIBESTRAN_CUDSS_DEVICE_MEMORY_MIB or free device memory"
+                           : "Free device memory";
+  return advice + (fp32 ? "." : ", or retry with --cuda-precision=fp32 to reduce it.");
+}
+
+/// Ordering and symbolic factorization. When the factor does not fit on the
+/// device (or under VIBESTRAN_CUDSS_DEVICE_MEMORY_MIB) it continues in hybrid mode,
+/// which keeps the factor in host memory, and returns its settings.
+/// Throws SolverError when the device cannot hold even hybrid mode's minimum.
+static std::optional<CudssHybridMemory>
+analyze_within_device_memory(cudssHandle_t handle, cudssConfig_t cfg, CuDSSData &data,
+                             cudssMatrix_t A, cudssMatrix_t x, cudssMatrix_t b,
+                             const std::string &label, bool fp32) {
+  const auto analyze = [&] {
+    return cudssExecute(handle, CUDSS_PHASE_ANALYSIS, cfg, data.data, A, x, b);
+  };
+  const std::int64_t budget = cudss_device_budget();
+  cudssStatus_t st = analyze();
+  if (st == CUDSS_STATUS_SUCCESS) {
+    // Layout: [0]=device stable, [1]=device peak, [2]=host stable, [3]=host peak
+    std::int64_t estimates[16] = {0};
+    cudssDataGet(handle, data.data, CUDSS_DATA_MEMORY_ESTIMATES, &estimates,
+                 sizeof(estimates), nullptr);
+    vibestran::log_debug(
+        "[cuda] cuDSS memory estimates (" + label + "):"
+        " device stable=" + std::to_string(estimates[0] / kMiB) + " MiB"
+        " peak=" + std::to_string(estimates[1] / kMiB) + " MiB"
+        ", host stable=" + std::to_string(estimates[2] / kMiB) + " MiB"
+        " peak=" + std::to_string(estimates[3] / kMiB) + " MiB");
+    const std::int64_t allowed = budget > 0 ? budget : static_cast<std::int64_t>(device_free_bytes() * 0.85);
+    if (estimates[1] <= allowed)
+      return std::nullopt;
+    vibestran::log_debug("[cuda] cuDSS (" + label + "): device peak estimate " +
+                         std::to_string(estimates[1] / kMiB) + " MiB exceeds " +
+                         std::to_string(allowed / kMiB) + " MiB -- enabling hybrid mode");
+  } else if (st == CUDSS_STATUS_ALLOC_FAILED) {
+    vibestran::log_debug("[cuda] cuDSS (" + label +
+                         "): analysis alloc failed -- enabling hybrid mode");
+  } else {
+    throw SolverError("CUDA solver: cuDSS analysis failed (" + label +
+                      "), status=" + std::to_string(static_cast<int>(st)));
+  }
+
+  // Hybrid mode has to be set before a data object's first analysis.
+  data.reset();
+  const std::int64_t free_bytes = device_free_bytes();
+  const std::int64_t limit = budget > 0 ? std::min(budget, free_bytes)
+                                        : static_cast<std::int64_t>(free_bytes * 0.85);
+  int hybrid_mode = 1;
+  cudssConfigSet(cfg, CUDSS_CONFIG_HYBRID_MODE, &hybrid_mode, sizeof(hybrid_mode));
+  std::int64_t minimum = 0;
+  for (int registration : {0, 1}) {
+    cudssConfigSet(cfg, CUDSS_CONFIG_USE_CUDA_REGISTER_MEMORY, &registration,
+                   sizeof(registration));
+    st = analyze();
+    if (st == CUDSS_STATUS_SUCCESS) {
+      cudssDataGet(handle, data.data, CUDSS_DATA_HYBRID_DEVICE_MEMORY_MIN, &minimum,
+                   sizeof(minimum), nullptr);
+      if (minimum <= limit) {
+        std::int64_t estimates[16] = {0};
+        cudssDataGet(handle, data.data, CUDSS_DATA_MEMORY_ESTIMATES, &estimates,
+                     sizeof(estimates), nullptr);
+        std::int64_t device_limit = limit;
+        st = cudssConfigSet(cfg, CUDSS_CONFIG_HYBRID_DEVICE_MEMORY_LIMIT, &device_limit,
+                            sizeof(device_limit));
+        if (st != CUDSS_STATUS_SUCCESS)
+          throw SolverError("CUDA solver: setting the cuDSS hybrid device limit failed (" + label +
+                            "), status=" + std::to_string(static_cast<int>(st)));
+        vibestran::log_info(
+            "[cuda] cuDSS hybrid memory (" + label + "): device limit " +
+            std::to_string(limit / kMiB) + " MiB, minimum " +
+            std::to_string(minimum / kMiB) + " MiB, factor in host memory (estimate " +
+            std::to_string(estimates[3] / kMiB) + " MiB), host registration " +
+            (registration ? "on" : "off"));
+        return CudssHybridMemory{limit, minimum, registration != 0};
+      }
+      vibestran::log_debug("[cuda] cuDSS (" + label + "): hybrid minimum " +
+                           std::to_string(minimum / kMiB) + " MiB exceeds the " +
+                           std::to_string(limit / kMiB) + " MiB limit with host registration " +
+                           (registration ? "on" : "off"));
+    } else if (st != CUDSS_STATUS_ALLOC_FAILED) {
+      throw SolverError("CUDA solver: cuDSS hybrid analysis failed (" + label +
+                        "), status=" + std::to_string(static_cast<int>(st)));
+    }
+    data.reset();
+  }
+  throw SolverError("CUDA solver: cuDSS hybrid mode (" + label + ") needs " +
+                    (minimum > 0 ? "at least " + std::to_string(minimum / kMiB) + " MiB of"
+                                 : std::string("more")) +
+                    " device memory, but its limit is " + std::to_string(limit / kMiB) +
+                    " MiB (" + std::to_string(free_bytes / kMiB) + " MiB free). " +
+                    memory_advice(fp32));
+}
+
 // ── factor_cudss: run analysis + factorization for a given matrix type, then
 // hand use_factor a solve with that factorization (valid only during the
 // call; it reuses d_F and d_u as the right-hand side and solution buffers).
@@ -249,6 +403,7 @@ static bool factor_cudss(cudssHandle_t handle, int n, int nnz,
                          DeviceBuffer<Scalar> &d_u, cudssMatrixType_t mtype,
                          cudssMatrixViewType_t mview,
                          cudaDataType_t scalar_type, const std::string &label,
+                         std::optional<CudssHybridMemory> &hybrid,
                          const std::function<void(const FactorSolve &)> &use_factor) {
   // Reset solution buffer.
   cudaMemset(d_u.ptr, 0, (std::size_t)n * sizeof(Scalar));
@@ -301,92 +456,30 @@ static bool factor_cudss(cudssHandle_t handle, int n, int nnz,
     throw SolverError("CUDA solver: cudssMatrixCreateDn (sol) failed, status=" +
                       std::to_string(static_cast<int>(st)));
 
-  constexpr double kMiB = 1024.0 * 1024.0;
-
-  // Helper: enable hybrid mode on cfg and re-run analysis.
-  // Returns the status of the re-run analysis.
-  auto enable_hybrid_and_reanalyse = [&]() -> cudssStatus_t {
-    int hybrid_mode = 1;
-    cudssConfigSet(cfg.cfg, CUDSS_CONFIG_HYBRID_MODE, &hybrid_mode,
-                   sizeof(hybrid_mode));
-    cudssStatus_t s =
-        cudss_execute(handle, CUDSS_PHASE_ANALYSIS, cfg.cfg, solver_data.data,
-                      A_mat.mat, x_mat.mat, b_mat.mat);
-    if (s == CUDSS_STATUS_SUCCESS) {
-      int64_t dev_mem_min = 0;
-      cudssDataGet(handle, solver_data.data,
-                   CUDSS_DATA_HYBRID_DEVICE_MEMORY_MIN, &dev_mem_min,
-                   sizeof(dev_mem_min), nullptr);
-      vibestran::log_debug(
-          "[cuda] cuDSS hybrid mode active: min device memory required=" +
-          std::to_string(dev_mem_min / static_cast<int64_t>(kMiB)) + " MiB");
-    }
-    return s;
-  };
-
-  // ── Analysis pass 1 (no hybrid) ──────────────────────────────────────────
-  // Run analysis without hybrid first to obtain memory estimates cheaply.
-  // If it fails with ALLOC_FAILED the symbolic phase itself needs more memory
-  // than is available on device — enable hybrid and retry immediately.
-  // It's not clear that trying analysis without hybrid first is the right
-  // choice, it may be better to always use hybrid, since it will attempt to use
-  // all vram if possible.
-  st = cudss_execute(handle, CUDSS_PHASE_ANALYSIS, cfg.cfg, solver_data.data,
-                     A_mat.mat, x_mat.mat, b_mat.mat);
-  if (st == CUDSS_STATUS_ALLOC_FAILED) {
-    vibestran::log_debug("[cuda] cuDSS (" + label +
-                        "): analysis alloc failed -- "
-                        "enabling hybrid mode and retrying");
-    st = enable_hybrid_and_reanalyse();
-    if (st != CUDSS_STATUS_SUCCESS)
-      throw SolverError(
-          "CUDA solver: cuDSS analysis failed even in hybrid mode (" + label +
-          "), status=" + std::to_string(static_cast<int>(st)) +
-          ". Retry with --cuda-precision=fp32 to halve GPU memory usage.");
-  } else if (st != CUDSS_STATUS_SUCCESS) {
-    throw SolverError("CUDA solver: cuDSS analysis failed (" + label +
-                      "), status=" + std::to_string(static_cast<int>(st)));
-  } else {
-    // Analysis succeeded — check if factorisation peak would exceed device
-    // memory. Layout: [0]=device stable, [1]=device peak, [2]=host stable,
-    // [3]=host peak
-    int64_t mem_est[16] = {0};
-    cudssDataGet(handle, solver_data.data, CUDSS_DATA_MEMORY_ESTIMATES,
-                 &mem_est, sizeof(mem_est), nullptr);
-    vibestran::log_debug(
-        "[cuda] cuDSS memory estimates (" + label + "):"
-        " device stable=" + std::to_string(mem_est[0] / static_cast<int64_t>(kMiB)) + " MiB"
-        " peak=" + std::to_string(mem_est[1] / static_cast<int64_t>(kMiB)) + " MiB"
-        ", host stable=" + std::to_string(mem_est[2] / static_cast<int64_t>(kMiB)) + " MiB"
-        " peak=" + std::to_string(mem_est[3] / static_cast<int64_t>(kMiB)) + " MiB");
-
-    std::size_t free_bytes = 0, total_bytes = 0;
-    cudaMemGetInfo(&free_bytes, &total_bytes);
-    const int64_t threshold = static_cast<int64_t>(free_bytes * 0.85);
-    if (mem_est[1] > threshold) {
-      vibestran::log_debug(
-          "[cuda] cuDSS (" + label + "): device peak estimate " +
-          std::to_string(mem_est[1] / static_cast<int64_t>(kMiB)) +
-          " MiB exceeds 85% of free memory (" +
-          std::to_string(free_bytes / (1024UL * 1024UL)) +
-          " MiB) -- enabling hybrid mode");
-      st = enable_hybrid_and_reanalyse();
-      if (st != CUDSS_STATUS_SUCCESS)
-        throw SolverError("CUDA solver: cuDSS analysis (hybrid) failed (" +
-                          label +
-                          "), status=" + std::to_string(static_cast<int>(st)));
-    }
-  }
+  constexpr bool fp32 = std::is_same_v<Scalar, float>;
+  hybrid = analyze_within_device_memory(handle, cfg.cfg, solver_data, A_mat.mat, x_mat.mat,
+                                        b_mat.mat, label, fp32);
 
   // ── Factorisation ─────────────────────────────────────────────────────────
   st = cudss_execute(handle, CUDSS_PHASE_FACTORIZATION, cfg.cfg,
                      solver_data.data, A_mat.mat, x_mat.mat, b_mat.mat);
   if (st == CUDSS_STATUS_ALLOC_FAILED)
     throw SolverError(
-        "CUDA solver: cuDSS factorisation alloc failed -- matrix too large for "
-        "device workspace (n=" +
+        "CUDA solver: cuDSS factorisation ran out of memory (" + label + ", n=" +
         std::to_string(n) + ", nnz=" + std::to_string(nnz) +
-        "). Retry with --cuda-precision=fp32 to halve GPU memory usage.");
+        (hybrid ? ", hybrid device limit " +
+                      std::to_string(hybrid->device_limit_bytes / kMiB) + " MiB). "
+                : std::string("). ")) +
+        memory_advice(fp32));
+  // A rejected configuration says nothing about the matrix, and LU would not help.
+  if (st == CUDSS_STATUS_INVALID_VALUE)
+    throw SolverError("CUDA solver: cuDSS rejected the factorisation settings (" + label +
+                      ", n=" + std::to_string(n) + ")" +
+                      (hybrid ? ", hybrid device limit " +
+                                    std::to_string(hybrid->device_limit_bytes / kMiB) +
+                                    " MiB, minimum " +
+                                    std::to_string(hybrid->device_minimum_bytes / kMiB) + " MiB"
+                              : std::string()));
   // Non-success for SPD factorisation likely means matrix is not positive
   // definite; return false so the caller can retry with GENERAL type.
   if (st != CUDSS_STATUS_SUCCESS) {
@@ -480,6 +573,7 @@ CudaSolverBackend::solve(const SparseMatrixBuilder::CsrData &K,
                       std::to_string(F.size()) + " != matrix size " +
                       std::to_string(n));
   last_refinement_.reset();
+  last_hybrid_.reset();
   if (ctx_->precision == CudaSolverPrecision::Float32) {
     std::vector<double> u = solve_typed<float>(K, F);
     if (last_refinement_->converged)
@@ -562,7 +656,7 @@ CudaSolverBackend::solve_typed(const SparseMatrixBuilder::CsrData &K,
       d_values.upload(K_spd->values.data(), nnz);
     chol_ok = factor_cudss<Scalar>(
         ctx_->cudss, n, nnz, d_values, d_row_ptr, d_col_ind, d_F, d_u,
-        CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER, scalar_type, "SPD" + suffix,
+        CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER, scalar_type, "SPD" + suffix, last_hybrid_,
         [&](const FactorSolve &solve) {
           u = solve_and_refine(K, F, solve, fp32, refine, "Cholesky" + suffix, report);
         });
@@ -601,7 +695,7 @@ CudaSolverBackend::solve_typed(const SparseMatrixBuilder::CsrData &K,
     const bool lu_ok = factor_cudss<Scalar>(
         ctx_->cudss, K_lu->n, K_lu->nnz, d_values_lu, d_row_ptr_lu,
         d_col_ind_lu, d_F, d_u, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL,
-        scalar_type, "LU" + suffix, [&](const FactorSolve &solve) {
+        scalar_type, "LU" + suffix, last_hybrid_, [&](const FactorSolve &solve) {
           u = solve_and_refine(K, F, solve, fp32, refine, "LU" + suffix, report);
         });
     if (!lu_ok)
@@ -695,33 +789,11 @@ public:
     }
   }
 
-  /// Ordering and symbolic factorization, switching to cuDSS hybrid
-  /// (host + device) memory when the device cannot hold the factor.
+  /// Ordering and symbolic factorization, in cuDSS hybrid mode when the device
+  /// cannot hold the factor.
   void analyze() {
-    cudssStatus_t st = execute(CUDSS_PHASE_ANALYSIS);
-    if (st == CUDSS_STATUS_ALLOC_FAILED) {
-      vibestran::log_debug("[cuda] cuDSS (" + label_ +
-                           "): analysis alloc failed -- enabling hybrid mode");
-      st = reanalyze_hybrid();
-      if (st != CUDSS_STATUS_SUCCESS)
-        throw SolverError(
-            "CUDA solver: cuDSS analysis failed even in hybrid mode (" + label_ +
-            "), status=" + std::to_string(static_cast<int>(st)) +
-            ". Retry with --cuda-precision=fp32 to halve GPU memory usage.");
-      return;
-    }
-    check_cudss(st, "cuDSS analysis (" + label_ + ")");
-    int64_t estimates[16] = {0};
-    cudssDataGet(handle_, data_.data, CUDSS_DATA_MEMORY_ESTIMATES, &estimates,
-                 sizeof(estimates), nullptr);
-    std::size_t free_bytes = 0, total_bytes = 0;
-    cudaMemGetInfo(&free_bytes, &total_bytes);
-    if (estimates[1] > static_cast<int64_t>(free_bytes * 0.85)) {
-      vibestran::log_debug("[cuda] cuDSS (" + label_ + "): device peak estimate " +
-                           std::to_string(estimates[1] >> 20) +
-                           " MiB exceeds 85% of free memory -- enabling hybrid mode");
-      check_cudss(reanalyze_hybrid(), "cuDSS hybrid analysis (" + label_ + ")");
-    }
+    hybrid_ = analyze_within_device_memory(handle_, cfg_.cfg, data_, A_.mat, X_.mat, B_.mat,
+                                           label_, std::is_same_v<Scalar, float>);
   }
 
   /// Numeric factorization of the loaded values. Returns CUDSS_DATA_INFO:
@@ -734,9 +806,12 @@ public:
     const cudssStatus_t st = execute(CUDSS_PHASE_FACTORIZATION);
     if (st == CUDSS_STATUS_ALLOC_FAILED)
       throw SolverError(
-          "CUDA solver: cuDSS factorization alloc failed (" + label_ + ", n=" +
+          "CUDA solver: cuDSS factorization ran out of memory (" + label_ + ", n=" +
           std::to_string(n_) + ", nnz=" + std::to_string(nnz_) +
-          "). Retry with --cuda-precision=fp32 to halve GPU memory usage.");
+          (hybrid_ ? ", hybrid device limit " +
+                         std::to_string(hybrid_->device_limit_bytes / kMiB) + " MiB). "
+                   : std::string("). ")) +
+          memory_advice(std::is_same_v<Scalar, float>));
     check_cudss(st, "cuDSS factorization (" + label_ + ")");
     check_cudss(cudssDataGet(handle_, data_.data, CUDSS_DATA_INFO, &info,
                              sizeof(info), nullptr),
@@ -781,13 +856,6 @@ private:
                         B_.mat);
   }
 
-  cudssStatus_t reanalyze_hybrid() {
-    int hybrid_mode = 1;
-    cudssConfigSet(cfg_.cfg, CUDSS_CONFIG_HYBRID_MODE, &hybrid_mode,
-                   sizeof(hybrid_mode));
-    return execute(CUDSS_PHASE_ANALYSIS);
-  }
-
   /// Right-hand side and solution descriptors with exactly cols columns.
   void dense(int cols) {
     if (cols == cols_)
@@ -815,6 +883,7 @@ private:
   cudssHandle_t handle_;
   CuDSSConfig cfg_;
   CuDSSData data_;
+  std::optional<CudssHybridMemory> hybrid_;
   int n_, nnz_;
   std::string label_;
   DeviceBuffer<int> row_ptr_, col_ind_;

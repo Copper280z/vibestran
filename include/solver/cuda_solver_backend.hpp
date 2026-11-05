@@ -13,7 +13,9 @@
 // fp32 mode halves the device memory footprint by factorizing in float;
 // refinement with double-precision residuals then recovers double accuracy
 // when cond(K) is below about 1e7.  When it cannot, the solve is repeated in
-// fp64 (with a warning).
+// fp64 (with a warning).  A factor that does not fit on the device is kept in
+// host memory with cuDSS hybrid mode; VIBESTRAN_CUDSS_DEVICE_MEMORY_MIB sets its
+// device limit.
 //
 // Use try_create() to construct — returns nullopt when no CUDA device is
 // present so the caller can fall back without exception handling.
@@ -21,6 +23,7 @@
 #ifdef HAVE_CUDA
 
 #include "solver/solver_backend.hpp"
+#include <cstdint>
 #include <memory>
 #include <optional>
 
@@ -29,6 +32,13 @@ namespace vibestran {
 enum class CudaSolverPrecision {
     Float64,
     Float32,
+};
+
+/// Settings of a cuDSS hybrid memory factorization.
+struct CudssHybridMemory {
+    std::int64_t device_limit_bytes;
+    std::int64_t device_minimum_bytes;
+    bool host_registration;
 };
 
 // Opaque RAII wrapper around cuSOLVER/cuSPARSE handles.
@@ -91,6 +101,12 @@ public:
         return last_refinement_;
     }
 
+    /// Hybrid memory settings of the last solve(), empty when the factor stayed
+    /// on the device. Only used in tests.
+    [[nodiscard]] std::optional<CudssHybridMemory> last_hybrid_memory() const noexcept {
+        return last_hybrid_;
+    }
+
     /// Refine fp64 solves (fp32 factorizations are always refined).
     void set_refinement(bool enabled) noexcept override { refine_ = enabled; }
 
@@ -106,6 +122,7 @@ private:
     bool last_cholesky_{true};
     bool refine_{false};
     std::optional<RefinementReport> last_refinement_;
+    std::optional<CudssHybridMemory> last_hybrid_;
 };
 
 } // namespace vibestran
