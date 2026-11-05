@@ -404,12 +404,14 @@ TEST(CdScalar, MassOnASkewAxisSeesTheSeriesCompliance) {
     ASSERT_EQ(r.modes.size(), 1U);
     EXPECT_NEAR(r.modes[0].eigenvalue * m * flexibility, 1.0, 1e-9);
     // The shape is the static deflection under a force along the axis, K^-1 e1,
-    // scaled so that m (e1 . phi)^2 = 1. Its length holds in any frame.
+    // scaled so that m T1^2 = 1. In the frame its T2 is (1 / ky - 1 / kx) sin cos
+    // for a unit force, and T1 is the flexibility.
     const auto shape = std::ranges::find(r.modes[0].shape, NodeId{3}, &NodeDisplacement::node);
     ASSERT_NE(shape, r.modes[0].shape.end());
-    const double length = std::hypot(shape->d[0], shape->d[1]);
-    EXPECT_NEAR(length, std::hypot(std::cos(t) / kx, std::sin(t) / ky) /
-                            (flexibility * std::sqrt(m)), 1e-9);
+    const double t2_over_t1 = (1.0 / ky - 1.0 / kx) * std::sin(t) * std::cos(t) / flexibility;
+    EXPECT_EQ(shape->coord, CoordId{12});
+    EXPECT_NEAR(std::abs(shape->d[0]), 1.0 / std::sqrt(m), 1e-9);
+    EXPECT_NEAR(shape->d[1] / shape->d[0], t2_over_t1, 1e-9);
 }
 
 TEST(CdScalar, MassAlongAnObliqueAxisCountsOneFiniteMode) {
@@ -456,4 +458,81 @@ TEST(CdScalar, TwoAxisOscillatorKeepsItsFrequencies) {
     ASSERT_EQ(r.modes.size(), 2U);
     EXPECT_NEAR(r.modes[0].eigenvalue, 150.0, 1e-8);
     EXPECT_NEAR(r.modes[1].eigenvalue, 800.0, 1e-8);
+}
+
+// ── Mode shapes on a CD grid ──────────────────────────────────────────────────
+
+TEST(CdModeShape, CylindricalFrameReportsARadialModeOnT1) {
+    // A radial rod at 45 degrees with a mass on its free end: the motion is all T1
+    // of the cylindrical frame, whereas basic would split it between X and Y.
+    const double m = 2.5;
+    const auto r = solve_modal(
+        "SOL 103\nCEND\nSPC = 1\nMETHOD = 9\nBEGIN BULK\nEIGRL,9,,,1\n" + kRodProps +
+        "CORD2C,3,,0.,0.,0.,0.,0.,1.,\n,1.,0.,0.\n"
+        "GRID,1,,20.,20.,0.\nGRID,2,,10.,10.,0.,3\nCROD,1,1,1,2\nSPC1,1,123456,1\n"
+        "CONM2,5,2,,2.5\nENDDATA\n");
+    ASSERT_EQ(r.modes.size(), 1U);
+    const double L = 10.0 * std::numbers::sqrt2;
+    EXPECT_NEAR(r.modes[0].eigenvalue / (axial_k(L) / m), 1.0, 1e-10);
+    const auto shape = std::ranges::find(r.modes[0].shape, NodeId{2}, &NodeDisplacement::node);
+    ASSERT_NE(shape, r.modes[0].shape.end());
+    EXPECT_EQ(shape->coord, CoordId{3});
+    EXPECT_NEAR(std::abs(shape->d[0]), 1.0 / std::sqrt(m), 1e-10);
+    EXPECT_NEAR(shape->d[1], 0.0, 1e-10);
+    EXPECT_NEAR(shape->d[2], 0.0, 1e-10);
+}
+
+TEST(CdModeShape, RotationsAreReportedInTheFrameToo) {
+    // A rod along basic Y twists about R1 of a 90-degree frame, against a scalar
+    // inertia on that component.
+    const double inertia = 3.0, kt = torsional_k(10.0);
+    const auto r = solve_modal(
+        "SOL 103\nCEND\nSPC = 1\nMETHOD = 9\nBEGIN BULK\nEIGRL,9,,,1\n" + kRodProps +
+        turned_frame(12, 90.0) +
+        "GRID,1,,0.,0.,0.\nGRID,2,,0.,10.,0.,12\nCROD,1,2,1,2\nSPC1,1,123456,1\n"
+        "CMASS2,5,3.,2,4\nENDDATA\n");
+    ASSERT_EQ(r.modes.size(), 1U);
+    EXPECT_NEAR(r.modes[0].eigenvalue / (kt / inertia), 1.0, 1e-10);
+    const auto shape = std::ranges::find(r.modes[0].shape, NodeId{2}, &NodeDisplacement::node);
+    ASSERT_NE(shape, r.modes[0].shape.end());
+    EXPECT_NEAR(std::abs(shape->d[3]), 1.0 / std::sqrt(inertia), 1e-10);
+    EXPECT_NEAR(shape->d[4], 0.0, 1e-10);
+}
+
+TEST(CdModeShape, GridsWithoutAFrameStayInBasic) {
+    // Grid 4 has no CD: its T1 is the common motion of the tie, as is grid 2's.
+    const double m = 2.5;
+    const auto r = solve_modal(
+        "SOL 103\nCEND\nSPC = 1\nMPC = 7\nMETHOD = 9\nBEGIN BULK\nEIGRL,9,,,1\n" + kRodProps +
+        turned_frame(12, 90.0) +
+        "GRID,1,,0.,0.,0.\nGRID,2,,0.,10.,0.,12\nGRID,3,,20.,0.,0.\nGRID,4,,40.,0.,0.\n"
+        "CROD,1,1,1,2\nCROD,2,1,3,4\nSPC1,1,123456,1,3\nMPC,7,2,1,1.,4,1,-1.\n"
+        "CONM2,5,2,,2.5\nENDDATA\n");
+    ASSERT_EQ(r.modes.size(), 1U);
+    const auto grid = [&](const int id) {
+        return *std::ranges::find(r.modes[0].shape, NodeId{id}, &NodeDisplacement::node);
+    };
+    EXPECT_EQ(grid(4).coord, CoordId{0});
+    EXPECT_NEAR(std::abs(grid(2).d[0]), 1.0 / std::sqrt(m), 1e-10);
+    EXPECT_NEAR(grid(2).d[0], grid(4).d[0], 1e-10);
+    EXPECT_NEAR(grid(2).d[1], 0.0, 1e-10);
+}
+
+TEST(CdModeShape, NormMaxIsUnitInTheReportedFrame) {
+    // The skew oscillator of MassOnASkewAxisSeesTheSeriesCompliance. Its largest
+    // basic component is Y, but its largest reported component must be one: T1.
+    const double t = std::numbers::pi / 6.0;
+    const double kx = axial_k(10.0), ky = axial_k(25.0);
+    const auto r = solve_modal(
+        "SOL 103\nCEND\nSPC = 1\nMETHOD = 9\nBEGIN BULK\nEIGRL,9,,,1,,,,MAX\n" + kRodProps +
+        turned_frame(12, 30.0) +
+        "GRID,1,,10.,0.,0.\nGRID,2,,0.,25.,0.\nGRID,3,,0.,0.,0.,12\n"
+        "CROD,1,1,1,3\nCROD,2,1,2,3\nSPC1,1,123456,1,2\nCMASS2,8,4.,3,1\nENDDATA\n");
+    ASSERT_EQ(r.modes.size(), 1U);
+    const double flexibility = std::pow(std::cos(t), 2) / kx + std::pow(std::sin(t), 2) / ky;
+    const auto shape = std::ranges::find(r.modes[0].shape, NodeId{3}, &NodeDisplacement::node);
+    ASSERT_NE(shape, r.modes[0].shape.end());
+    EXPECT_NEAR(std::abs(shape->d[0]), 1.0, 1e-12);
+    EXPECT_NEAR(shape->d[1] / shape->d[0],
+                (1.0 / ky - 1.0 / kx) * std::sin(t) * std::cos(t) / flexibility, 1e-9);
 }

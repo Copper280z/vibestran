@@ -4,6 +4,7 @@
 #include "core/mpc_handler.hpp"
 #include "core/model.hpp"
 
+#include <array>
 #include <vector>
 
 namespace vibestran {
@@ -29,6 +30,11 @@ namespace vibestran {
 /// (their active DOFs), so other grids are not analysed.
 [[nodiscard]] std::vector<Spc> analysis_spcs(const Model &model,
                                              const SubCase &sc);
+
+/// Rotates a basic-frame grid 6-vector (displacements, forces, moments) into the
+/// grid's global (CD) system.
+[[nodiscard]] std::array<double, 6>
+to_grid_frame(const Model &model, NodeId nid, const std::array<double, 6> &v);
 
 [[nodiscard]] DofMap build_analysis_dof_map(const Model &model,
                                             const SubCase &sc);

@@ -23,6 +23,40 @@
 
 namespace vibestran {
 
+namespace {
+
+/// NORM=MAX sets the largest independent component to one, in the frame it is
+/// reported in. The reduced vector was scaled with basic components, which are
+/// those of a grid without CD; a CD grid's own components can be larger, and its
+/// dependent ones cannot be told apart from them, so all of them count. A model
+/// with no CD grid is already normalized.
+void renormalize_to_unit_max_in_grid_frames(const MpcHandler& mpc_handler,
+                                            std::vector<NodeDisplacement>& shape) {
+    const auto on_cd_grid = [](const NodeDisplacement& nd) { return nd.coord.value != 0; };
+    if (std::ranges::none_of(shape, on_cd_grid))
+        return;
+    const DofMap& dof_map = mpc_handler.full_dof_map();
+    double largest = 0.0;
+    for (const NodeDisplacement& nd : shape) {
+        for (int d = 0; d < 6; ++d) {
+            if (!on_cd_grid(nd)) {
+                const EqIndex eq = dof_map.eq_index(nd.node, d);
+                if (eq == CONSTRAINED_DOF ||
+                    mpc_handler.reduced_index(eq) == CONSTRAINED_DOF)
+                    continue;
+            }
+            largest = std::max(largest, std::abs(nd.d[static_cast<size_t>(d)]));
+        }
+    }
+    if (largest <= 1e-30)
+        return;
+    for (NodeDisplacement& nd : shape)
+        for (double& value : nd.d)
+            value /= largest;
+}
+
+} // namespace
+
 ModalSolver::ModalSolver(std::unique_ptr<EigensolverBackend> backend)
     : backend_(std::move(backend)) {}
 
@@ -211,6 +245,8 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
         }
 
         mr.shape = recover_mode_shape(model, mpc_handler, phi);
+        if (eigrl.norm == EigRL::Norm::Max)
+            renormalize_to_unit_max_in_grid_frames(mpc_handler, mr.shape);
         msc.modes.push_back(std::move(mr));
     }
 
@@ -298,6 +334,11 @@ ModalSolver::recover_mode_shape(const Model& model,
                        eq < static_cast<int>(phi_full.size()))
                       ? phi_full[static_cast<size_t>(eq)]
                       : 0.0;
+        }
+        const CoordId cd = model.node(nid).cd;
+        if (cd.value != 0) {
+            nd.d = to_grid_frame(model, nid, nd.d);
+            nd.coord = cd;
         }
         shape.push_back(nd);
     }

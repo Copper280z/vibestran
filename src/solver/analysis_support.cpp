@@ -466,6 +466,22 @@ std::vector<Spc> analysis_spcs(const Model &model, const SubCase &sc) {
   return result;
 }
 
+std::array<double, 6> to_grid_frame(const Model &model, const NodeId nid,
+                                    const std::array<double, 6> &v) {
+  if (model.node(nid).cd.value == 0)
+    return v;
+  const Mat3 T3 = model.displacement_axes(nid);
+  std::array<double, 6> out{};
+  for (int block = 0; block < 2; ++block)
+    for (int i = 0; i < 3; ++i) {
+      double x = 0.0;
+      for (int j = 0; j < 3; ++j)
+        x += T3(j, i) * v[static_cast<size_t>(3 * block + j)];
+      out[static_cast<size_t>(3 * block + i)] = x;
+    }
+  return out;
+}
+
 DofMap build_analysis_dof_map(const Model &model, const SubCase &sc) {
   DofMap dmap;
   dmap.build(model.nodes, 6);

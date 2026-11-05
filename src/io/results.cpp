@@ -1283,7 +1283,7 @@ void F06Writer::write_eigenvector_table(const ModeResult& mode, int subcase_id,
 
     for (const auto& nd : mode.shape) {
         out << std::setw(15) << nd.node.value;
-        out << std::setw(9)  << 0; // global coord sys
+        out << std::setw(9)  << nd.coord.value; // grid's global (CD) system
         out << std::uppercase;
         for (int i = 0; i < 6; ++i) {
             double v = nd.d[i];

@@ -620,3 +620,7 @@ most recent entry.
   `APPLIEDFORCES` records (OLOAD output), so no record changes bucket. The shell
   record counts that moved (`vic/1`, `vic/6`, `vic/7`) move by as much between
   runs of one binary.
+- **Mode shapes in the CD frame (1,706 final failure records, unchanged).**
+  Eigenvectors on a CD grid were reported in basic under a coordinate column of
+  0; they now follow the same frame as DISPLACEMENT output, and NORM=MAX is unit
+  in that frame. No suite deck runs SOL 103 on a grid with a CD frame.

@@ -44,6 +44,7 @@ reference is a MYSTRAN run.
 |---|---|---|
 | MPCADD naming its own SID or another MPCADD, and over MPC cards of its SID | The only 2 MPCADD decks name plain MPC sets of other SIDs | A rod chain with the same ties given each way, as in `MpcAdd.*` |
 | MPC on a cylindrical CD grid, or on rotation components of a CD grid | CD MPC appears only in `SB/SS-RODLOAD-MPC-FOR-SING`, on translations in a rectangular frame | `CdMpc.CylindricalFrameFollowsTheGrid` and `CdMpc.RotationsTurnWithTheSameAxes` |
+| SOL 103 on a grid with a CD frame | No SOL 103 deck has a GRID with nonzero CD | A radial rod with a mass in a cylindrical CD frame: the shape is all T1, against the basic split between X and Y, with NORM=MASS and NORM=MAX, as in `CdModeShape.*` |
 | CELAS and CMASS components on a CD grid | The CELAS grids of `vic/6/NAS S30 twisted plate mit4+.bdf`, the only deck with both, have no CD frame | A grounded spring on T1 of a skew frame (the load's projection, with the rest reacted on T2), and a mass on a skew axis between unequal rods, as in `CdScalar.*` |
 
 ## CBAR / PBAR

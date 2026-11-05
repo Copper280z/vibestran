@@ -1215,6 +1215,7 @@ TEST(F06Writer, ModalEigenvalueAndEigenvectorBlocks) {
     NodeDisplacement nd;
     nd.node = NodeId{5};
     nd.d = {1.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    nd.coord = CoordId{12};
     mode.shape.push_back(nd);
     msc.modes.push_back(mode);
     res.subcases.push_back(msc);
@@ -1226,6 +1227,8 @@ TEST(F06Writer, ModalEigenvalueAndEigenvectorBlocks) {
 
     EXPECT_NE(out.find("R E A L   E I G E N V A L U E S"), std::string::npos);
     EXPECT_NE(out.find("E I G E N V E C T O R"), std::string::npos);
+    // The row names the frame its components are in.
+    EXPECT_NE(out.find("              5       12"), std::string::npos);
 
     std::istringstream iss(out);
     std::string line;

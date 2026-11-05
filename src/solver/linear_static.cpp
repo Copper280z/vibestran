@@ -1148,24 +1148,6 @@ void subtract_spc_thermal_loads(const Model &model, const SubCase &sc,
   }
 }
 
-/// Rotate a basic-frame grid 6-vector (forces, moments) into the grid's
-/// global (CD) system.
-std::array<double, 6> to_grid_frame(const Model &model, const NodeId nid,
-                                    const std::array<double, 6> &v) {
-  if (model.node(nid).cd.value == 0)
-    return v;
-  const Mat3 T3 = model.displacement_axes(nid);
-  std::array<double, 6> out{};
-  for (int block = 0; block < 2; ++block)
-    for (int i = 0; i < 3; ++i) {
-      double x = 0.0;
-      for (int j = 0; j < 3; ++j)
-        x += T3(j, i) * v[static_cast<size_t>(3 * block + j)];
-      out[static_cast<size_t>(3 * block + i)] = x;
-    }
-  return out;
-}
-
 } // namespace
 
 LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
@@ -1429,32 +1411,10 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
                     ? u_free[static_cast<size_t>(eq)]
                     : 0.0;
     }
-    // Rotate displacements to CD frame for output
-    const GridPoint &gp = model.node(nid);
-    if (gp.cd.value != 0) {
-      auto cs_it = model.coord_systems.find(gp.cd);
-      if (cs_it != model.coord_systems.end()) {
-        Mat3 T3 = rotation_matrix(cs_it->second, gp.position);
-        // v_cd = T3^T * v_basic
-        // T3^T[i][j] = T3[j][i]
-        Vec3 u_basic{nd.d[0], nd.d[1], nd.d[2]};
-        // v_cd[i] = sum_j T3[j][i] * v_basic[j]
-        Vec3 u_cd{
-            T3(0,0)*u_basic.x + T3(1,0)*u_basic.y + T3(2,0)*u_basic.z,
-            T3(0,1)*u_basic.x + T3(1,1)*u_basic.y + T3(2,1)*u_basic.z,
-            T3(0,2)*u_basic.x + T3(1,2)*u_basic.y + T3(2,2)*u_basic.z,
-        };
-        nd.d[0] = u_cd.x; nd.d[1] = u_cd.y; nd.d[2] = u_cd.z;
-
-        Vec3 rot_basic{nd.d[3], nd.d[4], nd.d[5]};
-        Vec3 rot_cd{
-            T3(0,0)*rot_basic.x + T3(1,0)*rot_basic.y + T3(2,0)*rot_basic.z,
-            T3(0,1)*rot_basic.x + T3(1,1)*rot_basic.y + T3(2,1)*rot_basic.z,
-            T3(0,2)*rot_basic.x + T3(1,2)*rot_basic.y + T3(2,2)*rot_basic.z,
-        };
-        nd.d[3] = rot_cd.x; nd.d[4] = rot_cd.y; nd.d[5] = rot_cd.z;
-        nd.coord = gp.cd;
-      }
+    const CoordId cd = model.node(nid).cd;
+    if (cd.value != 0) {
+      nd.d = to_grid_frame(model, nid, nd.d);
+      nd.coord = cd;
     }
     res.displacements.push_back(nd);
   }
