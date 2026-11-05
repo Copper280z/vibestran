@@ -1405,6 +1405,31 @@ TEST(Op2Writer, CrodAndConrodStressesGoInSeparateRecords) {
     }
 }
 
+TEST(Op2Writer, SpringStressesUseTheirElementTypes) {
+    // OES1X for CELAS1 is element type 11 and for CELAS2 type 12, with the stress in
+    // the second of two words per element.
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    SpringResult first;
+    first.eid = ElementId{21};
+    first.stress = 7.5;
+    SpringResult second;
+    second.eid = ElementId{22};
+    second.type = ElementType::CELAS2;
+    second.stress = -8.5;
+    sc.spring_results = {first, second};
+    res.subcases.push_back(sc);
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].stress_plot = true;
+
+    const auto words = bytes_to_words(run_op2_writer(res, m));
+    EXPECT_TRUE(contains_word_sequence(words, {11, 5, 11, 1}));
+    EXPECT_TRUE(contains_word_sequence(words, {11, 5, 12, 1}));
+    EXPECT_TRUE(contains_word_sequence(words, {4 * 2, 211, as_word(7.5f), 4 * 2}));
+    EXPECT_TRUE(contains_word_sequence(words, {4 * 2, 221, as_word(-8.5f), 4 * 2}));
+}
+
 TEST(Op2Writer, UsesMystranBarStressTableAndPayload) {
     SolverResults res;
     SubCaseResults sc;

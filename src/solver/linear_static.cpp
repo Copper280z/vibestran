@@ -413,8 +413,13 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
       backend_->uses_near_nullspace(n) && structural_amg_modes(model, amg_modes_) == AmgModes::Rigid
           ? rigid_body_modes(model, mpc_handler)
           : nullptr);
-  std::vector<double> u_reduced =
-      backend_->solve(*solve_csr, F, &factor_ratio_policy);
+  // When the elements have every DOF prescribed there is nothing to solve, and the
+  // results follow from those values. A model with no element at all, usually
+  // because its cards were unsupported, still goes to the backend, which rejects it.
+  const bool fully_prescribed = csr.n == 0 && !model.elements.empty();
+  std::vector<double> u_reduced;
+  if (!fully_prescribed)
+    u_reduced = backend_->solve(*solve_csr, F, &factor_ratio_policy);
   const auto t6 = Clock::now();
   spdlog::debug("[subcase {}] linear solve: {:.3f} ms", sc.id, Ms(t6 - t5b).count());
   if (!dump_prefix_.empty()) {
@@ -443,7 +448,7 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   // ill-conditioned K it is ~ eps ||K|| ||u|| / ||F|| even for the exact
   // solution rounded to double.  Refined solves (--refine, PARAM,REFINE,YES,
   // and all PCG backends) report the refinement's error estimate instead.
-  {
+  if (!fully_prescribed) {
     std::optional<RefinementReport> rep = backend_->last_refinement();
     const bool refined = rep.has_value();
     if (!refined) {
@@ -1432,12 +1437,6 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
       case ElementType::CBUSH:
         unsupported_types.insert("CBUSH");
         break;
-      case ElementType::CELAS1:
-        unsupported_types.insert("CELAS1");
-        break;
-      case ElementType::CELAS2:
-        unsupported_types.insert("CELAS2");
-        break;
       case ElementType::CMASS1:
         unsupported_types.insert("CMASS1");
         break;
@@ -1558,6 +1557,16 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
       rr.axial_margin = recovered.axial_margin;
       rr.torsional_margin = recovered.torsional_margin;
       res.rod_results.push_back(rr);
+    } else if (elem_data.type == ElementType::CELAS1 ||
+               elem_data.type == ElementType::CELAS2) {
+      const auto &spring = static_cast<const ScalarSpringElement &>(*elem);
+      SpringResult result;
+      result.eid = elem_data.id;
+      result.type = elem_data.type;
+      result.force = spring.force(
+          std::span<const double>(ue.data(), static_cast<size_t>(ue.size())));
+      result.stress = spring.stress_coefficient() * result.force;
+      res.spring_results.push_back(result);
     } else if (elem_data.type == ElementType::CQUAD4 ||
                elem_data.type == ElementType::CTRIA3) {
       PlateStress ps;

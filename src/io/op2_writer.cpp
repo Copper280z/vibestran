@@ -618,6 +618,58 @@ static int write_oes1x_rod(std::ostream& f,
     return itable;
 }
 
+// ── Write one OES1X spring stress TABLE-4 ────────────────────────────────────
+// CELAS1 (element_type=11) or CELAS2 (element_type=12), 2 words per element:
+//   [eid_device, stress]
+
+static int write_oes1x_spring(std::ostream& f,
+                              const SubCaseResults& sc,
+                              const ElementType etype,
+                              bool new_result, int itable,
+                              const std::string& subtitle) {
+    const int nel = static_cast<int>(std::ranges::count(
+        sc.spring_results, etype, &SpringResult::type));
+    if (nel == 0) return itable;
+
+    const int analysis_code = 1;
+    const int table_code = 5;
+    const int element_type = etype == ElementType::CELAS1 ? 11 : 12;
+    const int num_wide = 2;
+    const int ntotal = nel * num_wide;
+
+    write_table3(f, new_result, itable,
+                 analysis_code, kMystranDeviceCode,
+                 table_code, element_type, sc.id,
+                 /*field5_int=*/sc.id, /*field6=*/0.0f, /*field7=*/0.0f,
+                 /*field8_int=*/1, num_wide, kVonMisesStressCode,
+                 "", subtitle, sc.label);
+    itable--;
+
+    {
+        const int32_t m[13] = {4, itable, 4,
+                               4, 1, 4,
+                               4, 0, 4,
+                               4, ntotal, 4,
+                               4 * ntotal};
+        f.write(reinterpret_cast<const char*>(m), 52);
+    }
+
+    for (const auto& spring : sc.spring_results) {
+        if (spring.type != etype) continue;
+        const int32_t eid_dev =
+            static_cast<int32_t>(spring.eid.value) * 10 + kMystranDeviceCode;
+        write_f32(f, i32_as_f32(eid_dev));
+        write_f32(f, static_cast<float>(spring.stress));
+    }
+
+    {
+        int32_t tail = 4 * ntotal;
+        f.write(reinterpret_cast<const char*>(&tail), 4);
+    }
+    itable--;
+    return itable;
+}
+
 // ── Write one OES1X solid stress TABLE-4 ─────────────────────────────────────
 // CTETRA4 (element_type=39, num_wide=109) or CHEXA8 (element_type=67, num_wide=193).
 // We have centroid data only; corner nodes are filled with the centroid values.
@@ -938,7 +990,7 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
             results.subcases.begin(), results.subcases.end(),
             [&](const auto& sc) {
                 return has_line_stress_plot_output(model, sc.id) &&
-                       !sc.rod_results.empty();
+                       (!sc.rod_results.empty() || !sc.spring_results.empty());
             });
         if (any) {
             const char name8[8] = {'O','E','S','1','X',' ',' ',' '};
@@ -948,9 +1000,12 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
             bool new_result = true;
             for (const auto& sc : results.subcases) {
                 if (!has_line_stress_plot_output(model, sc.id)) continue;
-                for (const ElementType etype : {ElementType::CROD, ElementType::CONROD}) {
+                for (const ElementType etype : {ElementType::CROD, ElementType::CONROD,
+                                                ElementType::CELAS1, ElementType::CELAS2}) {
                     const int prev_itable = itable;
-                    itable = write_oes1x_rod(f, sc, etype, new_result, itable, sc.label);
+                    itable = (etype == ElementType::CROD || etype == ElementType::CONROD)
+                                 ? write_oes1x_rod(f, sc, etype, new_result, itable, sc.label)
+                                 : write_oes1x_spring(f, sc, etype, new_result, itable, sc.label);
                     if (itable == prev_itable) continue;
                     if (!new_result || itable < -3) new_result = false;
                     const int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};

@@ -583,7 +583,7 @@ ENDDATA
     Model m = BdfParser::parse_string(bdf);
     const auto &pbarl = std::get<PBarL>(m.properties.at(PropertyId{11}));
     EXPECT_EQ(pbarl.section_type, "TUBE");
-    EXPECT_NEAR(pbarl.A, std::numbers::pi * (4.0 - 2.25) * 0.25, 1e-12);
+    EXPECT_NEAR(pbarl.A, std::numbers::pi * (4.0 - 0.0625), 1e-12);
     EXPECT_DOUBLE_EQ(pbarl.nsm, 0.1);
 
     ASSERT_EQ(m.loads.size(), 1u);

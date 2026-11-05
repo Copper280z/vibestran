@@ -1566,55 +1566,71 @@ void parse_line_element_ends(const std::vector<std::string> &f, ElementData &e,
                          "has data beyond the WB offset fields");
 }
 
+/// The four corners of a section as C, D, E, F, at y = +-half_y and z = +-half_z.
+[[nodiscard]] std::array<std::array<double, 2>, 4>
+corner_recovery_points(const double half_y, const double half_z) {
+  return {{{half_y, half_z},
+           {-half_y, half_z},
+           {-half_y, -half_z},
+           {half_y, -half_z}}};
+}
+
+/// Section constants and stress recovery points of a PBARL, about the neutral
+/// axis. y is the depth direction: I1 bends about z and I2 about y. The open
+/// sections take J = sum(b t^3) / 3 over their rectangles, and BOX takes Bredt's
+/// J = 4 Am^2 / sum(l / t) on its centreline, so J is the thin-wall value and not
+/// the numerical one MSC Nastran computes. K1 and K2 are the shear area factors:
+/// 5/6 for BAR and Cowper's at nu = 0 for ROD and TUBE, as the section knows no
+/// material. A thin-walled section carries shear in the walls along the load, with
+/// flanges taking 5/6 of theirs, as those walls are rectangles in that direction.
 void populate_pbarl_section(PBarL &p, const int line_num) {
   const std::string type = uppercase_copy(p.section_type);
-  if (type == "ROD") {
-    if (p.dimensions.size() != 1) {
+  const std::vector<double> &d = p.dimensions;
+  for (const double dimension : d) {
+    if (dimension <= 0.0) {
       throw ParseError(std::format(
-          "Line {}: PBARL ROD requires exactly 1 dimension", line_num));
+          "Line {}: PBARL {} {} dimensions must be positive, got {}", line_num,
+          p.pid.value, type, dimension));
     }
-    const double d = p.dimensions[0];
-    if (d <= 0.0)
-      throw ParseError(std::format(
-          "Line {}: PBARL ROD diameter must be positive", line_num));
-    p.A = std::numbers::pi * d * d * 0.25;
-    p.I1 = p.I2 = std::numbers::pi * std::pow(d, 4) / 64.0;
+  }
+  const auto require = [&](const bool holds, const std::string_view condition) {
+    if (!holds) {
+      throw ParseError(std::format("Line {}: PBARL {} {} requires {}", line_num,
+                                   p.pid.value, type, condition));
+    }
+  };
+
+  if (type == "ROD") {
+    // DIM1 is the radius.
+    const double r = d[0];
+    p.A = std::numbers::pi * r * r;
+    p.I1 = p.I2 = std::numbers::pi * std::pow(r, 4) / 4.0;
     p.J = p.I1 + p.I2;
+    p.recovery_points = {{{r, 0.0}, {0.0, r}, {-r, 0.0}, {0.0, -r}}};
+    p.K1 = p.K2 = 6.0 / 7.0;
     return;
   }
 
   if (type == "TUBE") {
-    if (p.dimensions.size() != 2) {
-      throw ParseError(std::format(
-          "Line {}: PBARL TUBE requires outer diameter and thickness",
-          line_num));
-    }
-    const double d_outer = p.dimensions[0];
-    const double t = p.dimensions[1];
-    const double d_inner = d_outer - 2.0 * t;
-    if (d_outer <= 0.0 || t <= 0.0 || d_inner <= 0.0) {
-      throw ParseError(std::format(
-          "Line {}: PBARL TUBE dimensions must satisfy OD > 2*t > 0",
-          line_num));
-    }
-    p.A = std::numbers::pi * (d_outer * d_outer - d_inner * d_inner) * 0.25;
-    p.I1 = p.I2 = std::numbers::pi *
-                  (std::pow(d_outer, 4) - std::pow(d_inner, 4)) / 64.0;
+    // DIM1 and DIM2 are the outer and inner radii.
+    const double r_outer = d[0];
+    const double r_inner = d[1];
+    require(r_inner < r_outer, "DIM2 < DIM1");
+    p.A = std::numbers::pi * (r_outer * r_outer - r_inner * r_inner);
+    p.I1 = p.I2 =
+        std::numbers::pi * (std::pow(r_outer, 4) - std::pow(r_inner, 4)) / 4.0;
     p.J = p.I1 + p.I2;
+    p.recovery_points = {
+        {{r_outer, 0.0}, {0.0, r_outer}, {-r_outer, 0.0}, {0.0, -r_outer}}};
+    const double m = r_inner / r_outer;
+    const double s = std::pow(1.0 + m * m, 2);
+    p.K1 = p.K2 = 6.0 * s / (7.0 * s + 20.0 * m * m);
     return;
   }
 
   if (type == "BAR") {
-    if (p.dimensions.size() != 2) {
-      throw ParseError(std::format(
-          "Line {}: PBARL BAR requires exactly 2 dimensions", line_num));
-    }
-    const double b = p.dimensions[0];
-    const double h = p.dimensions[1];
-    if (b <= 0.0 || h <= 0.0) {
-      throw ParseError(std::format(
-          "Line {}: PBARL BAR dimensions must be positive", line_num));
-    }
+    const double b = d[0];
+    const double h = d[1];
     p.A = b * h;
     p.I1 = b * std::pow(h, 3) / 12.0;
     p.I2 = h * std::pow(b, 3) / 12.0;
@@ -1623,6 +1639,112 @@ void populate_pbarl_section(PBarL &p, const int line_num) {
     const double beta = c / a;
     p.J = a * std::pow(c, 3) *
           (1.0 / 3.0 - 0.21 * beta * (1.0 - std::pow(beta, 4) / 12.0));
+    p.recovery_points = corner_recovery_points(0.5 * h, 0.5 * b);
+    p.K1 = p.K2 = 5.0 / 6.0;
+    return;
+  }
+
+  if (type == "BOX") {
+    // Width, depth, top and bottom wall thickness, side wall thickness.
+    const double b = d[0];
+    const double h = d[1];
+    const double t_flange = d[2];
+    const double t_web = d[3];
+    require(2.0 * t_web < b, "2 * DIM4 < DIM1");
+    require(2.0 * t_flange < h, "2 * DIM3 < DIM2");
+    const double b_in = b - 2.0 * t_web;
+    const double h_in = h - 2.0 * t_flange;
+    p.A = b * h - b_in * h_in;
+    p.I1 = (b * std::pow(h, 3) - b_in * std::pow(h_in, 3)) / 12.0;
+    p.I2 = (h * std::pow(b, 3) - h_in * std::pow(b_in, 3)) / 12.0;
+    const double b_mid = b - t_web;
+    const double h_mid = h - t_flange;
+    const double enclosed = b_mid * h_mid;
+    p.J = 4.0 * enclosed * enclosed /
+          (2.0 * b_mid / t_flange + 2.0 * h_mid / t_web);
+    p.recovery_points = corner_recovery_points(0.5 * h, 0.5 * b);
+    p.K1 = 2.0 * t_web * h_in / p.A;
+    p.K2 = 2.0 * t_flange * b_in / p.A;
+    return;
+  }
+
+  if (type == "CHAN") {
+    // Flange width, depth, web thickness, flange thickness. The web is on the -z
+    // side of the centroid, at distance z_web from its outer face.
+    const double b = d[0];
+    const double h = d[1];
+    const double t_web = d[2];
+    const double t_flange = d[3];
+    require(t_web < b, "DIM3 < DIM1");
+    require(2.0 * t_flange < h, "2 * DIM4 < DIM2");
+    const double h_web = h - 2.0 * t_flange;
+    const double a_flange = b * t_flange;
+    const double a_web = h_web * t_web;
+    p.A = 2.0 * a_flange + a_web;
+    const double z_web = (a_flange * b + 0.5 * a_web * t_web) / p.A;
+    p.I1 = (b * std::pow(h, 3) - (b - t_web) * std::pow(h_web, 3)) / 12.0;
+    p.I2 = 2.0 * (t_flange * std::pow(b, 3) / 12.0 +
+                  a_flange * std::pow(0.5 * b - z_web, 2)) +
+           h_web * std::pow(t_web, 3) / 12.0 +
+           a_web * std::pow(z_web - 0.5 * t_web, 2);
+    p.J = (2.0 * b * std::pow(t_flange, 3) + h_web * std::pow(t_web, 3)) / 3.0;
+    p.recovery_points = {{{0.5 * h, b - z_web},
+                          {-0.5 * h, b - z_web},
+                          {-0.5 * h, -z_web},
+                          {0.5 * h, -z_web}}};
+    p.K1 = a_web / p.A;
+    p.K2 = (5.0 / 6.0) * 2.0 * a_flange / p.A;
+    return;
+  }
+
+  if (type == "T") {
+    // Flange width, depth, flange thickness, web thickness. The flange is at +y,
+    // and y_end is the distance from the centroid to the free end of the web.
+    const double b = d[0];
+    const double h = d[1];
+    const double t_flange = d[2];
+    const double t_web = d[3];
+    require(t_flange < h, "DIM3 < DIM2");
+    require(t_web < b, "DIM4 < DIM1");
+    const double h_web = h - t_flange;
+    const double a_flange = b * t_flange;
+    const double a_web = h_web * t_web;
+    p.A = a_flange + a_web;
+    const double y_flange = h_web + 0.5 * t_flange;
+    const double y_end = (a_flange * y_flange + 0.5 * a_web * h_web) / p.A;
+    p.I1 = b * std::pow(t_flange, 3) / 12.0 +
+           a_flange * std::pow(y_flange - y_end, 2) +
+           t_web * std::pow(h_web, 3) / 12.0 +
+           a_web * std::pow(y_end - 0.5 * h_web, 2);
+    p.I2 = (t_flange * std::pow(b, 3) + h_web * std::pow(t_web, 3)) / 12.0;
+    p.J = (b * std::pow(t_flange, 3) + h_web * std::pow(t_web, 3)) / 3.0;
+    const double y_top = h - y_end;
+    p.recovery_points = {{{y_top, 0.0},
+                          {y_top, 0.5 * b},
+                          {-y_end, 0.0},
+                          {y_top, -0.5 * b}}};
+    p.K1 = a_web / p.A;
+    p.K2 = (5.0 / 6.0) * a_flange / p.A;
+    return;
+  }
+
+  if (type == "I1") {
+    // Total width of the two flange outstands, web thickness, clear web depth,
+    // overall depth.
+    const double outstands = d[0];
+    const double t_web = d[1];
+    const double h_web = d[2];
+    const double h = d[3];
+    require(h_web < h, "DIM3 < DIM4");
+    const double b = outstands + t_web;
+    const double t_flange = 0.5 * (h - h_web);
+    p.A = b * h - outstands * h_web;
+    p.I1 = (b * std::pow(h, 3) - outstands * std::pow(h_web, 3)) / 12.0;
+    p.I2 = (2.0 * t_flange * std::pow(b, 3) + h_web * std::pow(t_web, 3)) / 12.0;
+    p.J = (2.0 * b * std::pow(t_flange, 3) + h_web * std::pow(t_web, 3)) / 3.0;
+    p.recovery_points = corner_recovery_points(0.5 * h, 0.5 * b);
+    p.K1 = h_web * t_web / p.A;
+    p.K2 = (5.0 / 6.0) * 2.0 * b * t_flange / p.A;
     return;
   }
 
@@ -2087,7 +2209,12 @@ void BdfParser::process_pbarl(ParseContext &ctx,
   const int required_dims =
       (p.section_type == "ROD")
           ? 1
-          : (p.section_type == "BAR" || p.section_type == "TUBE") ? 2 : -1;
+          : (p.section_type == "BAR" || p.section_type == "TUBE")
+                ? 2
+                : (p.section_type == "BOX" || p.section_type == "CHAN" ||
+                   p.section_type == "T" || p.section_type == "I1")
+                      ? 4
+                      : -1;
   if (required_dims < 0) {
     throw ParseError(std::format(
         "Line {}: PBARL section type '{}' is not yet supported",
@@ -2105,17 +2232,23 @@ void BdfParser::process_pbarl(ParseContext &ctx,
         "Line {}: PBARL {} requires {} dimensions, got {}", ctx.line_num,
         p.section_type, required_dims, numeric_values.size()));
   }
-  if (static_cast<int>(numeric_values.size()) > required_dims + 1) {
-    throw ParseError(std::format(
-        "Line {}: PBARL {} continuation data beyond dimensions and NSM is not "
-        "yet supported",
-        ctx.line_num, p.section_type));
+  // Preprocessors pad the continuation with zeros, which MSC Nastran accepts.
+  // Anything else after NSM has no meaning.
+  for (size_t i = static_cast<size_t>(required_dims) + 1;
+       i < numeric_values.size(); ++i) {
+    if (numeric_values[i] != 0.0) {
+      throw ParseError(std::format(
+          "Line {}: PBARL {} {} takes {} dimensions and NSM, but has the further "
+          "value {}",
+          ctx.line_num, p.pid.value, p.section_type, required_dims,
+          numeric_values[i]));
+    }
   }
 
   p.dimensions.assign(numeric_values.begin(),
                       numeric_values.begin() + required_dims);
-  if (static_cast<int>(numeric_values.size()) == required_dims + 1)
-    p.nsm = numeric_values.back();
+  if (static_cast<int>(numeric_values.size()) > required_dims)
+    p.nsm = numeric_values[static_cast<size_t>(required_dims)];
   populate_pbarl_section(p, ctx.line_num);
   ctx.model.properties[p.pid] = p;
 }
@@ -2529,8 +2662,10 @@ void BdfParser::parse_scalar_connection(ElementData &e,
                                         const int line) {
   for (const size_t field : {size_t{3}, size_t{5}}) {
     const int point = parse_int(f[field], line);
-    if (point == 0)
+    if (point == 0) {
+      e.first_end_grounded = e.first_end_grounded || field == 3;
       continue;
+    }
     e.components[e.nodes.size()] = parse_int(f[field + 1], line);
     e.nodes.push_back(NodeId(point));
   }
@@ -2548,6 +2683,8 @@ void BdfParser::parse_scalar_points(ElementData &e,
     const int point = parse_int(f[field], line);
     if (point != 0)
       e.nodes.push_back(NodeId(point));
+    else if (field == 3)
+      e.first_end_grounded = true;
   }
   if (e.nodes.empty())
     throw ParseError(std::format(
@@ -2685,15 +2822,12 @@ void BdfParser::process_celas2(ParseContext &ctx,
   e.type = ElementType::CELAS2;
   e.value = parse_double(f[2], ctx.line_num);
   parse_scalar_connection(e, f, ctx.line_num);
-  if ((f.size() > 7 && !f[7].empty() &&
-       parse_double(f[7], ctx.line_num) != 0.0) ||
-      (f.size() > 8 && !f[8].empty() &&
-       parse_double(f[8], ctx.line_num) != 0.0)) {
-    throw ParseError(std::format(
-        "Line {}: CELAS2 damping and stress-coefficient fields are not yet "
-        "supported",
-        ctx.line_num));
-  }
+  // GE only damps a dynamic response, which no solution here computes, so it is
+  // checked and has no effect. S recovers the stress.
+  if (f.size() > 7)
+    static_cast<void>(parse_double(f[7], ctx.line_num));
+  if (f.size() > 8)
+    e.stress_coefficient = parse_double(f[8], ctx.line_num);
   reject_nonblank_fields(f, 9, ctx.line_num, "CELAS2",
                          "extra continuation data is not supported");
   ctx.model.elements.push_back(std::move(e));

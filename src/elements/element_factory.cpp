@@ -97,7 +97,9 @@ std::unique_ptr<ElementBase> make_element(const ElementData& data, const Model& 
         case ElementType::CELAS2:
             return std::make_unique<ScalarSpringElement>(data.type, data.id, data.pid,
                                                          data.nodes, data.components,
-                                                         data.value, model);
+                                                         data.value, model,
+                                                         data.stress_coefficient,
+                                                         data.first_end_grounded);
         case ElementType::CMASS1:
         case ElementType::CMASS2:
             return std::make_unique<ScalarMassElement>(data.type, data.id, data.pid,

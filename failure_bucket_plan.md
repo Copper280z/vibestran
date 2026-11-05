@@ -18,17 +18,17 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 1,706 final failure
+The suite contains 3,226 definitions. The current run has 1,649 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
 | `unsupported_input` | 874 | 147 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 599 | 217 | Result exists but differs from the reference or comparator expectation |
-| `input_parse_error` | 185 | 15 | Parser rejects syntax or a card variant used by a valid deck |
-| `missing_result_data` | 42 | 14 | Solver completes but does not emit the requested result family |
-| `solver_model_error` | 6 | 2 | Parsed model is rejected by a geometry gate or has no free DOFs |
-| **Total** | **1,706** |  |  |
+| `numerical_mismatch` | 600 | 218 | Result exists but differs from the reference or comparator expectation |
+| `input_parse_error` | 141 | 12 | Parser rejects syntax or a card variant used by a valid deck |
+| `missing_result_data` | 30 | 8 | Solver completes but does not emit the requested result family |
+| `solver_model_error` | 4 | 1 | Parsed model is rejected by a geometry gate |
+| **Total** | **1,649** |  |  |
 
 CQUAD4 is the MITC4+/D continuum shell and CTRIA3 the MITC3+ shell (see
 `SHELL_REWRITE_PLAN.md` and `SHELL_BENCHMARKS.md`): six DOFs per grid,
@@ -234,14 +234,11 @@ There are 36 records across 11 decks:
 |---|---:|
 | `COMPOSITESTRESSES` | 24 |
 | `DISPLACEMENTS` | 4 |
-| `ELASSTRESSES` | 3 |
-| `ELASFORCES` | 3 |
 | `MODE` | 2 |
 
 `COMPOSITESTRESSES` are PCOMP ply stresses (`S30 shell laminate orthotropic
 thermal stress` and `_2`), which are not implemented; these decks solved
-for the first time once PCOMP was supported. `ELASSTRESSES`/`ELASFORCES`
-are CELAS stress and force recovery. The four `DISPLACEMENTS` records are
+for the first time once PCOMP was supported. The four `DISPLACEMENTS` records are
 the `BANDED`/`SPARSE BAILOUT` decks and `RBE3 crash`.
 
 The two `MODE` records are `V30 beam released dof x-x` and `xyz-xyz`, which
@@ -329,12 +326,11 @@ genuine numerical defects before changing solver mathematics or tolerances.
 
 ### Solver Model Errors
 
-There are 6 records across 2 decks:
+There are 4 records across 1 deck:
 
 | Current cause | Decks | Disposition |
 |---|---:|---|
 | CQUAD4 interior angle 170.2 deg > `MAXANGLE` 170 (strict quality gate) | 1 | `S30 mitc4 reaction moment complex shape`; was blocked by the warp gate before. Nastran rejects only concave elements; consider making the interior-angle check a warning like warp |
-| Empty stiffness matrix (no free DOFs) | 1 | `celas1_stress_force`; deck-specific, not yet triaged |
 
 Unused entities, coincident nodes, aspect ratio, taper and warp are
 warnings. Fatal negative/inverted geometry checks remain enabled.
@@ -343,14 +339,12 @@ intentionally share a position.
 
 ### Input Parse Errors
 
-There are 185 records across 15 decks. The unique deck causes are:
+There are 141 records across 12 decks. The unique deck causes are:
 
 | Parser gap | Decks |
 |---|---:|
 | 15-node CPENTA | 7 |
 | Partial or advanced PBUSH fields | 5 |
-| Advanced or unsupported PBARL section data | 2 |
-| CELAS2 damping/stress-coefficient fields | 1 |
 
 Parser support must be paired with the corresponding element/formulation
 behavior; accepting fields and silently ignoring their mechanics would produce
@@ -390,7 +384,7 @@ values encode MYSTRAN behaviour and are not a correctness oracle.
    `APPLIEDFORCES` record, with every displacement, SPC force, rod force and
    rod stress agreeing with MYSTRAN to 1e-4 where only rods are present) and
    modal GPFORCE (inertia-force rows; 34 decks request GPFORCE in SOL 103).
-   ELFORCE and stress output for CELASi are missing (`celas3_*`, `celas4_*`). Solid stress/strain output is in basic; PSOLID CORDM
+   Solid stress/strain output is in basic; PSOLID CORDM
    is parsed but not yet applied.
 3. Triage the faceted-cylinder free-thermal decks and the SPCFORCES
    `numerical_mismatch` decks (RBE3 node-surface coupling, MITC4+ reaction
@@ -631,3 +625,14 @@ most recent entry.
 - **CONROD (1,706 final failure records, unchanged).** No suite deck has the card,
   so no record could change. Rewriting each CROD and PROD pair as a CONROD left the
   F06 unchanged on the 35 suite decks that could be converted and run.
+- **PBARL sections and CELAS recovery (1,706 → 1,649 final failure records).**
+  PBARL gained CHAN, T, I1 and BOX, transverse shear factors and zero padding after
+  NSM; ROD and TUBE dimensions are now radii, as in MSC Nastran, where they had been
+  read as a diameter and a diameter with thickness. CELASi report force and stress
+  with S from PELAS or CELAS2, GE is accepted, and a model whose elements have every
+  DOF prescribed now solves. All 57 records are fixed outright, none fail newly, and
+  one moves from `input_parse_error` to `numerical_mismatch`: the `mys` comparison of
+  `NAS S30 beam section shapes no shear_2`, at grid 2 RZ. MYSTRAN multiplies CHAN J
+  by 1.12 where MSC Nastran gets 9.334E-08 against our 9.333E-08, so the difference
+  is MYSTRAN's. `NAS S30 beam orientation_2`, which has a shear load, matches MSC Nastran
+  and MYSTRAN to all printed digits.

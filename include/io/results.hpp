@@ -147,6 +147,16 @@ struct RodResult {
   std::optional<double> axial_margin, torsional_margin;
 };
 
+/// CELAS1 and CELAS2 force k (u1 - u2) and stress S * force.  CELAS3 and CELAS4
+/// report under those types.
+struct SpringResult {
+  constexpr SpringResult() = default;
+  ElementId eid{0};
+  ElementType type{ElementType::CELAS1};
+  double force{0};
+  double stress{0};
+};
+
 /// Nodal temperature (SOL 153 heat-transfer output).
 struct NodeTemperature {
   NodeId node{0};
@@ -209,6 +219,7 @@ struct SubCaseResults {
   std::string constraint_force_error;
   std::vector<LineStress> line_stresses;
   std::vector<RodResult> rod_results;
+  std::vector<SpringResult> spring_results;
   std::vector<PlateStress> plate_stresses;
   std::vector<SolidStress> solid_stresses;
   std::vector<SolidStrain> solid_strains;
@@ -330,6 +341,8 @@ private:
                                       bool corners);
   static void write_rod_force_table(const SubCaseResults& sc,
                                     std::ostream& out);
+  static void write_spring_table(const SubCaseResults& sc, std::ostream& out,
+                                 ElementType etype, bool stress);
   static void write_rod_stress_table(const SubCaseResults& sc,
                                      std::ostream& out, bool strain);
   static void write_bar_stress_table(const SubCaseResults& sc,

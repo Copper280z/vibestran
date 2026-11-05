@@ -210,6 +210,8 @@ struct HermiteData {
       .I12 = 0.0,
       .J = prop.J,
       .nsm = prop.nsm,
+      .K1 = prop.K1,
+      .K2 = prop.K2,
   };
 }
 
@@ -253,33 +255,14 @@ struct HermiteData {
 using RecoveryPoints = std::array<std::array<double, 2>, 4>;
 
 /// Stress recovery points C, D, E, F as (y, z) in the element frame.
-/// PBAR supplies them explicitly; PBARL derives them from the section
-/// dimensions; otherwise they are all at the neutral axis (zero bending
+/// PBAR supplies them explicitly; the parser derives them from PBARL dimensions;
+/// otherwise they are all at the neutral axis (zero bending
 /// stress), which is the Nastran behaviour for blank C1..F2.
 [[nodiscard]] RecoveryPoints recovery_points_from_property(const Property &prop) {
   if (const auto *pbar = std::get_if<PBar>(&prop))
     return pbar->recovery_points;
-  if (const auto *pbarl = std::get_if<PBarL>(&prop)) {
-    const std::string type = uppercase_copy(pbarl->section_type);
-    if (type == "BAR" && pbarl->dimensions.size() == 2) {
-      // DIM1 spans element z and DIM2 spans element y, consistent with
-      // I1 = DIM1*DIM2^3/12 (plane 1 bends about z).
-      const double half_y = 0.5 * pbarl->dimensions[1];
-      const double half_z = 0.5 * pbarl->dimensions[0];
-      return {{{half_y, half_z},
-               {-half_y, half_z},
-               {-half_y, -half_z},
-               {half_y, -half_z}}};
-    }
-    if (type == "ROD" && pbarl->dimensions.size() == 1) {
-      const double r = 0.5 * pbarl->dimensions[0];
-      return {{{r, 0.0}, {0.0, r}, {-r, 0.0}, {0.0, -r}}};
-    }
-    if (type == "TUBE" && pbarl->dimensions.size() == 2) {
-      const double r = 0.5 * pbarl->dimensions[0];
-      return {{{r, 0.0}, {0.0, r}, {-r, 0.0}, {0.0, -r}}};
-    }
-  }
+  if (const auto *pbarl = std::get_if<PBarL>(&prop))
+    return pbarl->recovery_points;
   return {};
 }
 
@@ -1181,10 +1164,13 @@ ScalarSpringElement::ScalarSpringElement(ElementType type, ElementId eid,
                                          PropertyId pid,
                                          std::vector<NodeId> nodes,
                                          std::array<int, 2> components,
-                                         double value, const Model &model)
+                                         double value, const Model &model,
+                                         const double stress_coefficient,
+                                         const bool first_end_grounded)
     : type_(type), eid_(eid), pid_(pid), nodes_(std::move(nodes)),
       dofs_(scalar_connection_dofs(nodes_, components, model)), value_(value),
-      model_(model) {}
+      stress_coefficient_(stress_coefficient),
+      first_end_grounded_(first_end_grounded), model_(model) {}
 
 double ScalarSpringElement::stiffness_value() const {
   if (type_ == ElementType::CELAS1)
@@ -1194,6 +1180,27 @@ double ScalarSpringElement::stiffness_value() const {
 
 LocalKe ScalarSpringElement::stiffness_matrix() const {
   return scalar_connection_matrix(dofs_, stiffness_value());
+}
+
+double ScalarSpringElement::force(
+    const std::span<const double> global_displacements) const {
+  if (global_displacements.size() != dofs_.size()) {
+    throw SolverError(std::format(
+        "CELAS {}: expected {} displacement entries for recovery, got {}",
+        eid_.value, dofs_.size(), global_displacements.size()));
+  }
+  double stretch = 0.0;
+  for (size_t i = 0; i < dofs_.size(); ++i)
+    stretch += dofs_[i].weight * global_displacements[i];
+  // The one connected point takes the first end's weight whichever end it is.
+  return (first_end_grounded_ ? -1.0 : 1.0) * stiffness_value() * stretch;
+}
+
+double ScalarSpringElement::stress_coefficient() const {
+  if (type_ != ElementType::CELAS1)
+    return stress_coefficient_;
+  const auto *pelas = std::get_if<PElas>(&model_.property(pid_));
+  return pelas != nullptr ? pelas->s : 0.0;
 }
 
 LocalKe ScalarSpringElement::mass_matrix() const {

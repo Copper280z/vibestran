@@ -288,6 +288,8 @@ void F06Writer::write(const SolverResults& results, const Model& model,
         if (msc != nullptr && msc->force_print) {
             write_bar_force_table(sc, out);
             write_rod_force_table(sc, out);
+            write_spring_table(sc, out, ElementType::CELAS1, false);
+            write_spring_table(sc, out, ElementType::CELAS2, false);
             write_shell_force_table(sc, out, ElementType::CQUAD4,
                                     msc->force_corner);
             write_shell_force_table(sc, out, ElementType::CTRIA3,
@@ -296,6 +298,8 @@ void F06Writer::write(const SolverResults& results, const Model& model,
         if (do_stress_any) {
             write_bar_stress_table(sc, out);
             write_rod_stress_table(sc, out, false);
+            write_spring_table(sc, out, ElementType::CELAS1, true);
+            write_spring_table(sc, out, ElementType::CELAS2, true);
             write_shell_stress_table(sc, out, ElementType::CQUAD4, do_corner,
                                      shell_props);
             write_shell_stress_table(sc, out, ElementType::CTRIA3, do_corner,
@@ -517,6 +521,48 @@ void F06Writer::write_rod_force_table(const SubCaseResults& sc, std::ostream& ou
         out << "\n";
     }
     out << "                         ------------- -------------\n\n";
+}
+
+// MYSTRAN layout, five elements to a row. Parser windows: stresses have the eid
+// at cols 2-9 and the value at 11-23, repeating every 23; forces have the eid at
+// 17-24 and the value at 26-38, repeating every 22.
+void F06Writer::write_spring_table(const SubCaseResults& sc, std::ostream& out,
+                                   const ElementType etype, const bool stress) {
+    constexpr int kPerRow = 5;
+    std::vector<const SpringResult*> springs;
+    for (const auto& spring : sc.spring_results)
+        if (spring.type == etype) springs.push_back(&spring);
+    if (springs.empty()) return;
+    write_subcase_header(out, sc.id);
+    if (!sc.label.empty())
+        out << " " << sc.label << "\n";
+    out << "\n";
+    const char* const name = etype == ElementType::CELAS1 ? "1" : "2";
+    if (stress) {
+        out << "           E L E M E N T   S T R E S S E S   I N   L O C A L   E L E M E N T   C O O R D I N A T E   S Y S T E M\n";
+        out << "                                        F O R   E L E M E N T   T Y P E   E L A S " << name << "\n";
+        out << "  Element     Stress     Element     Stress     Element     Stress     Element     Stress     Element     Stress\n";
+        out << "     ID                     ID                     ID                     ID                     ID\n";
+    } else {
+        out << "                                                 E L E M E N T   E N G I N E E R I N G   F O R C E S\n";
+        out << "                                                     F O R   E L E M E N T   T Y P E   E L A S " << name << "\n";
+        out << "                 Element     Force      Element     Force      Element     Force      Element     Force      Element     Force\n";
+        out << "                    ID                     ID                     ID                     ID                     ID\n";
+    }
+    const int first_eid = stress ? 2 : 17;
+    const int first_value = stress ? 11 : 26;
+    const int pitch = stress ? 23 : 22;
+    for (size_t i = 0; i < springs.size(); i += kPerRow) {
+        F06Row row;
+        for (size_t j = i; j < std::min(i + kPerRow, springs.size()); ++j) {
+            const int column = static_cast<int>(j - i) * pitch;
+            row.put(first_eid + column, 8, std::to_string(springs[j]->eid.value));
+            row.put(first_value + column, 13,
+                    std::format("{:.6E}", stress ? springs[j]->stress : springs[j]->force));
+        }
+        out << row.str() << "\n";
+    }
+    out << "\n";
 }
 
 void F06Writer::write_shell_force_table(const SubCaseResults& sc, std::ostream& out,

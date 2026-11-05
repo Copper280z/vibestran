@@ -213,7 +213,9 @@ class ScalarSpringElement : public ElementBase {
 public:
   ScalarSpringElement(ElementType type, ElementId eid, PropertyId pid,
                       std::vector<NodeId> nodes, std::array<int, 2> components,
-                      double value, const Model &model);
+                      double value, const Model &model,
+                      double stress_coefficient = 0.0,
+                      bool first_end_grounded = false);
 
   [[nodiscard]] ElementType type() const noexcept override { return type_; }
   [[nodiscard]] ElementId id() const noexcept override { return eid_; }
@@ -231,6 +233,13 @@ public:
     return nodes_;
   }
 
+  /// The spring force k (u1 - u2), with a grounded end at zero, from displacements
+  /// ordered as global_dof_indices().
+  [[nodiscard]] double
+  force(std::span<const double> global_displacements) const;
+  /// S, which gives the stress S * force: from PELAS for a CELAS1.
+  [[nodiscard]] double stress_coefficient() const;
+
 private:
   [[nodiscard]] double stiffness_value() const;
 
@@ -240,6 +249,8 @@ private:
   std::vector<NodeId> nodes_;
   std::vector<ScalarConnectionDof> dofs_;
   double value_;
+  double stress_coefficient_;
+  bool first_end_grounded_;
   const Model &model_;
 };
 

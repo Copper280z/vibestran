@@ -296,6 +296,11 @@ struct PBarL {
   double I2{0.0};
   double J{0.0};
   double nsm{0.0};
+  /// Stress recovery points C, D, E, F as (y, z) from the neutral axis.
+  std::array<std::array<double, 2>, 4> recovery_points{};
+  /// Transverse shear area factors (shear stiffness K*A*G) in planes 1 and 2.
+  double K1{0.0};
+  double K2{0.0};
 };
 
 struct PBeam {
@@ -421,6 +426,9 @@ struct ElementData {
   std::optional<CoordId> cid{std::nullopt};
   std::array<int, 2> components{0, 0};
   double value{0.0};
+  double stress_coefficient{0.0}; ///< CELAS2 S; a CELAS1 takes it from PELAS
+  /// A scalar element with G1 blank: its one point in `nodes` is the second end.
+  bool first_end_grounded{false};
   /// CBAR/CBEAM pin flags (PA, PB): released element-frame DOFs at ends A
   /// and B, as a bitmask where bit k releases component k+1.
   std::array<std::uint8_t, 2> pin_flags{0, 0};

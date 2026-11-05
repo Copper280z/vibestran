@@ -50,7 +50,7 @@ vibestran/
 - **CHEXA20** is a projected assumed-strain serendipity hexahedron (`CHEXA20_PLAN.md`): the natural normal strains are projected onto spaces linear in their own direction (removing membrane locking on curved elements), the shears onto the trilinear space, and the dilatation by B-bar, with local natural frames and a zero-mean correction that keeps the patch test exact with curved, off-centre midside nodes. One element through the thickness gives 97.9% / 99.3% of the pinched-hemisphere reference on 8x8 / 12x12 meshes (Simcenter Nastran 96.6% / 99.0%), with no spurious modes, no preferred direction and no volumetric locking (Lame cylinder at nu = 0.4999: 99.9%). ISOP = FULL selects the standard element; CHEXA20 always uses 3x3x3 Gauss points (PSOLID IN is not used, since 2x2x2 has six spurious modes per element). PLOAD4 applies to its 8-node faces.
 - **Omitted midside grids**: any midside grid of a CHEXA20 or CTETRA10 may be left blank, as in Nastran. That edge is then linear (the grid's shape function is folded into the edge's corners, `elements/midside_nodes.hpp`), so CHEXA20/CHEXA8 and CTETRA10/CTETRA4 transitions are compatible; PLOAD4 on a face with an omitted grid folds its load the same way.
 - **Materials**: MAT1 (all elements), MAT2 and MAT8 (shells), plus parser/model support for MAT3, MAT4, MAT5, and MAT6
-- **Properties**: PSHELL (MID1-MID4, 12I/T^3, TS/T, NSM, Z1/Z2), PCOMP (classical lamination theory; LAM blank, SYM, MEM, BEND, SMEAR, SMCORE), PSOLID, PBAR (stress recovery points C-F, K1/K2 transverse shear, I12), PBARL (`ROD`, `TUBE`, `BAR`), PBEAM, PBUSH (`K` section), PELAS, PMASS
+- **Properties**: PSHELL (MID1-MID4, 12I/T^3, TS/T, NSM, Z1/Z2), PCOMP (classical lamination theory; LAM blank, SYM, MEM, BEND, SMEAR, SMCORE), PSOLID, PBAR (stress recovery points C-F, K1/K2 transverse shear, I12), PBARL (`ROD`, `TUBE`, `BAR`, `BOX`, `CHAN`, `T`, `I1`), PBEAM, PBUSH (`K` section), PELAS, PMASS
 - **CROD and CONROD**: PROD or the fields of the CONROD card, with axial and torsional stiffness, consistent or lumped mass, thermal load, conduction in SOL 153, and force, stress, strain and margin-of-safety output (F06, OP2 OES1X type 1 for CROD and 10 for CONROD, CSV). The F06 rod tables list both together. J also serves as the polar inertia in consistent mass
 - **Scalar points**: SPOINT (lists and THRU), or implicitly a CELASi/CMASSi connection with a blank or zero component; usable in CELASi, CMASSi, SPC, SPC1, MPC, SLOAD, TEMP and as a CHBDY ambient point, in statics, modes and heat transfer. Output is a row with T1 only (OP2 grid type S). Grid and scalar points share one ID space; GRAV gives scalar mass no load
 - **AUTOSPC at rod grids**: grids connecting a CROD, and blocks that a CELAS, CMASS or MPC component opens on a CD grid, get Nastran's grid point singularity processing, in the grid's CD system, with PARAM,EPZERO (1e-8) as the threshold; reactions show in SPCFORCE, and `PARAM,AUTOSPC,NO` disables it. See `include/solver/analysis_support.hpp`
@@ -60,7 +60,7 @@ vibestran/
 - **Defaults**: GRDSET (CP/CD/PS for blank GRID fields), BAROR (PID/orientation/OFFT for blank CBAR fields)
 - **Reaction output**: SPCFORCE(S) and MPCFORCE(S) in F06, in each grid's global (CD) system (MYSTRAN-compatible blocks)
 - **Shell strains**: STRAIN for CQUAD4/CTRIA3 in STRCUR (membrane strain + curvature, default) or FIBER form, von Mises or SHEAR/MAXS, centre and CORNER
-- **Element forces**: FORCE/ELFORCE for CBAR/CBEAM, CQUAD4 (centre and CORNER/BILIN) and CTRIA3, Nastran sign convention (MYSTRAN-compatible blocks)
+- **Element forces**: FORCE/ELFORCE for CBAR/CBEAM, CROD/CONROD, CELAS1-4, CQUAD4 (centre and CORNER/BILIN) and CTRIA3, Nastran sign convention (MYSTRAN-compatible blocks)
 - **Grid point force balance**: GPFORCE for linear statics (applied, thermal, SPC, MPC, and per-element rows; MYSTRAN layout)
 - **Coordinate systems**: CORD1R/C/S, CORD2R/C/S
 - **Input formats**: Nastran BDF (`.bdf`) and CalculiX/Abaqus (`.inp`, experimental)
@@ -73,10 +73,11 @@ Notable current limitations:
 - PLOAD1 support is limited to CBAR and CBEAM.
 - CTUBE and CDAMPi are not implemented. CELAS3/4 and CMASS3/4 are stored and reported as CELAS1/2 and CMASS1/2.
 - AUTOSPC looks at one grid at a time, as Nastran's does: a rod with J > 0 whose rotations are free at both ends can still spin about its axis, which the solver reports only if that spin is loaded.
-- Stress recovery is not yet implemented for CBUSH, CELAS1-4, and CMASS1-4.
+- Stress recovery is not yet implemented for CBUSH and CMASS1-4.
+- PBARL supports ROD, TUBE, BAR, BOX, CHAN, T and I1. Its J is the closed-form thin-wall value and differs by up to 2% from MSC Nastran's numerical one; its K1 and K2 are 5/6 for BAR, Cowper's for ROD and TUBE, and wall-area estimates for the rest. CELAS GE is accepted and has no effect, as no solution here computes a damped response.
 - CBAR offsets in the element system (OFFT `xGO`/`xOG`/`xOO`) are not yet supported.
 - GRID and GRDSET SEID (superelements) are not supported.
-- Element forces are not yet written for CBUSH, CELAS, or solids; solid stress/strain output ignores PSOLID CORDM (always basic).
+- Element forces are not yet written for CBUSH or solids; solid stress/strain output ignores PSOLID CORDM (always basic).
 - GPFORCE is written for linear statics only (no modal inertia-force rows yet).
 - Shell drill rotations carry only a small stabilisation (like Nastran's K6ROT); `PARAM,K6ROT`, `QUAD4TYP`, and `SHELLFORM` are accepted and ignored.
 - PCOMP ply stresses and strains (COMPOSITESTRESSES), CQUAD8, and CTRIA6 are not implemented; PCOMP is not used in heat transfer.

@@ -32,6 +32,9 @@ reference is a MYSTRAN run.
 | Feature | How absence was checked | Suggested deck |
 |---|---|---|
 | CONROD | No deck contains the card | Any CROD deck with each CROD and PROD pair rewritten as one CONROD: identical results. 35 suite decks were checked this way, but that is not a comparison against another solver |
+| PBARL CHAN, T, I1, BOX, ROD and TUBE shear factors | The only PBARL deck with a transverse load uses BAR | Cantilever of each section under a tip force, compared with MSC Nastran's numerical conversion |
+| PBARL properties in SOL 103 and with a CD frame or offsets | Both PBARL decks are SOL 101 without offsets | Cantilever bending modes of a CHAN against the closed-form frequencies |
+| CELAS stress in OP2 | The suite reads F06 only | Read OES1X types 11 and 12 with pyNastran |
 | CMASS3, CMASS4 | No deck contains either card | Spring-mass chain of scalar points: lambda_j = (k/m)(2 - 2 cos((2j-1) pi / (2n+1))) |
 | Scalar points in SOL 103 and SOL 153 | The six SPOINT and CELAS3/4 decks are all SOL 101 | Scalar oscillator on a rod tip (two-DOF eigenproblem); scalar ambient point on a CHBDY (series resistance) |
 | SLOAD on a grid with a CD frame | SLOAD appears in 3 decks, all on scalar points | Rod along a rotated CD X axis, loaded on its T1 |

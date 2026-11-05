@@ -92,6 +92,16 @@ void CsvWriter::write(const SolverResults& results, const Model& model,
                    << std::sqrt(s * s + 3.0 * t * t) << "\n";
             }
 
+            // The spring stress S * force as sx.
+            for (const auto& spring : sc.spring_results) {
+                const double s = spring.stress;
+                ef << spring.eid.value << ", " << sc.id << ", "
+                   << s      << ", " << 0.0    << ", " << 0.0    << ", "
+                   << 0.0    << ", " << 0.0    << ", " << 0.0    << ", "
+                   << 0.0    << ", " << 0.0    << ", " << 0.0    << ", "
+                   << std::abs(s) << "\n";
+            }
+
             for (const auto& ss : sc.solid_stresses) {
                 ef << ss.eid.value << ", " << sc.id << ", "
                    << ss.sx  << ", " << ss.sy  << ", " << ss.sxy << ", "
