@@ -698,6 +698,7 @@ void LinearStaticSolver::apply_inertial_loads(const Model &model,
     case ElementType::CBAR:
     case ElementType::CBEAM:
     case ElementType::CROD:
+    case ElementType::CONROD:
     case ElementType::CBUSH:
     case ElementType::CONM2:
       for (size_t i = 0; i < elem_data.nodes.size(); ++i) {
@@ -1010,6 +1011,7 @@ void subtract_spc_inertial_loads(const Model &model, const SubCase &sc,
     case ElementType::CBAR:
     case ElementType::CBEAM:
     case ElementType::CROD:
+    case ElementType::CONROD:
     case ElementType::CBUSH:
     case ElementType::CONM2:
       for (size_t i = 0; i < elem_data.nodes.size(); ++i) {
@@ -1535,7 +1537,8 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
                    recovery.forces.v1,  recovery.forces.v2,
                    recovery.forces.axial, recovery.forces.torque};
       res.line_stresses.push_back(ls);
-    } else if (elem_data.type == ElementType::CROD) {
+    } else if (elem_data.type == ElementType::CROD ||
+               elem_data.type == ElementType::CONROD) {
       const CRodElement rod(elem_data, model);
       const MaterialId mid = property_material_id(model.property(elem_data.pid));
       const double avg_temp = average_temperature(
@@ -1545,6 +1548,7 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
           avg_temp);
       RodResult rr;
       rr.eid = elem_data.id;
+      rr.type = elem_data.type;
       rr.axial_force = recovered.axial_force;
       rr.torque = recovered.torque;
       rr.axial_stress = recovered.axial_stress;

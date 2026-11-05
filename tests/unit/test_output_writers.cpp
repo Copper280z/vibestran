@@ -1370,6 +1370,41 @@ TEST(Op2Writer, RodStressesAndScalarPointsUseTheirNastranCodes) {
     EXPECT_TRUE(contains_word_sequence(words, {121, as_word(200.0f), as_word(49.0f), as_word(30.0f), as_word(0.0f)}));
 }
 
+TEST(Op2Writer, CrodAndConrodStressesGoInSeparateRecords) {
+    // A reader tells them apart by element type: 1 for CROD and 10 for CONROD, each
+    // record holding only its own elements, in both subcases.
+    SolverResults res;
+    for (const int id : {1, 2}) {
+        SubCaseResults sc;
+        sc.id = id;
+        RodResult crod;
+        crod.eid = ElementId{12};
+        crod.axial_stress = 200.0f + static_cast<float>(id);
+        RodResult conrod;
+        conrod.eid = ElementId{13};
+        conrod.type = ElementType::CONROD;
+        conrod.axial_stress = 300.0f + static_cast<float>(id);
+        sc.rod_results = {conrod, crod};
+        res.subcases.push_back(sc);
+    }
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].stress_plot = true;
+    SubCase second = m.analysis.subcases[0];
+    second.id = 2;
+    m.analysis.subcases.push_back(second);
+
+    const auto words = bytes_to_words(run_op2_writer(res, m));
+    for (const int id : {1, 2}) {
+        EXPECT_TRUE(contains_word_sequence(words, {11, 5, 1, id})) << "subcase " << id;
+        EXPECT_TRUE(contains_word_sequence(words, {11, 5, 10, id})) << "subcase " << id;
+        const int payload = 4 * 5;  // one element of five words, as bytes
+        EXPECT_TRUE(contains_word_sequence(
+            words, {payload, 121, as_word(200.0f + static_cast<float>(id))})) << "subcase " << id;
+        EXPECT_TRUE(contains_word_sequence(
+            words, {payload, 131, as_word(300.0f + static_cast<float>(id))})) << "subcase " << id;
+    }
+}
+
 TEST(Op2Writer, UsesMystranBarStressTableAndPayload) {
     SolverResults res;
     SubCaseResults sc;

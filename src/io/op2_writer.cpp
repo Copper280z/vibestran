@@ -564,19 +564,21 @@ static int write_oes1x_line(std::ostream& f,
 }
 
 // ── Write one OES1X rod stress TABLE-4 ───────────────────────────────────────
-// CROD (element_type=1), 5 words per element:
+// CROD (element_type=1) or CONROD (element_type=10), 5 words per element:
 //   [eid_device, axial, axial margin, torsion, torsion margin]
 
 static int write_oes1x_rod(std::ostream& f,
                            const SubCaseResults& sc,
+                           const ElementType etype,
                            bool new_result, int itable,
                            const std::string& subtitle) {
-    const int nel = static_cast<int>(sc.rod_results.size());
+    const int nel = static_cast<int>(std::ranges::count(
+        sc.rod_results, etype, &RodResult::type));
     if (nel == 0) return itable;
 
     const int analysis_code = 1;
     const int table_code = 5;
-    const int element_type = 1;
+    const int element_type = etype == ElementType::CONROD ? 10 : 1;
     const int num_wide = 5;
     const int ntotal = nel * num_wide;
 
@@ -598,6 +600,7 @@ static int write_oes1x_rod(std::ostream& f,
     }
 
     for (const auto& rod : sc.rod_results) {
+        if (rod.type != etype) continue;
         const int32_t eid_dev =
             static_cast<int32_t>(rod.eid.value) * 10 + kMystranDeviceCode;
         write_f32(f, i32_as_f32(eid_dev));
@@ -929,7 +932,7 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
         }
     }
 
-    // ── OES1X table for CROD stresses ────────────────────────────────────────
+    // ── OES1X table for rod stresses ─────────────────────────────────────────
     {
         const bool any = std::any_of(
             results.subcases.begin(), results.subcases.end(),
@@ -945,12 +948,14 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
             bool new_result = true;
             for (const auto& sc : results.subcases) {
                 if (!has_line_stress_plot_output(model, sc.id)) continue;
-                const int prev_itable = itable;
-                itable = write_oes1x_rod(f, sc, new_result, itable, sc.label);
-                if (itable == prev_itable) continue;
-                if (!new_result || itable < -3) new_result = false;
-                const int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};
-                f.write(reinterpret_cast<const char*>(footer), 36);
+                for (const ElementType etype : {ElementType::CROD, ElementType::CONROD}) {
+                    const int prev_itable = itable;
+                    itable = write_oes1x_rod(f, sc, etype, new_result, itable, sc.label);
+                    if (itable == prev_itable) continue;
+                    if (!new_result || itable < -3) new_result = false;
+                    const int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};
+                    f.write(reinterpret_cast<const char*>(footer), 36);
+                }
             }
             write_markers(f, 0);
         }

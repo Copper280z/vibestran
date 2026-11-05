@@ -628,3 +628,6 @@ most recent entry.
   It was that of the solver's vector, about 1, and is now that of the reported
   shape, with the generalized stiffness following it. The comparator reads only
   eigenvalues and cycles from that table, so no record could change.
+- **CONROD (1,706 final failure records, unchanged).** No suite deck has the card,
+  so no record could change. Rewriting each CROD and PROD pair as a CONROD left the
+  F06 unchanged on the 35 suite decks that could be converted and run.

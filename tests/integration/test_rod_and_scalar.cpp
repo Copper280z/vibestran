@@ -1,5 +1,5 @@
 // tests/integration/test_rod_and_scalar.cpp
-// CROD elements and scalar points, checked against closed-form solutions: truss
+// CROD and CONROD elements and scalar points, checked against closed-form solutions: truss
 // statics, thermal stress, torsion, axial and torsional vibration, spring-mass
 // chains, MPC equations through a scalar point and heat flow to a scalar ambient.
 
@@ -663,4 +663,212 @@ TEST(ScalarPointQuality, ScalarPointsAreNeverCoincidentGrids) {
         "SOL 101\nCEND\nBEGIN BULK\nGRID,1,,0.,0.,0.\nSPOINT,2,3\nCELAS4,1,1.,2,3\nCELAS2,2,1.,1,1,2\nENDDATA\n");
     const auto topology = check_topology(model, 1e-8);
     EXPECT_TRUE(topology.duplicate_node_pairs.empty());
+}
+
+// ── CONROD ────────────────────────────────────────────────────────────────────
+
+TEST(ConrodParsing, FollowsTheCardDefinition) {
+    Model model = BdfParser::parse_string(
+        "SOL 101\nCEND\nBEGIN BULK\nGRID,1,,0.,0.,0.\nGRID,2,,1.,0.,0.\nGRID,3,,2.,0.,0.\n"
+        "CONROD,7,2,3,4,1.5,0.5,0.25,0.75\nCONROD,8,1,2,6,3.5\nENDDATA\n");
+    ASSERT_EQ(model.elements.size(), 2U);
+    const ElementData& full = model.elements[0];
+    EXPECT_EQ(full.type, ElementType::CONROD);
+    EXPECT_EQ(full.id, ElementId{7});
+    EXPECT_EQ(full.nodes, (std::vector<NodeId>{NodeId{2}, NodeId{3}}));
+    const auto& section = std::get<PRod>(model.property(full.pid));
+    EXPECT_EQ(section.mid, MaterialId{4});
+    EXPECT_EQ(section.A, 1.5);
+    EXPECT_EQ(section.J, 0.5);
+    EXPECT_EQ(section.C, 0.25);
+    EXPECT_EQ(section.nsm, 0.75);
+    // J, C and NSM default to zero.
+    const auto& area_only = std::get<PRod>(model.property(model.elements[1].pid));
+    EXPECT_EQ(area_only.mid, MaterialId{6});
+    EXPECT_EQ(area_only.A, 3.5);
+    EXPECT_EQ(area_only.J, 0.0);
+    EXPECT_EQ(area_only.C, 0.0);
+    EXPECT_EQ(area_only.nsm, 0.0);
+}
+
+TEST(ConrodParsing, RejectsMisuse) {
+    const auto parse = [](const std::string& bulk) {
+        return BdfParser::parse_string("SOL 101\nCEND\nBEGIN BULK\n" + bulk + "ENDDATA\n");
+    };
+    const std::string grids = "GRID,1,,0.,0.,0.\nGRID,2,,1.,0.,0.\n";
+    EXPECT_THROW(parse(grids + "CONROD,1,1,2,1,-1.\n"), ParseError);
+    EXPECT_THROW(parse(grids + "CONROD,1,1,2,1,1.,-1.\n"), ParseError);
+    EXPECT_THROW(parse(grids + "CONROD,-1,1,2,1,1.\n"), ParseError);
+    EXPECT_THROW(parse(grids + "CONROD,1,1,2,1,1.\nCONROD,1,2,1,1,1.\n"), ParseError);
+    EXPECT_THROW(parse(grids + "CONROD,1,1,2,1,1.,,,,+\n+,5\n"), ParseError);
+
+    const auto validate = [&](const std::string& bulk) { parse(bulk).validate(); };
+    EXPECT_THROW(validate(grids + "CONROD,1,1,2,9,1.\n"), SolverError);
+    EXPECT_THROW(validate(grids + "MAT1,1,1.,,0.3\nCONROD,1,1,3,1,1.\n"), SolverError);
+    EXPECT_THROW(validate("SPOINT,1\nGRID,2,,1.,0.,0.\nMAT1,1,1.,,0.3\nCONROD,1,1,2,1,1.\n"),
+                 SolverError);
+}
+
+TEST(ConrodElement, ZeroLengthNamesTheCard) {
+    Model model = BdfParser::parse_string(
+        "SOL 101\nCEND\nBEGIN BULK\nMAT1,1,1.0E7,,0.3\nGRID,1,,1.,1.,1.\nGRID,2,,1.,1.,1.\n"
+        "CONROD,7,1,2,1,1.\nENDDATA\n");
+    try {
+        const CRodElement rod_element(model.elements.at(0), model);
+        FAIL() << "a zero-length CONROD must throw";
+    } catch (const SolverError& error) {
+        EXPECT_NE(std::string(error.what()).find("CONROD 7"), std::string::npos) << error.what();
+    }
+}
+
+TEST(ConrodQuality, ItsSectionIsNotOrphanedAndUsesItsMaterial) {
+    Model model = BdfParser::parse_string(
+        "SOL 101\nCEND\nBEGIN BULK\nMAT1,1,1.0E7,,0.3\nMAT1,2,1.0E7,,0.3\nGRID,1,,0.,0.,0.\n"
+        "GRID,2,,1.,0.,0.\nCONROD,7,1,2,1,1.\nENDDATA\n");
+    const auto topology = check_topology(model, 1e-8);
+    EXPECT_TRUE(topology.orphaned_properties.empty());
+    EXPECT_EQ(topology.orphaned_materials, std::vector<MaterialId>{MaterialId{2}});
+}
+
+TEST(ConrodStatics, EveryFieldActsAsItsClosedFormRequires) {
+    // E = 1e7, G = 4e6, A = 2, J = 1.5, C = 0.5 and L = 10, under P = 1000 and T = 300.
+    const double P = 1000.0, T = 300.0, L = 10.0;
+    const auto r = solve_static(static_deck(
+        "GRID,1,,0.,0.,0.\nGRID,2,,10.,0.,0.\nCONROD,5,1,2,1,2.0,1.5,0.5,0.3\n"
+        "SPC1,1,123456,1\nFORCE,1,2,0,1000.,1.,0.,0.\nMOMENT,1,2,0,300.,1.,0.,0.\n"));
+    EXPECT_NEAR(disp(r, 2).d[0], P * L / (kE * kA), 1e-14);
+    EXPECT_NEAR(disp(r, 2).d[3], T * L / (kG * kJ), 1e-14);
+    const RodResult& result = rod(r, 5);
+    EXPECT_EQ(result.type, ElementType::CONROD);
+    EXPECT_NEAR(result.axial_force, P, 1e-8);
+    EXPECT_NEAR(result.torque, T, 1e-8);
+    EXPECT_NEAR(result.axial_stress, P / kA, 1e-8);
+    EXPECT_NEAR(result.torsional_stress, kC * T / kJ, 1e-8);
+    EXPECT_NEAR(result.axial_strain, P / (kA * kE), 1e-14);
+    EXPECT_NEAR(result.torsional_strain, kC * T / (kJ * kG), 1e-14);
+    ASSERT_NE(spc_at(r, 1), nullptr);
+    EXPECT_NEAR(spc_at(r, 1)->f[0], -P, 1e-8);
+    EXPECT_NEAR(spc_at(r, 1)->f[3], -T, 1e-8);
+
+    // NSM and rho A both act through gravity: (0.2 + 0.3) * 10 * 386.
+    const auto gravity = solve_static(static_deck(
+        "GRID,1,,0.,0.,0.\nGRID,2,,0.,0.,10.\nCONROD,5,1,2,1,2.0,1.5,0.5,0.3\n"
+        "SPC1,1,123,1\nSPC1,1,12,2\nGRAV,1,0,386.,0.,0.,-1.\n"));
+    ASSERT_NE(spc_at(gravity, 1), nullptr);
+    EXPECT_NEAR(spc_at(gravity, 1)->f[2], (kRho * kA + kNsm) * L * 386.0, 1e-8);
+}
+
+TEST(ConrodStatics, SectionStaysApartFromAProdOfTheSameNumber) {
+    // PROD 5 gives CROD 6 an area of 8 while CONROD 5 keeps its own area of 2, so
+    // the same load stretches them by a ratio of 4.
+    const double P = 1000.0, L = 10.0;
+    const auto r = solve_static(static_deck(
+        "PROD,5,1,8.0\nGRID,1,,0.,0.,0.\nGRID,2,,10.,0.,0.\nGRID,3,,0.,5.,0.\nGRID,4,,10.,5.,0.\n"
+        "CONROD,5,1,2,1,2.0\nCROD,6,5,3,4\nSPC1,1,123,1,3\n"
+        "FORCE,1,2,0,1000.,1.,0.,0.\nFORCE,1,4,0,1000.,1.,0.,0.\n"));
+    EXPECT_NEAR(disp(r, 2).d[0], P * L / (kE * 2.0), 1e-14);
+    EXPECT_NEAR(disp(r, 4).d[0], P * L / (kE * 8.0), 1e-14);
+    EXPECT_NEAR(rod(r, 5).axial_stress, P / 2.0, 1e-8);
+    EXPECT_NEAR(rod(r, 6).axial_stress, P / 8.0, 1e-8);
+}
+
+TEST(ConrodStatics, MixesWithCrodInADeterminateTruss) {
+    // The truss of CRodStatics.DeterminateTrussMatchesTheMethodOfJoints with its
+    // loaded member and diagonal as CONRODs.
+    const double P = 1000.0, b = 100.0, EA = kE * kA, diagonal = b * std::numbers::sqrt2;
+    const auto r = solve_static(static_deck(
+        "GRID,1,,0.,0.,0.\nGRID,2,,100.,0.,0.\nGRID,3,,100.,100.,0.\n"
+        "CROD,1,1,1,2\nCONROD,2,2,3,1,2.0\nCONROD,3,1,3,1,2.0\n"
+        "SPC1,1,123,1\nSPC1,1,23,2\nSPC1,1,3,3\nFORCE,1,3,0,1000.,1.,0.,0.\n"));
+    EXPECT_EQ(rod(r, 1).type, ElementType::CROD);
+    EXPECT_EQ(rod(r, 2).type, ElementType::CONROD);
+    EXPECT_NEAR(rod(r, 1).axial_force, 0.0, 1e-7);
+    EXPECT_NEAR(rod(r, 2).axial_force, -P, 1e-7);
+    EXPECT_NEAR(rod(r, 3).axial_force, P * std::numbers::sqrt2, 1e-7);
+    const double v = -P * b / EA;
+    EXPECT_NEAR(disp(r, 3).d[0], -v + 2.0 * P * diagonal / EA, 1e-12);
+    EXPECT_NEAR(disp(r, 3).d[1], v, 1e-12);
+    ASSERT_FALSE(r.gp_forces.empty());
+    for (const auto& grid : r.gp_forces)
+        for (const double total : grid.totals)
+            EXPECT_NEAR(total, 0.0, 1e-7) << "grid " << grid.node.value;
+}
+
+TEST(ConrodStatics, IsEquivalentToCrodAndProdUnderEveryLoad) {
+    // Three skew rods meeting at grid 4, loaded by force, moment, gravity and
+    // temperature. Each CONROD carries the section of PROD 1, so nothing may differ.
+    const auto solve = [](const std::string& rods) {
+        return solve_static(static_deck(
+            "GRID,1,,0.,0.,0.\nGRID,2,,30.,0.,0.\nGRID,3,,0.,40.,0.\nGRID,4,,10.,10.,20.\n" + rods +
+                "SPC1,1,123456,1,2,3\nFORCE,1,4,0,900.,1.,-2.,0.5\nMOMENT,1,4,0,70.,0.3,1.,-1.\n"
+                "GRAV,1,0,386.,0.,0.,-1.\nTEMP,2,1,10.\nTEMP,2,2,20.\nTEMP,2,3,30.\nTEMP,2,4,40.\n",
+            "TEMP(LOAD) = 2\n"));
+    };
+    const auto with_crod = solve("CROD,1,1,1,4\nCROD,2,1,2,4\nCROD,3,1,3,4\n");
+    const auto with_conrod = solve(
+        "CONROD,1,1,4,1,2.0,1.5,0.5,0.3\nCONROD,2,2,4,1,2.0,1.5,0.5,0.3\n"
+        "CONROD,3,3,4,1,2.0,1.5,0.5,0.3\n");
+
+    EXPECT_GT(std::abs(disp(with_crod, 4).d[0]), 0.0);
+    EXPECT_EQ(disp(with_conrod, 4).d, disp(with_crod, 4).d);
+    ASSERT_EQ(with_conrod.rod_results.size(), 3U);
+    for (const int eid : {1, 2, 3}) {
+        const RodResult& a = rod(with_conrod, eid);
+        const RodResult& b = rod(with_crod, eid);
+        EXPECT_EQ(a.axial_force, b.axial_force);
+        EXPECT_EQ(a.torque, b.torque);
+        EXPECT_EQ(a.axial_stress, b.axial_stress);
+        EXPECT_EQ(a.torsional_stress, b.torsional_stress);
+        EXPECT_EQ(a.axial_strain, b.axial_strain);
+        EXPECT_EQ(a.torsional_strain, b.torsional_strain);
+        ASSERT_NE(spc_at(with_conrod, eid), nullptr);
+        EXPECT_EQ(spc_at(with_conrod, eid)->f, spc_at(with_crod, eid)->f);
+    }
+}
+
+TEST(ConrodAutoSpc, ConstrainsExactlyTheDirectionsARodLeavesFree) {
+    Model model = BdfParser::parse_string(
+        "SOL 101\nCEND\nSPC = 1\nBEGIN BULK\nMAT1,1,1.0E7,,0.3\n"
+        "GRID,1,,0.,0.,0.\nGRID,2,,10.,0.,0.\nGRID,3,,20.,0.,0.\nCONROD,1,1,2,1,1.\nCONROD,2,2,3,1,1.\n"
+        "SPC1,1,123,1\nENDDATA\n");
+    const SubCase sc = model.analysis.subcases.at(0);
+    const DofMap dofs = build_analysis_dof_map(model, sc);
+    EXPECT_EQ(dofs.num_free_dofs(), 2);
+    EXPECT_TRUE(dofs.is_free(NodeId{2}, 0));
+    EXPECT_TRUE(dofs.is_free(NodeId{3}, 0));
+}
+
+TEST(ConrodModal, SingleElementFrequenciesAreExact) {
+    // Fixed-free with E = 1e7, G = 4e6, rho = 0.1, A = 2, J = 0.5, NSM = 0.75 and L = 10.
+    // Consistent mass gives 3 E A / ((rho A + NSM) L^2) axially, where NSM counts,
+    // and 3 G / (rho L^2) in torsion, where it does not. Lumped mass has 2 in place
+    // of 3 axially and no rotary mass.
+    const std::string bulk =
+        "SOL 103\nCEND\nSPC = 1\nMETHOD = 1\nBEGIN BULK\nMAT1,1,1.0E7,4.0E6,0.25,0.1\n"
+        "GRID,1,,0.,0.,0.\nGRID,2,,10.,0.,0.\nCONROD,1,1,2,1,2.0,0.5,,0.75\nSPC1,1,123456,1\n";
+    const double axial = kE * 2.0 / ((kRho * 2.0 + 0.75) * 100.0);
+    const auto consistent = solve_modal(bulk + "EIGRL,1,,,2\nENDDATA\n");
+    ASSERT_EQ(consistent.modes.size(), 2U);
+    EXPECT_NEAR(consistent.modes[0].eigenvalue, 3.0 * axial, 1e-5 * axial);
+    EXPECT_NEAR(consistent.modes[1].eigenvalue, 3.0 * kG / (kRho * 100.0), 1e-5 * axial);
+    const auto lumped = solve_modal(bulk + "EIGRL,1,,,1\nPARAM,COUPMASS,-1\nENDDATA\n");
+    ASSERT_EQ(lumped.modes.size(), 1U);
+    EXPECT_NEAR(lumped.modes[0].eigenvalue, 2.0 * axial, 1e-5 * axial);
+}
+
+TEST(ConrodHeat, ConductionFollowsFouriersLawAndKeepsItsName) {
+    // k = 50, A = 2, L = 10: a power q into the far end drops q L / (k A).
+    Model model = BdfParser::parse_string(
+        "SOL 153\nCEND\nSPC = 1\nLOAD = 1\nFLUX = ALL\nBEGIN BULK\nMAT4,1,50.\nGRID,1,,0.,0.,0.\n"
+        "GRID,2,,10.,0.,0.\nCONROD,1,1,2,1,2.0\nSPC,1,1,0,20.\nSLOAD,1,2,100.\nENDDATA\n");
+    HeatTransferSteadySolver solver(std::make_unique<EigenSolverBackend>());
+    const SolverResults results = solver.solve(model);
+    const SubCaseResults& r = results.subcases.at(0);
+    EXPECT_NEAR(temperature(r, 2), 20.0 + 100.0 * 10.0 / (50.0 * 2.0), 1e-9);
+    ASSERT_EQ(r.heat_fluxes.size(), 1U);
+    EXPECT_EQ(r.heat_fluxes[0].etype, ElementType::CONROD);
+    EXPECT_NEAR(std::abs(r.heat_fluxes[0].q[0]), 100.0 / 2.0, 1e-9);
+    std::ostringstream f06;
+    F06Writer::write_thermal(results, model, f06);
+    EXPECT_NE(f06.str().find("CONROD"), std::string::npos);
 }

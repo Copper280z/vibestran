@@ -596,7 +596,8 @@ void F06Writer::write_gpforce_table(const SubCaseResults& sc,
         case ElementType::CPENTA6:  return "PENTA6";
         case ElementType::CBAR:     return "BAR";
         case ElementType::CBEAM:    return "BEAM";
-        case ElementType::CROD:     return "ROD";
+        case ElementType::CROD:
+        case ElementType::CONROD:   return "ROD";
         case ElementType::CBUSH:    return "BUSH";
         case ElementType::CELAS1:   return "ELAS1";
         case ElementType::CELAS2:   return "ELAS2";
@@ -1348,6 +1349,7 @@ void F06Writer::write_thermal(const SolverResults& results, const Model& model,
                   case ElementType::CBAR:    tn = "CBAR"; break;
                   case ElementType::CBEAM:   tn = "CBEAM"; break;
                   case ElementType::CROD:    tn = "CROD"; break;
+                  case ElementType::CONROD:  tn = "CONROD"; break;
                   default: break;
                 }
                 out << "    " << std::setw(10) << ef.eid.value

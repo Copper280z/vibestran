@@ -134,12 +134,13 @@ struct LineStress {
   LineForces forces;
 };
 
-/// CROD forces, stresses and elastic strains.  The axial force is tension
+/// CROD and CONROD forces, stresses and elastic strains.  The axial force is tension
 /// positive and the torque follows the right-handed twist of end B relative to
 /// end A.  Margins of safety are empty without a MAT1 allowable.
 struct RodResult {
   constexpr RodResult() = default;
   ElementId eid{0};
+  ElementType type{ElementType::CROD};
   double axial_force{0}, torque{0};
   double axial_stress{0}, torsional_stress{0};
   double axial_strain{0}, torsional_strain{0};

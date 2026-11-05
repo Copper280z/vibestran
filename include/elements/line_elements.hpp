@@ -2,7 +2,7 @@
 // include/elements/line_elements.hpp
 // 1-D structural and scalar element families:
 //   - CBAR / CBEAM
-//   - CROD
+//   - CROD, CONROD
 //   - CBUSH
 //   - CELAS1 / CELAS2
 //   - CMASS1 / CMASS2
@@ -84,7 +84,7 @@ private:
   const Model &model_;
 };
 
-/// CROD: axial and torsional stiffness only, with linear displacement and twist
+/// CROD and CONROD: axial and torsional stiffness only, with linear displacement and twist
 /// along the element.  It has no shear or bending, so its grids need something
 /// else, or AUTOSPC, to hold the directions it leaves free
 /// (analysis_support.hpp).  Matrices are in basic axes; the element axis is the
@@ -96,9 +96,7 @@ public:
 
   CRodElement(const ElementData &data, const Model &model);
 
-  [[nodiscard]] ElementType type() const noexcept override {
-    return ElementType::CROD;
-  }
+  [[nodiscard]] ElementType type() const noexcept override { return type_; }
   [[nodiscard]] ElementId id() const noexcept override { return eid_; }
   [[nodiscard]] int num_dofs() const noexcept override { return NUM_DOFS; }
 
@@ -140,6 +138,7 @@ public:
 
 private:
   ElementId eid_;
+  ElementType type_;
   std::array<NodeId, NUM_NODES> nodes_{NodeId{0}, NodeId{0}};
   Eigen::Vector3d axis_{Eigen::Vector3d::Zero()};
   double length_{0.0};

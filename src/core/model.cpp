@@ -36,6 +36,7 @@ bool element_requires_property(const ElementType type) {
     case ElementType::CBAR:
     case ElementType::CBEAM:
     case ElementType::CROD:
+    case ElementType::CONROD:
     case ElementType::CBUSH:
     case ElementType::CELAS1:
     case ElementType::CMASS1:
@@ -70,6 +71,7 @@ bool element_supports_thermal_conduction(const ElementType type) {
     case ElementType::CBAR:
     case ElementType::CBEAM:
     case ElementType::CROD:
+    case ElementType::CONROD:
         return true;
     default:
         return false;
@@ -164,7 +166,7 @@ void Model::validate() const {
             require_grids(elem.nodes, std::format("Element {}", elem.id.value));
 
         if ((elem.type == ElementType::CBAR || elem.type == ElementType::CBEAM ||
-             elem.type == ElementType::CROD ||
+             elem.type == ElementType::CROD || elem.type == ElementType::CONROD ||
              elem.type == ElementType::CBUSH) && elem.nodes.size() != 2) {
             throw SolverError(std::format(
                 "Element {} expects exactly 2 grid points", elem.id.value));

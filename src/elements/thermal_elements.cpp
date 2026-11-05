@@ -975,7 +975,8 @@ make_thermal_element(const ElementData &data, const Model &model) {
   }
   case ElementType::CBAR:
   case ElementType::CBEAM:
-  case ElementType::CROD: {
+  case ElementType::CROD:
+  case ElementType::CONROD: {
     std::array<NodeId, 2> n{data.nodes[0], data.nodes[1]};
     return std::make_unique<ThermalLine>(data.id, data.type, data.pid, n, model);
   }

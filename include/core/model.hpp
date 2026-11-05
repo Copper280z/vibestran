@@ -309,7 +309,9 @@ struct PBeam {
   double nsm{0.0};
 };
 
-/// PROD: section of a CROD, which carries axial force and torque only.
+/// PROD: section of a CROD, which carries axial force and torque only.  A CONROD
+/// holds its section on the element card; the parser stores that under the PID
+/// -EID, which no PROD can use.
 struct PRod {
   PropertyId pid{0};
   MaterialId mid{0};
@@ -352,6 +354,7 @@ enum class ElementType {
   CBAR,
   CBEAM,
   CROD,
+  CONROD,
   CBUSH,
   CELAS1,
   CELAS2,

@@ -66,6 +66,7 @@ static const char* element_type_name(ElementType t) {
     case ElementType::CBAR:    return "CBAR";
     case ElementType::CBEAM:   return "CBEAM";
     case ElementType::CROD:    return "CROD";
+    case ElementType::CONROD:  return "CONROD";
     case ElementType::CBUSH:   return "CBUSH";
     case ElementType::CELAS1:  return "CELAS1";
     case ElementType::CELAS2:  return "CELAS2";

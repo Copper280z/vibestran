@@ -71,6 +71,7 @@ void mark_element_dofs(const ElementData &elem, const Model &model,
   case ElementType::CBAR:
   case ElementType::CBEAM:
   case ElementType::CROD:
+  case ElementType::CONROD:
   case ElementType::CBUSH:
     for (NodeId nid : elem.nodes)
       mark_all(node_masks[nid]);
@@ -338,7 +339,7 @@ std::vector<Spc> analysis_spcs(const Model &model, const SubCase &sc) {
   // The translation and rotation blocks to analyse at each grid.
   std::unordered_map<NodeId, std::array<bool, 2>> analysed;
   for (const auto &elem : model.elements)
-    if (elem.type == ElementType::CROD)
+    if (elem.type == ElementType::CROD || elem.type == ElementType::CONROD)
       for (const NodeId nid : elem.nodes)
         analysed[nid] = {true, true};
 

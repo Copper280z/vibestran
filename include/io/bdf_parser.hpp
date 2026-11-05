@@ -14,7 +14,7 @@
 //                    SPOINT,
 //                    PSHELL, PSOLID, PBAR, PBARL, PBEAM, PROD, PBUSH, PELAS, PMASS,
 //                    CQUAD4, CTRIA3, CHEXA, CTETRA, CPENTA,
-//                    CBAR, CBEAM, CROD, CBUSH, CELAS1, CELAS2, CELAS3, CELAS4,
+//                    CBAR, CBEAM, CROD, CONROD, CBUSH, CELAS1, CELAS2, CELAS3, CELAS4,
 //                    CMASS1, CMASS2, CMASS3, CMASS4,
 //                    FORCE, MOMENT, SLOAD, TEMP, TEMPD, GRAV, ACCEL1,
 //                    PLOAD, PLOAD1, PLOAD2, PLOAD4,
@@ -73,6 +73,7 @@ private:
     static void process_prod    (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_spoint  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_crod    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_conrod  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_sload   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_celas3  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_celas4  (ParseContext& ctx, const std::vector<std::string>& fields);

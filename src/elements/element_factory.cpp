@@ -82,6 +82,7 @@ std::unique_ptr<ElementBase> make_element(const ElementData& data, const Model& 
             return std::make_unique<CBarBeamElement>(data, model);
         }
         case ElementType::CROD:
+        case ElementType::CONROD:
             return std::make_unique<CRodElement>(data, model);
         case ElementType::CBUSH: {
             if (data.nodes.size() != 2)

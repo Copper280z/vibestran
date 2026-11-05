@@ -991,6 +991,8 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_cbeam(ctx, card.fields);
       else if (kw == "CROD")
         process_crod(ctx, card.fields);
+      else if (kw == "CONROD")
+        process_conrod(ctx, card.fields);
       else if (kw == "CBUSH")
         process_cbush(ctx, card.fields);
       else if (kw == "CELAS1")
@@ -2406,6 +2408,37 @@ void BdfParser::process_crod(ParseContext &ctx,
   }
   reject_nonblank_fields(f, 9, ctx.line_num, "CROD",
                          "extra continuation data is not supported");
+}
+
+void BdfParser::process_conrod(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  // CONROD, EID, G1, G2, MID, A, J, C, NSM
+  ElementData e;
+  e.id = ElementId(parse_int(f[1], ctx.line_num));
+  if (e.id.value <= 0)
+    throw ParseError(std::format("Line {}: CONROD EID {} must be positive",
+                                 ctx.line_num, e.id.value));
+  e.type = ElementType::CONROD;
+  e.pid = PropertyId(-e.id.value);
+  e.nodes.push_back(NodeId(parse_int(f[2], ctx.line_num)));
+  e.nodes.push_back(NodeId(parse_int(f[3], ctx.line_num)));
+
+  PRod p;
+  p.pid = e.pid;
+  p.mid = MaterialId(parse_int(f[4], ctx.line_num));
+  p.A = parse_double(f[5], ctx.line_num);
+  p.J = parse_double(f[6], ctx.line_num);
+  p.C = parse_double(f[7], ctx.line_num);
+  p.nsm = parse_double(f[8], ctx.line_num);
+  if (p.A < 0.0 || p.J < 0.0)
+    throw ParseError(std::format("Line {}: CONROD {} has negative A ({}) or J ({})",
+                                 ctx.line_num, e.id.value, p.A, p.J));
+  reject_nonblank_fields(f, 9, ctx.line_num, "CONROD",
+                         "extra continuation data is not supported");
+  if (!ctx.model.properties.emplace(p.pid, p).second)
+    throw ParseError(std::format("Line {}: CONROD EID {} is already in use",
+                                 ctx.line_num, e.id.value));
+  ctx.model.elements.push_back(std::move(e));
 }
 
 void BdfParser::process_conm2(ParseContext &ctx,

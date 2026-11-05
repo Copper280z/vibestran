@@ -37,6 +37,7 @@ inline int element_num_dofs(ElementType type) {
   case ElementType::CBAR:
   case ElementType::CBEAM:
   case ElementType::CROD:
+  case ElementType::CONROD:
   case ElementType::CBUSH:
     return 12;
   case ElementType::CELAS1:

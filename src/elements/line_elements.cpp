@@ -885,15 +885,16 @@ CBarBeamElement::global_dof_indices(const DofMap &dof_map) const {
 }
 
 CRodElement::CRodElement(const ElementData &data, const Model &model)
-    : eid_(data.id) {
+    : eid_(data.id), type_(data.type) {
+  const char *const card = type_ == ElementType::CONROD ? "CONROD" : "CROD";
   if (data.nodes.size() != NUM_NODES) {
-    throw SolverError(std::format("CROD {} needs 2 nodes, got {}", eid_.value,
+    throw SolverError(std::format("{} {} needs 2 nodes, got {}", card, eid_.value,
                                   data.nodes.size()));
   }
   nodes_ = {data.nodes[0], data.nodes[1]};
   const auto *prop = std::get_if<PRod>(&model.property(data.pid));
   if (prop == nullptr) {
-    throw SolverError(std::format("CROD {}: property {} must be PROD",
+    throw SolverError(std::format("{} {}: property {} must be PROD", card,
                                   eid_.value, data.pid.value));
   }
   const Mat1 &mat = model.material(prop->mid);
@@ -916,7 +917,7 @@ CRodElement::CRodElement(const ElementData &data, const Model &model)
   length_ = d.norm();
   if (length_ < kFrameTolerance) {
     throw SolverError(std::format(
-        "CROD {} has zero length: grids {} and {} are both at ({}, {}, {})",
+        "{} {} has zero length: grids {} and {} are both at ({}, {}, {})", card,
         eid_.value, nodes_[0].value, nodes_[1].value, pa.x, pa.y, pa.z));
   }
   axis_ = Eigen::Vector3d(d.x, d.y, d.z) / length_;
