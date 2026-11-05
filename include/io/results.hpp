@@ -229,7 +229,7 @@ struct ModeResult {
   double eigenvalue{0};       ///< λ = ω² (rad²/s²)
   double radians_per_sec{0};  ///< ω = sqrt(max(λ,0))
   double cycles_per_sec{0};   ///< f = ω/(2π)
-  double gen_mass{0};         ///< φᵀ M φ (≈ 1 after mass normalisation)
+  double gen_mass{0};         ///< φᵀ M φ of `shape` (1 under NORM=MASS)
   std::vector<NodeDisplacement> shape; ///< mode shape as nodal displacements
 };
 

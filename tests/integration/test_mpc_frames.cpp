@@ -535,4 +535,48 @@ TEST(CdModeShape, NormMaxIsUnitInTheReportedFrame) {
     EXPECT_NEAR(std::abs(shape->d[0]), 1.0, 1e-12);
     EXPECT_NEAR(shape->d[1] / shape->d[0],
                 (1.0 / ky - 1.0 / kx) * std::sin(t) * std::cos(t) / flexibility, 1e-9);
+    // The mass acts on T1 alone, and T1 is one.
+    EXPECT_NEAR(r.modes[0].gen_mass, 4.0, 1e-9);
+}
+
+// ── Generalized mass ──────────────────────────────────────────────────────────
+
+TEST(GeneralizedMass, NormMaxIsThatOfTheReportedShape) {
+    // Two equal masses and springs from ground. With g the golden ratio the shapes
+    // are (1 / g, 1) at lambda = (k / m) (3 - sqrt 5) / 2 and (1, -1 / g) at
+    // (k / m) (3 + sqrt 5) / 2, each with generalized mass m (1 + 1 / g^2). The
+    // generalized stiffness phi^T K phi, worked from the springs, must equal
+    // lambda times it.
+    const double k = 4.0, m = 2.0, g = (1.0 + std::sqrt(5.0)) / 2.0;
+    const auto r = solve_modal(
+        "SOL 103\nCEND\nSPC = 1\nMETHOD = 9\nBEGIN BULK\nEIGRL,9,,,2,,,,MAX\nSPOINT,1,2\n"
+        "CELAS2,1,4.,1\nCELAS4,2,4.,1,2\nCMASS2,3,2.,1\nCMASS2,4,2.,2\nENDDATA\n");
+    ASSERT_EQ(r.modes.size(), 2U);
+    const double expected = m * (1.0 + 1.0 / (g * g));
+    EXPECT_NEAR(r.modes[0].gen_mass, expected, 1e-10);
+    EXPECT_NEAR(r.modes[1].gen_mass, expected, 1e-10);
+    const auto stiffness = [&](const double a, const double b) {
+        return k * a * a + k * (b - a) * (b - a);
+    };
+    EXPECT_NEAR(r.modes[0].eigenvalue * r.modes[0].gen_mass, stiffness(1.0 / g, 1.0), 1e-9);
+    EXPECT_NEAR(r.modes[1].eigenvalue * r.modes[1].gen_mass, stiffness(1.0, -1.0 / g), 1e-9);
+}
+
+TEST(GeneralizedMass, NormMaxCountsTheMassOfDependentDofs) {
+    // Two masses tied by an MPC move as one, so both count at a shape of one.
+    const auto r = solve_modal(
+        "SOL 103\nCEND\nSPC = 1\nMPC = 7\nMETHOD = 9\nBEGIN BULK\nEIGRL,9,,,1,,,,MAX\nSPOINT,1,2\n"
+        "CELAS2,1,60.,1\nCMASS2,3,2.,1\nCMASS2,4,3.,2\nMPC,7,2,,1.,1,,-1.\nENDDATA\n");
+    ASSERT_EQ(r.modes.size(), 1U);
+    EXPECT_NEAR(r.modes[0].eigenvalue, 12.0, 1e-9);
+    EXPECT_NEAR(r.modes[0].gen_mass, 5.0, 1e-10);
+}
+
+TEST(GeneralizedMass, NormMassIsOne) {
+    const auto r = solve_modal(
+        "SOL 103\nCEND\nSPC = 1\nMETHOD = 9\nBEGIN BULK\nEIGRL,9,,,1\nSPOINT,1\n"
+        "CELAS2,1,60.,1\nCMASS2,3,5.,1\nENDDATA\n");
+    ASSERT_EQ(r.modes.size(), 1U);
+    EXPECT_DOUBLE_EQ(r.modes[0].gen_mass, 1.0);
+    EXPECT_NEAR(std::abs(r.modes[0].shape.at(0).d[0]), 1.0 / std::sqrt(5.0), 1e-12);
 }

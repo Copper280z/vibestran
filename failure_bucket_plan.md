@@ -624,3 +624,7 @@ most recent entry.
   Eigenvectors on a CD grid were reported in basic under a coordinate column of
   0; they now follow the same frame as DISPLACEMENT output, and NORM=MAX is unit
   in that frame. No suite deck runs SOL 103 on a grid with a CD frame.
+- **Generalized mass under NORM=MAX (1,706 final failure records, unchanged).**
+  It was that of the solver's vector, about 1, and is now that of the reported
+  shape, with the generalized stiffness following it. The comparator reads only
+  eigenvalues and cycles from that table, so no record could change.

@@ -29,12 +29,12 @@ namespace {
 /// reported in. The reduced vector was scaled with basic components, which are
 /// those of a grid without CD; a CD grid's own components can be larger, and its
 /// dependent ones cannot be told apart from them, so all of them count. A model
-/// with no CD grid is already normalized.
-void renormalize_to_unit_max_in_grid_frames(const MpcHandler& mpc_handler,
-                                            std::vector<NodeDisplacement>& shape) {
+/// with no CD grid is already normalized. Returns the divisor it applied.
+[[nodiscard]] double renormalize_to_unit_max_in_grid_frames(
+    const MpcHandler& mpc_handler, std::vector<NodeDisplacement>& shape) {
     const auto on_cd_grid = [](const NodeDisplacement& nd) { return nd.coord.value != 0; };
     if (std::ranges::none_of(shape, on_cd_grid))
-        return;
+        return 1.0;
     const DofMap& dof_map = mpc_handler.full_dof_map();
     double largest = 0.0;
     for (const NodeDisplacement& nd : shape) {
@@ -49,10 +49,11 @@ void renormalize_to_unit_max_in_grid_frames(const MpcHandler& mpc_handler,
         }
     }
     if (largest <= 1e-30)
-        return;
+        return 1.0;
     for (NodeDisplacement& nd : shape)
         for (double& value : nd.d)
             value /= largest;
+    return largest;
 }
 
 } // namespace
@@ -228,25 +229,28 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
         mr.radians_per_sec  = std::sqrt(std::max(ep.eigenvalue, 0.0));
         mr.cycles_per_sec   = mr.radians_per_sec / (2.0 * std::numbers::pi);
 
-        // Compute generalised mass: φᵀ M φ (should be ≈1 for mass-normalised)
-        mr.gen_mass = ep.eigenvector.dot(
-            M_eigen.selfadjointView<Eigen::Lower>() * ep.eigenvector);
+        // Generalised mass φᵀ M φ of the shape as reported.
+        const auto generalized_mass = [&](const Eigen::VectorXd& v) {
+            return v.dot(M_eigen.selfadjointView<Eigen::Lower>() * v);
+        };
 
         // Normalise if needed (Spectra mass-normalises, but apply NORM=MAX)
         Eigen::VectorXd phi = ep.eigenvector;
         if (eigrl.norm == EigRL::Norm::Max) {
             double max_abs = phi.cwiseAbs().maxCoeff();
             if (max_abs > 1e-30) phi /= max_abs;
+            mr.shape = recover_mode_shape(model, mpc_handler, phi);
+            const double divisor =
+                renormalize_to_unit_max_in_grid_frames(mpc_handler, mr.shape);
+            mr.gen_mass = generalized_mass(phi) / (divisor * divisor);
         } else {
             // Mass normalisation: φ / sqrt(φᵀMφ)
-            if (mr.gen_mass > 1e-30)
-                phi /= std::sqrt(mr.gen_mass);
+            const double unscaled = generalized_mass(phi);
+            if (unscaled > 1e-30)
+                phi /= std::sqrt(unscaled);
             mr.gen_mass = 1.0;
+            mr.shape = recover_mode_shape(model, mpc_handler, phi);
         }
-
-        mr.shape = recover_mode_shape(model, mpc_handler, phi);
-        if (eigrl.norm == EigRL::Norm::Max)
-            renormalize_to_unit_max_in_grid_frames(mpc_handler, mr.shape);
         msc.modes.push_back(std::move(mr));
     }
 

@@ -74,6 +74,7 @@ reference is a MYSTRAN run.
 | CONM2 with CID = -1 (X is the basic location of the CG) | 19 decks use CONM2, none with CID = -1 | Same offset mass given once with CID = 0 and an offset, once with CID = -1 and the absolute CG location; results must be identical |
 | Modal analysis requesting all finite modes (ND >= massed DOFs, e.g. a one-DOF spring-mass) | Not checked by any deck | Grounded CELAS2 + CONM2: lambda = k/m |
 | CTETRA10 consistent mass in modal or inertial-load analysis | 12 decks use CTETRA10, none in SOL 103 (this hid a bug: the mass rejected Nastran's vertex orientation, fixed with `CTetra10.MassIsTheSameForEitherVertexOrientation`) | Free-free or cantilevered tet10 block in SOL 103, compared with a refined CHEXA/CTETRA4 reference, plus a GRAV case checking total reaction = rho*V*g |
+| Generalized mass and stiffness under NORM=MAX | 12 decks set EIGRL MAX, but `f06_query.py` reads only EIGENVALUE and CYCLES from the eigenvalue table | Two equal masses and springs from ground: m (1 + 1 / g^2) for both modes, g the golden ratio, as in `GeneralizedMass.*`, with the comparator extended to those columns |
 
 ## Solids
 
