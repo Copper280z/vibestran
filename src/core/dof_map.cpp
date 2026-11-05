@@ -23,11 +23,13 @@ void DofMap::build(const std::unordered_map<NodeId, GridPoint>& nodes,
 
     for (NodeId nid : sorted_ids) {
         NodeDofBlock& blk = blocks_[nid];
-        for (int d = 0; d < default_dofs_per_node; ++d) {
+        // A scalar point has one DOF whatever the analysis gives a grid.
+        const int dofs = nodes.at(nid).scalar ? 1 : default_dofs_per_node;
+        for (int d = 0; d < dofs; ++d) {
             blk.eq[d] = num_free_++;
         }
         // remaining slots (if dofs_per_node < 6) stay CONSTRAINED_DOF
-        num_total_ += default_dofs_per_node;
+        num_total_ += dofs;
     }
     num_total_ = num_free_; // before constraints
 }

@@ -884,6 +884,134 @@ CBarBeamElement::global_dof_indices(const DofMap &dof_map) const {
   return line_global_dofs(nodes_, dof_map);
 }
 
+CRodElement::CRodElement(const ElementData &data, const Model &model)
+    : eid_(data.id) {
+  if (data.nodes.size() != NUM_NODES) {
+    throw SolverError(std::format("CROD {} needs 2 nodes, got {}", eid_.value,
+                                  data.nodes.size()));
+  }
+  nodes_ = {data.nodes[0], data.nodes[1]};
+  const auto *prop = std::get_if<PRod>(&model.property(data.pid));
+  if (prop == nullptr) {
+    throw SolverError(std::format("CROD {}: property {} must be PROD",
+                                  eid_.value, data.pid.value));
+  }
+  const Mat1 &mat = model.material(prop->mid);
+  E_ = mat.E;
+  G_ = (mat.G != 0.0) ? mat.G : mat.E / (2.0 * (1.0 + mat.nu));
+  rho_ = mat.rho;
+  alpha_ = mat.A;
+  ref_temp_ = mat.ref_temp;
+  st_ = mat.st;
+  sc_ = mat.sc;
+  ss_ = mat.ss;
+  A_ = prop->A;
+  J_ = prop->J;
+  C_ = prop->C;
+  nsm_ = prop->nsm;
+
+  const Vec3 pa = model.node(nodes_[0]).position;
+  const Vec3 pb = model.node(nodes_[1]).position;
+  const Vec3 d = pb - pa;
+  length_ = d.norm();
+  if (length_ < kFrameTolerance) {
+    throw SolverError(std::format(
+        "CROD {} has zero length: grids {} and {} are both at ({}, {}, {})",
+        eid_.value, nodes_[0].value, nodes_[1].value, pa.x, pa.y, pa.z));
+  }
+  axis_ = Eigen::Vector3d(d.x, d.y, d.z) / length_;
+}
+
+namespace {
+
+/// Writes [a -a; -a a] onto the 3x3 block `base` (0 translations, 3 rotations)
+/// of the two ends of a 12-DOF element.
+void add_end_coupling(LocalKe &K, const int base, const Eigen::Matrix3d &a,
+                      const double diagonal, const double off_diagonal) {
+  K.block<3, 3>(base, base) += diagonal * a;
+  K.block<3, 3>(base + 6, base + 6) += diagonal * a;
+  K.block<3, 3>(base, base + 6) += off_diagonal * a;
+  K.block<3, 3>(base + 6, base) += off_diagonal * a;
+}
+
+} // namespace
+
+LocalKe CRodElement::stiffness_matrix() const {
+  LocalKe K = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+  const Eigen::Matrix3d nn = axis_ * axis_.transpose();
+  const double axial = E_ * A_ / length_;
+  const double torsion = G_ * J_ / length_;
+  add_end_coupling(K, 0, nn, axial, -axial);
+  add_end_coupling(K, 3, nn, torsion, -torsion);
+  return K;
+}
+
+LocalKe CRodElement::mass_matrix() const {
+  LocalKe M = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+  const double mass = (rho_ * A_ + nsm_) * length_;
+  add_end_coupling(M, 0, Eigen::Matrix3d::Identity(), mass / 3.0, mass / 6.0);
+  const double inertia = rho_ * J_ * length_;
+  add_end_coupling(M, 3, axis_ * axis_.transpose(), inertia / 3.0, inertia / 6.0);
+  return M;
+}
+
+LocalKe CRodElement::lumped_mass_matrix() const {
+  LocalKe M = LocalKe::Zero(NUM_DOFS, NUM_DOFS);
+  const double half_mass = 0.5 * (rho_ * A_ + nsm_) * length_;
+  for (const int dof : {0, 1, 2, 6, 7, 8})
+    M(dof, dof) = half_mass;
+  return M;
+}
+
+LocalFe CRodElement::thermal_load(std::span<const double> temperatures,
+                                  const double t_ref) const {
+  LocalFe f = LocalFe::Zero(NUM_DOFS);
+  const double dT = 0.5 * (temperatures[0] + temperatures[1]) - t_ref;
+  const Eigen::Vector3d force = E_ * A_ * alpha_ * dT * axis_;
+  f.segment<3>(0) = -force;
+  f.segment<3>(6) = force;
+  return f;
+}
+
+std::vector<EqIndex>
+CRodElement::global_dof_indices(const DofMap &dof_map) const {
+  return line_global_dofs(nodes_, dof_map);
+}
+
+CRodElement::Recovery
+CRodElement::recover(std::span<const double> global_displacements,
+                     const double average_temperature) const {
+  if (global_displacements.size() != static_cast<size_t>(NUM_DOFS)) {
+    throw SolverError(std::format(
+        "CROD {}: expected {} displacement entries for recovery, got {}",
+        eid_.value, NUM_DOFS, global_displacements.size()));
+  }
+  const auto along_axis = [&](const size_t first) {
+    return axis_.dot(Eigen::Vector3d(global_displacements[first + 6] - global_displacements[first],
+                                     global_displacements[first + 7] - global_displacements[first + 1],
+                                     global_displacements[first + 8] - global_displacements[first + 2]));
+  };
+  Recovery out;
+  out.axial_strain = along_axis(0) / length_ - alpha_ * (average_temperature - ref_temp_);
+  out.axial_stress = E_ * out.axial_strain;
+  out.axial_force = out.axial_stress * A_;
+  out.torque = G_ * J_ * along_axis(3) / length_;
+  if (J_ != 0.0)
+    out.torsional_stress = C_ * out.torque / J_;
+  if (G_ != 0.0)
+    out.torsional_strain = out.torsional_stress / G_;
+  const auto margin = [](const double allowable,
+                         const double stress) -> std::optional<double> {
+    if (allowable <= 0.0 || stress == 0.0)
+      return std::nullopt;
+    return allowable / std::abs(stress) - 1.0;
+  };
+  out.axial_margin =
+      margin(out.axial_stress > 0.0 ? st_ : sc_, out.axial_stress);
+  out.torsional_margin = margin(ss_, out.torsional_stress);
+  return out;
+}
+
 CBushElement::CBushElement(ElementId eid, PropertyId pid,
                            std::array<NodeId, 2> node_ids, const Model &model,
                            std::optional<Vec3> orientation,

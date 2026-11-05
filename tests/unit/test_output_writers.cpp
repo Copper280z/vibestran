@@ -1280,6 +1280,93 @@ TEST(F06Writer, CtetrA10GpstressTableIncludesMidsideRows) {
     EXPECT_NE(out.find("9110"), std::string::npos);
 }
 
+TEST(F06Writer, RodTablesMatchParserColumns) {
+    // Validation parser (1-based): force rows read the EID at cols 17-24, axial
+    // and torque in 13-wide windows from cols 26 and 40; stress rows read the EID
+    // at cols 2-9, axial at 11, its margin in 9 at 25, torsion at 36, its margin
+    // in 9 at 50.  A blank margin reads as infinite.
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    RodResult first;
+    first.eid = ElementId{12};
+    first.axial_force = 1297.2973;
+    first.torque = -2.5;
+    first.axial_stress = -2594.5946;
+    first.torsional_stress = 4.5;
+    first.axial_strain = 1.25e-4;
+    first.torsional_strain = -3.5e-6;
+    first.axial_margin = 2.85;
+    sc.rod_results.push_back(first);
+    res.subcases.push_back(sc);
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].force_print = true;
+    m.analysis.subcases[0].stress_print = true;
+    m.analysis.subcases[0].strain_print = true;
+    std::ostringstream oss;
+    F06Writer::write(res, m, oss);
+
+    std::vector<std::string> rows;
+    std::istringstream iss(oss.str());
+    std::string line;
+    while (std::getline(iss, line))
+        if (line.find("T Y P E   R O D") != std::string::npos) {
+            std::getline(iss, line);
+            std::getline(iss, line);
+            std::getline(iss, line);
+            rows.push_back(line);
+            std::getline(iss, line);
+            EXPECT_EQ(line.find("---") != std::string::npos, true) << "the table must close with a rule";
+        }
+    ASSERT_EQ(rows.size(), 3U);
+    const auto field = [](const std::string& row, size_t col1, size_t width) {
+        return std::stod(row.substr(col1 - 1, width));
+    };
+    EXPECT_EQ(std::stoi(rows[0].substr(16, 8)), 12);
+    EXPECT_NEAR(field(rows[0], 26, 13), 1297.2973, 1e-3);
+    EXPECT_NEAR(field(rows[0], 40, 13), -2.5, 1e-9);
+
+    EXPECT_EQ(std::stoi(rows[1].substr(1, 8)), 12);
+    EXPECT_NEAR(field(rows[1], 11, 13), -2594.5946, 1e-3);
+    EXPECT_NEAR(field(rows[1], 25, 9), 2.85, 1e-9);
+    EXPECT_NEAR(field(rows[1], 36, 13), 4.5, 1e-9);
+    EXPECT_EQ(rows[1].find_first_not_of(' ', 49), std::string::npos) << "no torsional margin";
+
+    EXPECT_NEAR(field(rows[2], 11, 13), 1.25e-4, 1e-12);
+    EXPECT_NEAR(field(rows[2], 36, 13), -3.5e-6, 1e-12);
+}
+
+TEST(Op2Writer, RodStressesAndScalarPointsUseTheirNastranCodes) {
+    // OES1X for CROD is element type 1 with five words per element, and OUGV1
+    // marks a scalar point with grid type 2 where a grid has 1.
+    SolverResults res;
+    SubCaseResults sc;
+    sc.id = 1;
+    NodeDisplacement grid;
+    grid.node = NodeId{4};
+    grid.d[0] = 1.5f;
+    NodeDisplacement point;
+    point.node = NodeId{9};
+    point.scalar = true;
+    point.d[0] = 2.5f;
+    sc.displacements = {grid, point};
+    RodResult bar;
+    bar.eid = ElementId{12};
+    bar.axial_stress = 200.0f;
+    bar.axial_margin = 49.0f;
+    bar.torsional_stress = 30.0f;
+    sc.rod_results.push_back(bar);
+    res.subcases.push_back(sc);
+    Model m = make_empty_model_sc1();
+    m.analysis.subcases[0].disp_plot = true;
+    m.analysis.subcases[0].stress_plot = true;
+
+    const auto words = bytes_to_words(run_op2_writer(res, m));
+    EXPECT_TRUE(contains_word_sequence(words, {41, 1, as_word(1.5f)}));
+    EXPECT_TRUE(contains_word_sequence(words, {91, 2, as_word(2.5f)}));
+    EXPECT_TRUE(contains_word_sequence(words, {121, as_word(200.0f), as_word(49.0f), as_word(30.0f), as_word(0.0f)}));
+}
+
 TEST(Op2Writer, UsesMystranBarStressTableAndPayload) {
     SolverResults res;
     SubCaseResults sc;

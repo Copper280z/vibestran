@@ -27,6 +27,17 @@ reference is a MYSTRAN run.
 |---|---|---|
 | BAROR OFFT field (`BGG` default for CBARs with blank OFFT) | 14 decks use BAROR, none set its OFFT | BAROR with `BGG` and a GA displacement system that differs from basic, so the orientation-vector frame matters |
 
+## Rods and scalar points
+
+| Feature | How absence was checked | Suggested deck |
+|---|---|---|
+| CMASS3, CMASS4 | No deck contains either card | Spring-mass chain of scalar points: lambda_j = (k/m)(2 - 2 cos((2j-1) pi / (2n+1))) |
+| Scalar points in SOL 103 and SOL 153 | The six SPOINT and CELAS3/4 decks are all SOL 101 | Scalar oscillator on a rod tip (two-DOF eigenproblem); scalar ambient point on a CHBDY (series resistance) |
+| SLOAD on a grid with a CD frame | SLOAD appears in 3 decks, all on scalar points | Rod along a rotated CD X axis, loaded on its T1 |
+| Implicit scalar points | Every deck with a blank or zero CELAS/CMASS component on an undefined point also has SPOINT | The same chain with the SPOINT card removed must give identical results |
+| CROD torsion with C, and rod margins on torsion | No PROD sets C with nonzero torque on a suite-checked record | Skew rod with a moment along its axis: T L / (G J), tau = C T / J, margin SS/tau - 1 |
+| AUTOSPC of a skew rod on a CD grid | No deck has a singular rod block on a CD grid without an MPC | Rod along a rotated CD X axis: displacement F L / (E A) along T1 and exactly zero on T2 and T3 |
+
 ## CBAR / PBAR
 
 | Feature | Check | Suggested deck |

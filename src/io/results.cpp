@@ -287,6 +287,7 @@ void F06Writer::write(const SolverResults& results, const Model& model,
         if (msc != nullptr && msc->gpforce_print) write_gpforce_table(sc, out);
         if (msc != nullptr && msc->force_print) {
             write_bar_force_table(sc, out);
+            write_rod_force_table(sc, out);
             write_shell_force_table(sc, out, ElementType::CQUAD4,
                                     msc->force_corner);
             write_shell_force_table(sc, out, ElementType::CTRIA3,
@@ -294,6 +295,7 @@ void F06Writer::write(const SolverResults& results, const Model& model,
         }
         if (do_stress_any) {
             write_bar_stress_table(sc, out);
+            write_rod_stress_table(sc, out, false);
             write_shell_stress_table(sc, out, ElementType::CQUAD4, do_corner,
                                      shell_props);
             write_shell_stress_table(sc, out, ElementType::CTRIA3, do_corner,
@@ -307,6 +309,7 @@ void F06Writer::write(const SolverResults& results, const Model& model,
             write_solid_stress_table(sc, out, ElementType::CPENTA6, true);
         }
         if (do_strain_any) {
+            write_rod_stress_table(sc, out, true);
             write_shell_strain_table(sc, out, ElementType::CQUAD4,
                                      do_strain_corner, msc->strain_fiber,
                                      msc->strain_max_shear, shell_props);
@@ -497,6 +500,25 @@ void F06Writer::write_bar_force_table(const SubCaseResults& sc, std::ostream& ou
     out << "          ------------- ------------- ------------- ------------- ------------- ------------- ------------- -------------\n\n";
 }
 
+void F06Writer::write_rod_force_table(const SubCaseResults& sc, std::ostream& out) {
+    if (sc.rod_results.empty()) return;
+    write_subcase_header(out, sc.id);
+    if (!sc.label.empty())
+        out << " " << sc.label << "\n";
+    out << "\n";
+    out << "                                                       E L E M E N T   E N G I N E E R I N G   F O R C E S\n";
+    out << "                                                             F O R   E L E M E N T   T Y P E   R O D\n";
+    out << "                 Element     Axial        Torque\n";
+    out << "                    ID       Force\n";
+    for (const auto& rod : sc.rod_results) {
+        out << std::right << std::setw(24) << rod.eid.value;
+        put_es14(out, rod.axial_force);
+        put_es14(out, rod.torque);
+        out << "\n";
+    }
+    out << "                         ------------- -------------\n\n";
+}
+
 void F06Writer::write_shell_force_table(const SubCaseResults& sc, std::ostream& out,
                                         const ElementType etype, const bool corners) {
     const bool any = std::any_of(sc.plate_stresses.begin(), sc.plate_stresses.end(),
@@ -574,6 +596,7 @@ void F06Writer::write_gpforce_table(const SubCaseResults& sc,
         case ElementType::CPENTA6:  return "PENTA6";
         case ElementType::CBAR:     return "BAR";
         case ElementType::CBEAM:    return "BEAM";
+        case ElementType::CROD:     return "ROD";
         case ElementType::CBUSH:    return "BUSH";
         case ElementType::CELAS1:   return "ELAS1";
         case ElementType::CELAS2:   return "ELAS2";
@@ -619,6 +642,38 @@ void F06Writer::write_gpforce_table(const SubCaseResults& sc,
         put_values(gb.totals);
         out << " (should all be 0)\n\n\n";
     }
+}
+
+// MYSTRAN "ELEMENT STRESSES ... FOR ELEMENT TYPE ROD" layout. Parser windows:
+// eid cols 2-9, axial 11-23, axial margin 25-33, torsional 36-48, torsional
+// margin 50-58. Six significant decimals, and a margin is blank without a MAT1
+// allowable or in the strain table.
+void F06Writer::write_rod_stress_table(const SubCaseResults& sc, std::ostream& out,
+                                       const bool strain) {
+    if (sc.rod_results.empty()) return;
+    write_subcase_header(out, sc.id);
+    if (!sc.label.empty())
+        out << " " << sc.label << "\n";
+    out << "\n";
+    out << "                                E L E M E N T   "
+        << (strain ? "S T R A I N S" : "S T R E S S E S")
+        << "   I N   L O C A L   E L E M E N T   C O O R D I N A T E   S Y S T E M\n";
+    out << "                                 F O R   E L E M E N T   T Y P E   R O D\n";
+    out << "  Element     Axial       Safety     Torsional     Safety\n";
+    out << (strain ? "     ID       Strain      Margin       Strain      Margin\n"
+                   : "     ID       Stress      Margin       Stress      Margin\n");
+    for (const auto& rod : sc.rod_results) {
+        F06Row row;
+        row.put(2, 8, std::to_string(rod.eid.value));
+        row.put(11, 13, std::format("{:.6E}", strain ? rod.axial_strain : rod.axial_stress));
+        row.put(36, 13, std::format("{:.6E}", strain ? rod.torsional_strain : rod.torsional_stress));
+        if (!strain && rod.axial_margin)
+            row.put(25, 9, std::format("{:.2E}", *rod.axial_margin));
+        if (!strain && rod.torsional_margin)
+            row.put(50, 9, std::format("{:.2E}", *rod.torsional_margin));
+        out << row.str() << "\n";
+    }
+    out << "          ------------- ---------  ------------- ---------\n\n";
 }
 
 void F06Writer::write_bar_stress_table(const SubCaseResults& sc,
@@ -1292,6 +1347,7 @@ void F06Writer::write_thermal(const SolverResults& results, const Model& model,
                   case ElementType::CPENTA6: tn = "CPENTA"; break;
                   case ElementType::CBAR:    tn = "CBAR"; break;
                   case ElementType::CBEAM:   tn = "CBEAM"; break;
+                  case ElementType::CROD:    tn = "CROD"; break;
                   default: break;
                 }
                 out << "    " << std::setw(10) << ef.eid.value

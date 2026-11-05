@@ -2,12 +2,14 @@
 // include/elements/line_elements.hpp
 // 1-D structural and scalar element families:
 //   - CBAR / CBEAM
+//   - CROD
 //   - CBUSH
 //   - CELAS1 / CELAS2
 //   - CMASS1 / CMASS2
 
 #include "elements/element_base.hpp"
 #include <array>
+#include <optional>
 
 namespace vibestran {
 
@@ -80,6 +82,79 @@ private:
   ElementData data_;
   std::array<NodeId, NUM_NODES> nodes_{NodeId{0}, NodeId{0}};
   const Model &model_;
+};
+
+/// CROD: axial and torsional stiffness only, with linear displacement and twist
+/// along the element.  It has no shear or bending, so its grids need something
+/// else, or AUTOSPC, to hold the directions it leaves free
+/// (analysis_support.hpp).  Matrices are in basic axes; the element axis is the
+/// only direction it needs.
+class CRodElement : public ElementBase {
+public:
+  static constexpr int NUM_NODES = 2;
+  static constexpr int NUM_DOFS = 12;
+
+  CRodElement(const ElementData &data, const Model &model);
+
+  [[nodiscard]] ElementType type() const noexcept override {
+    return ElementType::CROD;
+  }
+  [[nodiscard]] ElementId id() const noexcept override { return eid_; }
+  [[nodiscard]] int num_dofs() const noexcept override { return NUM_DOFS; }
+
+  [[nodiscard]] LocalKe stiffness_matrix() const override;
+  /// Consistent mass: (rho*A + NSM)*L/6 * [2 1; 1 2] on all three translations,
+  /// so a transverse motion carries the whole mass, and rho*J*L/6 * [2 1; 1 2]
+  /// about the axis.  PROD has no polar inertia, so J stands in for it, exactly
+  /// for a circular section.
+  [[nodiscard]] LocalKe mass_matrix() const override;
+  /// Lumped mass: half of (rho*A + NSM)*L on each end's translations, with no
+  /// rotational inertia.
+  [[nodiscard]] LocalKe lumped_mass_matrix() const override;
+  [[nodiscard]] LocalFe thermal_load(std::span<const double> temperatures,
+                                     double t_ref) const override;
+  [[nodiscard]] std::vector<EqIndex>
+  global_dof_indices(const DofMap &dof_map) const override;
+  [[nodiscard]] std::span<const NodeId> node_ids() const noexcept override {
+    return std::span<const NodeId>{nodes_.data(), NUM_NODES};
+  }
+
+  /// Tension-positive axial force, and torque positive for a right-handed twist
+  /// of end B relative to end A about the axis from A to B, with the stresses
+  /// and elastic (thermal-free) strains they produce.  The torsional stress is
+  /// C*T/J, and it and its strain are zero when C or J is.  A margin of safety
+  /// is allowable / |stress| - 1, with MAT1 ST or SC by the sign of the axial
+  /// stress and SS for torsion, and is empty for no stress or no allowable.
+  struct Recovery {
+    double axial_force{0.0};
+    double torque{0.0};
+    double axial_stress{0.0};
+    double torsional_stress{0.0};
+    double axial_strain{0.0};
+    double torsional_strain{0.0};
+    std::optional<double> axial_margin;
+    std::optional<double> torsional_margin;
+  };
+  [[nodiscard]] Recovery recover(std::span<const double> global_displacements,
+                                 double average_temperature) const;
+
+private:
+  ElementId eid_;
+  std::array<NodeId, NUM_NODES> nodes_{NodeId{0}, NodeId{0}};
+  Eigen::Vector3d axis_{Eigen::Vector3d::Zero()};
+  double length_{0.0};
+  double E_{0.0};
+  double G_{0.0};
+  double rho_{0.0};
+  double alpha_{0.0};
+  double ref_temp_{0.0};
+  double st_{0.0};
+  double sc_{0.0};
+  double ss_{0.0};
+  double A_{0.0};
+  double J_{0.0};
+  double C_{0.0};
+  double nsm_{0.0};
 };
 
 class CBushElement : public ElementBase {

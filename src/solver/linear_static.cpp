@@ -27,6 +27,7 @@
 #include <cmath>
 #include <numbers>
 #include <set>
+#include <unordered_set>
 #include <spdlog/spdlog.h>
 
 namespace vibestran {
@@ -81,7 +82,23 @@ namespace {
     return pbarl->mid;
   if (const auto *pbeam = std::get_if<PBeam>(&prop))
     return pbeam->mid;
+  if (const auto *prod = std::get_if<PRod>(&prop))
+    return prod->mid;
   return MaterialId{0};
+}
+
+/// An SLOAD as a basic force: on a scalar point it stands in for the point's one
+/// component, and on a grid it acts on T1 of the displacement frame.
+[[nodiscard]] Vec3 sload_force(const Model &model, const SloadLoad &load,
+                               const double scale) {
+  const Vec3 along_t1{scale * load.value, 0.0, 0.0};
+  const GridPoint &gp = model.node(load.node);
+  if (gp.cd == CoordId{0})
+    return along_t1;
+  const auto cs_it = model.coord_systems.find(gp.cd);
+  if (cs_it == model.coord_systems.end())
+    return along_t1;
+  return apply_rotation(rotation_matrix(cs_it->second, gp.position), along_t1);
 }
 
 [[nodiscard]] double component_value(const Vec3 &v, const int component) {
@@ -583,6 +600,15 @@ void LinearStaticSolver::apply_point_loads(const Model &model,
             mpc_handler.apply_to_force(gdofs,
                 std::span<const double>(fe, 6), F);
 
+          } else if constexpr (std::is_same_v<T, SloadLoad>) {
+            const Vec3 force = sload_force(model, load, load_scale);
+            std::array<EqIndex, 6> full_eqs;
+            dof_map.global_indices(load.node, full_eqs);
+            std::vector<EqIndex> gdofs(full_eqs.begin(), full_eqs.end());
+            double fe[6] = {force.x, force.y, force.z, 0, 0, 0};
+            mpc_handler.apply_to_force(gdofs,
+                std::span<const double>(fe, 6), F);
+
           } else if constexpr (std::is_same_v<T, MomentLoad>) {
             Vec3 moment{load_scale * load.scale * load.direction.x,
                         load_scale * load.scale * load.direction.y,
@@ -626,6 +652,8 @@ void LinearStaticSolver::apply_inertial_loads(const Model &model,
           if constexpr (std::is_same_v<T, GravLoad>) {
             has_inertial_load = true;
             for (const auto &[nid, gp] : model.nodes) {
+              if (gp.scalar)
+                continue; // rigid-body acceleration does not move a scalar point
               const Vec3 accel =
                   load_direction_in_basic(model, load.cid,
                                           load.direction * (load_scale * load.scale),
@@ -668,6 +696,7 @@ void LinearStaticSolver::apply_inertial_loads(const Model &model,
     case ElementType::CTRIA3:
     case ElementType::CBAR:
     case ElementType::CBEAM:
+    case ElementType::CROD:
     case ElementType::CBUSH:
     case ElementType::CONM2:
       for (size_t i = 0; i < elem_data.nodes.size(); ++i) {
@@ -791,7 +820,7 @@ namespace {
 std::unordered_map<NodeId, std::array<SpcDofState, 6>>
 active_spc_state(const Model &model, const SubCase &sc) {
   std::unordered_map<NodeId, std::array<SpcDofState, 6>> spc;
-  for (const Spc &spc_c : model.structural_spcs(sc.spc_set)) {
+  for (const Spc &spc_c : analysis_spcs(model, sc)) {
     auto node_it = model.nodes.find(spc_c.node);
     if (node_it == model.nodes.end())
       continue;
@@ -882,6 +911,17 @@ void subtract_spc_point_loads(const Model &model, const SubCase &sc,
               const double v = (d == 0) ? force.x : ((d == 1) ? force.y : force.z);
               react[load.node][static_cast<size_t>(d)] -= v;
             }
+          } else if constexpr (std::is_same_v<T, SloadLoad>) {
+            const Vec3 force = sload_force(model, load, load_scale);
+            auto spc_it = spc.find(load.node);
+            if (spc_it == spc.end())
+              return;
+            for (int d = 0; d < 3; ++d) {
+              if (!spc_it->second[static_cast<size_t>(d)].active)
+                continue;
+              const double v = (d == 0) ? force.x : ((d == 1) ? force.y : force.z);
+              react[load.node][static_cast<size_t>(d)] -= v;
+            }
           } else if constexpr (std::is_same_v<T, MomentLoad>) {
             Vec3 moment{load_scale * load.scale * load.direction.x,
                         load_scale * load.scale * load.direction.y,
@@ -931,6 +971,8 @@ void subtract_spc_inertial_loads(const Model &model, const SubCase &sc,
           if constexpr (std::is_same_v<T, GravLoad>) {
             has_inertial_load = true;
             for (const auto &[nid, gp] : model.nodes) {
+              if (gp.scalar)
+                continue; // rigid-body acceleration does not move a scalar point
               const Vec3 accel = load_direction_in_basic(
                   model, load.cid, load.direction * (load_scale * load.scale),
                   gp.position);
@@ -966,6 +1008,7 @@ void subtract_spc_inertial_loads(const Model &model, const SubCase &sc,
     case ElementType::CTRIA3:
     case ElementType::CBAR:
     case ElementType::CBEAM:
+    case ElementType::CROD:
     case ElementType::CBUSH:
     case ElementType::CONM2:
       for (size_t i = 0; i < elem_data.nodes.size(); ++i) {
@@ -1264,8 +1307,13 @@ LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
   const auto& mpc_forces = std::get<NodalForces>(recovery);
 
   std::unordered_map<NodeId, DofSet> constrained;
-  for (const Spc &c : model.structural_spcs(sc.spc_set))
+  for (const Spc &c : analysis_spcs(model, sc))
     constrained[c.node].mask |= c.dofs.mask;
+  // AUTOSPC adds a component at every rod grid, so its grids are reported only
+  // when they carry a reaction.
+  std::unordered_set<NodeId> user_constrained;
+  for (const Spc &c : model.structural_spcs(sc.spc_set))
+    user_constrained.insert(c.node);
 
   std::vector<NodeId> grids;
   grids.reserve(model.nodes.size());
@@ -1296,7 +1344,7 @@ LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
       for (int d = 0; d < 6; ++d)
         if (!c_it->second.has(d + 1))
           sf.f[static_cast<size_t>(d)] = 0.0;
-      if (want_spc)
+      if (want_spc && (user_constrained.contains(nid) || any_nonzero(sf.f)))
         out.spc_forces.push_back(sf);
     }
 
@@ -1380,6 +1428,7 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
   for (NodeId nid : sorted_nodes) {
     NodeDisplacement nd;
     nd.node = nid;
+    nd.scalar = model.node(nid).scalar;
     for (int d = 0; d < 6; ++d) {
       EqIndex eq = dof_map.eq_index(nid, d);
       nd.d[d] = (eq != CONSTRAINED_DOF && eq < static_cast<int>(u_free.size()))
@@ -1532,6 +1581,25 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
                    recovery.forces.v1,  recovery.forces.v2,
                    recovery.forces.axial, recovery.forces.torque};
       res.line_stresses.push_back(ls);
+    } else if (elem_data.type == ElementType::CROD) {
+      const CRodElement rod(elem_data, model);
+      const MaterialId mid = property_material_id(model.property(elem_data.pid));
+      const double avg_temp = average_temperature(
+          elem_data.nodes, nodal_temps_rec, model.material(mid).ref_temp);
+      const auto recovered = rod.recover(
+          std::span<const double>(ue.data(), static_cast<size_t>(ue.size())),
+          avg_temp);
+      RodResult rr;
+      rr.eid = elem_data.id;
+      rr.axial_force = recovered.axial_force;
+      rr.torque = recovered.torque;
+      rr.axial_stress = recovered.axial_stress;
+      rr.torsional_stress = recovered.torsional_stress;
+      rr.axial_strain = recovered.axial_strain;
+      rr.torsional_strain = recovered.torsional_strain;
+      rr.axial_margin = recovered.axial_margin;
+      rr.torsional_margin = recovered.torsional_margin;
+      res.rod_results.push_back(rr);
     } else if (elem_data.type == ElementType::CQUAD4 ||
                elem_data.type == ElementType::CTRIA3) {
       PlateStress ps;

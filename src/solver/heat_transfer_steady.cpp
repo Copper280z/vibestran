@@ -209,6 +209,9 @@ void assemble_system(const Model &model, const SubCase &sc,
               add_rhs(te->node_ids(),
                       te->volumetric_heat_load(scale * load.q_vol));
             }
+          } else if constexpr (std::is_same_v<T, SloadLoad>) {
+            add_rhs(std::span<const NodeId>(&load.node, 1),
+                    Eigen::VectorXd::Constant(1, scale * load.value));
           } else if constexpr (std::is_same_v<T, Qbdy1Load>) {
             for (ElementId eid : load.elements) {
               auto it = std::find_if(model.chbdy_elements.begin(),

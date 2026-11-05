@@ -315,7 +315,7 @@ static int write_ougv1(std::ostream& f,
     for (const auto& nd : sc.displacements) {
         int32_t id_dev = static_cast<int32_t>(nd.node.value) * 10 + kMystranDeviceCode;
         write_f32(f, i32_as_f32(id_dev));
-        write_f32(f, i32_as_f32(1));   // grid_type G=1
+        write_f32(f, i32_as_f32(nd.scalar ? 2 : 1)); // grid_type G=1, S=2
         for (int i = 0; i < 6; ++i)
             write_f32(f, static_cast<float>(nd.d[i]));
     }
@@ -563,6 +563,58 @@ static int write_oes1x_line(std::ostream& f,
     return itable;
 }
 
+// ── Write one OES1X rod stress TABLE-4 ───────────────────────────────────────
+// CROD (element_type=1), 5 words per element:
+//   [eid_device, axial, axial margin, torsion, torsion margin]
+
+static int write_oes1x_rod(std::ostream& f,
+                           const SubCaseResults& sc,
+                           bool new_result, int itable,
+                           const std::string& subtitle) {
+    const int nel = static_cast<int>(sc.rod_results.size());
+    if (nel == 0) return itable;
+
+    const int analysis_code = 1;
+    const int table_code = 5;
+    const int element_type = 1;
+    const int num_wide = 5;
+    const int ntotal = nel * num_wide;
+
+    write_table3(f, new_result, itable,
+                 analysis_code, kMystranDeviceCode,
+                 table_code, element_type, sc.id,
+                 /*field5_int=*/sc.id, /*field6=*/0.0f, /*field7=*/0.0f,
+                 /*field8_int=*/1, num_wide, kVonMisesStressCode,
+                 "", subtitle, sc.label);
+    itable--;
+
+    {
+        const int32_t m[13] = {4, itable, 4,
+                               4, 1, 4,
+                               4, 0, 4,
+                               4, ntotal, 4,
+                               4 * ntotal};
+        f.write(reinterpret_cast<const char*>(m), 52);
+    }
+
+    for (const auto& rod : sc.rod_results) {
+        const int32_t eid_dev =
+            static_cast<int32_t>(rod.eid.value) * 10 + kMystranDeviceCode;
+        write_f32(f, i32_as_f32(eid_dev));
+        write_f32(f, static_cast<float>(rod.axial_stress));
+        write_f32(f, static_cast<float>(rod.axial_margin.value_or(0.0)));
+        write_f32(f, static_cast<float>(rod.torsional_stress));
+        write_f32(f, static_cast<float>(rod.torsional_margin.value_or(0.0)));
+    }
+
+    {
+        int32_t tail = 4 * ntotal;
+        f.write(reinterpret_cast<const char*>(&tail), 4);
+    }
+    itable--;
+    return itable;
+}
+
 // ── Write one OES1X solid stress TABLE-4 ─────────────────────────────────────
 // CTETRA4 (element_type=39, num_wide=109) or CHEXA8 (element_type=67, num_wide=193).
 // We have centroid data only; corner nodes are filled with the centroid values.
@@ -754,7 +806,7 @@ static void write_ougv1_modal_mode(std::ostream& f,
     for (const auto& nd : mr.shape) {
         int32_t id_dev = static_cast<int32_t>(nd.node.value) * 10 + kMystranDeviceCode;
         write_f32(f, i32_as_f32(id_dev));
-        write_f32(f, i32_as_f32(1)); // grid type G=1
+        write_f32(f, i32_as_f32(nd.scalar ? 2 : 1)); // grid type G=1, S=2
         for (int i = 0; i < 6; ++i)
             write_f32(f, static_cast<float>(nd.d[i]));
     }
@@ -868,6 +920,33 @@ void Op2Writer::write(const SolverResults& results, const Model& model,
                 if (!has_line_stress_plot_output(model, sc.id)) continue;
                 const int prev_itable = itable;
                 itable = write_oes1x_line(f, sc, new_result, itable, sc.label);
+                if (itable == prev_itable) continue;
+                if (!new_result || itable < -3) new_result = false;
+                const int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};
+                f.write(reinterpret_cast<const char*>(footer), 36);
+            }
+            write_markers(f, 0);
+        }
+    }
+
+    // ── OES1X table for CROD stresses ────────────────────────────────────────
+    {
+        const bool any = std::any_of(
+            results.subcases.begin(), results.subcases.end(),
+            [&](const auto& sc) {
+                return has_line_stress_plot_output(model, sc.id) &&
+                       !sc.rod_results.empty();
+            });
+        if (any) {
+            const char name8[8] = {'O','E','S','1','X',' ',' ',' '};
+            write_table_header(f, name8, month, day, dyear);
+
+            int itable = -3;
+            bool new_result = true;
+            for (const auto& sc : results.subcases) {
+                if (!has_line_stress_plot_output(model, sc.id)) continue;
+                const int prev_itable = itable;
+                itable = write_oes1x_rod(f, sc, new_result, itable, sc.label);
                 if (itable == prev_itable) continue;
                 if (!new_result || itable < -3) new_result = false;
                 const int32_t footer[9] = {4, itable, 4, 4, 1, 4, 4, 0, 4};

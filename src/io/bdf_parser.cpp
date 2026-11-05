@@ -19,6 +19,7 @@
 #include <set>
 #include <sstream>
 #include <string_view>
+#include <unordered_set>
 
 namespace vibestran {
 
@@ -155,6 +156,10 @@ struct BdfParser::ParseContext {
     bool offt{false};
   };
   std::vector<BarBlankFields> bar_blank_fields;
+
+  // SPOINT IDs; added to the model after parsing, since their references (and
+  // the GRIDs that may clash with them) can come in any order.
+  std::unordered_set<NodeId> scalar_points;
   struct BarorDefaults {
     std::optional<PropertyId> pid;
     std::optional<Vec3> orientation;
@@ -957,6 +962,10 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_pelas(ctx, card.fields);
       else if (kw == "PMASS")
         process_pmass(ctx, card.fields);
+      else if (kw == "PROD")
+        process_prod(ctx, card.fields);
+      else if (kw == "SPOINT")
+        process_spoint(ctx, card.fields);
       else if (kw == "CQUAD4")
         process_cquad4(ctx, card.fields);
       else if (kw == "CTRIA3")
@@ -971,24 +980,36 @@ Model BdfParser::parse_stream(std::istream &in) {
         process_cbar(ctx, card.fields);
       else if (kw == "CBEAM")
         process_cbeam(ctx, card.fields);
+      else if (kw == "CROD")
+        process_crod(ctx, card.fields);
       else if (kw == "CBUSH")
         process_cbush(ctx, card.fields);
       else if (kw == "CELAS1")
         process_celas1(ctx, card.fields);
       else if (kw == "CELAS2")
         process_celas2(ctx, card.fields);
+      else if (kw == "CELAS3")
+        process_celas3(ctx, card.fields);
+      else if (kw == "CELAS4")
+        process_celas4(ctx, card.fields);
       else if (kw == "CMASS1")
         process_cmass1(ctx, card.fields);
       else if (kw == "CONM2")
         process_conm2(ctx, card.fields);
       else if (kw == "CMASS2")
         process_cmass2(ctx, card.fields);
+      else if (kw == "CMASS3")
+        process_cmass3(ctx, card.fields);
+      else if (kw == "CMASS4")
+        process_cmass4(ctx, card.fields);
       else if (kw == "LOAD")
         process_load(ctx, card.fields);
       else if (kw == "FORCE")
         process_force(ctx, card.fields);
       else if (kw == "MOMENT")
         process_moment(ctx, card.fields);
+      else if (kw == "SLOAD")
+        process_sload(ctx, card.fields);
       else if (kw == "TEMP")
         process_temp(ctx, card.fields);
       else if (kw == "TEMPD")
@@ -1085,6 +1106,8 @@ Model BdfParser::parse_stream(std::istream &in) {
       log_info(std::format("PARAM,{} is ignored: CQUAD4 uses MITC4+/D and CTRIA3 "
                            "MITC3+ with their own drill stabilisation",
                            name));
+
+  resolve_scalar_points(ctx);
 
   // SNORM grids and coordinate systems must exist.
   for (const auto &[gid, sn] : ctx.model.snorms) {
@@ -1699,7 +1722,7 @@ void BdfParser::process_snorm(ParseContext &ctx,
 
 void BdfParser::process_mat1(ParseContext &ctx,
                              const std::vector<std::string> &f) {
-  // MAT1, MID, E, G, NU, RHO, A, TREF, GE
+  // MAT1, MID, E, G, NU, RHO, A, TREF, GE, ST, SC, SS, MCSID
   Mat1 m;
   m.id = MaterialId(parse_int(f[1], ctx.line_num));
   m.E = parse_double(f[2], ctx.line_num);
@@ -1708,6 +1731,12 @@ void BdfParser::process_mat1(ParseContext &ctx,
   m.rho = f[5].empty() ? 0.0 : parse_double(f[5], ctx.line_num);
   m.A = f[6].empty() ? 0.0 : parse_double(f[6], ctx.line_num);
   m.ref_temp = f[7].empty() ? 0.0 : parse_double(f[7], ctx.line_num);
+  // Continuation: ST, SC, SS (a blank field reads as no allowable).
+  if (f.size() > 11) {
+    m.st = parse_double(f[9], ctx.line_num);
+    m.sc = parse_double(f[10], ctx.line_num);
+    m.ss = parse_double(f[11], ctx.line_num);
+  }
 
   // Derive G from E, nu if not given
   if (m.G == 0.0 && m.E > 0 && m.nu > 0)
@@ -2096,6 +2125,24 @@ void BdfParser::process_pbeam(ParseContext &ctx,
   ctx.model.properties[p.pid] = p;
 }
 
+void BdfParser::process_prod(ParseContext &ctx,
+                             const std::vector<std::string> &f) {
+  // PROD, PID, MID, A, J, C, NSM
+  PRod p;
+  p.pid = PropertyId(parse_int(f[1], ctx.line_num));
+  p.mid = MaterialId(parse_int(f[2], ctx.line_num));
+  p.A = parse_double(f[3], ctx.line_num);
+  p.J = parse_double(f[4], ctx.line_num);
+  p.C = parse_double(f[5], ctx.line_num);
+  p.nsm = parse_double(f[6], ctx.line_num);
+  if (p.A < 0.0 || p.J < 0.0)
+    throw ParseError(std::format("Line {}: PROD {} has negative A ({}) or J ({})",
+                                 ctx.line_num, p.pid.value, p.A, p.J));
+  reject_nonblank_fields(f, 7, ctx.line_num, "PROD",
+                         "extra continuation data is not supported");
+  ctx.model.properties[p.pid] = p;
+}
+
 void BdfParser::process_pbush(ParseContext &ctx,
                               const std::vector<std::string> &f) {
   PBush p;
@@ -2332,6 +2379,25 @@ void BdfParser::process_cbar(ParseContext &ctx,
   ctx.model.elements.push_back(std::move(e));
 }
 
+void BdfParser::process_crod(ParseContext &ctx,
+                             const std::vector<std::string> &f) {
+  // CROD, EID, PID, G1, G2  (fields 5-8 may hold a second element, as in COSMIC)
+  for (const size_t first : {size_t{1}, size_t{5}}) {
+    if (f[first].empty())
+      continue;
+    ElementData e;
+    e.id = ElementId(parse_int(f[first], ctx.line_num));
+    e.type = ElementType::CROD;
+    e.pid = f[first + 1].empty() ? PropertyId(e.id.value)
+                                 : PropertyId(parse_int(f[first + 1], ctx.line_num));
+    e.nodes.push_back(NodeId(parse_int(f[first + 2], ctx.line_num)));
+    e.nodes.push_back(NodeId(parse_int(f[first + 3], ctx.line_num)));
+    ctx.model.elements.push_back(std::move(e));
+  }
+  reject_nonblank_fields(f, 9, ctx.line_num, "CROD",
+                         "extra continuation data is not supported");
+}
+
 void BdfParser::process_conm2(ParseContext &ctx,
                               const std::vector<std::string> &f) {
   // CONM2, EID, G, CID, M, X1, X2, X3, (blank)
@@ -2412,19 +2478,158 @@ void BdfParser::process_cbush(ParseContext &ctx,
   ctx.model.elements.push_back(std::move(e));
 }
 
+/// G1, C1, G2, C2 of CELAS1/2 and CMASS1/2 (fields 3-6).  A blank or zero point
+/// is ground, and a blank component reads as 0, which is how a scalar point is
+/// connected (resolve_scalar_points).
+void BdfParser::parse_scalar_connection(ElementData &e,
+                                        const std::vector<std::string> &f,
+                                        const int line) {
+  for (const size_t field : {size_t{3}, size_t{5}}) {
+    const int point = parse_int(f[field], line);
+    if (point == 0)
+      continue;
+    e.components[e.nodes.size()] = parse_int(f[field + 1], line);
+    e.nodes.push_back(NodeId(point));
+  }
+  if (e.nodes.empty())
+    throw ParseError(std::format(
+        "Line {}: scalar element {} connects no point", line, e.id.value));
+}
+
+/// S1, S2 of CELAS3/4 and CMASS3/4 (fields 3-4), which connect scalar points
+/// only.  These cards are the CELAS1/2 and CMASS1/2 forms with blank components.
+void BdfParser::parse_scalar_points(ElementData &e,
+                                    const std::vector<std::string> &f,
+                                    const int line) {
+  for (const size_t field : {size_t{3}, size_t{4}}) {
+    const int point = parse_int(f[field], line);
+    if (point != 0)
+      e.nodes.push_back(NodeId(point));
+  }
+  if (e.nodes.empty())
+    throw ParseError(std::format(
+        "Line {}: scalar element {} connects no point", line, e.id.value));
+}
+
+void BdfParser::process_celas3(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  // CELAS3, EID, PID, S1, S2
+  ElementData e;
+  e.id = ElementId(parse_int(f[1], ctx.line_num));
+  e.type = ElementType::CELAS1;
+  e.pid = PropertyId(parse_int(f[2], ctx.line_num));
+  parse_scalar_points(e, f, ctx.line_num);
+  reject_nonblank_fields(f, 5, ctx.line_num, "CELAS3",
+                         "extra continuation data is not supported");
+  ctx.model.elements.push_back(std::move(e));
+}
+
+void BdfParser::process_celas4(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  // CELAS4, EID, K, S1, S2
+  ElementData e;
+  e.id = ElementId(parse_int(f[1], ctx.line_num));
+  e.type = ElementType::CELAS2;
+  e.value = parse_double(f[2], ctx.line_num);
+  parse_scalar_points(e, f, ctx.line_num);
+  reject_nonblank_fields(f, 5, ctx.line_num, "CELAS4",
+                         "extra continuation data is not supported");
+  ctx.model.elements.push_back(std::move(e));
+}
+
+void BdfParser::process_cmass3(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  // CMASS3, EID, PID, S1, S2
+  ElementData e;
+  e.id = ElementId(parse_int(f[1], ctx.line_num));
+  e.type = ElementType::CMASS1;
+  e.pid = PropertyId(parse_int(f[2], ctx.line_num));
+  parse_scalar_points(e, f, ctx.line_num);
+  reject_nonblank_fields(f, 5, ctx.line_num, "CMASS3",
+                         "extra continuation data is not supported");
+  ctx.model.elements.push_back(std::move(e));
+}
+
+void BdfParser::process_cmass4(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  // CMASS4, EID, M, S1, S2
+  ElementData e;
+  e.id = ElementId(parse_int(f[1], ctx.line_num));
+  e.type = ElementType::CMASS2;
+  e.value = parse_double(f[2], ctx.line_num);
+  parse_scalar_points(e, f, ctx.line_num);
+  reject_nonblank_fields(f, 5, ctx.line_num, "CMASS4",
+                         "extra continuation data is not supported");
+  ctx.model.elements.push_back(std::move(e));
+}
+
+void BdfParser::process_spoint(ParseContext &ctx,
+                               const std::vector<std::string> &f) {
+  // SPOINT, ID1, ID2, ...  or  SPOINT, ID1, THRU, ID2
+  for (const int id : expand_id_list(f, 1, ctx.line_num))
+    ctx.scalar_points.insert(NodeId(id));
+}
+
+/// Adds the scalar points to the model and gives their references the component
+/// the rest of the solver uses for them, 1.  As in Nastran, a scalar element
+/// connection with a blank or zero component needs no SPOINT card: it defines
+/// the point itself.
+void BdfParser::resolve_scalar_points(ParseContext &ctx) {
+  Model &model = ctx.model;
+  const auto is_scalar_connection = [](const ElementData &e) {
+    return e.type == ElementType::CELAS1 || e.type == ElementType::CELAS2 ||
+           e.type == ElementType::CMASS1 || e.type == ElementType::CMASS2;
+  };
+  for (const NodeId nid : ctx.scalar_points)
+    if (model.nodes.contains(nid))
+      throw ParseError(std::format(
+          "SPOINT {} has the same ID as a GRID; grid and scalar points share "
+          "one ID space",
+          nid.value));
+  for (const ElementData &e : model.elements) {
+    if (!is_scalar_connection(e))
+      continue;
+    for (size_t i = 0; i < e.nodes.size(); ++i) {
+      if (e.components[i] != 0)
+        continue;
+      if (model.nodes.contains(e.nodes[i]))
+        throw ParseError(std::format(
+            "Element {} connects GRID {} with a blank or zero component, which "
+            "is valid only for a scalar point",
+            e.id.value, e.nodes[i].value));
+      ctx.scalar_points.insert(e.nodes[i]);
+    }
+  }
+  if (ctx.scalar_points.empty())
+    return;
+
+  for (const NodeId nid : ctx.scalar_points) {
+    GridPoint point;
+    point.id = nid;
+    point.scalar = true;
+    model.nodes.emplace(nid, point);
+  }
+  for (ElementData &e : model.elements)
+    if (is_scalar_connection(e))
+      for (size_t i = 0; i < e.nodes.size(); ++i)
+        if (e.components[i] == 0)
+          e.components[i] = 1;
+  for (Spc &spc : model.spcs)
+    if (ctx.scalar_points.contains(spc.node) && spc.dofs.mask == 0)
+      spc.dofs.mask = 1;
+  for (Mpc &mpc : model.mpcs)
+    for (MpcTerm &term : mpc.terms)
+      if (ctx.scalar_points.contains(term.node) && term.dof == 0)
+        term.dof = 1;
+}
+
 void BdfParser::process_celas1(ParseContext &ctx,
                                const std::vector<std::string> &f) {
   ElementData e;
   e.id = ElementId(parse_int(f[1], ctx.line_num));
   e.type = ElementType::CELAS1;
   e.pid = PropertyId(parse_int(f[2], ctx.line_num));
-  e.nodes.push_back(NodeId(parse_int(f[3], ctx.line_num)));
-  e.components[0] = parse_int(f[4], ctx.line_num);
-  if (f.size() > 5 && !f[5].empty() && parse_int(f[5], ctx.line_num) != 0) {
-    e.nodes.push_back(NodeId(parse_int(f[5], ctx.line_num)));
-    e.components[1] =
-        (f.size() > 6 && !f[6].empty()) ? parse_int(f[6], ctx.line_num) : 0;
-  }
+  parse_scalar_connection(e, f, ctx.line_num);
   reject_nonblank_fields(f, 7, ctx.line_num, "CELAS1",
                          "extra continuation data is not supported");
   ctx.model.elements.push_back(std::move(e));
@@ -2436,13 +2641,7 @@ void BdfParser::process_celas2(ParseContext &ctx,
   e.id = ElementId(parse_int(f[1], ctx.line_num));
   e.type = ElementType::CELAS2;
   e.value = parse_double(f[2], ctx.line_num);
-  e.nodes.push_back(NodeId(parse_int(f[3], ctx.line_num)));
-  e.components[0] = parse_int(f[4], ctx.line_num);
-  if (f.size() > 5 && !f[5].empty() && parse_int(f[5], ctx.line_num) != 0) {
-    e.nodes.push_back(NodeId(parse_int(f[5], ctx.line_num)));
-    e.components[1] =
-        (f.size() > 6 && !f[6].empty()) ? parse_int(f[6], ctx.line_num) : 0;
-  }
+  parse_scalar_connection(e, f, ctx.line_num);
   if ((f.size() > 7 && !f[7].empty() &&
        parse_double(f[7], ctx.line_num) != 0.0) ||
       (f.size() > 8 && !f[8].empty() &&
@@ -2463,13 +2662,7 @@ void BdfParser::process_cmass1(ParseContext &ctx,
   e.id = ElementId(parse_int(f[1], ctx.line_num));
   e.type = ElementType::CMASS1;
   e.pid = PropertyId(parse_int(f[2], ctx.line_num));
-  e.nodes.push_back(NodeId(parse_int(f[3], ctx.line_num)));
-  e.components[0] = parse_int(f[4], ctx.line_num);
-  if (f.size() > 5 && !f[5].empty() && parse_int(f[5], ctx.line_num) != 0) {
-    e.nodes.push_back(NodeId(parse_int(f[5], ctx.line_num)));
-    e.components[1] =
-        (f.size() > 6 && !f[6].empty()) ? parse_int(f[6], ctx.line_num) : 0;
-  }
+  parse_scalar_connection(e, f, ctx.line_num);
   reject_nonblank_fields(f, 7, ctx.line_num, "CMASS1",
                          "extra continuation data is not supported");
   ctx.model.elements.push_back(std::move(e));
@@ -2481,13 +2674,7 @@ void BdfParser::process_cmass2(ParseContext &ctx,
   e.id = ElementId(parse_int(f[1], ctx.line_num));
   e.type = ElementType::CMASS2;
   e.value = parse_double(f[2], ctx.line_num);
-  e.nodes.push_back(NodeId(parse_int(f[3], ctx.line_num)));
-  e.components[0] = parse_int(f[4], ctx.line_num);
-  if (f.size() > 5 && !f[5].empty() && parse_int(f[5], ctx.line_num) != 0) {
-    e.nodes.push_back(NodeId(parse_int(f[5], ctx.line_num)));
-    e.components[1] =
-        (f.size() > 6 && !f[6].empty()) ? parse_int(f[6], ctx.line_num) : 0;
-  }
+  parse_scalar_connection(e, f, ctx.line_num);
   reject_nonblank_fields(f, 7, ctx.line_num, "CMASS2",
                          "extra continuation data is not supported");
   ctx.model.elements.push_back(std::move(e));
@@ -2532,6 +2719,23 @@ void BdfParser::process_force(ParseContext &ctx,
       Vec3(parse_double(f[5], ctx.line_num), parse_double(f[6], ctx.line_num),
            parse_double(f[7], ctx.line_num));
   ctx.model.loads.emplace_back(l);
+}
+
+void BdfParser::process_sload(ParseContext &ctx,
+                              const std::vector<std::string> &f) {
+  // SLOAD, SID, S1, F1, S2, F2, S3, F3
+  const LoadSetId sid(parse_int(f[1], ctx.line_num));
+  for (const size_t field : {size_t{2}, size_t{4}, size_t{6}}) {
+    if (f[field].empty())
+      continue;
+    SloadLoad l;
+    l.sid = sid;
+    l.node = NodeId(parse_int(f[field], ctx.line_num));
+    l.value = parse_double(f[field + 1], ctx.line_num);
+    ctx.model.loads.emplace_back(l);
+  }
+  reject_nonblank_fields(f, 8, ctx.line_num, "SLOAD",
+                         "extra continuation data is not supported");
 }
 
 void BdfParser::process_moment(ParseContext &ctx,
@@ -2931,19 +3135,25 @@ void BdfParser::process_mpc(ParseContext &ctx,
   mpc.sid = MpcSetId(sid);
 
   // Fixed-field MPC continuations reserve alignment fields between pairs of
-  // terms. Logical-card flattening preserves those blanks, so compact the
-  // required fields before grouping them into (G, C, A) triples.
-  std::vector<std::string> data;
-  for (size_t i = 2; i < f.size(); ++i) {
-    if (!f[i].empty())
-      data.emplace_back(f[i]);
-  }
-  for (size_t i = 0; i + 2 < data.size(); i += 3) {
+  // terms, and logical-card flattening preserves those blanks, so blanks before
+  // a point or a coefficient are skipped.  The component that follows a point is
+  // read in place, since a scalar point's is blank.
+  for (size_t i = 2; i < f.size();) {
+    if (f[i].empty()) {
+      ++i;
+      continue;
+    }
+    size_t coeff = i + 2;
+    while (coeff < f.size() && f[coeff].empty())
+      ++coeff;
+    if (coeff >= f.size())
+      break;
     MpcTerm term;
-    term.node  = NodeId(parse_int(data[i], ctx.line_num));
-    term.dof   = parse_int(data[i + 1], ctx.line_num);
-    term.coeff = parse_double(data[i + 2], ctx.line_num);
+    term.node  = NodeId(parse_int(f[i], ctx.line_num));
+    term.dof   = parse_int(f[i + 1], ctx.line_num);
+    term.coeff = parse_double(f[coeff], ctx.line_num);
     mpc.terms.push_back(term);
+    i = coeff + 1;
   }
 
   if (!mpc.terms.empty())

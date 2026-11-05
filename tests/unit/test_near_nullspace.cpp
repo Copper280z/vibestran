@@ -16,9 +16,11 @@
 #include <format>
 #include <iostream>
 #include <map>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace vibestran;
@@ -141,6 +143,99 @@ TEST(RigidBodyModes, ConstrainedEquationsHaveNoRow) {
     EXPECT_DOUBLE_EQ(r.modes->modes[0 * 6 + 5], 0.5);
     EXPECT_DOUBLE_EQ(r.modes->modes[1 * 6 + 5], 1.0);
     EXPECT_DOUBLE_EQ(r.modes->modes[1 * 6 + 0], 0.0);
+}
+
+TEST(RigidBodyModes, ScalarPointsHaveZeroRowsAndTheirOwnPointNumber) {
+    // Scalar points sit at the origin in storage but must not move the centroid,
+    // or the rigid rotations of the grids stop being exact.
+    const std::string sheet = shell_sheet(3);
+    const std::string scalar =
+        "SPOINT,90001,90002\nCELAS4,90001,1.E3,90001,90002\nSPC,1,90002,0\n";
+    const auto with = assemble(kSteel + sheet + scalar + kFreeFree, false);
+    const auto without = assemble(kSteel + sheet + kFreeFree, false);
+    ASSERT_TRUE(with.modes && without.modes);
+    ASSERT_EQ(with.k.n, without.k.n + 1);
+    ASSERT_EQ(with.modes->points, without.modes->points + 1);
+    const auto cols = std::size_t(with.modes->cols);
+    // Point numbering is by ascending ID, so the scalar's equation comes last.
+    const auto scalar_row = std::size_t(with.k.n - 1);
+    EXPECT_EQ(with.modes->point[scalar_row], with.modes->points - 1);
+    for (std::size_t c = 0; c < cols; ++c)
+        EXPECT_EQ(with.modes->modes[scalar_row * cols + c], 0.0);
+    for (std::size_t i = 0; i < std::size_t(without.k.n) * cols; ++i)
+        EXPECT_EQ(with.modes->modes[i], without.modes->modes[i]);
+}
+
+TEST(RigidBodyAmg, ScalarPointsOnAStructureSolveToTheDirectAnswer) {
+    // A sheet with scalar oscillators attached at many grids: the zero mode rows
+    // leave scalar equations to the smoother, and the solution must not change.
+    std::ostringstream extra;
+    for (int i = 1; i <= 20; ++i) {
+        extra << "SPOINT," << 90000 + i << "\nCELAS2," << 90000 + i << ",1.E5," << i * 5 << ",3,"
+              << 90000 + i << "\nCELAS2," << 91000 + i << ",1.E4," << 90000 + i << "\n";
+    }
+    extra << "SLOAD,2,90007,50.\n";
+    const auto r = assemble(shell_sheet(16) + extra.str());
+    ASSERT_TRUE(r.modes);
+    const auto solved = detail::solve_hybrid_amg(r.k, r.f, 1e-10, 5000, {}, r.modes);
+    ASSERT_LT(solved.iterations, 5000);
+    const double scale = test::largest_magnitude(r.u);
+    for (std::size_t i = 0; i < r.u.size(); ++i)
+        EXPECT_NEAR(solved.solution[i], r.u[i], 1e-6 * scale) << "equation " << i;
+}
+
+namespace {
+
+// A 3-D pin-jointed lattice of CRODs: grid IDs from 1, clamped at x = 0, with the
+// rotations left to AUTOSPC.
+std::string rod_lattice(int n) {
+    std::ostringstream out;
+    out << kSteel << "PROD,70,1,0.01\n";
+    const auto grid = [n](int i, int j, int k) { return 1 + i + (n + 1) * (j + (n + 1) * k); };
+    int eid = 1;
+    for (int k = 0; k <= n; ++k)
+        for (int j = 0; j <= n; ++j)
+            for (int i = 0; i <= n; ++i) {
+                out << std::format("GRID,{},,{},{},{}\n", grid(i, j, k), double(i), double(j), double(k));
+                if (i == 0)
+                    out << "SPC1,1,123," << grid(i, j, k) << "\n";
+                for (const auto& [a, b, c] : {std::tuple(1, 0, 0), std::tuple(0, 1, 0), std::tuple(0, 0, 1),
+                                              std::tuple(1, 1, 0), std::tuple(1, 0, 1), std::tuple(0, 1, 1),
+                                              std::tuple(1, 1, 1)})
+                    if (i + a <= n && j + b <= n && k + c <= n)
+                        out << std::format("CROD,{},70,{},{}\n", eid++, grid(i, j, k), grid(i + a, j + b, k + c));
+            }
+    out << std::format("FORCE,2,{},0,1.,0.,0.,-1.\n", grid(n, n, n));
+    return out.str();
+}
+
+} // namespace
+
+TEST(RigidBodyModes, RodLatticeAnnihilatesTheModes) {
+    // AUTOSPC removes only rotations here, which rods do not couple to the
+    // translations, so the free-free translations still carry every rigid motion.
+    const std::string lattice = rod_lattice(3);
+    const std::string unclamped = std::regex_replace(lattice, std::regex("SPC1,1,123,[0-9]+\n"), "");
+    const auto r = assemble(unclamped + kFreeFree, false);
+    ASSERT_TRUE(r.modes);
+    const double k_max = test::largest_magnitude(r.k.values);
+    for (int c = 0; c < 6; ++c) {
+        std::vector<double> mode(std::size_t(r.k.n));
+        for (std::size_t i = 0; i < mode.size(); ++i)
+            mode[i] = r.modes->modes[i * 6 + std::size_t(c)];
+        const auto y = product(r.k, mode);
+        EXPECT_LT(test::largest_magnitude(y), 1e-9 * k_max) << "mode " << c;
+    }
+}
+
+TEST(RigidBodyAmg, RodLatticeSolvesToTheDirectAnswer) {
+    const auto r = assemble(rod_lattice(10));
+    ASSERT_TRUE(r.modes);
+    const auto solved = detail::solve_hybrid_amg(r.k, r.f, 1e-10, 5000, {}, r.modes);
+    ASSERT_LT(solved.iterations, 5000);
+    const double scale = test::largest_magnitude(r.u);
+    for (std::size_t i = 0; i < r.u.size(); ++i)
+        EXPECT_NEAR(solved.solution[i], r.u[i], 1e-6 * scale) << "equation " << i;
 }
 
 TEST(AmgModes, ChoicePrecedence) {

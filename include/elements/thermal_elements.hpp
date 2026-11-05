@@ -3,7 +3,7 @@
 // Concrete thermal element classes for linear steady-state heat conduction.
 //
 // Coverage (MVP):
-//   - ThermalLine   — 1D axial conduction (CROD / CBAR / CTUBE / CONROD)
+//   - ThermalLine   — 1D axial conduction (CROD / CBAR / CBEAM)
 //   - ThermalTetra4 — constant-gradient tetrahedron (closed-form)
 //   - ThermalHexa8  — trilinear 8-node hex, 2×2×2 Gauss
 //   - ThermalTetra10 — quadratic 10-node tet, 4-point Gauss

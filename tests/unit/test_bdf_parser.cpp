@@ -896,7 +896,7 @@ BEGIN BULK
 GRID,1,,0.0,0.0,0.0
 PBEAML,10,1
 PBEAML,11,1
-CELAS3,100,1,2
+CGAP,100,1,2
 ENDDATA
 )";
 
@@ -908,7 +908,7 @@ ENDDATA
 
     EXPECT_NE(log_text.find("Unsupported BDF cards were ignored"), std::string::npos);
     EXPECT_NE(log_text.find("Case control: ECHO, TITLE"), std::string::npos);
-    EXPECT_NE(log_text.find("Bulk data: CELAS3, PBEAML"), std::string::npos);
+    EXPECT_NE(log_text.find("Bulk data: CGAP, PBEAML"), std::string::npos);
 }
 
 TEST(BdfParser, SmallFieldSpcFullLine) {

@@ -45,6 +45,8 @@ gather_nodes(const Model &model, std::span<const NodeId> ids) {
     return pbarl->A;
   if (const auto *pbeam = std::get_if<PBeam>(&prop))
     return pbeam->A;
+  if (const auto *prod = std::get_if<PRod>(&prop))
+    return prod->A;
   return 0.0;
 }
 
@@ -136,6 +138,8 @@ MaterialId property_thermal_mid(const Model &model, PropertyId pid) {
   if (const auto *p = std::get_if<PBarL>(&prop))
     return p->mid;
   if (const auto *p = std::get_if<PBeam>(&prop))
+    return p->mid;
+  if (const auto *p = std::get_if<PRod>(&prop))
     return p->mid;
   throw SolverError(std::format(
       "Property {} has no material reference suitable for thermal analysis",
@@ -970,7 +974,8 @@ make_thermal_element(const ElementData &data, const Model &model) {
     return std::make_unique<ThermalPenta6>(data.id, data.pid, n, model);
   }
   case ElementType::CBAR:
-  case ElementType::CBEAM: {
+  case ElementType::CBEAM:
+  case ElementType::CROD: {
     std::array<NodeId, 2> n{data.nodes[0], data.nodes[1]};
     return std::make_unique<ThermalLine>(data.id, data.type, data.pid, n, model);
   }

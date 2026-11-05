@@ -132,7 +132,10 @@ void write_f06_header(std::ostream &out, std::string_view title,
 F06Section solution_section(const Model &model, std::string_view solution) {
   F06Section s{"SOLUTION", {}};
   s.add("Solution", std::string(solution));
-  s.add("Grid points", std::to_string(model.nodes.size()));
+  const std::size_t scalar_points = model.scalar_point_count();
+  s.add("Grid points", std::to_string(model.nodes.size() - scalar_points));
+  if (scalar_points != 0)
+    s.add("Scalar points", std::to_string(scalar_points));
   s.add("Elements", std::to_string(model.elements.size()));
   s.add("Subcases", std::to_string(model.analysis.subcases.size()));
   std::vector<std::pair<std::string, std::string>> params(model.params.begin(),

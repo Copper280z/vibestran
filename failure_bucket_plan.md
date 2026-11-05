@@ -18,17 +18,17 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 1,786 final failure
+The suite contains 3,226 definitions. The current run has 1,706 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
-| `unsupported_input` | 963 | 178 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 596 | 207 | Result exists but differs from the reference or comparator expectation |
+| `unsupported_input` | 874 | 147 | Requires unsupported cards, solution sequences, elements, or formulations |
+| `numerical_mismatch` | 599 | 217 | Result exists but differs from the reference or comparator expectation |
 | `input_parse_error` | 185 | 15 | Parser rejects syntax or a card variant used by a valid deck |
-| `missing_result_data` | 36 | 11 | Solver completes but does not emit the requested result family |
+| `missing_result_data` | 42 | 14 | Solver completes but does not emit the requested result family |
 | `solver_model_error` | 6 | 2 | Parsed model is rejected by a geometry gate or has no free DOFs |
-| **Total** | **1,786** |  |  |
+| **Total** | **1,706** |  |  |
 
 CQUAD4 is the MITC4+/D continuum shell and CTRIA3 the MITC3+ shell (see
 `SHELL_REWRITE_PLAN.md` and `SHELL_BENCHMARKS.md`): six DOFs per grid,
@@ -212,11 +212,10 @@ show:
 
 The explicit cases are CBUSH offset/location fields (8 decks). The most
 widespread ignored keywords across these decks are `ECHO`/`TITLE` (47),
-`DEBUG`/`ID` (46), `CQUAD8` (41), `OLOAD` (34), `CROD`/`PROD` (32),
-`MEFFMASS` (24), `EIGR` (22), `SUBT` (22), `SUBTITLE` (12), and `MPFACTOR`
+`DEBUG`/`ID` (46), `CQUAD8` (41), `OLOAD` (34), `MEFFMASS` (24), `EIGR` (22), `SUBT` (22), `SUBTITLE` (12), and `MPFACTOR`
 (10).
 
-The main implementation work remains CQUAD8 (and CTRIA6), CROD/PROD,
+The main implementation work remains CQUAD8 (and CTRIA6), OLOAD output,
 modal GPFORCE, EIGR/reduction behavior, and unsupported solution
 sequences such as buckling.
 
@@ -380,8 +379,14 @@ values encode MYSTRAN behaviour and are not a correctness oracle.
 
 1. PCOMP ply stress/strain output (`COMPOSITESTRESSES`, 24 records) and
    CQUAD8/CTRIA6 (MITC9/MITC6-type elements; CQUAD8 in 41 decks).
-2. CROD/PROD, modal GPFORCE (inertia-force rows; 34 decks request
-   GPFORCE in SOL 103). Solid stress/strain output is in basic; PSOLID CORDM
+2. OLOAD output (the rod benchmark decks stop at their first
+   `APPLIEDFORCES` record, with every displacement, SPC force, rod force and
+   rod stress agreeing with MYSTRAN to 1e-4 where only rods are present) and
+   modal GPFORCE (inertia-force rows; 34 decks request GPFORCE in SOL 103). Two
+   parser and constraint gaps show on rod decks: MPCADD only collects MPCs that
+   precede it (`SB-RBE2-01-CROD-05-MPC-03`), and MPC components on a CD grid are
+   read in basic (`SB-RODLOAD-MPC-FOR-SING`). ELFORCE and stress output for
+   CELASi are missing (`celas3_*`, `celas4_*`). Solid stress/strain output is in basic; PSOLID CORDM
    is parsed but not yet applied.
 3. Triage the faceted-cylinder free-thermal decks and the SPCFORCES
    `numerical_mismatch` decks (RBE3 node-surface coupling, MITC4+ reaction
@@ -598,3 +603,8 @@ most recent entry.
   orientation, whose det(J) is negative (SOL 103 and GRAV used to fail on
   correctly numbered tet10 meshes). No suite deck uses either; the one-record
   change is the RBE3 10 roundoff flake.
+- **CROD and scalar points (1,786 → 1,706 final failure records).** CROD/PROD,
+  SPOINT, SLOAD and CELAS3/4, CMASS3/4 were added, with AUTOSPC at rod grids.
+  `unsupported_input` fell by 31 decks; those now run, and some reach a
+  comparison that fails for another reason (item 2 of the next steps). No record
+  fails that passed in the run of 2026-10-31.

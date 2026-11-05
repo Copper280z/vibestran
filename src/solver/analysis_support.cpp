@@ -3,10 +3,14 @@
 #include "solver/analysis_support.hpp"
 
 #include "core/coord_sys.hpp"
+#include "elements/element_factory.hpp"
 #include "elements/rbe_constraints.hpp"
+#include "solver/linear_static.hpp"
+#include <Eigen/Dense>
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <iterator>
 #include <unordered_map>
@@ -43,6 +47,7 @@ void mark_element_dofs(const ElementData &elem,
   case ElementType::CTRIA3:
   case ElementType::CBAR:
   case ElementType::CBEAM:
+  case ElementType::CROD:
   case ElementType::CBUSH:
     for (NodeId nid : elem.nodes)
       mark_all(node_masks[nid]);
@@ -232,7 +237,132 @@ void reduce_3x3_constraints(NodeId nid, const Mat3 &T3,
   }
 }
 
+/// Removes from `free` (positions in a block) the components nearest each
+/// principal direction of `block` whose stiffness is below tolerance, and
+/// returns them.
+std::vector<int> singular_components(const Eigen::Matrix3d &block,
+                                     std::vector<int> free,
+                                     const double tolerance) {
+  std::vector<int> singular;
+  while (!free.empty()) {
+    const auto n = static_cast<Eigen::Index>(free.size());
+    Eigen::MatrixXd sub(n, n);
+    for (Eigen::Index i = 0; i < n; ++i)
+      for (Eigen::Index j = 0; j < n; ++j)
+        sub(i, j) = block(free[static_cast<size_t>(i)], free[static_cast<size_t>(j)]);
+    const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen(sub);
+    if (eigen.eigenvalues()(0) > tolerance)
+      break;
+    // The largest entry of the weakest direction; the first of those that tie,
+    // up to roundoff, so a rod at 45 degrees picks the same component each run.
+    Eigen::Index nearest = 0;
+    for (Eigen::Index i = 1; i < n; ++i)
+      if (std::abs(eigen.eigenvectors()(i, 0)) >
+          std::abs(eigen.eigenvectors()(nearest, 0)) + 1e-9)
+        nearest = i;
+    singular.push_back(free[static_cast<size_t>(nearest)]);
+    free.erase(free.begin() + nearest);
+  }
+  return singular;
+}
+
 } // namespace
+
+std::vector<Spc> analysis_spcs(const Model &model, const SubCase &sc) {
+  std::vector<Spc> result = model.structural_spcs(sc.spc_set);
+  const auto autospc = model.params.find("AUTOSPC");
+  if (autospc != model.params.end() && !autospc->second.empty() &&
+      std::toupper(static_cast<unsigned char>(autospc->second[0])) == 'N')
+    return result;
+
+  std::unordered_map<NodeId, Eigen::Matrix<double, 6, 6>> blocks;
+  for (const auto &elem : model.elements)
+    if (elem.type == ElementType::CROD)
+      for (const NodeId nid : elem.nodes)
+        blocks.try_emplace(nid, Eigen::Matrix<double, 6, 6>::Zero());
+  if (blocks.empty())
+    return result;
+
+  // Each grid's own 6x6 stiffness from every element on it, in basic axes.
+  for (const auto &elem : model.elements) {
+    if (std::none_of(elem.nodes.begin(), elem.nodes.end(),
+                     [&](NodeId nid) { return blocks.contains(nid); }))
+      continue;
+    const LocalKe ke = make_element(elem, model)->stiffness_matrix();
+    const auto identity = local_dof_identity(elem);
+    for (Eigen::Index i = 0; i < ke.rows(); ++i) {
+      const auto [node, row] = identity[static_cast<size_t>(i)];
+      const auto block = blocks.find(node);
+      if (block == blocks.end())
+        continue;
+      for (Eigen::Index j = 0; j < ke.cols(); ++j) {
+        const auto [other, col] = identity[static_cast<size_t>(j)];
+        if (other == node)
+          block->second(row, col) += ke(i, j);
+      }
+    }
+  }
+
+  // Components already controlled at these grids.
+  std::unordered_map<NodeId, ActiveMask> by_spc;
+  for (const Spc &spc : result)
+    for (int d = 1; d <= 6; ++d)
+      if (spc.dofs.has(d))
+        mark_component(by_spc[spc.node], d);
+  std::unordered_map<NodeId, ActiveMask> by_mpc;
+  mark_rigid_element_dofs(model, by_mpc);
+  mark_explicit_mpc_dofs(model, sc, by_mpc);
+
+  const double epzero = model.param_real("EPZERO").value_or(1e-8);
+  std::vector<NodeId> grids;
+  grids.reserve(blocks.size());
+  for (const auto &[nid, _] : blocks)
+    grids.push_back(nid);
+  std::sort(grids.begin(), grids.end());
+
+  for (const NodeId nid : grids) {
+    const Eigen::Matrix<double, 6, 6> &k = blocks.at(nid);
+    const GridPoint &gp = model.node(nid);
+    Eigen::Matrix3d T = Eigen::Matrix3d::Identity();
+    if (const auto cs = model.coord_systems.find(gp.cd);
+        gp.cd != CoordId{0} && cs != model.coord_systems.end()) {
+      const Mat3 T3 = rotation_matrix(cs->second, gp.position);
+      for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+          T(i, j) = T3(i, j);
+    }
+    const auto spc_mask = by_spc.find(nid);
+    const auto mpc_mask = by_mpc.find(nid);
+    const auto marked = [](const auto &masks, const auto &it, const int d) {
+      return it != masks.end() && it->second[static_cast<size_t>(d)];
+    };
+
+    Spc added;
+    added.sid = sc.spc_set;
+    added.node = nid;
+    for (const int base : {0, 3}) {
+      bool mpc_on_block = false;
+      for (int c = 0; c < 3; ++c)
+        mpc_on_block = mpc_on_block || marked(by_mpc, mpc_mask, base + c);
+      if (mpc_on_block && gp.cd != CoordId{0})
+        continue;
+      std::vector<int> free;
+      for (int c = 0; c < 3; ++c)
+        if (!marked(by_spc, spc_mask, base + c) &&
+            !marked(by_mpc, mpc_mask, base + c))
+          free.push_back(c);
+      const Eigen::Matrix3d block = T.transpose() * k.block<3, 3>(base, base) * T;
+      const double largest =
+          Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>(block, Eigen::EigenvaluesOnly)
+              .eigenvalues()(2);
+      for (const int c : singular_components(block, std::move(free), epzero * largest))
+        added.dofs.mask |= static_cast<uint8_t>(1U << (base + c));
+    }
+    if (added.dofs.mask != 0)
+      result.push_back(added);
+  }
+  return result;
+}
 
 DofMap build_analysis_dof_map(const Model &model, const SubCase &sc) {
   DofMap dmap;
@@ -257,7 +387,7 @@ DofMap build_analysis_dof_map(const Model &model, const SubCase &sc) {
   dmap.constrain_batch(inactive_constraints);
 
   std::vector<std::pair<NodeId, int>> spc_constraints;
-  for (const Spc &spc : model.structural_spcs(sc.spc_set)) {
+  for (const Spc &spc : analysis_spcs(model, sc)) {
     auto node_it = model.nodes.find(spc.node);
     const bool has_cd =
         (node_it != model.nodes.end() && node_it->second.cd.value != 0);
@@ -285,7 +415,7 @@ void build_analysis_mpc_system(const Model &model, const SubCase &sc,
     std::array<double, 6> values{};
   };
   std::unordered_map<NodeId, SpcValues> node_spcs;
-  for (const Spc &spc : model.structural_spcs(sc.spc_set)) {
+  for (const Spc &spc : analysis_spcs(model, sc)) {
     SpcValues& values = node_spcs[spc.node];
     values.dofs.mask |= spc.dofs.mask;
     for (int d = 0; d < 6; ++d) {

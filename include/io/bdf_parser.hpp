@@ -11,10 +11,12 @@
 //   - Comment lines ($)
 //
 // Parsed card types: GRID, MAT1, MAT2, MAT3, MAT4, MAT5, MAT6, MAT8,
-//                    PSHELL, PSOLID, PBAR, PBARL, PBEAM, PBUSH, PELAS, PMASS,
+//                    SPOINT,
+//                    PSHELL, PSOLID, PBAR, PBARL, PBEAM, PROD, PBUSH, PELAS, PMASS,
 //                    CQUAD4, CTRIA3, CHEXA, CTETRA, CPENTA,
-//                    CBAR, CBEAM, CBUSH, CELAS1, CELAS2, CMASS1, CMASS2,
-//                    FORCE, MOMENT, TEMP, TEMPD, GRAV, ACCEL1,
+//                    CBAR, CBEAM, CROD, CBUSH, CELAS1, CELAS2, CELAS3, CELAS4,
+//                    CMASS1, CMASS2, CMASS3, CMASS4,
+//                    FORCE, MOMENT, SLOAD, TEMP, TEMPD, GRAV, ACCEL1,
 //                    PLOAD, PLOAD1, PLOAD2, PLOAD4,
 //                    SPC, SPC1,
 //                    SOL, SUBCASE, LOAD, SPC (case control)
@@ -68,6 +70,17 @@ private:
     static void process_pbush   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_pelas   (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_pmass   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_prod    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_spoint  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_crod    (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_sload   (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_celas3  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_celas4  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_cmass3  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void process_cmass4  (ParseContext& ctx, const std::vector<std::string>& fields);
+    static void resolve_scalar_points(ParseContext& ctx);
+    static void parse_scalar_connection(ElementData& e, const std::vector<std::string>& fields, int line);
+    static void parse_scalar_points(ElementData& e, const std::vector<std::string>& fields, int line);
     static void process_cquad4  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_ctria3  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_chexa   (ParseContext& ctx, const std::vector<std::string>& fields);

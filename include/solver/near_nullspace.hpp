@@ -44,8 +44,9 @@ enum class AmgModes {
 /// grid's displacement frame (CD affects only constraints and output), and each
 /// motion that satisfies the model's MPCs and RBEs is the image of its
 /// independent DOFs under the elimination, so restricting it to them is exact:
-/// K_reduced * mode vanishes away from single-point constraints and grounded
-/// elements. Grid points are numbered in ascending ID order.
+/// K_reduced * mode vanishes away from single-point constraints, grounded
+/// elements and springs to scalar points, whose rows of the modes are zero.
+/// Grid points are numbered in ascending ID order.
 [[nodiscard]] std::shared_ptr<const NearNullspace>
 rigid_body_modes(const Model& model, const MpcHandler& mpc_handler);
 

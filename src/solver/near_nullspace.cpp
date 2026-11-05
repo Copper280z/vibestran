@@ -31,14 +31,18 @@ std::shared_ptr<const NearNullspace> rigid_body_modes(const Model& model,
     std::vector<NodeId> grids;
     grids.reserve(model.nodes.size());
     Vec3 centre{0, 0, 0};
+    double located = 0;
     for (const auto& [id, grid] : model.nodes) {
         grids.push_back(id);
+        if (grid.scalar)
+            continue;
         centre.x += grid.position.x;
         centre.y += grid.position.y;
         centre.z += grid.position.z;
+        located += 1;
     }
     std::ranges::sort(grids, [](NodeId a, NodeId b) { return a.value < b.value; });
-    const auto count = std::max<double>(1.0, static_cast<double>(grids.size()));
+    const auto count = std::max<double>(1.0, located);
     centre.x /= count;
     centre.y /= count;
     centre.z /= count;
@@ -50,7 +54,17 @@ std::shared_ptr<const NearNullspace> rigid_body_modes(const Model& model,
     out->point.assign(n, -1);
     const DofMap& full = mpc_handler.full_dof_map();
     for (const NodeId id : grids) {
-        const Vec3& p = model.nodes.at(id).position;
+        const GridPoint& grid = model.nodes.at(id);
+        if (grid.scalar) {
+            // A scalar point takes no part in rigid motion: its row of every
+            // mode stays zero, so only the smoother and a coarse aggregate that
+            // already holds the modes act on it.
+            const EqIndex eq = mpc_handler.reduced_index(full.eq_index(id, 0));
+            if (eq != CONSTRAINED_DOF)
+                out->point[static_cast<std::size_t>(eq)] = out->points++;
+            continue;
+        }
+        const Vec3& p = grid.position;
         const double x = p.x - centre.x, y = p.y - centre.y, z = p.z - centre.z;
         // Columns T1 T2 T3 R1 R2 R3 of the motion of this grid, by component.
         const std::array<std::array<double, kCols>, kCols> motion{{

@@ -32,7 +32,8 @@ public:
   /// Build from the model: assign equation indices to all free DOFs.
   /// dofs_per_node is 6 for general 3-D; shell elements use all 6,
   /// solid elements only 3 (T1-T3) — the map always reserves 6 slots
-  /// but only activates the ones the element type needs.
+  /// but only activates the ones the element type needs.  A scalar point gets
+  /// only slot 0, whatever dofs_per_node is.
   void build(const std::unordered_map<NodeId, GridPoint> &nodes,
              int default_dofs_per_node = 6);
 

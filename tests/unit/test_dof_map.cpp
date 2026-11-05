@@ -26,6 +26,23 @@ TEST(DofMap, TwoNodesTwelveDOFBeforeConstraint) {
     EXPECT_EQ(dm.num_total_dofs(), 12);
 }
 
+TEST(DofMap, ScalarPointGetsOneEquationWhateverTheGridDofCount) {
+    auto nodes = two_nodes();
+    GridPoint scalar;
+    scalar.id = NodeId{3};
+    scalar.scalar = true;
+    nodes.emplace(scalar.id, scalar);
+    for (const int per_node : {6, 1}) {
+        DofMap dm;
+        dm.build(nodes, per_node);
+        EXPECT_EQ(dm.num_free_dofs(), 2 * per_node + 1);
+        EXPECT_EQ(dm.num_total_dofs(), 2 * per_node + 1);
+        EXPECT_NE(dm.eq_index(NodeId{3}, 0), CONSTRAINED_DOF);
+        for (int d = 1; d < 6; ++d)
+            EXPECT_EQ(dm.eq_index(NodeId{3}, d), CONSTRAINED_DOF);
+    }
+}
+
 TEST(DofMap, AllIndicesAreUnique) {
     auto nodes = two_nodes();
     DofMap dm;

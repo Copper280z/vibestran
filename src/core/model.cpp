@@ -3,6 +3,7 @@
 #include "core/coord_sys.hpp"
 #include <format>
 #include <algorithm>
+#include <span>
 #include <type_traits>
 #include <unordered_set>
 
@@ -21,6 +22,7 @@ bool element_requires_property(const ElementType type) {
     case ElementType::CPENTA6:
     case ElementType::CBAR:
     case ElementType::CBEAM:
+    case ElementType::CROD:
     case ElementType::CBUSH:
     case ElementType::CELAS1:
     case ElementType::CMASS1:
@@ -38,6 +40,11 @@ bool component_is_valid(const int component) {
     return component >= 1 && component <= 6;
 }
 
+bool is_scalar_connection(const ElementType type) {
+    return type == ElementType::CELAS1 || type == ElementType::CELAS2 ||
+           type == ElementType::CMASS1 || type == ElementType::CMASS2;
+}
+
 bool element_supports_thermal_conduction(const ElementType type) {
     switch (type) {
     case ElementType::CQUAD4:
@@ -49,6 +56,7 @@ bool element_supports_thermal_conduction(const ElementType type) {
     case ElementType::CPENTA6:
     case ElementType::CBAR:
     case ElementType::CBEAM:
+    case ElementType::CROD:
         return true;
     default:
         return false;
@@ -58,6 +66,17 @@ bool element_supports_thermal_conduction(const ElementType type) {
 } // namespace
 
 void Model::validate() const {
+    const auto is_scalar_point = [&](NodeId nid) {
+        const auto it = nodes.find(nid);
+        return it != nodes.end() && it->second.scalar;
+    };
+    const auto require_grids = [&](std::span<const NodeId> ids, const std::string& what) {
+        const auto scalar = std::find_if(ids.begin(), ids.end(), is_scalar_point);
+        if (scalar != ids.end())
+            throw SolverError(std::format(
+                "{} references scalar point {}, which has no location or grid "
+                "components; it needs a GRID", what, scalar->value));
+    };
     std::unordered_set<ElementId> element_ids;
     element_ids.reserve(elements.size());
     for (const auto& elem : elements)
@@ -86,6 +105,8 @@ void Model::validate() const {
             throw SolverError(std::format(
                 "CHBDY {} references undefined ambient node {}",
                 elem.eid.value, missing_ambient->value));
+        // The ambient points may be scalar points: they carry a temperature only.
+        require_grids(elem.nodes, std::format("CHBDY {}", elem.eid.value));
         if (elem.pid.value != 0 && !phbdy_properties.count(elem.pid))
             throw SolverError(std::format(
                 "CHBDY {} references undefined PHBDY {}",
@@ -126,19 +147,21 @@ void Model::validate() const {
             throw SolverError(std::format(
                 "Element {} references undefined property {}", elem.id.value, elem.pid.value));
 
+        if (!is_scalar_connection(elem.type))
+            require_grids(elem.nodes, std::format("Element {}", elem.id.value));
+
         if ((elem.type == ElementType::CBAR || elem.type == ElementType::CBEAM ||
+             elem.type == ElementType::CROD ||
              elem.type == ElementType::CBUSH) && elem.nodes.size() != 2) {
             throw SolverError(std::format(
                 "Element {} expects exactly 2 grid points", elem.id.value));
         }
-        if ((elem.type == ElementType::CELAS1 || elem.type == ElementType::CELAS2 ||
-             elem.type == ElementType::CMASS1 || elem.type == ElementType::CMASS2) &&
+        if (is_scalar_connection(elem.type) &&
             (elem.nodes.empty() || elem.nodes.size() > 2)) {
             throw SolverError(std::format(
                 "Scalar element {} must reference one or two grid points", elem.id.value));
         }
-        if (elem.type == ElementType::CELAS1 || elem.type == ElementType::CELAS2 ||
-            elem.type == ElementType::CMASS1 || elem.type == ElementType::CMASS2) {
+        if (is_scalar_connection(elem.type)) {
             if (!component_is_valid(elem.components[0])) {
                 throw SolverError(std::format(
                     "Element {} has invalid first component {}", elem.id.value,
@@ -149,6 +172,12 @@ void Model::validate() const {
                     "Element {} has invalid second component {}", elem.id.value,
                     elem.components[1]));
             }
+            for (std::size_t i = 0; i < elem.nodes.size(); ++i)
+                if (is_scalar_point(elem.nodes[i]) && elem.components[i] != 1)
+                    throw SolverError(std::format(
+                        "Element {} connects scalar point {} with component {}; a "
+                        "scalar point has only one component",
+                        elem.id.value, elem.nodes[i].value, elem.components[i]));
         }
     }
 
@@ -175,7 +204,8 @@ void Model::validate() const {
                         "PSOLID {} references undefined material {}", pid.value, p.mid.value));
             } else if constexpr (std::is_same_v<T, PBar> ||
                                  std::is_same_v<T, PBarL> ||
-                                 std::is_same_v<T, PBeam>) {
+                                 std::is_same_v<T, PBeam> ||
+                                 std::is_same_v<T, PRod>) {
                 if (material_card_name(p.mid) == nullptr)
                     throw SolverError(std::format(
                         "Property {} references undefined material {}", pid.value, p.mid.value));
@@ -189,6 +219,40 @@ void Model::validate() const {
     if (missing_spc != spcs.end())
         throw SolverError(std::format(
             "SPC references undefined node {}", missing_spc->node.value));
+    auto scalar_spc = std::find_if(spcs.begin(), spcs.end(),
+        [&](const Spc& spc) { return is_scalar_point(spc.node) && spc.dofs.mask != 1; });
+    if (scalar_spc != spcs.end())
+        throw SolverError(std::format(
+            "SPC on scalar point {} names grid components; a scalar point has "
+            "only one component", scalar_spc->node.value));
+
+    // A scalar point's only component reaches MPC equations as 1 once parsed.
+    for (const Mpc& mpc : mpcs)
+        for (const MpcTerm& term : mpc.terms) {
+            if (!nodes.count(term.node))
+                throw SolverError(std::format(
+                    "MPC references undefined node {}", term.node.value));
+            const bool valid = is_scalar_point(term.node)
+                                   ? term.dof == 1
+                                   : component_is_valid(term.dof);
+            if (!valid)
+                throw SolverError(std::format(
+                    "MPC set {} has invalid component {} on {} {}", mpc.sid.value,
+                    term.dof, is_scalar_point(term.node) ? "scalar point" : "grid",
+                    term.node.value));
+        }
+
+    for (const Rbe2& rbe : rbe2s) {
+        const auto what = std::format("RBE2 {}", rbe.eid.value);
+        require_grids(std::span(&rbe.gn, 1), what);
+        require_grids(rbe.gm, what);
+    }
+    for (const Rbe3& rbe : rbe3s) {
+        const auto what = std::format("RBE3 {}", rbe.eid.value);
+        require_grids(std::span(&rbe.ref_node, 1), what);
+        for (const Rbe3WeightGroup& group : rbe.weight_groups)
+            require_grids(group.nodes, what);
+    }
 
     // Check load nodes exist
     for (const auto& load : loads) {
@@ -196,16 +260,24 @@ void Model::validate() const {
             using T = std::decay_t<decltype(l)>;
             if constexpr (std::is_same_v<T, ForceLoad> ||
                           std::is_same_v<T, MomentLoad> ||
+                          std::is_same_v<T, SloadLoad> ||
                           std::is_same_v<T, TempLoad>) {
                 if (!nodes.count(l.node))
                     throw SolverError(std::format(
                         "Load references undefined node {}", l.node.value));
+                if constexpr (std::is_same_v<T, ForceLoad> ||
+                              std::is_same_v<T, MomentLoad>)
+                    require_grids(std::span(&l.node, 1),
+                                  std::is_same_v<T, ForceLoad>
+                                      ? "FORCE (use SLOAD for a scalar point)"
+                                      : "MOMENT (use SLOAD for a scalar point)");
             } else if constexpr (std::is_same_v<T, PloadLoad>) {
                 auto missing_node = std::find_if(l.nodes.begin(), l.nodes.end(),
                     [&](NodeId nid) { return !nodes.count(nid); });
                 if (missing_node != l.nodes.end())
                     throw SolverError(std::format(
                         "PLOAD references undefined node {}", missing_node->value));
+                require_grids(l.nodes, "PLOAD");
             } else if constexpr (std::is_same_v<T, Pload1Load> ||
                                  std::is_same_v<T, Pload2Load> ||
                                  std::is_same_v<T, Pload4Load>) {
@@ -226,6 +298,7 @@ void Model::validate() const {
                 if (missing_node != l.nodes.end())
                     throw SolverError(std::format(
                         "ACCEL1 references undefined node {}", missing_node->value));
+                require_grids(l.nodes, "ACCEL1");
             } else if constexpr (std::is_same_v<T, QvolLoad>) {
                 for (ElementId eid : l.elements) {
                     auto element = std::find_if(
@@ -249,6 +322,7 @@ void Model::validate() const {
                 if (missing_node != l.nodes.end())
                     throw SolverError(std::format(
                         "QHBDY references undefined node {}", missing_node->value));
+                require_grids(l.nodes, "QHBDY");
             } else if constexpr (std::is_same_v<T, Qbdy1Load> ||
                                  std::is_same_v<T, QvectLoad>) {
                 const auto missing_element = std::find_if(

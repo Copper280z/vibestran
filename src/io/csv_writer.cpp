@@ -12,6 +12,7 @@
 
 #include "io/results.hpp"
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <format>
@@ -79,6 +80,16 @@ void CsvWriter::write(const SolverResults& results, const Model& model,
                    << 0.0    << ", " << 0.0    << ", " << 0.0    << ", "
                    << ps.mx  << ", " << ps.my  << ", " << ps.mxy << ", "
                    << ps.von_mises << "\n";
+            }
+
+            // Axial stress as sx and torsional stress as sxy.
+            for (const auto& rod : sc.rod_results) {
+                const double s = rod.axial_stress, t = rod.torsional_stress;
+                ef << rod.eid.value << ", " << sc.id << ", "
+                   << s      << ", " << 0.0    << ", " << t      << ", "
+                   << 0.0    << ", " << 0.0    << ", " << 0.0    << ", "
+                   << 0.0    << ", " << 0.0    << ", " << 0.0    << ", "
+                   << std::sqrt(s * s + 3.0 * t * t) << "\n";
             }
 
             for (const auto& ss : sc.solid_stresses) {

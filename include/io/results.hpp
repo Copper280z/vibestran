@@ -23,6 +23,7 @@ struct NodeDisplacement {
   NodeId node{0};
   std::array<double, 6> d{}; // indexed 0-5, in the grid's CD frame
   CoordId coord{0};          // frame of d: the grid's displacement system
+  bool scalar{false};        // a scalar point: d[0] is its one value
 };
 
 /// Total shell strains at a point in the element frame (engineering shear).
@@ -133,6 +134,18 @@ struct LineStress {
   LineForces forces;
 };
 
+/// CROD forces, stresses and elastic strains.  The axial force is tension
+/// positive and the torque follows the right-handed twist of end B relative to
+/// end A.  Margins of safety are empty without a MAT1 allowable.
+struct RodResult {
+  constexpr RodResult() = default;
+  ElementId eid{0};
+  double axial_force{0}, torque{0};
+  double axial_stress{0}, torsional_stress{0};
+  double axial_strain{0}, torsional_strain{0};
+  std::optional<double> axial_margin, torsional_margin;
+};
+
 /// Nodal temperature (SOL 153 heat-transfer output).
 struct NodeTemperature {
   NodeId node{0};
@@ -194,6 +207,7 @@ struct SubCaseResults {
   /// and gp_forces are then empty although they were requested.
   std::string constraint_force_error;
   std::vector<LineStress> line_stresses;
+  std::vector<RodResult> rod_results;
   std::vector<PlateStress> plate_stresses;
   std::vector<SolidStress> solid_stresses;
   std::vector<SolidStrain> solid_strains;
@@ -313,6 +327,10 @@ private:
   static void write_shell_force_table(const SubCaseResults& sc,
                                       std::ostream& out, ElementType etype,
                                       bool corners);
+  static void write_rod_force_table(const SubCaseResults& sc,
+                                    std::ostream& out);
+  static void write_rod_stress_table(const SubCaseResults& sc,
+                                     std::ostream& out, bool strain);
   static void write_bar_stress_table(const SubCaseResults& sc,
                                      std::ostream& out);
   static void write_quad4_gpstress_table(const SubCaseResults& sc,

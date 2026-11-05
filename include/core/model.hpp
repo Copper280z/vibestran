@@ -33,6 +33,9 @@ struct GridPoint {
   /// Permanent single-point constraints (GRID field 8, PS), applied in every
   /// structural subcase in the displacement coordinate system `cd`.
   DofSet ps;
+  /// A scalar point (SPOINT): one DOF, stored as component 1 (T1), with no
+  /// location or displacement frame.  It shares the grid ID space.
+  bool scalar{false};
 };
 
 // ── Materials ────────────────────────────────────────────────────────────────
@@ -45,6 +48,9 @@ struct Mat1 {
   double rho{0};      // density
   double A{0};        // thermal expansion coefficient
   double ref_temp{0}; // reference temperature
+  double st{0};       // tension allowable (0 = none)
+  double sc{0};       // compression allowable (0 = none)
+  double ss{0};       // shear allowable (0 = none)
 };
 
 struct Mat2 {
@@ -303,6 +309,16 @@ struct PBeam {
   double nsm{0.0};
 };
 
+/// PROD: section of a CROD, which carries axial force and torque only.
+struct PRod {
+  PropertyId pid{0};
+  MaterialId mid{0};
+  double A{0.0};
+  double J{0.0};
+  double C{0.0};   ///< Torsional stress recovery coefficient, tau = C * T / J
+  double nsm{0.0};
+};
+
 struct PBush {
   PropertyId pid{0};
   std::array<double, 6> k{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
@@ -321,7 +337,7 @@ struct PMass {
 };
 
 using Property = std::variant<PShell, PSolid, PBar, PBarL, PBeam, PBush,
-                              PElas, PMass, PComp>;
+                              PElas, PMass, PComp, PRod>;
 
 // ── Elements ─────────────────────────────────────────────────────────────────
 
@@ -335,6 +351,7 @@ enum class ElementType {
   CPENTA6,
   CBAR,
   CBEAM,
+  CROD,
   CBUSH,
   CELAS1,
   CELAS2,
@@ -461,6 +478,14 @@ struct TempRefLoad {
   double t_ref{0}; // from TEMPD or analysis case
 };
 
+/// SLOAD card: a load on one scalar point, or on component T1 of a grid in its
+/// displacement frame.  In heat transfer it is a power into the point.
+struct SloadLoad {
+  LoadSetId sid{0};
+  NodeId node{0};
+  double value{0.0};
+};
+
 /// PLOAD card: pressure on 3 or 4 explicitly listed grid points.
 struct PloadLoad {
   LoadSetId sid{0};
@@ -568,7 +593,7 @@ struct QvectLoad {
   std::vector<ElementId> elements;
 };
 
-using Load = std::variant<ForceLoad, MomentLoad, TempLoad, PloadLoad,
+using Load = std::variant<ForceLoad, MomentLoad, SloadLoad, TempLoad, PloadLoad,
                           Pload1Load, Pload2Load, Pload4Load, GravLoad,
                           Accel1Load, AccelLoad,
                           QvolLoad, QhbdyLoad, Qbdy1Load, Qbdy2Load,
@@ -947,6 +972,7 @@ public:
   /// SPC set plus one zero-valued constraint per grid with GRID PS
   /// components.  Heat-transfer analyses use spcs_for_set() only, since PS
   /// constrains structural components.
+  // cppcheck-suppress unusedFunction -- called from analysis_support.cpp, linear_static.cpp and quality_checks.cpp
   std::vector<Spc> structural_spcs(SpcSetId sid) const {
     // Permanent constraints come first so that an explicit SPC with an
     // enforced value on the same component (merged later by consumers)
@@ -972,6 +998,13 @@ public:
   [[nodiscard]] bool use_lumped_mass() const {
     const auto coupmass = param_real("COUPMASS");
     return coupmass && *coupmass <= 0.0;
+  }
+
+  /// Number of entries of `nodes` that are scalar points.
+  [[nodiscard]] std::size_t scalar_point_count() const {
+    return static_cast<std::size_t>(
+        std::count_if(nodes.begin(), nodes.end(),
+                      [](const auto &entry) { return entry.second.scalar; }));
   }
 
   /// Retrieve all MPCs for a given set

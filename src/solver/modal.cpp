@@ -280,6 +280,7 @@ ModalSolver::recover_mode_shape(const Model& model,
     for (NodeId nid : sorted_nodes) {
         NodeDisplacement nd;
         nd.node = nid;
+        nd.scalar = model.node(nid).scalar;
         for (int d = 0; d < 6; ++d) {
             EqIndex eq = dof_map.eq_index(nid, d);
             nd.d[d] = (eq != CONSTRAINED_DOF &&

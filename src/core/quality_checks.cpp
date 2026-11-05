@@ -65,6 +65,7 @@ static const char* element_type_name(ElementType t) {
     case ElementType::CPENTA6: return "CPENTA6";
     case ElementType::CBAR:    return "CBAR";
     case ElementType::CBEAM:   return "CBEAM";
+    case ElementType::CROD:    return "CROD";
     case ElementType::CBUSH:   return "CBUSH";
     case ElementType::CELAS1:  return "CELAS1";
     case ElementType::CELAS2:  return "CELAS2";
@@ -417,6 +418,7 @@ void remap_node(Model& model, NodeId old_id, NodeId keep_id) {
             using T = std::decay_t<decltype(l)>;
             if constexpr (std::is_same_v<T, ForceLoad>  ||
                           std::is_same_v<T, MomentLoad> ||
+                          std::is_same_v<T, SloadLoad>  ||
                           std::is_same_v<T, TempLoad>)
                 remap(l.node);
             else if constexpr (std::is_same_v<T, PloadLoad>)
@@ -593,7 +595,8 @@ TopologyResult check_topology(const Model& model, double dup_node_tol) {
                 used_mats.insert(p.mid);
             } else if constexpr (std::is_same_v<T, PBar>  ||
                                  std::is_same_v<T, PBarL> ||
-                                 std::is_same_v<T, PBeam>) {
+                                 std::is_same_v<T, PBeam> ||
+                                 std::is_same_v<T, PRod>) {
                 used_mats.insert(p.mid);
             }
         }, prop);
@@ -707,8 +710,10 @@ TopologyResult check_topology(const Model& model, double dup_node_tol) {
         // Build index: cell → list of (node index into nodes_vec)
         std::vector<std::pair<Vec3, NodeId>> nodes_vec;
         nodes_vec.reserve(model.nodes.size());
+        // Scalar points have no location, so they are never coincident.
         for (const auto& [nid, gp] : model.nodes)
-            nodes_vec.push_back({gp.position, nid});
+            if (!gp.scalar)
+                nodes_vec.push_back({gp.position, nid});
 
         const double inv_cell = 1.0 / dup_node_tol;
         std::unordered_map<Cell, std::vector<size_t>, CellHash> grid;
