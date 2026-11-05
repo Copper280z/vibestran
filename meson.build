@@ -702,6 +702,7 @@ integration_test_sources = files(
   'tests/integration/test_integration.cpp',
   'tests/integration/test_constraint_forces.cpp',
   'tests/integration/test_rod_and_scalar.cpp',
+  'tests/integration/test_mpc_frames.cpp',
   'tests/integration/test_thermal_steady.cpp',
   'tests/integration/test_shell_benchmarks.cpp',
   'tests/integration/test_hexa8_reference.cpp',

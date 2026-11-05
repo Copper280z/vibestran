@@ -15,6 +15,7 @@
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <numbers>
 #include <set>
 #include <sstream>
@@ -160,6 +161,14 @@ struct BdfParser::ParseContext {
   // SPOINT IDs; added to the model after parsing, since their references (and
   // the GRIDs that may clash with them) can come in any order.
   std::unordered_set<NodeId> scalar_points;
+
+  // MPCADD names sets whose MPC cards may follow it; resolved after parsing.
+  struct MpcAddCard {
+    int sid{0};
+    std::vector<int> sources;
+    int line{0};
+  };
+  std::vector<MpcAddCard> mpc_adds;
   struct BarorDefaults {
     std::optional<PropertyId> pid;
     std::optional<Vec3> orientation;
@@ -1107,6 +1116,7 @@ Model BdfParser::parse_stream(std::istream &in) {
                            "MITC3+ with their own drill stabilisation",
                            name));
 
+  resolve_mpcadds(ctx);
   resolve_scalar_points(ctx);
 
   // SNORM grids and coordinate systems must exist.
@@ -3162,29 +3172,71 @@ void BdfParser::process_mpc(ParseContext &ctx,
 
 void BdfParser::process_mpcadd(ParseContext &ctx,
                                 const std::vector<std::string> &f) {
-  // MPCADD, SID, SID1, SID2, ...
-  // Merges multiple MPC sets into one.  We expand by re-labelling all terms
-  // from each source set to the target SID.
-  int target_sid = parse_int(f[1], ctx.line_num);
+  // MPCADD, SID, S1, S2, ...
+  ParseContext::MpcAddCard card;
+  card.sid = parse_int(f[1], ctx.line_num);
+  card.line = ctx.line_num;
+  for (size_t i = 2; i < f.size(); ++i)
+    if (!f[i].empty())
+      card.sources.push_back(parse_int(f[i], ctx.line_num));
+  ctx.mpc_adds.push_back(std::move(card));
+}
 
-  for (size_t i = 2; i < f.size(); ++i) {
-    if (f[i].empty())
-      continue;
-    int src_sid = parse_int(f[i], ctx.line_num);
-    if (src_sid == target_sid)
-      continue; // avoid infinite loop
+void BdfParser::resolve_mpcadds(ParseContext &ctx) {
+  if (ctx.mpc_adds.empty())
+    return;
 
-    // Collect MPCs with src_sid and re-label to target_sid
-    std::vector<Mpc> new_mpcs;
-    for (const auto &mpc : ctx.model.mpcs) {
-      if (mpc.sid.value == src_sid) {
-        Mpc copy = mpc;
-        copy.sid = MpcSetId(target_sid);
-        new_mpcs.push_back(std::move(copy));
+  // Every SID an MPCADD defines holds only what its MPCADD cards name, since
+  // MPCADD takes precedence over MPC cards of the same SID. A card may name its
+  // own SID to mean those MPC cards, or another MPCADD to include its set.
+  std::map<int, std::vector<const ParseContext::MpcAddCard *>> adds;
+  for (const auto &card : ctx.mpc_adds)
+    adds[card.sid].push_back(&card);
+
+  const std::vector<Mpc> cards = std::move(ctx.model.mpcs);
+  ctx.model.mpcs.clear();
+  for (const Mpc &mpc : cards)
+    if (!adds.contains(mpc.sid.value))
+      ctx.model.mpcs.push_back(mpc);
+
+  const auto append_cards = [&](const int sid, const int target, const int line) {
+    bool found = false;
+    for (const Mpc &mpc : cards) {
+      if (mpc.sid.value != sid)
+        continue;
+      found = true;
+      ctx.model.mpcs.push_back(mpc);
+      ctx.model.mpcs.back().sid = MpcSetId(target);
+    }
+    if (!found)
+      throw ParseError(std::format(
+          "Line {}: MPCADD {} names MPC set {}, which no MPC or MPCADD card "
+          "defines",
+          line, target, sid));
+  };
+
+  std::vector<int> open;
+  const auto append_set = [&](const auto &self, const int sid,
+                              const int target) -> void {
+    open.push_back(sid);
+    for (const auto *card : adds.at(sid)) {
+      for (const int source : card->sources) {
+        if (source == sid || !adds.contains(source)) {
+          append_cards(source, target, card->line);
+        } else if (std::ranges::find(open, source) != open.end()) {
+          throw ParseError(std::format(
+              "Line {}: MPCADD {} names MPCADD {}, which includes it", card->line,
+              sid, source));
+        } else {
+          self(self, source, target);
+        }
       }
     }
-    for (auto &m : new_mpcs)
-      ctx.model.mpcs.push_back(std::move(m));
+    open.pop_back();
+  };
+  for (const auto &[sid, unused] : adds) {
+    (void)unused;
+    append_set(append_set, sid, sid);
   }
 }
 

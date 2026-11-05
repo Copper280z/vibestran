@@ -868,6 +868,10 @@ public:
     return it->second;
   }
 
+  /// Columns are the grid's displacement axes in basic, at the grid, so
+  /// u_basic = axes * u_cd for translations and rotations alike.
+  [[nodiscard]] Mat3 displacement_axes(NodeId id) const;
+
   [[nodiscard]] const char *structural_material_card_name(MaterialId id) const {
     if (materials.count(id))
       return "MAT1";

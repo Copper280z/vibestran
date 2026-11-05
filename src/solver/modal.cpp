@@ -127,8 +127,19 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
     const FactorRatioCheckPolicy factor_ratio_policy =
         build_factor_ratio_check_policy(
             model, std::format("[modal sc {}]", sc.id), "shift matrix");
-    std::vector<EigenPair> pairs = backend_->solve(
-        K_eigen, M_eigen, eigrl.nd, sigma, &factor_ratio_policy);
+    std::vector<EigenPair> pairs;
+    if (const auto turned = semi_definite_mass_axes(M_eigen)) {
+        const Eigen::SparseMatrix<double> K_full = K_eigen.selfadjointView<Eigen::Lower>();
+        const Eigen::SparseMatrix<double> K_all =
+            turned->turn.transpose() * K_full * turned->turn;
+        const Eigen::SparseMatrix<double> K_turned = K_all.triangularView<Eigen::Lower>();
+        pairs = backend_->solve(K_turned, turned->mass, eigrl.nd, sigma,
+                                &factor_ratio_policy);
+        for (EigenPair& pair : pairs)
+            pair.eigenvector = (turned->turn * pair.eigenvector).eval();
+    } else {
+        pairs = backend_->solve(K_eigen, M_eigen, eigrl.nd, sigma, &factor_ratio_policy);
+    }
     const auto t5 = Clock::now();
     spdlog::debug("[modal sc {}] eigensolver: {:.3f} ms  ({} modes)",
                   sc.id, Ms(t5 - t4).count(), pairs.size());

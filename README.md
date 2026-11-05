@@ -53,10 +53,10 @@ vibestran/
 - **Properties**: PSHELL (MID1-MID4, 12I/T^3, TS/T, NSM, Z1/Z2), PCOMP (classical lamination theory; LAM blank, SYM, MEM, BEND, SMEAR, SMCORE), PSOLID, PBAR (stress recovery points C-F, K1/K2 transverse shear, I12), PBARL (`ROD`, `TUBE`, `BAR`), PBEAM, PBUSH (`K` section), PELAS, PMASS
 - **CROD**: PROD with axial and torsional stiffness, consistent or lumped mass, thermal load, conduction in SOL 153, and force, stress, strain and margin-of-safety output (F06, OP2 OES1X type 1, CSV). `PROD` J also serves as the polar inertia in consistent mass
 - **Scalar points**: SPOINT (lists and THRU), or implicitly a CELASi/CMASSi connection with a blank or zero component; usable in CELASi, CMASSi, SPC, SPC1, MPC, SLOAD, TEMP and as a CHBDY ambient point, in statics, modes and heat transfer. Output is a row with T1 only (OP2 grid type S). Grid and scalar points share one ID space; GRAV gives scalar mass no load
-- **AUTOSPC at rod grids**: grids connecting a CROD get Nastran's grid point singularity processing, in the grid's CD system, with PARAM,EPZERO (1e-8) as the threshold; reactions show in SPCFORCE, and `PARAM,AUTOSPC,NO` disables it. See `include/solver/analysis_support.hpp`
+- **AUTOSPC at rod grids**: grids connecting a CROD, and blocks that a CELAS, CMASS or MPC component opens on a CD grid, get Nastran's grid point singularity processing, in the grid's CD system, with PARAM,EPZERO (1e-8) as the threshold; reactions show in SPCFORCE, and `PARAM,AUTOSPC,NO` disables it. See `include/solver/analysis_support.hpp`
 - **CBAR end data**: pin flags (PA/PB, statically condensed), rigid end offsets (WA/WB), OFFT `GGG`/`BGG`
 - **Loads**: FORCE, MOMENT, TEMP/TEMPD, PLOAD, PLOAD1 (CBAR/CBEAM), PLOAD2, PLOAD4, GRAV, ACCEL1
-- **Constraints**: SPC, SPC1, GRID PS (permanent SPCs, in the grid's CD frame), MPC, RBE2, RBE3
+- **Constraints**: SPC, SPC1, GRID PS (permanent SPCs, in the grid's CD frame), MPC and MPCADD (components in the grid's CD frame), RBE2, RBE3
 - **Defaults**: GRDSET (CP/CD/PS for blank GRID fields), BAROR (PID/orientation/OFFT for blank CBAR fields)
 - **Reaction output**: SPCFORCE(S) and MPCFORCE(S) in F06, in each grid's global (CD) system (MYSTRAN-compatible blocks)
 - **Shell strains**: STRAIN for CQUAD4/CTRIA3 in STRCUR (membrane strain + curvature, default) or FIBER form, von Mises or SHEAR/MAXS, centre and CORNER

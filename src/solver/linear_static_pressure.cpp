@@ -731,10 +731,10 @@ void apply_element_force_vector(const ElementData &elem_data, const Model &model
 /// Subtract an element's equivalent nodal load vector from the SPC reaction
 /// map (reaction = K u - F), taking only rows that belong to SPC'd DOFs.
 void add_spc_element_force(
-    const ElementData &elem_data, const std::vector<double> &fe,
+    const Model &model, const ElementData &elem_data, const std::vector<double> &fe,
     const std::unordered_map<NodeId, std::array<SpcDofState, 6>> &spc,
     std::unordered_map<NodeId, std::array<double, 6>> &react) {
-  const auto identity = local_dof_identity(elem_data);
+  const auto identity = local_dof_identity(elem_data, model);
   for (size_t li = 0; li < identity.size(); ++li) {
     const auto [nid, comp] = identity[li];
     const auto spc_it = spc.find(nid);
@@ -1031,7 +1031,7 @@ void LinearStaticSolver::compute_spc_pressure_loads(
             const LocalFe fe =
                 load_scale * compute_pload1_equivalent_load(elem, model, load);
             const std::vector<double> fe_vec(fe.data(), fe.data() + fe.size());
-            add_spc_element_force(elem, fe_vec, spc, react);
+            add_spc_element_force(model, elem, fe_vec, spc, react);
 
           } else if constexpr (std::is_same_v<T, Pload2Load>) {
             const auto it = elements_by_id.find(load.element);
@@ -1056,7 +1056,7 @@ void LinearStaticSolver::compute_spc_pressure_loads(
                   std::format("PLOAD2 element {}", elem.id.value));
               const std::vector<Vec3> forces(nodal_forces.begin(),
                                              nodal_forces.end());
-              add_spc_element_force(elem, shell_force_vector(elem, forces),
+              add_spc_element_force(model, elem, shell_force_vector(elem, forces),
                                     spc, react);
             } else if (elem.type == ElementType::CTRIA3) {
               const std::array<Vec3, 3> coords{
@@ -1071,7 +1071,7 @@ void LinearStaticSolver::compute_spc_pressure_loads(
                   std::format("PLOAD2 element {}", elem.id.value));
               const std::vector<Vec3> forces(nodal_forces.begin(),
                                              nodal_forces.end());
-              add_spc_element_force(elem, shell_force_vector(elem, forces),
+              add_spc_element_force(model, elem, shell_force_vector(elem, forces),
                                     spc, react);
             } else {
               throw SolverError(std::format(
@@ -1112,7 +1112,7 @@ void LinearStaticSolver::compute_spc_pressure_loads(
                   coords, scaled_pressures, model, direction, 1.0, context);
               const std::vector<Vec3> forces(nodal_forces.begin(),
                                              nodal_forces.end());
-              add_spc_element_force(elem, shell_force_vector(elem, forces),
+              add_spc_element_force(model, elem, shell_force_vector(elem, forces),
                                     spc, react);
             } else if (elem.type == ElementType::CTRIA3) {
               const std::array<Vec3, 3> coords{
@@ -1127,7 +1127,7 @@ void LinearStaticSolver::compute_spc_pressure_loads(
                   coords, tri_pressures, model, direction, 1.0, context);
               const std::vector<Vec3> forces(nodal_forces.begin(),
                                              nodal_forces.end());
-              add_spc_element_force(elem, shell_force_vector(elem, forces),
+              add_spc_element_force(model, elem, shell_force_vector(elem, forces),
                                     spc, react);
             } else if (is_supported_solid_pressure_element(elem.type)) {
               const std::vector<int> face =
@@ -1140,7 +1140,7 @@ void LinearStaticSolver::compute_spc_pressure_loads(
                 const std::vector<Vec3> forces(nodal_forces.begin(),
                                                nodal_forces.end());
                 add_spc_element_force(
-                    elem, solid_face_force_vector(elem, face, forces), spc,
+                    model, elem, solid_face_force_vector(elem, face, forces), spc,
                     react);
               } else if (face.size() == 3) {
                 const auto coords = tri3_face_coords(elem, model, face);
@@ -1152,7 +1152,7 @@ void LinearStaticSolver::compute_spc_pressure_loads(
                 const std::vector<Vec3> forces(nodal_forces.begin(),
                                                nodal_forces.end());
                 add_spc_element_force(
-                    elem, solid_face_force_vector(elem, face, forces), spc,
+                    model, elem, solid_face_force_vector(elem, face, forces), spc,
                     react);
               } else if (face.size() == 6) {
                 const auto coords = tri6_face_coords(elem, model, face);
@@ -1164,7 +1164,7 @@ void LinearStaticSolver::compute_spc_pressure_loads(
                 const std::vector<Vec3> forces(nodal_forces.begin(),
                                                nodal_forces.end());
                 add_spc_element_force(
-                    elem, solid_face_force_vector(elem, face, forces), spc,
+                    model, elem, solid_face_force_vector(elem, face, forces), spc,
                     react);
               } else if (face.size() == 8) {
                 const auto coords = quad8_face_coords(elem, model, face);
@@ -1173,7 +1173,7 @@ void LinearStaticSolver::compute_spc_pressure_loads(
                 const std::vector<Vec3> forces(nodal_forces.begin(),
                                                nodal_forces.end());
                 add_spc_element_force(
-                    elem, solid_face_force_vector(elem, face, forces), spc,
+                    model, elem, solid_face_force_vector(elem, face, forces), spc,
                     react);
               } else {
                 throw SolverError(std::format(

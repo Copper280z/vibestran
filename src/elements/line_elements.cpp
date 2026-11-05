@@ -1128,13 +1128,62 @@ Conm2Element::global_dof_indices(const DofMap &dof_map) const {
   return {blk.eq[0], blk.eq[1], blk.eq[2], blk.eq[3], blk.eq[4], blk.eq[5]};
 }
 
+namespace {
+
+/// value * d d^T for the weights d of a scalar connection.
+[[nodiscard]] LocalKe scalar_connection_matrix(
+    const std::vector<ScalarConnectionDof> &dofs, const double value) {
+  const auto n = static_cast<Eigen::Index>(dofs.size());
+  LocalKe matrix(n, n);
+  for (Eigen::Index i = 0; i < n; ++i)
+    for (Eigen::Index j = 0; j < n; ++j)
+      matrix(i, j) = value * dofs[static_cast<size_t>(i)].weight *
+                     dofs[static_cast<size_t>(j)].weight;
+  return matrix;
+}
+
+[[nodiscard]] std::vector<EqIndex> scalar_connection_indices(
+    const std::vector<ScalarConnectionDof> &dofs, const DofMap &dof_map) {
+  std::vector<EqIndex> result;
+  result.reserve(dofs.size());
+  for (const ScalarConnectionDof &dof : dofs)
+    result.push_back(dof_map.eq_index(dof.node, dof.component));
+  return result;
+}
+
+} // namespace
+
+std::vector<ScalarConnectionDof>
+scalar_connection_dofs(const std::span<const NodeId> nodes,
+                       const std::array<int, 2> &components, const Model &model) {
+  std::vector<ScalarConnectionDof> dofs;
+  dofs.reserve(nodes.size());
+  for (size_t end = 0; end < nodes.size(); ++end) {
+    const NodeId node = nodes[end];
+    const int component = components[end];
+    const double sign = end == 0 ? 1.0 : -1.0;
+    if (model.node(node).cd == CoordId{0}) {
+      dofs.push_back({node, component - 1, sign});
+      continue;
+    }
+    const Mat3 axes = model.displacement_axes(node);
+    const int base = component <= 3 ? 0 : 3;
+    const int axis = component - 1 - base;
+    for (int basic = 0; basic < 3; ++basic)
+      if (std::abs(axes(basic, axis)) > 1e-14)
+        dofs.push_back({node, base + basic, sign * axes(basic, axis)});
+  }
+  return dofs;
+}
+
 ScalarSpringElement::ScalarSpringElement(ElementType type, ElementId eid,
                                          PropertyId pid,
                                          std::vector<NodeId> nodes,
                                          std::array<int, 2> components,
                                          double value, const Model &model)
     : type_(type), eid_(eid), pid_(pid), nodes_(std::move(nodes)),
-      components_(components), value_(value), model_(model) {}
+      dofs_(scalar_connection_dofs(nodes_, components, model)), value_(value),
+      model_(model) {}
 
 double ScalarSpringElement::stiffness_value() const {
   if (type_ == ElementType::CELAS1)
@@ -1143,15 +1192,7 @@ double ScalarSpringElement::stiffness_value() const {
 }
 
 LocalKe ScalarSpringElement::stiffness_matrix() const {
-  const double k = stiffness_value();
-  if (nodes_.size() == 1) {
-    LocalKe K(1, 1);
-    K(0, 0) = k;
-    return K;
-  }
-  LocalKe K(2, 2);
-  K << k, -k, -k, k;
-  return K;
+  return scalar_connection_matrix(dofs_, stiffness_value());
 }
 
 LocalKe ScalarSpringElement::mass_matrix() const {
@@ -1165,11 +1206,7 @@ LocalFe ScalarSpringElement::thermal_load(std::span<const double> /*temperatures
 
 std::vector<EqIndex>
 ScalarSpringElement::global_dof_indices(const DofMap &dof_map) const {
-  std::vector<EqIndex> result;
-  result.reserve(nodes_.size());
-  for (size_t i = 0; i < nodes_.size(); ++i)
-    result.push_back(dof_map.eq_index(nodes_[i], components_[i] - 1));
-  return result;
+  return scalar_connection_indices(dofs_, dof_map);
 }
 
 ScalarMassElement::ScalarMassElement(ElementType type, ElementId eid,
@@ -1177,7 +1214,8 @@ ScalarMassElement::ScalarMassElement(ElementType type, ElementId eid,
                                      std::array<int, 2> components,
                                      double value, const Model &model)
     : type_(type), eid_(eid), pid_(pid), nodes_(std::move(nodes)),
-      components_(components), value_(value), model_(model) {}
+      dofs_(scalar_connection_dofs(nodes_, components, model)), value_(value),
+      model_(model) {}
 
 double ScalarMassElement::mass_value() const {
   if (type_ == ElementType::CMASS1)
@@ -1190,15 +1228,7 @@ LocalKe ScalarMassElement::stiffness_matrix() const {
 }
 
 LocalKe ScalarMassElement::mass_matrix() const {
-  const double m = mass_value();
-  if (nodes_.size() == 1) {
-    LocalKe M(1, 1);
-    M(0, 0) = m;
-    return M;
-  }
-  LocalKe M(2, 2);
-  M << m, -m, -m, m;
-  return M;
+  return scalar_connection_matrix(dofs_, mass_value());
 }
 
 LocalFe ScalarMassElement::thermal_load(std::span<const double> /*temperatures*/,
@@ -1208,11 +1238,7 @@ LocalFe ScalarMassElement::thermal_load(std::span<const double> /*temperatures*/
 
 std::vector<EqIndex>
 ScalarMassElement::global_dof_indices(const DofMap &dof_map) const {
-  std::vector<EqIndex> result;
-  result.reserve(nodes_.size());
-  for (size_t i = 0; i < nodes_.size(); ++i)
-    result.push_back(dof_map.eq_index(nodes_[i], components_[i] - 1));
-  return result;
+  return scalar_connection_indices(dofs_, dof_map);
 }
 
 LocalFe compute_pload1_fixed_end_local(const ElementData &elem,

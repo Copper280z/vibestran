@@ -299,6 +299,10 @@ TEST(ConstraintForces, RotatedAndPrescribedSupportsKeepSpcAndMpcForcesSeparate) 
     for (const int cd : {0, 5}) {
         for (const double prescribed : {0., 0.2}) {
             SCOPED_TRACE(::testing::Message() << "CD=" << cd << " displacement=" << prescribed);
+            // The spring runs along T2 of both ends, so they lie on that axis and
+            // it carries no moment.
+            const double spring_end_x = cd == 0 ? 0. : 1./std::sqrt(2.);
+            const double spring_end_y = cd == 0 ? -1. : -1./std::sqrt(2.);
             const Model model = BdfParser::parse_string(std::format(R"(
 SOL 101
 CEND
@@ -311,18 +315,20 @@ BEGIN BULK
 CORD2R,5,0,0.,0.,0.,0.,0.,1.,1.,1.,0.
 GRID,1,,0.,0.,0.,{}
 GRID,2,,0.,0.,0.
-GRID,3,,0.,-1.,0.
+GRID,3,,{:.17g},{:.17g},0.,{}
 CELAS2,1,100.,1,2,3,2
 SPC,1,1,1,{}
 SPC1,1,123456,3
 RBE2,20,1,12,2
 FORCE,2,2,0,1.,10.,-5.,0.
 ENDDATA
-)", cd, prescribed));
+)", cd, spring_end_x, spring_end_y, cd, prescribed));
             const auto result = solve_forces(model);
             const auto* support = force_at(result.spc_forces, 1);
             ASSERT_NE(support, nullptr);
-            EXPECT_NEAR(support->f[0], cd == 0 ? -10. : -10.*std::sqrt(2.), 1e-11);
+            // The spring acts along T2 of grid 1's frame, so the support reacts
+            // the load's part along T1.
+            EXPECT_NEAR(support->f[0], cd == 0 ? -10. : -5./std::sqrt(2.), 1e-11);
             EXPECT_EQ(support->f[1], 0.);
             const auto* mpc = force_at(result.mpc_forces, 1);
             ASSERT_NE(mpc, nullptr);
@@ -332,7 +338,7 @@ ENDDATA
                 if (u.node != NodeId{1})
                     continue;
                 EXPECT_NEAR(u.d[0], prescribed, 1e-13);
-                EXPECT_NEAR(u.d[1], cd == 0 ? -0.05 : -0.15*std::sqrt(2.)-prescribed, 1e-13);
+                EXPECT_NEAR(u.d[1], cd == 0 ? -0.05 : -0.15/std::sqrt(2.), 1e-13);
             }
             const auto total = resultant(model, result.spc_forces);
             const std::array<double, 6> expected{-10., 5., 0., 0., 0., 0.};

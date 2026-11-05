@@ -8,6 +8,7 @@
 #include <Eigen/SparseCore>
 #include <string>
 #include <utility>
+#include <optional>
 #include <vector>
 
 namespace vibestran {
@@ -29,6 +30,21 @@ struct EigenPair {
 /// eigenproblem by the backends.  The number of finite eigenvalues equals the
 /// number of massed DOFs.
 [[nodiscard]] std::vector<int> massed_dof_indices(const Eigen::SparseMatrix<double>& M);
+
+/// M turned to its principal axes where it is semi-definite on a small block, and
+/// the turn: M = T M_turned T^T, with M_turned lower-triangular like M. A CMASS
+/// along an oblique axis fills a block of basic components with no zero diagonal
+/// but too little rank, which the massless-DOF condensation of the eigensolvers
+/// cannot see and a Lanczos run in the M inner product cannot survive. In these
+/// axes the block is a diagonal with exact zeros. Empty when no block needs it.
+/// Blocks are the connected components of M's graph, up to 64 DOFs: larger ones
+/// (a consistent mass matrix) are left as they are.
+struct TurnedMass {
+    Eigen::SparseMatrix<double> turn;
+    Eigen::SparseMatrix<double> mass;
+};
+[[nodiscard]] std::optional<TurnedMass>
+semi_definite_mass_axes(const Eigen::SparseMatrix<double>& M);
 
 class EigensolverBackend {
 public:

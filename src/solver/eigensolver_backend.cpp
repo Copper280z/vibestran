@@ -19,6 +19,7 @@
 #include <Spectra/SymGEigsShiftSolver.h>
 #include <Spectra/MatOp/SparseSymMatProd.h>
 
+#include <numeric>
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -370,6 +371,93 @@ std::vector<int> massed_dof_indices(const Eigen::SparseMatrix<double>& M) {
         if (diag(i) > 0.0)
             massed.push_back(i);
     return massed;
+}
+
+std::optional<TurnedMass>
+semi_definite_mass_axes(const Eigen::SparseMatrix<double>& M) {
+    constexpr std::size_t kMaxBlock = 64;
+    const auto n = static_cast<int>(M.rows());
+    std::vector<int> parent(static_cast<size_t>(n));
+    std::iota(parent.begin(), parent.end(), 0);
+    const auto root = [&](int i) {
+        while (parent[static_cast<size_t>(i)] != i) {
+            int& up = parent[static_cast<size_t>(i)];
+            up = parent[static_cast<size_t>(up)];
+            i = up;
+        }
+        return i;
+    };
+    for (int col = 0; col < M.outerSize(); ++col)
+        for (Eigen::SparseMatrix<double>::InnerIterator it(M, col); it; ++it)
+            if (it.row() != it.col() && it.value() != 0.0)
+                parent[static_cast<size_t>(root(static_cast<int>(it.row())))] = root(col);
+
+    std::vector<std::vector<int>> members(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i)
+        members[static_cast<size_t>(root(i))].push_back(i);
+    std::vector<int> position(static_cast<size_t>(n), 0);
+    for (const auto& block : members)
+        for (size_t k = 0; k < block.size(); ++k)
+            position[static_cast<size_t>(block[k])] = static_cast<int>(k);
+
+    std::vector<Eigen::MatrixXd> blocks(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        const auto size = members[static_cast<size_t>(i)].size();
+        if (size >= 2 && size <= kMaxBlock)
+            blocks[static_cast<size_t>(i)] = Eigen::MatrixXd::Zero(
+                static_cast<Eigen::Index>(size), static_cast<Eigen::Index>(size));
+    }
+    for (int col = 0; col < M.outerSize(); ++col) {
+        Eigen::MatrixXd& block = blocks[static_cast<size_t>(root(col))];
+        if (block.size() == 0)
+            continue;
+        const int c = position[static_cast<size_t>(col)];
+        for (Eigen::SparseMatrix<double>::InnerIterator it(M, col); it; ++it) {
+            const int r = position[static_cast<size_t>(it.row())];
+            block(r, c) = it.value();
+            block(c, r) = it.value();
+        }
+    }
+
+    std::vector<Eigen::Triplet<double>> turn;
+    std::vector<Eigen::Triplet<double>> mass;
+    std::vector<char> turned(static_cast<size_t>(n), 0);
+    for (int i = 0; i < n; ++i) {
+        const Eigen::MatrixXd& block = blocks[static_cast<size_t>(i)];
+        if (block.size() == 0)
+            continue;
+        const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> axes(block);
+        const double floor = 1e-12 * axes.eigenvalues().cwiseAbs().maxCoeff();
+        if (axes.eigenvalues()(0) > floor)
+            continue;
+        const auto& dofs = members[static_cast<size_t>(i)];
+        for (Eigen::Index k = 0; k < block.rows(); ++k) {
+            const int axis = dofs[static_cast<size_t>(k)];
+            turned[static_cast<size_t>(axis)] = 1;
+            if (axes.eigenvalues()(k) > floor)
+                mass.emplace_back(axis, axis, axes.eigenvalues()(k));
+            for (Eigen::Index r = 0; r < block.rows(); ++r)
+                turn.emplace_back(dofs[static_cast<size_t>(r)], axis, axes.eigenvectors()(r, k));
+        }
+    }
+    if (turn.empty())
+        return std::nullopt;
+
+    for (int i = 0; i < n; ++i)
+        if (!turned[static_cast<size_t>(i)])
+            turn.emplace_back(i, i, 1.0);
+    for (int col = 0; col < M.outerSize(); ++col) {
+        if (turned[static_cast<size_t>(col)])
+            continue;
+        for (Eigen::SparseMatrix<double>::InnerIterator it(M, col); it; ++it)
+            mass.emplace_back(it.row(), it.col(), it.value());
+    }
+    TurnedMass result;
+    result.turn.resize(n, n);
+    result.turn.setFromTriplets(turn.begin(), turn.end());
+    result.mass.resize(n, n);
+    result.mass.setFromTriplets(mass.begin(), mass.end());
+    return result;
 }
 
 namespace {

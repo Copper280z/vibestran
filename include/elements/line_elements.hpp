@@ -195,6 +195,21 @@ private:
   std::optional<CoordId> cid_;
 };
 
+/// One basic component of a CELAS/CMASS connection, 0-based.
+struct ScalarConnectionDof {
+  NodeId node{0};
+  int component{0};
+  double weight{0.0};
+};
+
+/// The relative motion a scalar element acts on, u_1 - u_2 in the components its
+/// card names, as a sum of weight * u over basic components. Those components
+/// are in each grid's displacement frame, so on a grid with CD != 0 one of them
+/// reaches up to three basic components. Otherwise each end is the one component.
+[[nodiscard]] std::vector<ScalarConnectionDof>
+scalar_connection_dofs(std::span<const NodeId> nodes,
+                       const std::array<int, 2> &components, const Model &model);
+
 class ScalarSpringElement : public ElementBase {
 public:
   ScalarSpringElement(ElementType type, ElementId eid, PropertyId pid,
@@ -204,7 +219,7 @@ public:
   [[nodiscard]] ElementType type() const noexcept override { return type_; }
   [[nodiscard]] ElementId id() const noexcept override { return eid_; }
   [[nodiscard]] int num_dofs() const noexcept override {
-    return static_cast<int>(nodes_.size());
+    return static_cast<int>(dofs_.size());
   }
 
   [[nodiscard]] LocalKe stiffness_matrix() const override;
@@ -224,7 +239,7 @@ private:
   ElementId eid_;
   PropertyId pid_;
   std::vector<NodeId> nodes_;
-  std::array<int, 2> components_;
+  std::vector<ScalarConnectionDof> dofs_;
   double value_;
   const Model &model_;
 };
@@ -270,7 +285,7 @@ public:
   [[nodiscard]] ElementType type() const noexcept override { return type_; }
   [[nodiscard]] ElementId id() const noexcept override { return eid_; }
   [[nodiscard]] int num_dofs() const noexcept override {
-    return static_cast<int>(nodes_.size());
+    return static_cast<int>(dofs_.size());
   }
 
   [[nodiscard]] LocalKe stiffness_matrix() const override;
@@ -290,7 +305,7 @@ private:
   ElementId eid_;
   PropertyId pid_;
   std::vector<NodeId> nodes_;
-  std::array<int, 2> components_;
+  std::vector<ScalarConnectionDof> dofs_;
   double value_;
   const Model &model_;
 };

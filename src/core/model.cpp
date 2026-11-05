@@ -9,6 +9,19 @@
 
 namespace vibestran {
 
+// cppcheck-suppress unusedFunction -- called from the elements and solvers
+Mat3 Model::displacement_axes(const NodeId id) const {
+  const GridPoint &grid = node(id);
+  if (grid.cd == CoordId{0})
+    return Mat3::identity();
+  const auto cs = coord_systems.find(grid.cd);
+  if (cs == coord_systems.end())
+    throw SolverError(std::format(
+        "GRID {} references undefined displacement coordinate system {}",
+        id.value, grid.cd.value));
+  return rotation_matrix(cs->second, grid.position);
+}
+
 namespace {
 
 bool element_requires_property(const ElementType type) {

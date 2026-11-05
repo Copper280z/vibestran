@@ -32,9 +32,10 @@ struct SpcDofState {
 };
 
 /// Map each local DOF index of an element to its (node, component) identity.
-/// Scalar elements (CELAS/CMASS) have one DOF per node on an explicit
-/// component; shell/line elements have 6 DOFs per node; solids have 3.
-std::vector<std::pair<NodeId, int>> local_dof_identity(const ElementData& elem);
+/// Scalar elements (CELAS/CMASS) reach the basic components of their
+/// scalar_connection_dofs; shell/line elements have 6 DOFs per node; solids have 3.
+std::vector<std::pair<NodeId, int>> local_dof_identity(const ElementData& elem,
+                                                       const Model& model);
 
 class LinearStaticSolver {
 public:

@@ -52,17 +52,7 @@ void expand_rbe2(const Rbe2& rbe, const Model& model, std::vector<Mpc>& out) {
 namespace {
 
 Eigen::Matrix3d displacement_axes(const Model& model, const NodeId node) {
-    const GridPoint& grid = model.node(node);
-    if (grid.cd == CoordId{0})
-        return Eigen::Matrix3d::Identity();
-
-    const auto coord_it = model.coord_systems.find(grid.cd);
-    if (coord_it == model.coord_systems.end()) {
-        throw SolverError(std::format(
-            "RBE3 grid {} references unresolved displacement coordinate system {}",
-            node.value, grid.cd.value));
-    }
-    const Mat3 axes = rotation_matrix(coord_it->second, grid.position);
+    const Mat3 axes = model.displacement_axes(node);
     Eigen::Matrix3d result;
     for (int row = 0; row < 3; ++row)
         for (int col = 0; col < 3; ++col)

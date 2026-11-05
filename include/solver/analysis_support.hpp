@@ -9,22 +9,24 @@
 namespace vibestran {
 
 /// The single-point constraints of a structural subcase: Model::structural_spcs
-/// plus the AUTOSPC of grid point singularities at grids that connect a CROD.
+/// plus the AUTOSPC of grid point singularities at grids that connect a CROD, and
+/// at blocks that a scalar element or MPC opens on a CD grid.
 ///
 /// A rod stiffens only its own axis, so a truss grid has zero rotational
 /// stiffness and, unless its rods span space, singular translations too; those
-/// directions are the same zero-valued constraints Nastran's AUTOSPC adds. For
-/// each grid and each of its translation and rotation blocks, the component
-/// nearest the weakest principal direction, in the grid's CD system, is
-/// constrained until the remaining components' smallest principal stiffness is
-/// at least PARAM,EPZERO (1e-8) of the block's largest. Components that an SPC,
-/// MPC or RBE already controls are left out, and on a CD grid an MPC or RBE
-/// removes the whole block, since those work on basic components. Reactions at
-/// these components appear in SPCFORCE like those of any SPC, so a load on a
-/// singular direction is reported rather than lost. PARAM,AUTOSPC,NO disables
-/// it and a singular K is then reported by the solver. Other elements declare
-/// the components they stiffen (their active DOFs), so grids without a rod are
-/// not analysed.
+/// directions are the same zero-valued constraints Nastran's AUTOSPC adds. A
+/// scalar element or MPC names one component of a CD grid, which activates all
+/// three basic components of its block, so a block no other element declares is
+/// analysed in the same way. For each such block, the component nearest the
+/// weakest principal direction, in the grid's CD system, is constrained until the
+/// remaining components' smallest principal stiffness is at least PARAM,EPZERO
+/// (1e-8) of the block's largest. Components that an SPC, MPC or RBE already
+/// controls are left out, an RBE counting for every CD axis with a part along its
+/// basic components. Reactions at these components appear in
+/// SPCFORCE like those of any SPC, so a load on a singular direction is reported
+/// rather than lost. PARAM,AUTOSPC,NO disables it and a singular K is then
+/// reported by the solver. Other elements declare the components they stiffen
+/// (their active DOFs), so other grids are not analysed.
 [[nodiscard]] std::vector<Spc> analysis_spcs(const Model &model,
                                              const SubCase &sc);
 

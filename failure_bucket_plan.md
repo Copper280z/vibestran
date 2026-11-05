@@ -81,6 +81,13 @@ sum_i C_i u_i = rhs
 Explicit BDF MPC, RBE2, and RBE3 equations are homogeneous. Internally
 generated enforced-displacement equations may have a nonzero right-hand side.
 
+MPCADD is resolved after all cards are parsed, so card order does not matter. It
+takes precedence over MPC cards of its own SID, may name that SID to include
+them or another MPCADD, and an undefined set is a parse error. MPC components are
+in the grid's displacement frame: a term on a CD grid is written on the basic
+components of its 3-block, all of which become active, and MPC forces are
+reported in that frame. CELAS and CMASS components are treated the same way.
+
 ### RBE2 expansion
 
 Each dependent RBE2 grid is expanded into ordinary rigid-body MPC rows. The
@@ -382,11 +389,8 @@ values encode MYSTRAN behaviour and are not a correctness oracle.
 2. OLOAD output (the rod benchmark decks stop at their first
    `APPLIEDFORCES` record, with every displacement, SPC force, rod force and
    rod stress agreeing with MYSTRAN to 1e-4 where only rods are present) and
-   modal GPFORCE (inertia-force rows; 34 decks request GPFORCE in SOL 103). Two
-   parser and constraint gaps show on rod decks: MPCADD only collects MPCs that
-   precede it (`SB-RBE2-01-CROD-05-MPC-03`), and MPC components on a CD grid are
-   read in basic (`SB-RODLOAD-MPC-FOR-SING`). ELFORCE and stress output for
-   CELASi are missing (`celas3_*`, `celas4_*`). Solid stress/strain output is in basic; PSOLID CORDM
+   modal GPFORCE (inertia-force rows; 34 decks request GPFORCE in SOL 103).
+   ELFORCE and stress output for CELASi are missing (`celas3_*`, `celas4_*`). Solid stress/strain output is in basic; PSOLID CORDM
    is parsed but not yet applied.
 3. Triage the faceted-cylinder free-thermal decks and the SPCFORCES
    `numerical_mismatch` decks (RBE3 node-surface coupling, MITC4+ reaction
@@ -608,3 +612,11 @@ most recent entry.
   `unsupported_input` fell by 31 decks; those now run, and some reach a
   comparison that fails for another reason (item 2 of the next steps). No record
   fails that passed in the run of 2026-10-31.
+- **Explicit MPC sets and frames (1,706 final failure records, unchanged).**
+  MPCADD resolves after parsing, and MPC, CELAS and CMASS components on a CD grid
+  are read in its displacement frame, with AUTOSPC on the blocks that opens.
+  `SB/SS-RBE2-01-CROD-05-MPC-03` fall from 31 to 4 failed comparisons and
+  `SB/SS-RODLOAD-MPC-FOR-SING` from 4 to 2; what remains in all four is their
+  `APPLIEDFORCES` records (OLOAD output), so no record changes bucket. The shell
+  record counts that moved (`vic/1`, `vic/6`, `vic/7`) move by as much between
+  runs of one binary.

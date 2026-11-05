@@ -38,6 +38,14 @@ reference is a MYSTRAN run.
 | CROD torsion with C, and rod margins on torsion | No PROD sets C with nonzero torque on a suite-checked record | Skew rod with a moment along its axis: T L / (G J), tau = C T / J, margin SS/tau - 1 |
 | AUTOSPC of a skew rod on a CD grid | No deck has a singular rod block on a CD grid without an MPC | Rod along a rotated CD X axis: displacement F L / (E A) along T1 and exactly zero on T2 and T3 |
 
+## MPC sets and frames
+
+| Feature | How absence was checked | Suggested deck |
+|---|---|---|
+| MPCADD naming its own SID or another MPCADD, and over MPC cards of its SID | The only 2 MPCADD decks name plain MPC sets of other SIDs | A rod chain with the same ties given each way, as in `MpcAdd.*` |
+| MPC on a cylindrical CD grid, or on rotation components of a CD grid | CD MPC appears only in `SB/SS-RODLOAD-MPC-FOR-SING`, on translations in a rectangular frame | `CdMpc.CylindricalFrameFollowsTheGrid` and `CdMpc.RotationsTurnWithTheSameAxes` |
+| CELAS and CMASS components on a CD grid | The CELAS grids of `vic/6/NAS S30 twisted plate mit4+.bdf`, the only deck with both, have no CD frame | A grounded spring on T1 of a skew frame (the load's projection, with the rest reacted on T2), and a mass on a skew axis between unequal rods, as in `CdScalar.*` |
+
 ## CBAR / PBAR
 
 | Feature | Check | Suggested deck |

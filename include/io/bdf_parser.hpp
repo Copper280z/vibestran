@@ -79,6 +79,7 @@ private:
     static void process_cmass3  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void process_cmass4  (ParseContext& ctx, const std::vector<std::string>& fields);
     static void resolve_scalar_points(ParseContext& ctx);
+    static void resolve_mpcadds(ParseContext& ctx);
     static void parse_scalar_connection(ElementData& e, const std::vector<std::string>& fields, int line);
     static void parse_scalar_points(ElementData& e, const std::vector<std::string>& fields, int line);
     static void process_cquad4  (ParseContext& ctx, const std::vector<std::string>& fields);

@@ -33,9 +33,10 @@
 namespace vibestran {
 
 /// Map each local DOF index of an element to its (node, component) identity.
-/// Scalar elements (CELAS/CMASS) have one DOF per node on an explicit
-/// component; shell/line elements have 6 DOFs per node; solids have 3.
-std::vector<std::pair<NodeId, int>> local_dof_identity(const ElementData &elem) {
+/// Scalar elements (CELAS/CMASS) reach the basic components of their
+/// scalar_connection_dofs; shell/line elements have 6 DOFs per node; solids have 3.
+std::vector<std::pair<NodeId, int>> local_dof_identity(const ElementData &elem,
+                                                       const Model &model) {
   const bool scalar = elem.type == ElementType::CELAS1 ||
                       elem.type == ElementType::CELAS2 ||
                       elem.type == ElementType::CMASS1 ||
@@ -47,9 +48,9 @@ std::vector<std::pair<NodeId, int>> local_dof_identity(const ElementData &elem) 
                      elem.type == ElementType::CPENTA6;
   std::vector<std::pair<NodeId, int>> result;
   if (scalar) {
-    result.reserve(elem.nodes.size());
-    for (size_t i = 0; i < elem.nodes.size(); ++i)
-      result.emplace_back(elem.nodes[i], elem.components[static_cast<size_t>(i)] - 1);
+    for (const ScalarConnectionDof &dof :
+         scalar_connection_dofs(elem.nodes, elem.components, model))
+      result.emplace_back(dof.node, dof.component);
     return result;
   }
   const int dpn = solid ? 3 : 6;
@@ -723,12 +724,12 @@ void LinearStaticSolver::apply_inertial_loads(const Model &model,
       break;
     case ElementType::CMASS1:
     case ElementType::CMASS2:
-      for (size_t i = 0; i < elem_data.nodes.size(); ++i) {
-        const auto it = nodal_accels.find(elem_data.nodes[i]);
-        if (it == nodal_accels.end())
-          continue;
-        accel(static_cast<int>(i)) =
-            component_value(it->second, elem_data.components[i]);
+      for (int li = 0; const auto &[nid, comp] :
+                       local_dof_identity(elem_data, model)) {
+        const auto it = nodal_accels.find(nid);
+        if (it != nodal_accels.end())
+          accel(li) = component_value(it->second, comp + 1);
+        ++li;
       }
       break;
     case ElementType::CHBDY:
@@ -1035,12 +1036,12 @@ void subtract_spc_inertial_loads(const Model &model, const SubCase &sc,
       break;
     case ElementType::CMASS1:
     case ElementType::CMASS2:
-      for (size_t i = 0; i < elem_data.nodes.size(); ++i) {
-        const auto it = nodal_accels.find(elem_data.nodes[i]);
-        if (it == nodal_accels.end())
-          continue;
-        accel(static_cast<int>(i)) =
-            component_value(it->second, elem_data.components[i]);
+      for (int li = 0; const auto &[nid, comp] :
+                       local_dof_identity(elem_data, model)) {
+        const auto it = nodal_accels.find(nid);
+        if (it != nodal_accels.end())
+          accel(li) = component_value(it->second, comp + 1);
+        ++li;
       }
       break;
     case ElementType::CHBDY:
@@ -1051,7 +1052,7 @@ void subtract_spc_inertial_loads(const Model &model, const SubCase &sc,
     if (fe.cwiseAbs().maxCoeff() < 1e-30)
       continue;
 
-    const auto identity = local_dof_identity(elem_data);
+    const auto identity = local_dof_identity(elem_data, model);
     for (int li = 0; li < elem->num_dofs(); ++li) {
       const auto [nid, comp] = identity[static_cast<size_t>(li)];
       const auto spc_it = spc.find(nid);
@@ -1134,7 +1135,7 @@ void subtract_spc_thermal_loads(const Model &model, const SubCase &sc,
     auto elem = make_element(elem_data, model);
     const LocalFe fe =
         element_thermal_vector(*elem, elem_data, model, nodal_temps);
-    const auto identity = local_dof_identity(elem_data);
+    const auto identity = local_dof_identity(elem_data, model);
     for (int li = 0; li < elem->num_dofs(); ++li) {
       const auto [nid, comp] = identity[static_cast<size_t>(li)];
       const auto spc_it = spc.find(nid);
@@ -1151,16 +1152,9 @@ void subtract_spc_thermal_loads(const Model &model, const SubCase &sc,
 /// global (CD) system.
 std::array<double, 6> to_grid_frame(const Model &model, const NodeId nid,
                                     const std::array<double, 6> &v) {
-  const GridPoint &gp = model.node(nid);
-  if (gp.cd.value == 0)
+  if (model.node(nid).cd.value == 0)
     return v;
-  const auto cs_it = model.coord_systems.find(gp.cd);
-  if (cs_it == model.coord_systems.end()) {
-    throw SolverError(std::format(
-        "GRID {}: displacement coordinate system {} not found", nid.value,
-        gp.cd.value));
-  }
-  const Mat3 T3 = rotation_matrix(cs_it->second, gp.position);
+  const Mat3 T3 = model.displacement_axes(nid);
   std::array<double, 6> out{};
   for (int block = 0; block < 2; ++block)
     for (int i = 0; i < 3; ++i) {
@@ -1222,7 +1216,7 @@ LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
     if (ke.size() == 0 || ke.cwiseAbs().maxCoeff() == 0.0)
       continue; // mass-only elements carry no internal force
     const auto gdofs = elem->global_dof_indices(dof_map);
-    const auto identity = local_dof_identity(elem_data);
+    const auto identity = local_dof_identity(elem_data, model);
     const int ndof = elem->num_dofs();
 
     Eigen::VectorXd ue = Eigen::VectorXd::Zero(ndof);
