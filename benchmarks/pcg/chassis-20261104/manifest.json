@@ -1,0 +1,176 @@
+{
+  "date": "2026-11-04T14:49:58.695435+00:00",
+  "command": [
+    "amg_budget_study.py",
+    "screen",
+    "--binary",
+    "/home/bob/pcg-perf/chassis-20261104/vibestran",
+    "--work",
+    "/tmp/amg-budget",
+    "--results",
+    "/home/bob/pcg-perf/chassis-20261104/screen.jsonl",
+    "--budgets",
+    "/home/bob/pcg-perf/chassis-20261104/budgets.json",
+    "--archive",
+    "/home/bob/pcg-perf/chassis-20261104/archive",
+    "--prefix",
+    "systemd-run --user --scope -q -p MemoryMax=26G -p MemorySwapMax=0 taskset -c 0-7",
+    "--timeout",
+    "300",
+    "--classes",
+    "tube-chassis",
+    "--manifest",
+    "/home/bob/pcg-perf/chassis-20261104/manifest.json",
+    "--source-commit",
+    "6a2aab099995499d7eb974d27b8a145a4b4e22d2",
+    "--source-patch",
+    "/home/bob/pcg-perf/chassis-20261104/working-tree.patch",
+    "--build-dir",
+    "/home/bob/vibestran-pcg-perf/build"
+  ],
+  "source_commit": "6a2aab099995499d7eb974d27b8a145a4b4e22d2",
+  "source_patch": "working-tree.patch",
+  "source_patch_sha256": "e721435a62be7c9f97b9ab9ad80516d890dff37d0d420f8334652d311fd45dbb",
+  "binary_sha256": "91164ed1c206cfbbe4395633fa2dfaf58c59dc2d40b887fd145e9c0bc44d8908",
+  "suite_sha256": "df641d7423717f0d1d40b27c26fea63588256eff2efffebe4ac29839d752a2d9",
+  "tolerances": {
+    "translation": 1e-08,
+    "rotation": 1e-08,
+    "residual": 1e-06,
+    "energy": 1e-08,
+    "reaction": 1e-05
+  },
+  "budget_mib": 0,
+  "prefix": "systemd-run --user --scope -q -p MemoryMax=26G -p MemorySwapMax=0 taskset -c 0-7",
+  "timeout_s": 300.0,
+  "machine": {
+    "platform": "Linux-7.0.0-34-generic-x86_64-with-glibc2.39",
+    "cpu": "model name\t: AMD Ryzen 7 5700",
+    "gpu": "NVIDIA TITAN V, 580.178.04, 12288 MiB"
+  },
+  "environment": {
+    "OMP_NUM_THREADS": "8",
+    "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu/libcudss/12"
+  },
+  "compilers": {
+    "cpp": {
+      "id": "gcc",
+      "version": "13.3.0",
+      "exelist": [
+        "ccache",
+        "c++"
+      ]
+    },
+    "c": {
+      "id": "gcc",
+      "version": "13.3.0",
+      "exelist": [
+        "ccache",
+        "cc"
+      ]
+    },
+    "cuda": {
+      "id": "nvcc",
+      "version": "12.8.93\nBuild cuda_12.8.r12.8/compiler.35583870_0",
+      "exelist": [
+        "ccache",
+        "nvcc"
+      ]
+    }
+  },
+  "dependencies": [
+    {
+      "name": "eigen3",
+      "version": "3.4.0"
+    },
+    {
+      "name": "spdlog",
+      "version": "1.12.0"
+    },
+    {
+      "name": "threads",
+      "version": "unknown"
+    },
+    {
+      "name": "tbb",
+      "version": "2021.11.0"
+    },
+    {
+      "name": "openmp",
+      "version": "4.5"
+    },
+    {
+      "name": "hdf5",
+      "version": "1.10.10"
+    },
+    {
+      "name": "vulkan",
+      "version": "1.3.275"
+    },
+    {
+      "name": "gtest_main",
+      "version": "1.14.0"
+    },
+    {
+      "name": "dep135937852183024",
+      "version": "1.5.0"
+    },
+    {
+      "name": "dep135937852185520",
+      "version": "0.1.0"
+    },
+    {
+      "name": "cholmod",
+      "version": "unknown"
+    },
+    {
+      "name": "suitesparseconfig",
+      "version": "unknown"
+    },
+    {
+      "name": "cudart",
+      "version": "unknown"
+    },
+    {
+      "name": "cudss",
+      "version": "unknown"
+    },
+    {
+      "name": "cublas",
+      "version": "unknown"
+    },
+    {
+      "name": "cusparse",
+      "version": "unknown"
+    },
+    {
+      "name": "dep135937852558368",
+      "version": "0.1.0"
+    },
+    {
+      "name": "dep135937855954656",
+      "version": "0.1.0"
+    },
+    {
+      "name": "dep135937852570464",
+      "version": "0.1.0"
+    },
+    {
+      "name": "dep135937852571520",
+      "version": "0.1.0"
+    }
+  ],
+  "options": {
+    "buildtype": "release",
+    "debug": false,
+    "optimization": "3",
+    "b_lto": false,
+    "b_ndebug": "if-release",
+    "cpp_args": [],
+    "cpp_std": "c++20"
+  },
+  "compile_flags": [
+    "-fdiagnostics-color=always -DNDEBUG -D_FILE_OFFSET_BITS=64 -std=c++20 -O3 -march=native -ffast-math -fno-finite-math-only -fPIC -fopenmp -DSPDLOG_SHARED_LIB -DSPDLOG_COMPILED_LIB -DSPDLOG_FMT_EXTERNAL -DHAVE_VULKAN=1 -DHAVE_CUDA=1 -DHAVE_CUDA_EIGENSOLVER=1 -DEIGEN_CHOLMOD_SUPPORT -DHAVE_TBB=1"
+  ],
+  "amgcl_wrap": "[wrap-file]\ndirectory = amgcl-1.5.0\nsource_url = https://codeload.github.com/ddemidov/amgcl/tar.gz/refs/tags/1.5.0\nsource_filename = amgcl-1.5.0.tar.gz\nsource_hash = 6794cab752f0f15bc40db9c8a08a5ad761adf7d74b3d6652b9e2d4bf7f19ab31\npatch_directory = amgcl\n\n[provide]\namgcl = amgcl_dep\n"
+}
