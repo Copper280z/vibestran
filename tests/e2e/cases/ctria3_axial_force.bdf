@@ -30,7 +30,7 @@ GRID,4,,0.0,1.0,0.0
 $ Material
 MAT1,1,1.0E6,,0.3
 $ Shell property: t = 0.1 m
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 $ Two CTRIA3 elements (CCW node order viewed from +z)
 CTRIA3,1,1,1,2,3
 CTRIA3,2,1,1,3,4

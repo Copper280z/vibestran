@@ -198,7 +198,7 @@ static std::string make_single_cquad4_pressure_bdf(const std::string& load_cards
         << "  SPC  = 1\n"
         << "BEGIN BULK\n"
         << "MAT1,1,1.0E6,,0.3\n"
-        << "PSHELL,1,1,0.1\n"
+        << "PSHELL,1,1,0.1,1,,1\n"
         << "GRID,1,,0.0,0.0,0.0\n"
         << "GRID,2,,1.0,0.0,0.0\n"
         << "GRID,3,,1.0,1.0,0.0\n"
@@ -377,7 +377,7 @@ static std::string make_cquad4_cantilever_bdf(
         << "  SPC  = 1\n"
         << "BEGIN BULK\n"
         << "MAT1,1," << E << ",," << nu << "\n"
-        << "PSHELL,1,1," << T << "\n";
+        << "PSHELL,1,1," << T << ",1,,1\n";
 
     for (int iy = 0; iy <= ny; ++iy) {
         const double y = H * static_cast<double>(iy) / ny;
@@ -441,7 +441,7 @@ static std::string make_closed_tube_cantilever_bdf(
         << "  SPC  = 1\n"
         << "BEGIN BULK\n"
         << "MAT1,1," << E << ",," << nu << "\n"
-        << "PSHELL,1,1," << T << "\n";
+        << "PSHELL,1,1," << T << ",1,,1\n";
 
     for (int ix = 0; ix <= nx; ++ix) {
         const double x = L * static_cast<double>(ix) / nx;
@@ -511,7 +511,7 @@ static std::string make_cylindrical_shell_pressure_sector_bdf(int ntheta,
         << "  TEMPERATURE(LOAD) = 3\n"
         << "BEGIN BULK\n"
         << "MAT1,1," << E << ",," << nu << ",," << alpha << ",0.0\n"
-        << "PSHELL,1,1," << T << "\n"
+        << "PSHELL,1,1," << T << ",1,,1\n"
         << "CORD2C,10,0,0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.0,0.0\n";
 
     for (int iz = 0; iz <= nz; ++iz) {
@@ -665,7 +665,7 @@ static std::string make_beam_shell_interconnection_thermal_bdf(bool with_beams) 
         << "GRID,5,,1.0,1.0,0.0\n"
         << "GRID,6,,2.0,1.0,0.0\n"
         << "MAT1,1,1.0E6,,0.0,,1.2E-5,0.0\n"
-        << "PSHELL,1,1,0.1\n"
+        << "PSHELL,1,1,0.1,1,,1\n"
         << "CQUAD4,1,1,1,2,5,4\n"
         << "CQUAD4,2,1,2,3,6,5\n";
     if (with_beams) {
@@ -709,7 +709,7 @@ static std::string make_shell_solid_interconnection_thermal_bdf(bool with_skins)
         << "CHEXA,1,1,1,2,5,4,7,8,11,10\n"
         << "CHEXA,2,1,2,3,6,5,8,9,12,11\n";
     if (with_skins) {
-        bdf << "PSHELL,20,1,0.25\n"
+        bdf << "PSHELL,20,1,0.25,1,,1\n"
             << "CQUAD4,20,20,1,2,5,4\n"
             << "CQUAD4,21,20,2,3,6,5\n"
             << "CQUAD4,22,20,7,8,11,10\n"
@@ -797,7 +797,7 @@ static std::string make_cylindrical_shell_axial_full_ring_bdf() {
         << "BEGIN BULK\n"
         << "CORD2C,10,0,0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.0,0.0\n"
         << "MAT1,1,1.0E6,,0.3\n"
-        << "PSHELL,1,1,0.1\n";
+        << "PSHELL,1,1,0.1,1,,1\n";
 
     for (int iz = 0; iz <= 1; ++iz) {
         const double z = length * static_cast<double>(iz);
@@ -838,7 +838,7 @@ static std::string make_cylindrical_shell_axial_slice_bdf() {
         << "BEGIN BULK\n"
         << "CORD2C,10,0,0.0,0.0,0.0,0.0,0.0,1.0,1.0,0.0,0.0\n"
         << "MAT1,1,1.0E6,,0.3\n"
-        << "PSHELL,1,1,0.1\n"
+        << "PSHELL,1,1,0.1,1,,1\n"
         << "GRID,1,10,1.0, 0.0,0.0,10\n"
         << "GRID,2,10,1.0, 0.0,2.0,10\n"
         << "GRID,3,10,1.0,60.0,2.0,10\n"
@@ -875,8 +875,8 @@ static std::string make_shell_solid_flap_bdf(bool with_skin_shell) {
         << "GRID,10,,1.0,1.0,2.0\n"
         << "MAT1,1,1.0E6,,0.3\n"
         << "PSOLID,1,1\n"
-        << "PSHELL,20,1,0.1\n"
-        << "PSHELL,21,1,0.1\n"
+        << "PSHELL,20,1,0.1,1,,1\n"
+        << "PSHELL,21,1,0.1,1,,1\n"
         << "CHEXA,1,1,1,2,3,4,5,6,7,8\n";
     if (with_skin_shell)
         bdf << "CQUAD4,20,20,5,6,7,8\n";
@@ -972,7 +972,7 @@ static std::string make_line_on_shell_moment_bdf(const LineElementSpec& spec) {
 
     bdf << "GRID,10,,1.0,0.0,0.0\n"
         << "MAT1,1,1.0E6,,0.3\n"
-        << "PSHELL,1,1,0.1\n"
+        << "PSHELL,1,1,0.1,1,,1\n"
         << spec.property_card << "\n"
         << "CQUAD4,1,1,1,2,5,4\n"
         << "CQUAD4,2,1,2,3,6,5\n"
@@ -1014,7 +1014,7 @@ GRID,4,,0.0,1.0,0.0
 $ Material: E=1e6, nu=0.3
 MAT1,1,1.0E6,,0.3
 $ Shell property: t=0.1
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 $ Single CQUAD4 element
 CQUAD4,1,1,1,2,3,4
 $ Minimal BCs: fix T1 (x) for both left-edge nodes (prevents T1 and R3 rigid body)
@@ -1192,7 +1192,7 @@ GRID,3,,1.0,1.0,0.0
 GRID,4,,0.0,1.0,0.0
 $ alpha = 1e-5
 MAT1,1,2.0E6,,0.3,0.0,1.0E-5
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 CQUAD4,1,1,1,2,3,4
 $ Minimal BCs to prevent rigid body motion:
 $ Fix node 1 fully, node 2 y-displacement, node 4 x-displacement
@@ -1335,7 +1335,7 @@ GRID,2,,10.0,0.0,0.0
 GRID,3,,10.0,1.0,0.0
 GRID,4,,0.0,1.0,0.0
 MAT1,1,1.0E6,,0.3
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 CQUAD4,1,1,1,2,3,4
 SPC1,1,1,1
 SPC1,1,1,4
@@ -1624,7 +1624,7 @@ GRID,2,,10.0,0.0,0.0
 GRID,3,,10.0,1.0,0.0
 GRID,4,,0.0,1.0,0.0
 MAT1,1,1.0E6,,0.3
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 CQUAD4,1,1,1,2,3,4
 SPC1,1,1,1
 SPC1,1,1,4
@@ -1696,7 +1696,7 @@ GRID,2,,10.0,0.0,0.0
 GRID,3,,10.0,1.0,0.0
 GRID,4,,0.0,1.0,0.0
 MAT1,1,1.0E6,,0.3
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 CQUAD4,1,1,1,2,3,4
 SPC1,1,1,1
 SPC1,1,1,4
@@ -1764,7 +1764,7 @@ GRID,3,,1.0,1.0,0.0
 GRID,4,,0.0,1.0,0.0
 GRID,5,,0.5,0.5,0.0
 MAT1,1,1.0E6,,0.3
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 CQUAD4,1,1,1,2,3,4
 $ Fix nodes 1 and 2 fully; fix nodes 3 and 4 in all DOFs except T1
 SPC1,1,123456,1
@@ -1844,7 +1844,7 @@ GRID,10,,-2.0,                0.0,              0.0
 GRID,11,,-1.0,               -1.7320508075688772,0.0
 GRID,12,, 1.0,               -1.7320508075688772,0.0
 MAT1,1,1.0E6,,0.3
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 $ 6 sectors (CCW node order): inner-θ1, outer-θ1, outer-θ2, inner-θ2
 CQUAD4,1,1, 1, 7, 8, 2
 CQUAD4,2,1, 2, 8, 9, 3
@@ -1968,7 +1968,7 @@ GRID,10,,-2.0,                0.0,              0.0
 GRID,11,,-1.0,               -1.7320508075688772,0.0
 GRID,12,, 1.0,               -1.7320508075688772,0.0
 MAT1,1,1.0E6,,0.3
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 CQUAD4,1,1, 1, 7, 8, 2
 CQUAD4,2,1, 2, 8, 9, 3
 CQUAD4,3,1, 3, 9,10, 4
@@ -2016,7 +2016,7 @@ $ Outer ring nodes
 GRID,7,10,2.0, 0.0,0.0
 GRID,8,10,2.0,60.0,0.0
 MAT1,1,1.0E6,,0.3
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 $ Single 60° sector (CCW): inner-0°, outer-0°, outer-60°, inner-60°
 CQUAD4,1,1,1,7,8,2
 $ Out-of-plane and drilling DOFs
@@ -2112,7 +2112,7 @@ GRID,2,10,1.0,60.0,0.0
 GRID,7,10,2.0, 0.0,0.0
 GRID,8,10,2.0,60.0,0.0
 MAT1,1,1.0E6,,0.3
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 CQUAD4,1,1,1,7,8,2
 SPC1,1,3456,1,2,7,8
 SPC1,1,2,1,7
@@ -2141,7 +2141,7 @@ GRID,2, 10, 1.0, 60.0,  0.0, 10
 GRID,7, 10, 2.0,  0.0,  0.0, 10
 GRID,8, 10, 2.0, 60.0,  0.0, 10
 MAT1,1,1.0E6,,0.3
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 CQUAD4,1,1,1,7,8,2
 $ Out-of-plane and drilling DOFs (DOFs 3-6 in CD frame)
 SPC1,1,3456,1,2,7,8
@@ -2491,7 +2491,7 @@ TEST(Modal, SimplySupportedBeamCQuad4_FirstBendingMode) {
     bdf << "SUBCASE 1\n  SPC = 1\n  METHOD = 1\n";
     bdf << "BEGIN BULK\n";
     bdf << "MAT1,1," << E << ",,," << rho << "\n";
-    bdf << "PSHELL,1,1," << t << "\n";
+    bdf << "PSHELL,1,1," << t << ",1,,1\n";
     bdf << "EIGRL,1,0.0,,4\n";
 
     // 2-row grid (width w): nodes at y=0 and y=w
@@ -2728,7 +2728,7 @@ GRID,7,,0.0,2.0,0.0
 GRID,8,,1.0,2.0,0.0
 GRID,9,,2.0,2.0,0.0
 MAT1,1,1.0E6,,0.3
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 $ Left column (CCW from +Z => normal = +Z)
 CQUAD4,1,1,1,2,5,4
 CQUAD4,2,1,4,5,8,7
@@ -2998,7 +2998,7 @@ TEST(Integration, BeamShellInterconnectionMatchesCombinedAxialStiffness) {
             << "GRID,5,,1.0,1.0,0.0\n"
             << "GRID,6,,2.0,1.0,0.0\n"
             << "MAT1,1,1.0E6,,0.0\n"
-            << "PSHELL,1,1,0.1\n"
+            << "PSHELL,1,1,0.1,1,,1\n"
             << "CQUAD4,1,1,1,2,5,4\n"
             << "CQUAD4,2,1,2,3,6,5\n";
         if (with_beams) {
@@ -3056,7 +3056,7 @@ TEST(Integration, ShellSolidInterconnectionMatchesCombinedAxialStiffness) {
             << "CHEXA,1,1,1,2,5,4,7,8,11,10\n"
             << "CHEXA,2,1,2,3,6,5,8,9,12,11\n";
         if (with_skins) {
-            bdf << "PSHELL,20,1,0.25\n"
+            bdf << "PSHELL,20,1,0.25,1,,1\n"
                 << "CQUAD4,20,20,1,2,5,4\n"
                 << "CQUAD4,21,20,2,3,6,5\n"
                 << "CQUAD4,22,20,7,8,11,10\n"
@@ -3545,7 +3545,7 @@ SUBCASE 1
   SPC = 1
 BEGIN BULK
 MAT1,1,7.0E10,,0.33
-PSHELL,1,1,5.0E-04
+PSHELL,1,1,5.0E-04,1,,1
 GRID,1,,0.0,0.0,0.0
 GRID,2,,0.5,0.0,0.0
 GRID,3,,1.0,0.0,0.0

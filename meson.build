@@ -703,6 +703,7 @@ endif
 integration_test_sources = files(
   'tests/integration/test_integration.cpp',
   'tests/integration/test_constraint_forces.cpp',
+  'tests/integration/test_autospc.cpp',
   'tests/integration/test_parallel_recovery.cpp',
   'tests/integration/test_rod_and_scalar.cpp',
   'tests/integration/test_pbarl_and_springs.cpp',

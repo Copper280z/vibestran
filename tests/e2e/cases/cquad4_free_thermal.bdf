@@ -36,7 +36,7 @@ GRID,4,,0.0,1.0,0.0
 $ Material: alpha = 1e-5 /°C, ref_temp = 0
 MAT1,1,1.0E6,,0.3,0.0,1.0E-5,0.0
 $ Shell property
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 $ Element
 CQUAD4,1,1,1,2,3,4
 $ Minimal BCs (all compatible with free thermal field u=alpha*dT*x, v=alpha*dT*y)

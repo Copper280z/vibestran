@@ -44,7 +44,7 @@ GRID,9,,2.0,2.0,0.0
 $ --- Material ---
 MAT1,1,1.0E6,,0.3
 $ --- Shell property ---
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 $ --- Left column: CCW from +Z => normal = +Z ---
 CQUAD4,1,1,1,2,5,4
 CQUAD4,2,1,4,5,8,7

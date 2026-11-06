@@ -886,18 +886,17 @@ shell-membrane-1258 from 60.1 s to 35.9 s and the rover from 6.5 s to 1.8 s.
   conditioning. The rest were 2.9e-8 or less.
 - All 23 e2e cases pass on `--backend=cpu-pcg`.
 - On MYSTRAN's 573 validation decks, run on the Mac, AMG completes every deck direct does
-  except five, and rejects those with an error. All five load a direction with no
-  stiffness, so `K u = F` has no solution as the deck stands. `SB-BAR-GRAV` and
-  `SS-BAR-GRAV` put a moment on the torsion of a bar with no J, and `RBE3 26` loads grids
-  held only by a CQUAD8, which is ignored as unsupported. On those three, Accelerate's
-  direct solve leaves the rows at zero and warns, with a relative residual of 0.18-0.89;
-  CHOLMOD on Linux stops with an error on the two of them tried, `SB-BAR-GRAV` and
-  `RBE3 26`; incomplete Cholesky returned a residual near 1e149. `bar_03` and `AUTOSPC
-  reaction forces` are mechanisms, where direct warns and returns displacements of order
-  1e16 and 1e9 that differ between Mac and Linux, and incomplete Cholesky also fails.
-  Validation records number 1656 failures against direct's 1649. Of
-  the 7 extra, 5 are checks `RBE3 26` passed on direct, and 2 are shear forces of about
-  1e-15 against an expected zero. Failures on both differ only by noise near zero.
+  except two, and rejects those with an error. Both load a direction with no stiffness,
+  so `K u = F` has no solution as the deck stands. `RBE3 26` loads grids held only by a
+  CQUAD8, which is ignored as unsupported. Accelerate's direct solve leaves those rows at
+  zero and warns, with a relative residual of 0.89, CHOLMOD on Linux stops with an error,
+  and incomplete Cholesky returned a residual near 1e149. In `AUTOSPC reaction forces` a
+  moment drives a rigid in-plane rotation, since `PARAM,K6ROT` is ignored. Direct warns
+  and returns displacements of order 1e9 that differ between Mac and Linux, and
+  incomplete Cholesky also fails. Validation records number 1656 failures against
+  direct's 1648. Of the 8 extra, 5 are checks `RBE3 26` passed on direct, 1 is a reaction
+  `AUTOSPC reaction forces` reports on direct, and 2 are shear forces of about 1e-15
+  against an expected zero. Failures on both differ only by noise near zero.
 - Rows with no stiffness get a unit diagonal, and a singular coarsest level uses a
   pseudo-inverse, so a deck that only has unloaded singular directions still solves, on
   every AMG backend.

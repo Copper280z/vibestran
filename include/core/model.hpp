@@ -214,9 +214,9 @@ struct PShell {
   PropertyId pid{0};
   MaterialId mid1{0};     // membrane material
   double t{0};            // thickness
-  MaterialId mid2{0};     // bending material (0 = same as mid1)
+  MaterialId mid2{0};     // bending material (0 = no bending, coupling or transverse shear)
   double twelveI_t3{1.0}; // 12I/t^3 bending stiffness factor
-  MaterialId mid3{0};     // transverse shear material
+  MaterialId mid3{0};     // transverse shear material (0 = same as mid2)
   double tst{0.833333};   // transverse shear thickness ratio
   double nsm{0.0};        // non-structural mass / unit area
   double z1{std::numeric_limits<double>::quiet_NaN()}; // stress recovery fiber distance 1

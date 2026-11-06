@@ -342,6 +342,14 @@ Eigen::Matrix<double, NE, 1> full_thermal(const Geometry &g,
   return f;
 }
 
+/// The inverse that condenses the bubble rotations. Without bending stiffness they
+/// have no stiffness at all and couple to nothing, so there is nothing to condense.
+Eigen::Matrix2d bubble_inverse(const Eigen::Matrix2d &Kbb) {
+  if ((Kbb.array() == 0.0).all())
+    return Eigen::Matrix2d::Zero();
+  return Kbb.inverse();
+}
+
 } // namespace
 
 ShellTria3::ShellTria3(const ElementData &data, const Model &model)
@@ -354,7 +362,7 @@ LocalKe ShellTria3::stiffness_matrix() const {
   const Eigen::Matrix<double, 18, 18> Kcc = K.topLeftCorner<18, 18>();
   const Eigen::Matrix<double, 18, 2> Kcb = K.topRightCorner<18, 2>();
   const Eigen::Matrix2d Kbb = K.bottomRightCorner<2, 2>();
-  const Eigen::Matrix<double, 18, 18> Kc = Kcc - Kcb * Kbb.inverse() * Kcb.transpose();
+  const Eigen::Matrix<double, 18, 18> Kc = Kcc - Kcb * bubble_inverse(Kbb) * Kcb.transpose();
   const Eigen::Matrix<double, 18, 18> W = offset_transform(g);
   return W.transpose() * Kc * W;
 }
@@ -395,7 +403,7 @@ LocalFe ShellTria3::thermal_load(std::span<const double> temperatures,
   const Eigen::Matrix<double, 18, 2> Kcb = K.topRightCorner<18, 2>();
   const Eigen::Matrix2d Kbb = K.bottomRightCorner<2, 2>();
   const Eigen::Matrix<double, 18, 1> fc =
-      f.head<18>() - Kcb * Kbb.inverse() * f.tail<2>();
+      f.head<18>() - Kcb * bubble_inverse(Kbb) * f.tail<2>();
   return offset_transform(g).transpose() * fc;
 }
 
@@ -426,7 +434,7 @@ ShellTria3::recover(std::span<const double> global_displacements,
   const KE K = full_stiffness(g);
   const Eigen::Matrix<double, NE, 1> f = full_thermal(g, temperatures, t_ref);
   const Eigen::Matrix2d Kbb = K.bottomRightCorner<2, 2>();
-  u.tail<2>() = Kbb.inverse() * (f.tail<2>() - K.bottomLeftCorner<2, 18>() * u.head<18>());
+  u.tail<2>() = bubble_inverse(Kbb) * (f.tail<2>() - K.bottomLeftCorner<2, 18>() * u.head<18>());
 
   auto at = [&](double r, double s) {
     const PointB p = point_b(g, r, s);

@@ -355,14 +355,15 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   const auto t0 = Clock::now();
 
   // 1. Build DOF map and apply SPC boundary conditions
-  DofMap dof_map = build_dof_map(model, sc);
+  const std::vector<Spc> spcs = analysis_spcs(model, sc);
+  DofMap dof_map = build_dof_map(model, sc, spcs);
   const auto t1 = Clock::now();
   spdlog::debug("[subcase {}] build_dof_map: {:.3f} ms  ({} free DOFs)",
                 sc.id, Ms(t1 - t0).count(), dof_map.num_free_dofs());
 
   // 2. Build MPC handler (CD-frame SPCs + explicit MPCs + RBE2/RBE3)
   MpcHandler mpc_handler;
-  build_mpc_system(model, sc, dof_map, mpc_handler);
+  build_mpc_system(model, sc, spcs, dof_map, mpc_handler);
   const int n = mpc_handler.num_reduced();
   const auto t2 = Clock::now();
   spdlog::debug("[subcase {}] build_mpc_system: {:.3f} ms  ({} reduced DOFs)",
@@ -531,7 +532,7 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   const bool want_gp = sc.gpforce_print || sc.gpforce_plot;
   if (want_spc || want_mpc || want_gp) {
     GridForceOutput forces = compute_grid_forces(
-        model, sc, mpc_handler, u_free, want_spc, want_mpc, want_gp);
+        model, sc, spcs, mpc_handler, u_free, want_spc, want_mpc, want_gp);
     if (forces.error) {
       notices.add(std::format("constraint forces unavailable: {}", *forces.error));
       result.constraint_force_error = std::move(*forces.error);
@@ -552,16 +553,17 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   return result;
 }
 
-DofMap LinearStaticSolver::build_dof_map(const Model &model,
-                                         const SubCase &sc) {
-  return build_analysis_dof_map(model, sc);
+DofMap LinearStaticSolver::build_dof_map(const Model &model, const SubCase &sc,
+                                         const std::span<const Spc> spcs) {
+  return build_analysis_dof_map(model, sc, spcs);
 }
 
 void LinearStaticSolver::build_mpc_system(const Model &model,
                                            const SubCase &sc,
+                                           const std::span<const Spc> spcs,
                                            DofMap &dof_map,
                                            MpcHandler &mpc_handler) {
-  build_analysis_mpc_system(model, sc, dof_map, mpc_handler,
+  build_analysis_mpc_system(model, sc, spcs, dof_map, mpc_handler,
                             /*use_spc_values=*/true);
 }
 
@@ -835,9 +837,9 @@ namespace {
 /// The (node, component) -> enforced-displacement map for the active SPC set.
 /// Component is 0-based (0=T1 .. 5=R3).  Values are in the basic frame.
 std::unordered_map<NodeId, std::array<SpcDofState, 6>>
-active_spc_state(const Model &model, const SubCase &sc) {
+active_spc_state(const Model &model, const std::span<const Spc> spcs) {
   std::unordered_map<NodeId, std::array<SpcDofState, 6>> spc;
-  for (const Spc &spc_c : analysis_spcs(model, sc)) {
+  for (const Spc &spc_c : spcs) {
     auto node_it = model.nodes.find(spc_c.node);
     if (node_it == model.nodes.end())
       continue;
@@ -1168,15 +1170,15 @@ void subtract_spc_thermal_loads(const Model &model, const SubCase &sc,
 } // namespace
 
 LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
-    const Model &model, const SubCase &sc, const MpcHandler &mpc_handler,
-    const std::vector<double> &u_free, const bool want_spc,
-    const bool want_mpc, const bool want_gp) const {
+    const Model &model, const SubCase &sc, const std::span<const Spc> spcs,
+    const MpcHandler &mpc_handler, const std::vector<double> &u_free,
+    const bool want_spc, const bool want_mpc, const bool want_gp) const {
   GridForceOutput out;
   const DofMap &dof_map = mpc_handler.full_dof_map();
 
   // Enforced values for constrained DOFs, and an "every component of every
   // grid" map so the load helpers assemble the full applied load vector.
-  const auto spc = active_spc_state(model, sc);
+  const auto spc = active_spc_state(model, spcs);
   std::unordered_map<NodeId, std::array<SpcDofState, 6>> all;
   all.reserve(model.nodes.size());
   for (const auto &[nid, _] : model.nodes) {
@@ -1349,10 +1351,29 @@ LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
   const auto& mpc_forces = std::get<NodalForces>(recovery);
 
   std::unordered_map<NodeId, DofSet> constrained;
-  for (const Spc &c : analysis_spcs(model, sc))
+  for (const Spc &c : spcs)
     constrained[c.node].mask |= c.dofs.mask;
-  // AUTOSPC adds a component at every rod grid, so its grids are reported only
-  // when they carry a reaction.
+  // A load on a component nothing declares, as at a grid no element connects or a
+  // rotation at a grid only solids connect, goes straight to ground like one AUTOSPC
+  // holds. On a CD grid such components come as a whole block.
+  if (autospc_enabled(model))
+    for (const auto &[nid, force] : neg_applied) {
+      const bool oblique = model.node(nid).cd.value != 0;
+      for (const int block : {0, 3}) {
+        const std::array<int, 3> components{block, block + 1, block + 2};
+        const auto fixed = [&](const int d) { return !dof_map.is_free(nid, d); };
+        const auto loaded = [&](const int d) {
+          return fixed(d) && force[static_cast<size_t>(d)] != 0.0;
+        };
+        const bool whole = oblique && std::ranges::all_of(components, fixed) &&
+                           std::ranges::any_of(components, loaded);
+        for (const int d : components)
+          if (whole || (!oblique && loaded(d)))
+            constrained[nid].mask |= static_cast<uint8_t>(1U << d);
+      }
+    }
+  // AUTOSPC adds components at many grids, so its grids are reported only when they
+  // carry a reaction.
   std::unordered_set<NodeId> user_constrained;
   for (const Spc &c : model.structural_spcs(sc.spc_set))
     user_constrained.insert(c.node);

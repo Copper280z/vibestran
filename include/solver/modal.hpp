@@ -16,6 +16,7 @@
 #include "io/results.hpp"
 #include "solver/eigensolver_backend.hpp"
 #include <memory>
+#include <span>
 
 namespace vibestran {
 
@@ -37,10 +38,12 @@ private:
     ModalSubCaseResults solve_subcase(const Model& model, const SubCase& sc,
                                       SolveSummary& summary);
 
-    DofMap build_dof_map(const Model& model, const SubCase& sc);
+    DofMap build_dof_map(const Model& model, const SubCase& sc,
+                         std::span<const Spc> spcs);
 
     void build_mpc_system(const Model& model, const SubCase& sc,
-                          DofMap& dof_map, MpcHandler& mpc_handler);
+                          std::span<const Spc> spcs, DofMap& dof_map,
+                          MpcHandler& mpc_handler);
 
     /// Assemble global stiffness K into K_builder (reduced system).
     void assemble_stiffness(const Model& model,

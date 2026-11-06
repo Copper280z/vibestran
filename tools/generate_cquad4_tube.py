@@ -286,8 +286,8 @@ def generate(n_target: int, thickness: float, load_case: str, out_path: str) -> 
     # ── Shell property ────────────────────────────────────────────────────────
     wr("$")
     wr("$ ── Property ───────────────────────────────────────────────────────────")
-    # PSHELL fields: PID, MID1, T  (MID2 defaults to MID1 for bending)
-    wr(f"PSHELL,1,1,{fmt_float(t)}")
+    # PSHELL fields: PID, MID1, T, MID2, 12I/T3, MID3 (a blank MID2 would be a membrane)
+    wr(f"PSHELL,1,1,{fmt_float(t)},1,,1")
 
     # ── Eigensolver (modal only) ──────────────────────────────────────────────
     if load_case == "modal":

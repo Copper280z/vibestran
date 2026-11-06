@@ -3,6 +3,7 @@
 #include "../unit/structural_system.hpp"
 #include "core/coord_sys.hpp"
 #include "io/bdf_parser.hpp"
+#include "solver/analysis_support.hpp"
 #include "solver/heat_transfer_steady.hpp"
 #include "solver/linear_static.hpp"
 #include "solver/solver_backend.hpp"
@@ -177,6 +178,41 @@ TEST(ParallelAssembly, ThermalSystemIsIndependentOfTheThreadCount) {
     EXPECT_EQ(serial.k.col_ind, parallel.k.col_ind);
     EXPECT_EQ(serial.k.values, parallel.k.values);
     EXPECT_EQ(serial.f, parallel.f);
+#else
+    GTEST_SKIP() << "built without TBB";
+#endif
+}
+
+TEST(ParallelAssembly, AutoSpcIsIndependentOfTheThreadCount) {
+#ifdef HAVE_TBB
+    // A chain of bars with no J along a skewed line, every bar on a CD grid every
+    // third grid, so the held components differ from grid to grid.
+    const int bars = 3 * 512;
+    std::ostringstream deck;
+    deck << "SOL 101\nCEND\nSPC = 1\nBEGIN BULK\nMAT1,1,1.0E7,,0.3\nPBAR,1,1,2.0,3.0,3.0\n"
+         << "CORD2R,5,,0.,0.,0.,0.3,0.4,0.8\n,0.9,0.1,0.2\n";
+    for (int g = 1; g <= bars + 1; ++g)
+        deck << std::format("GRID,{},,{},{},{},{}\n", g, 0.6 * g, 0.8 * g, 0.,
+                            g % 3 == 0 ? "5" : "");
+    for (int e = 1; e <= bars; ++e)
+        deck << std::format("CBAR,{},1,{},{},0.,0.,1.\n", e, e, e + 1);
+    deck << "SPC1,1,123456,1\nENDDATA\n";
+    const Model model = BdfParser::parse_string(deck.str());
+    const SubCase sc = model.analysis.subcases.at(0);
+
+    const auto masks = [&] {
+        std::vector<std::pair<int, unsigned>> out;
+        for (const Spc& spc : analysis_spcs(model, sc))
+            out.emplace_back(spc.node.value, spc.dofs.mask);
+        return out;
+    };
+    std::vector<std::pair<int, unsigned>> serial;
+    tbb::task_arena(1).execute([&] { serial = masks(); });
+    std::vector<std::pair<int, unsigned>> threaded;
+    tbb::task_arena(8).execute([&] { threaded = masks(); });
+    EXPECT_EQ(serial.size(), std::size_t(bars) + 1) << "the anchor and each free grid";
+    EXPECT_EQ(serial, threaded);
+    EXPECT_TRUE(std::ranges::is_sorted(serial.begin() + 1, serial.end()));
 #else
     GTEST_SKIP() << "built without TBB";
 #endif

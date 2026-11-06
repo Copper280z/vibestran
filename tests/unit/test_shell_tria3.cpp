@@ -242,7 +242,7 @@ TEST(ShellTria3, TiltedSnormDirectorsKeepThinPlateBending) {
   const auto tip_w = [](const char *snorm) {
     std::ostringstream os;
     os << "SOL 101\nCEND\nSPC = 1\nLOAD = 1\nDISPLACEMENT = ALL\nBEGIN BULK\n"
-          "MAT1,1,1.0E7,,0.3\nPSHELL,1,1,0.01\n";
+          "MAT1,1,1.0E7,,0.3\nPSHELL,1,1,0.01,1,,1\n";
     const auto id = [](int i, int j) { return 1 + i + 21 * j; };
     for (int j = 0; j <= 4; ++j)
       for (int i = 0; i <= 20; ++i) {

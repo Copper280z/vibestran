@@ -47,7 +47,7 @@ $ Node 8: r=2, theta=60  -> basic (1.0, 1.732051, 0)
 GRID,7,10,2.0, 0.0,0.0
 GRID,8,10,2.0,60.0,0.0
 MAT1,1,1.0E6,,0.3
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 $ Single 60 degree sector (CCW node order): inner-0, outer-0, outer-60, inner-60
 CQUAD4,1,1,1,7,8,2
 $ Out-of-plane and drilling DOFs (plane stress model)

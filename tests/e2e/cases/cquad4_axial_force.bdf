@@ -30,7 +30,7 @@ GRID,4,,0.0,1.0,0.0
 $ Material
 MAT1,1,1.0E6,,0.3
 $ Shell property: t = 0.1 m
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 $ Single CQUAD4 element (CCW node order viewed from +z)
 CQUAD4,1,1,1,2,3,4
 $ BCs: fix T1 of nodes 1 and 4 (left edge); fix T2 of node 1

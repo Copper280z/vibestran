@@ -348,6 +348,9 @@ TEST(InpParser, ShellSection) {
     ASSERT_TRUE(std::holds_alternative<PShell>(prop));
     const auto& ps = std::get<PShell>(prop);
     EXPECT_NEAR(ps.t, 0.5, 1e-10);
+    // A shell section bends and shears; in a PSHELL a blank MID2 would be a membrane.
+    EXPECT_EQ(ps.mid2.value, ps.mid1.value);
+    EXPECT_EQ(ps.mid3.value, ps.mid1.value);
 
     // Element should reference this property
     EXPECT_EQ(m.elements[0].pid, ps.pid);

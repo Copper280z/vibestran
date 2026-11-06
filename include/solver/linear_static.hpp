@@ -18,6 +18,7 @@
 #include "solver/solver_backend.hpp"
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -62,12 +63,14 @@ private:
                                  SolveSummary& summary);
 
     /// Build DofMap with SPC constraints only (no MPC elimination yet).
-    DofMap build_dof_map(const Model& model, const SubCase& sc);
+    DofMap build_dof_map(const Model& model, const SubCase& sc,
+                         std::span<const Spc> spcs);
 
     /// Build MpcHandler: CD-frame SPCs, RBE2/RBE3, explicit MPCs.
     /// Modifies dof_map: constrains dependent DOFs.
     void build_mpc_system(const Model& model, const SubCase& sc,
-                          DofMap& dof_map, MpcHandler& mpc_handler);
+                          std::span<const Spc> spcs, DofMap& dof_map,
+                          MpcHandler& mpc_handler);
 
     /// Assemble K and F using the pre-MPC dof_map (from mpc_handler.full_dof_map()).
     void assemble(const Model& model,
@@ -122,6 +125,7 @@ private:
     /// recovery is returned in `error` rather than thrown.
     GridForceOutput
     compute_grid_forces(const Model& model, const SubCase& sc,
+                        std::span<const Spc> spcs,
                         const MpcHandler& mpc_handler,
                         const std::vector<double>& u_free,
                         bool want_spc, bool want_mpc, bool want_gp) const;

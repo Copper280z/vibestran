@@ -618,7 +618,7 @@ TEST(ShellDirectors, SnormReplacesTheDirectorInItsOwnCoordinateSystem) {
                                    "CORD2C,5,0,0.,0.,0.,0.,0.,1.,1.,0.,0.\n"
                                    "GRID,1,,0.,0.,0.\nGRID,2,,1.,0.,0.\n"
                                    "GRID,3,,1.,1.,0.\nGRID,4,,0.,1.,0.\n"
-                                   "MAT1,1,1.0E7,,0.3\nPSHELL,1,1,0.1\n"
+                                   "MAT1,1,1.0E7,,0.3\nPSHELL,1,1,0.1,1,,1\n"
                                    "CQUAD4,1,1,1,2,3,4\n" +
                                    snorm + "ENDDATA\n");
   };

@@ -41,6 +41,11 @@ reference is a MYSTRAN run.
 | Implicit scalar points | Every deck with a blank or zero CELAS/CMASS component on an undefined point also has SPOINT | The same chain with the SPOINT card removed must give identical results |
 | CROD torsion with C, and rod margins on torsion | No PROD sets C with nonzero torque on a suite-checked record | Skew rod with a moment along its axis: T L / (G J), tau = C T / J, margin SS/tau - 1 |
 | AUTOSPC of a skew rod on a CD grid | No deck has a singular rod block on a CD grid without an MPC | Rod along a rotated CD X axis: displacement F L / (E A) along T1 and exactly zero on T2 and T3 |
+| AUTOSPC on a membrane-only shell | AUTOSPC holds nothing at a shell grid in any of the 459 decks that parse | Flat plate of quads or triangles with 12I/T^3 = 0 and TS/T = 0 in tension: stretch P L / (E A), with an out-of-plane load returned whole as a reaction |
+| PSHELL with a blank MID2 | All but 2 of the 326 PSHELL cards set MID1, MID2 and MID3, and those 2 leave MID1 blank | Flat plate as above with MID2 blank, with and without MID3: the same stretch and reaction, and no bending or shear resultants |
+| PSHELL with a blank MID1 | 2 decks, `SB-AQ3U2S004` and `SS-AQ3U2S004`, which stop with "references undefined material 0" | Plate with only MID2 and MID3: bending as usual, with no membrane stiffness or mass from the section |
+| A solid and a shell at one grid | Of the 33 decks that join element families at a grid, none joins a solid to a shell | Hex with membrane skins pulled along its length: stretch F L / (E (w h + 2 t w)) |
+| AUTOSPC at a CBUSH | AUTOSPC holds nothing at a CBUSH grid in any of the 459 decks that parse | CBUSH with only K1: displacement F / K1 along T1, with a load on T2 returned whole as a reaction |
 
 ## MPC sets and frames
 

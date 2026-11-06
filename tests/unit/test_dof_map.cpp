@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 #include "core/dof_map.hpp"
 #include "core/model.hpp"
+#include "io/bdf_parser.hpp"
 #include "solver/analysis_support.hpp"
 #include <set>
 
@@ -239,21 +240,12 @@ TEST(DofMap, GlobalIndicesAfterConstraint) {
 }
 
 static Model make_analysis_support_model() {
-    Model m;
-    auto add_node = [&](int id, double x, double y, double z) {
-        m.nodes[NodeId{id}] = GridPoint{NodeId{id}, CoordId{0}, Vec3{x, y, z}, CoordId{0}};
-    };
-
-    add_node(1, 0.0, 0.0, 0.0);
-    add_node(2, 1.0, 0.0, 0.0);
-    add_node(3, 0.0, 1.0, 0.0);
-    add_node(4, 1.0, 1.0, 0.0);
-    add_node(5, 0.0, 0.0, 1.0);
-    add_node(6, 1.0, 0.0, 1.0);
-    add_node(7, 0.0, 1.0, 1.0);
-    add_node(8, 1.0, 1.0, 1.0);
-
-    return m;
+    return BdfParser::parse_string(
+        "SOL 101\nCEND\nBEGIN BULK\n"
+        "GRID,1,,0.,0.,0.\nGRID,2,,1.,0.,0.\nGRID,3,,0.,1.,0.\nGRID,4,,1.,1.,0.\n"
+        "GRID,5,,0.,0.,1.\nGRID,6,,1.,0.,1.\nGRID,7,,0.,1.,1.\nGRID,8,,1.,1.,1.\n"
+        "MAT1,1,1.0E7,,0.3\nPSHELL,1,1,0.1,1,,1\nPBAR,2,1,1.,1.,1.,1.\nPSOLID,3,1\n"
+        "ENDDATA\n");
 }
 
 TEST(AnalysisSupport, ShellSolidSharedNodeKeepsRotationsActive) {
@@ -262,12 +254,14 @@ TEST(AnalysisSupport, ShellSolidSharedNodeKeepsRotationsActive) {
     ElementData shell;
     shell.id = ElementId{1};
     shell.type = ElementType::CQUAD4;
+    shell.pid = PropertyId{1};
     shell.nodes = {NodeId{1}, NodeId{2}, NodeId{4}, NodeId{3}};
     m.elements.push_back(shell);
 
     ElementData solid;
     solid.id = ElementId{2};
     solid.type = ElementType::CTETRA4;
+    solid.pid = PropertyId{3};
     solid.nodes = {NodeId{1}, NodeId{5}, NodeId{6}, NodeId{7}};
     m.elements.push_back(solid);
 
@@ -284,12 +278,15 @@ TEST(AnalysisSupport, BeamShellSharedNodeKeepsBeamRotationsActive) {
     ElementData beam;
     beam.id = ElementId{1};
     beam.type = ElementType::CBAR;
+    beam.pid = PropertyId{2};
+    beam.orientation = Vec3{0.0, 1.0, 0.0};
     beam.nodes = {NodeId{1}, NodeId{2}};
     m.elements.push_back(beam);
 
     ElementData shell;
     shell.id = ElementId{2};
     shell.type = ElementType::CQUAD4;
+    shell.pid = PropertyId{1};
     shell.nodes = {NodeId{1}, NodeId{3}, NodeId{4}, NodeId{2}};
     m.elements.push_back(shell);
 
@@ -305,12 +302,15 @@ TEST(AnalysisSupport, BeamSolidSharedNodeKeepsBeamRotationsActive) {
     ElementData beam;
     beam.id = ElementId{1};
     beam.type = ElementType::CBAR;
+    beam.pid = PropertyId{2};
+    beam.orientation = Vec3{0.0, 1.0, 0.0};
     beam.nodes = {NodeId{1}, NodeId{2}};
     m.elements.push_back(beam);
 
     ElementData solid;
     solid.id = ElementId{2};
     solid.type = ElementType::CTETRA4;
+    solid.pid = PropertyId{3};
     solid.nodes = {NodeId{1}, NodeId{5}, NodeId{6}, NodeId{7}};
     m.elements.push_back(solid);
 

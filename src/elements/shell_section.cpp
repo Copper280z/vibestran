@@ -150,13 +150,6 @@ ShellSection pshell_section(const Model &model, const PShell &ps, ElementId eid,
     throw SolverError(std::format("{} {}: PSHELL {} has non-positive thickness {}",
                                   owner, eid.value, ps.pid.value, ps.t));
   const PlaneStressMaterial m1 = plane_stress_material(model, ps.mid1, eid, owner);
-  // A blank MID2 means a membrane-only shell in Nastran.  vibestran has no
-  // AUTOSPC to remove the resulting rotational singularities, so a blank
-  // MID2 falls back to MID1 and a blank MID3 to the bending material.
-  const MaterialId mid2 = ps.mid2.value != 0 ? ps.mid2 : ps.mid1;
-  const MaterialId mid3 = ps.mid3.value != 0 ? ps.mid3 : mid2;
-  const PlaneStressMaterial m2 = plane_stress_material(model, mid2, eid, owner);
-  const PlaneStressMaterial m3 = plane_stress_material(model, mid3, eid, owner);
 
   ShellSection s;
   const double t = ps.t;
@@ -166,10 +159,18 @@ ShellSection pshell_section(const Model &model, const PShell &ps, ElementId eid,
   s.z1 = std::isnan(ps.z1) ? -0.5 * t : ps.z1;
   s.z2 = std::isnan(ps.z2) ? 0.5 * t : ps.z2;
   s.A = t * m1.Q;
-  s.D = (ps.twelveI_t3 * t * t * t / 12.0) * m2.Q;
-  s.T = (ps.tst * t) * m3.shear;
-  if (ps.mid4.value != 0)
-    s.B = t * t * plane_stress_material(model, ps.mid4, eid, owner).Q;
+  // A blank MID2 leaves no bending, coupling or transverse shear stiffness, whatever
+  // MID3 and MID4 say, as in Nastran. AUTOSPC holds the directions that leaves singular.
+  // With a MID2, a blank MID3 falls back to the bending material.
+  if (ps.mid2.value != 0) {
+    const MaterialId mid3 = ps.mid3.value != 0 ? ps.mid3 : ps.mid2;
+    const PlaneStressMaterial m2 = plane_stress_material(model, ps.mid2, eid, owner);
+    const PlaneStressMaterial m3 = plane_stress_material(model, mid3, eid, owner);
+    s.D = (ps.twelveI_t3 * t * t * t / 12.0) * m2.Q;
+    s.T = (ps.tst * t) * m3.shear;
+    if (ps.mid4.value != 0)
+      s.B = t * t * plane_stress_material(model, ps.mid4, eid, owner).Q;
+  }
   s.thermal_N = s.A * m1.alpha;
   s.ref_temp = m1.ref_temp;
   s.mass_per_area = m1.rho * t + ps.nsm;

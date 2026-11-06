@@ -93,14 +93,15 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
     const double wtmass = model.param_real("WTMASS").value_or(1.0);
 
     // ── 1. DOF map ────────────────────────────────────────────────────────────
-    DofMap dof_map = build_dof_map(model, sc);
+    const std::vector<Spc> spcs = analysis_spcs(model, sc);
+    DofMap dof_map = build_dof_map(model, sc, spcs);
     const auto t1 = Clock::now();
     spdlog::debug("[modal sc {}] build_dof_map: {:.3f} ms  ({} free DOFs)",
                   sc.id, Ms(t1 - t0).count(), dof_map.num_free_dofs());
 
     // ── 2. MPC system ─────────────────────────────────────────────────────────
     MpcHandler mpc_handler;
-    build_mpc_system(model, sc, dof_map, mpc_handler);
+    build_mpc_system(model, sc, spcs, dof_map, mpc_handler);
     const int n = mpc_handler.num_reduced();
     const auto t2 = Clock::now();
     spdlog::debug("[modal sc {}] build_mpc_system: {:.3f} ms  ({} reduced DOFs)",
@@ -259,15 +260,17 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
 
 // ── DOF map (identical to LinearStaticSolver::build_dof_map) ─────────────────
 
-DofMap ModalSolver::build_dof_map(const Model& model, const SubCase& sc) {
-    return build_analysis_dof_map(model, sc);
+DofMap ModalSolver::build_dof_map(const Model& model, const SubCase& sc,
+                                  std::span<const Spc> spcs) {
+    return build_analysis_dof_map(model, sc, spcs);
 }
 
 // ── MPC system (identical to LinearStaticSolver::build_mpc_system) ────────────
 
 void ModalSolver::build_mpc_system(const Model& model, const SubCase& sc,
-                                   DofMap& dof_map, MpcHandler& mpc_handler) {
-    build_analysis_mpc_system(model, sc, dof_map, mpc_handler,
+                                   std::span<const Spc> spcs, DofMap& dof_map,
+                                   MpcHandler& mpc_handler) {
+    build_analysis_mpc_system(model, sc, spcs, dof_map, mpc_handler,
                               /*use_spc_values=*/false);
 }
 

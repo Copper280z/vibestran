@@ -48,7 +48,7 @@ GRID,10,,-2.0,                0.0,              0.0
 GRID,11,,-1.0,               -1.7320508075688772,0.0
 GRID,12,, 1.0,               -1.7320508075688772,0.0
 MAT1,1,1.0E6,,0.3
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 $ 6 sectors (CCW): inner-theta1, outer-theta1, outer-theta2, inner-theta2
 CQUAD4,1,1, 1, 7, 8, 2
 CQUAD4,2,1, 2, 8, 9, 3

@@ -18,17 +18,17 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 1,649 final failure
+The suite contains 3,226 definitions. The current run has 1,648 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
 | `unsupported_input` | 874 | 147 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 600 | 218 | Result exists but differs from the reference or comparator expectation |
+| `numerical_mismatch` | 599 | 218 | Result exists but differs from the reference or comparator expectation |
 | `input_parse_error` | 141 | 12 | Parser rejects syntax or a card variant used by a valid deck |
 | `missing_result_data` | 30 | 8 | Solver completes but does not emit the requested result family |
 | `solver_model_error` | 4 | 1 | Parsed model is rejected by a geometry gate |
-| **Total** | **1,649** |  |  |
+| **Total** | **1,648** |  |  |
 
 CQUAD4 is the MITC4+/D continuum shell and CTRIA3 the MITC3+ shell (see
 `SHELL_REWRITE_PLAN.md` and `SHELL_BENCHMARKS.md`): six DOFs per grid,
@@ -279,7 +279,10 @@ The shell records fall into these groups:
   `AUTOSPC reaction forces`, `Shell pinned support multiple nodes`,
   `node-surface coupling shell rotation Z` and several `RZ` bulk records
   encode MYSTRAN's K6ROT drilling spring. vibestran's shells carry only a
-  small drill stabilisation (like Nastran) and ignore `PARAM,K6ROT`.
+  small drill stabilisation (like Nastran) and ignore `PARAM,K6ROT`. In
+  `AUTOSPC reaction forces` that leaves a moment driving a rigid in-plane rotation
+  about the one pinned grid, so the deck has no solution here: direct warns and
+  prints a rotation of order 1e9, and the iterative backends reject it.
 - **Roundoff against all-zero references** (suite issue 2): e.g. `shell
   element force`, `shell gravity`, `tri3 quad4`, `shell laminate coupling`,
   `tiny principal stress and strain angle bug` (errors 1e-23 to 5e-9).
@@ -636,3 +639,27 @@ most recent entry.
   by 1.12 where MSC Nastran gets 9.334E-08 against our 9.333E-08, so the difference
   is MYSTRAN's. `NAS S30 beam orientation_2`, which has a shear load, matches MSC Nastran
   and MYSTRAN to all printed digits.
+- **AUTOSPC at every grid (1,649 → 1,648 final failure records).** AUTOSPC analysed
+  only rod grids and blocks opened on a CD grid; it now covers every grid, and a load on
+  a component nothing declares is reported as a reaction instead of disappearing. No
+  record fails newly, and only 9 of 573 decks change at all on the deterministic CPU PCG
+  backend. `NAS S30 AUTOSPC reaction forces` passes grid 10 TX. Most of the gain is
+  inside bulk records that still fail on OLOAD output, which is not implemented:
+  `bar_03` falls from 50 to 7 bad values out of 107 and now matches MYSTRAN's
+  displacements, `SB-BAR-AUTOSPC-CHECK` and `SS-BAR-AUTOSPC-CHECK` from 4 to 2 with
+  their wrong T1 and T2 at grid 102 now right, and `SB-BAR-GRAV` and `SS-BAR-GRAV` from
+  127 to 125. `bar_03`, `SB-BAR-GRAV` and `SS-BAR-GRAV` had been rejected by CPU PCG and
+  now solve there. `quad4 quad8 hex20 together` and
+  `helical mesh ring` compare 30 more values and fail 4 to 5 more, because reactions
+  appear at grids held only by the ignored CQUAD8. Their reaction totals now equal the
+  applied load, which they did not before. Solids and shells with membrane, bending and
+  shear stiffness are not analysed, since their blocks cannot be singular. On 6 decks
+  with a low G12 a ratio test would hold drill rotations whose stiffness is as little as
+  1e-10 of bending, as MYSTRAN does on `shell laminate shear`, and those rotations
+  print as about 1e-12 or less here.
+- **Blank MID2 follows Nastran (no change in failure records).** A PSHELL with a blank
+  MID2 used to fall back to MID1; it now has no bending, coupling or transverse shear
+  stiffness. No deck in the suite leaves MID2 blank with a MID1, so direct stays at 1,648
+  and CPU PCG at 1,656, and CPU PCG's bulk counts don't move at all. Membrane-only CTRIA3
+  no longer returns zeros, which its condensed bubble rotations caused by dividing by zero.
+

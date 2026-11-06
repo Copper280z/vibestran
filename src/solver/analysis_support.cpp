@@ -2,9 +2,11 @@
 
 #include "solver/analysis_support.hpp"
 
+#include "assembly_parallel.hpp"
 #include "core/coord_sys.hpp"
 #include "elements/element_factory.hpp"
 #include "elements/rbe_constraints.hpp"
+#include "elements/shell_section.hpp"
 #include "solver/linear_static.hpp"
 #include <Eigen/Dense>
 
@@ -12,9 +14,13 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <format>
 #include <functional>
 #include <iterator>
 #include <map>
+#include <type_traits>
 #include <unordered_map>
 
 namespace vibestran {
@@ -327,86 +333,163 @@ std::vector<int> singular_components(const Eigen::Matrix3d &block,
   return singular;
 }
 
+/// The blocks at its grids that an element's own stiffness keeps nonsingular, so
+/// that AUTOSPC need not compute that stiffness.
+struct SureBlocks {
+  bool translation{false};
+  bool rotation{false};
+};
+
+[[nodiscard]] SureBlocks
+sure_blocks(const ElementData &elem, const Model &model,
+            std::unordered_map<PropertyId, bool> &complete_sections) {
+  switch (elem.type) {
+  case ElementType::CHEXA8:
+  case ElementType::CHEXA20:
+  case ElementType::CTETRA4:
+  case ElementType::CTETRA10:
+  case ElementType::CPENTA6:
+    return {.translation = true, .rotation = false};
+  case ElementType::CQUAD4:
+  case ElementType::CTRIA3: {
+    const auto known = complete_sections.find(elem.pid);
+    if (known != complete_sections.end())
+      return {.translation = known->second, .rotation = known->second};
+    const ShellSection section = build_shell_section(
+        model, elem.pid, elem.id, elem.type == ElementType::CQUAD4 ? "CQUAD4" : "CTRIA3");
+    const auto positive_definite = [](const auto &m) {
+      return Eigen::LLT<std::decay_t<decltype(m)>>(m).info() == Eigen::Success;
+    };
+    const bool complete = positive_definite(section.A) && positive_definite(section.D) &&
+                          positive_definite(section.T);
+    complete_sections.emplace(elem.pid, complete);
+    return {.translation = complete, .rotation = complete};
+  }
+  default:
+    return {};
+  }
+}
+
 } // namespace
+
+bool autospc_enabled(const Model &model) {
+  const auto autospc = model.params.find("AUTOSPC");
+  return autospc == model.params.end() || autospc->second.empty() ||
+         std::toupper(static_cast<unsigned char>(autospc->second[0])) != 'N';
+}
 
 std::vector<Spc> analysis_spcs(const Model &model, const SubCase &sc) {
   std::vector<Spc> result = model.structural_spcs(sc.spc_set);
-  const auto autospc = model.params.find("AUTOSPC");
-  if (autospc != model.params.end() && !autospc->second.empty() &&
-      std::toupper(static_cast<unsigned char>(autospc->second[0])) == 'N')
+  if (!autospc_enabled(model))
     return result;
 
-  // The translation and rotation blocks to analyse at each grid.
-  std::unordered_map<NodeId, std::array<bool, 2>> analysed;
-  for (const auto &elem : model.elements)
-    if (elem.type == ElementType::CROD || elem.type == ElementType::CONROD)
-      for (const NodeId nid : elem.nodes)
-        analysed[nid] = {true, true};
-
-  // Components named on a CD grid by a scalar element or MPC, which activate
-  // their whole block. Nothing else may stiffen the rest of it.
-  std::vector<std::pair<NodeId, int>> named_on_cd;
-  const auto note_named = [&](const NodeId nid, const int component) {
-    const auto grid = model.nodes.find(nid);
-    if (grid != model.nodes.end() && grid->second.cd != CoordId{0} &&
-        component >= 1 && component <= 6)
-      named_on_cd.emplace_back(nid, component);
+  // Only the elements that can leave a block singular need their stiffness.
+  std::unordered_map<PropertyId, bool> complete_sections;
+  const auto sure_of = [&](const ElementData &elem) {
+    return sure_blocks(elem, model, complete_sections);
   };
-  for (const auto &elem : model.elements)
-    if (is_scalar_element(elem))
-      for (size_t end = 0; end < elem.nodes.size(); ++end)
-        note_named(elem.nodes[end], elem.components[end]);
+  std::vector<const ElementData *> unsure;
+  // What those elements declare, which is all that can be singular here: a
+  // component an RBE or MPC names is controlled by it.
+  std::unordered_map<NodeId, ActiveMask> declared;
+  for (const auto &elem : model.elements) {
+    const SureBlocks sure = sure_of(elem);
+    if (sure.translation || sure.rotation)
+      continue;
+    unsure.push_back(&elem);
+    mark_element_dofs(elem, model, declared);
+  }
   std::unordered_map<NodeId, ActiveMask> by_explicit;
   if (sc.mpc_set.value != 0)
     for (const Mpc *mpc : model.mpcs_for_set(sc.mpc_set))
       for (const auto &term : mpc->terms) {
         mark_component(by_explicit[term.node], term.dof);
-        note_named(term.node, term.dof);
+        // A component named on a CD grid activates all three basic components of
+        // its block, and the MPC controls only the one it names.
+        const auto grid = model.nodes.find(term.node);
+        if (grid != model.nodes.end() && grid->second.cd != CoordId{0})
+          mark_grid_component(model, term.node, term.dof, declared);
       }
-  std::unordered_map<NodeId, ActiveMask> by_rigid;
-  mark_rigid_element_dofs(model, by_rigid);
-  if (!named_on_cd.empty()) {
-    std::unordered_map<NodeId, ActiveMask> declared = by_rigid;
-    for (const auto &elem : model.elements)
-      if (!is_scalar_element(elem) && elem.type != ElementType::CONM2)
-        mark_element_dofs(elem, model, declared);
-    for (const auto &[nid, component] : named_on_cd) {
-      const size_t block = component <= 3 ? 0 : 1;
-      const auto mask = declared.find(nid);
-      bool whole = mask != declared.end();
-      for (size_t c = 0; whole && c < 3; ++c)
-        whole = mask->second[3 * block + c];
-      if (!whole)
-        analysed[nid][block] = true;
-    }
-  }
+
+  // The translation and rotation blocks to analyse at each grid.
+  std::unordered_map<NodeId, std::array<bool, 2>> analysed;
+  analysed.reserve(declared.size());
+  for (const auto &[nid, mask] : declared)
+    if (model.nodes.contains(nid)) // a grounded end has no grid
+      analysed.emplace(nid, std::array<bool, 2>{mask[0] || mask[1] || mask[2],
+                                                mask[3] || mask[4] || mask[5]});
   if (analysed.empty())
     return result;
-
-  std::unordered_map<NodeId, Eigen::Matrix<double, 6, 6>> blocks;
-  for (const auto &[nid, _] : analysed)
-    blocks.emplace(nid, Eigen::Matrix<double, 6, 6>::Zero());
-
-  // Each grid's own 6x6 stiffness from every element on it, in basic axes.
   for (const auto &elem : model.elements) {
-    if (std::none_of(elem.nodes.begin(), elem.nodes.end(),
-                     [&](NodeId nid) { return blocks.contains(nid); }))
+    const SureBlocks sure = sure_of(elem);
+    if (!sure.translation && !sure.rotation)
       continue;
-    const LocalKe ke = make_element(elem, model)->stiffness_matrix();
-    const auto identity = local_dof_identity(elem, model);
-    for (Eigen::Index i = 0; i < ke.rows(); ++i) {
-      const auto [node, row] = identity[static_cast<size_t>(i)];
-      const auto block = blocks.find(node);
-      if (block == blocks.end())
+    for (const NodeId nid : elem.nodes) {
+      const auto grid = analysed.find(nid);
+      if (grid == analysed.end())
         continue;
-      for (Eigen::Index j = 0; j < ke.cols(); ++j) {
-        const auto [other, col] = identity[static_cast<size_t>(j)];
-        if (other == node)
-          block->second(row, col) += ke(i, j);
-      }
+      grid->second[0] = grid->second[0] && !sure.translation;
+      grid->second[1] = grid->second[1] && !sure.rotation;
     }
   }
 
+  // A grid's own translation and rotation stiffness, in basic axes.
+  using GridBlocks = std::array<Eigen::Matrix3d, 2>;
+  std::unordered_map<NodeId, GridBlocks> blocks;
+  blocks.reserve(analysed.size());
+  for (const auto &[nid, analyse] : analysed)
+    if (analyse[0] || analyse[1])
+      blocks.emplace(nid, GridBlocks{Eigen::Matrix3d::Zero(), Eigen::Matrix3d::Zero()});
+  if (blocks.empty())
+    return result;
+
+  // From every element on each grid. A sure element has no part in a block that is
+  // still analysed.
+  std::vector<std::vector<std::pair<NodeId, GridBlocks>>> parts(
+      detail::element_chunk_count(unsure.size()));
+  detail::for_element_chunks(unsure.size(), [&](const size_t chunk, const size_t first,
+                                                const size_t last) {
+    auto &part = parts[chunk];
+    for (size_t e = first; e < last; ++e) {
+      const ElementData &elem = *unsure[e];
+      if (std::none_of(elem.nodes.begin(), elem.nodes.end(),
+                       [&](NodeId nid) { return blocks.contains(nid); }))
+        continue;
+      const LocalKe ke = make_element(elem, model)->stiffness_matrix();
+      // Compared with NaN every direction would look singular and be held, which
+      // would hide the failure as a solution of zeros.
+      if (!ke.allFinite())
+        throw SolverError(std::format("AUTOSPC: element {} has a non-finite stiffness matrix",
+                                      elem.id.value));
+      const auto identity = local_dof_identity(elem, model);
+      const size_t element_start = part.size();
+      for (Eigen::Index i = 0; i < ke.rows(); ++i) {
+        const auto [node, row] = identity[static_cast<size_t>(i)];
+        if (!blocks.contains(node))
+          continue;
+        auto entry = std::find_if(part.begin() + static_cast<std::ptrdiff_t>(element_start),
+                                  part.end(), [&](const auto &p) { return p.first == node; });
+        if (entry == part.end()) {
+          part.emplace_back(node, GridBlocks{Eigen::Matrix3d::Zero(), Eigen::Matrix3d::Zero()});
+          entry = part.end() - 1;
+        }
+        for (Eigen::Index j = 0; j < ke.cols(); ++j) {
+          const auto [other, col] = identity[static_cast<size_t>(j)];
+          if (other == node && col / 3 == row / 3)
+            entry->second[static_cast<size_t>(row / 3)](row % 3, col % 3) += ke(i, j);
+        }
+      }
+    }
+  });
+  for (const auto &part : parts)
+    for (const auto &[nid, add] : part) {
+      GridBlocks &sum = blocks.at(nid);
+      sum[0] += add[0];
+      sum[1] += add[1];
+    }
+
+  std::unordered_map<NodeId, ActiveMask> by_rigid;
+  mark_rigid_element_dofs(model, by_rigid);
   // Components already controlled at these grids.
   std::unordered_map<NodeId, ActiveMask> by_spc;
   for (const Spc &spc : result)
@@ -416,54 +499,65 @@ std::vector<Spc> analysis_spcs(const Model &model, const SubCase &sc) {
 
   const double epzero = model.param_real("EPZERO").value_or(1e-8);
   std::vector<NodeId> grids;
-  grids.reserve(analysed.size());
-  for (const auto &[nid, _] : analysed)
+  grids.reserve(blocks.size());
+  for (const auto &[nid, _] : blocks)
     grids.push_back(nid);
   std::sort(grids.begin(), grids.end());
 
-  for (const NodeId nid : grids) {
-    const Eigen::Matrix<double, 6, 6> &k = blocks.at(nid);
-    const std::array<bool, 2> &analyse = analysed.at(nid);
-    const Mat3 T3 = model.displacement_axes(nid);
-    Eigen::Matrix3d T;
-    for (int i = 0; i < 3; ++i)
-      for (int j = 0; j < 3; ++j)
-        T(i, j) = T3(i, j);
-    const auto spc_mask = by_spc.find(nid);
-    const auto rigid_mask = by_rigid.find(nid);
-    const auto explicit_mask = by_explicit.find(nid);
-    const auto marked = [](const auto &masks, const auto &it, const int d) {
-      return it != masks.end() && it->second[static_cast<size_t>(d)];
-    };
-
-    Spc added;
-    added.sid = sc.spc_set;
-    added.node = nid;
-    for (const int base : {0, 3}) {
-      if (!analyse[base == 0 ? 0 : 1])
-        continue;
-      // RBE components are basic, so one controls each axis it has a part of.
-      const auto rigid_on_axis = [&](const int c) {
+  std::vector<uint8_t> held(grids.size(), 0);
+  detail::for_element_chunks(grids.size(), [&](size_t, const size_t first, const size_t last) {
+    for (size_t g = first; g < last; ++g) {
+      const NodeId nid = grids[g];
+      const GridBlocks &k = blocks.at(nid);
+      const std::array<bool, 2> &analyse = analysed.at(nid);
+      const Mat3 T3 = model.displacement_axes(nid);
+      Eigen::Matrix3d T;
+      for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 3; ++j)
-          if (marked(by_rigid, rigid_mask, base + j) && std::abs(T(j, c)) > 1e-9)
-            return true;
-        return false;
+          T(i, j) = T3(i, j);
+      const auto spc_mask = by_spc.find(nid);
+      const auto rigid_mask = by_rigid.find(nid);
+      const auto explicit_mask = by_explicit.find(nid);
+      const auto declared_mask = declared.find(nid);
+      const auto marked = [](const auto &masks, const auto &it, const int d) {
+        return it != masks.end() && it->second[static_cast<size_t>(d)];
       };
-      std::vector<int> free;
-      for (int c = 0; c < 3; ++c)
-        if (!marked(by_spc, spc_mask, base + c) &&
-            !marked(by_explicit, explicit_mask, base + c) && !rigid_on_axis(c))
-          free.push_back(c);
-      const Eigen::Matrix3d block = T.transpose() * k.block<3, 3>(base, base) * T;
-      const double largest =
-          Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>(block, Eigen::EigenvaluesOnly)
-              .eigenvalues()(2);
-      for (const int c : singular_components(block, std::move(free), epzero * largest))
-        added.dofs.mask |= static_cast<uint8_t>(1U << (base + c));
+
+      for (const int base : {0, 3}) {
+        const size_t index = base == 0 ? 0 : 1;
+        if (!analyse[index])
+          continue;
+        // Masks of basic components mark each CD axis with a part along them, so an
+        // RBE controls each such axis.
+        const auto on_axis = [&](const auto &masks, const auto &it, const int c) {
+          for (int j = 0; j < 3; ++j)
+            if (marked(masks, it, base + j) && std::abs(T(j, c)) > 1e-9)
+              return true;
+          return false;
+        };
+        std::vector<int> free;
+        for (int c = 0; c < 3; ++c)
+          if (on_axis(declared, declared_mask, c) && !marked(by_spc, spc_mask, base + c) &&
+              !marked(by_explicit, explicit_mask, base + c) &&
+              !on_axis(by_rigid, rigid_mask, c))
+            free.push_back(c);
+        const Eigen::Matrix3d block = T.transpose() * k[index] * T;
+        const double largest =
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>(block, Eigen::EigenvaluesOnly)
+                .eigenvalues()(2);
+        for (const int c : singular_components(block, std::move(free), epzero * largest))
+          held[g] |= static_cast<uint8_t>(1U << (base + c));
+      }
     }
-    if (added.dofs.mask != 0)
+  });
+  for (size_t g = 0; g < grids.size(); ++g)
+    if (held[g] != 0) {
+      Spc added;
+      added.sid = sc.spc_set;
+      added.node = grids[g];
+      added.dofs.mask = held[g];
       result.push_back(added);
-  }
+    }
   return result;
 }
 
@@ -484,6 +578,11 @@ std::array<double, 6> to_grid_frame(const Model &model, const NodeId nid,
 }
 
 DofMap build_analysis_dof_map(const Model &model, const SubCase &sc) {
+  return build_analysis_dof_map(model, sc, analysis_spcs(model, sc));
+}
+
+DofMap build_analysis_dof_map(const Model &model, const SubCase &sc,
+                              const std::span<const Spc> spcs) {
   DofMap dmap;
   dmap.build(model.nodes, 6);
 
@@ -506,7 +605,7 @@ DofMap build_analysis_dof_map(const Model &model, const SubCase &sc) {
   dmap.constrain_batch(inactive_constraints);
 
   std::vector<std::pair<NodeId, int>> spc_constraints;
-  for (const Spc &spc : analysis_spcs(model, sc)) {
+  for (const Spc &spc : spcs) {
     auto node_it = model.nodes.find(spc.node);
     const bool has_cd =
         (node_it != model.nodes.end() && node_it->second.cd.value != 0);
@@ -525,8 +624,8 @@ DofMap build_analysis_dof_map(const Model &model, const SubCase &sc) {
 
 // cppcheck-suppress unusedFunction -- referenced from linear_static.cpp and modal.cpp
 void build_analysis_mpc_system(const Model &model, const SubCase &sc,
-                               DofMap &dof_map, MpcHandler &mpc_handler,
-                               const bool use_spc_values) {
+                               const std::span<const Spc> spcs, DofMap &dof_map,
+                               MpcHandler &mpc_handler, const bool use_spc_values) {
   std::vector<Mpc> all_mpcs;
 
   struct SpcValues {
@@ -534,7 +633,7 @@ void build_analysis_mpc_system(const Model &model, const SubCase &sc,
     std::array<double, 6> values{};
   };
   std::unordered_map<NodeId, SpcValues> node_spcs;
-  for (const Spc &spc : analysis_spcs(model, sc)) {
+  for (const Spc &spc : spcs) {
     SpcValues& values = node_spcs[spc.node];
     values.dofs.mask |= spc.dofs.mask;
     for (int d = 0; d < 6; ++d) {

@@ -32,7 +32,7 @@ GRID,2,,1.0,0.0,0.0
 GRID,3,,1.0,1.0,0.0
 GRID,4,,0.0,1.0,0.0
 MAT1,1,1.0E6,,0.3,0.0,1.0E-5,0.0
-PSHELL,1,1,0.1
+PSHELL,1,1,0.1,1,,1
 CQUAD4,1,1,1,2,3,4
 $ Fix T1 (x) of all nodes — prevents x-expansion, creates thermal stress in x
 SPC1,1,1,1

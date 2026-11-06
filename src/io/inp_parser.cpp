@@ -511,8 +511,8 @@ static void process_shell_section(InpParser::ParseContext& ctx, const KeywordBlo
     ps.pid = pid;
     ps.mid1 = mid;
     ps.t = thickness;
-    ps.mid2 = MaterialId{0};  // same as mid1
-    ps.mid3 = MaterialId{0};
+    ps.mid2 = mid;
+    ps.mid3 = mid;
     ps.mid4 = MaterialId{0};
     ctx.model.properties[pid] = ps;
 

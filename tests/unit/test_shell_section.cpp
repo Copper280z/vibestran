@@ -89,6 +89,47 @@ TEST(ShellSection, PshellUsesEachMaterialForItsRole) {
   EXPECT_NEAR(s.z2, 0.1, 1e-15);
 }
 
+TEST(ShellSection, BlankMid2LeavesOnlyTheMembraneWhateverMid3AndMid4Say) {
+  // Nastran: a blank MID2 means no bending, coupling or transverse shear stiffness.
+  // The membrane, its thermal load and the mass are MID1's and don't change.
+  Model m;
+  add_mat1(m, 1, 100.0, 0.25, 2.0, 1e-3);
+  add_mat1(m, 3, 50.0, 0.0);
+  add_mat1(m, 4, 10.0, 0.0);
+  PShell ps;
+  ps.pid = PropertyId{7};
+  ps.mid1 = MaterialId{1};
+  ps.mid3 = MaterialId{3};
+  ps.mid4 = MaterialId{4};
+  ps.t = 0.2;
+  m.properties[ps.pid] = ps;
+  const ShellSection s = build_shell_section(m, ps.pid, ElementId{1}, "CTRIA3");
+
+  const double c1 = 100.0 / (1.0 - 0.0625);
+  EXPECT_NEAR(s.A(0, 0), 0.2 * c1, 1e-12);
+  EXPECT_NEAR(s.A(2, 2), 0.2 * 100.0 / 2.5, 1e-12);
+  EXPECT_TRUE(s.D.isZero(0.0));
+  EXPECT_TRUE(s.B.isZero(0.0));
+  EXPECT_TRUE(s.T.isZero(0.0));
+  EXPECT_NEAR(s.thermal_N(0), 0.2 * c1 * (1.0 + 0.25) * 1e-3, 1e-12);
+  EXPECT_NEAR(s.mass_per_area, 2.0 * 0.2, 1e-12);
+}
+
+TEST(ShellSection, BlankMid3TakesItsShearFromMid2NotMid1) {
+  Model m;
+  add_mat1(m, 1, 100.0, 0.0);
+  add_mat1(m, 2, 300.0, 0.0);
+  PShell ps;
+  ps.pid = PropertyId{7};
+  ps.mid1 = MaterialId{1};
+  ps.mid2 = MaterialId{2};
+  ps.t = 0.2;
+  ps.tst = 0.8;
+  m.properties[ps.pid] = ps;
+  const ShellSection s = build_shell_section(m, ps.pid, ElementId{1}, "CQUAD4");
+  EXPECT_NEAR(s.T(0, 0), 0.8 * 0.2 * 150.0, 1e-12);
+}
+
 TEST(ShellSection, RotationPreservesStrainEnergyAndResultantWork) {
   // For any strain in the target frame, the energy computed in the target
   // frame must equal the energy of the rotated strain in the material frame.
