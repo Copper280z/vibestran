@@ -2483,7 +2483,7 @@ void check_cached_geometry(const Mesh &mesh, bool nonaffine) {
 void check_thread_independence(Model model) {
 #ifdef HAVE_TBB
   model.subcases.resize(1); // the saturated operating point
-  vibestran::EigenPCGSolverBackend pcg(1e-12);
+  vibestran::CpuPCGSolverBackend pcg(1e-12);
   Result<Results> serial = Error{""};
   tbb::task_arena(1).execute([&] { serial = solve(model, pcg); });
   const Result<Results> parallel = solve(model, pcg);
@@ -3686,7 +3686,7 @@ TEST(MagneticBackend, IterativeBackendThroughTheAdapterMatchesDirect) {
   model.subcases = {{.id = 1, .load = 1}, {.id = 2, .load = 2}, {.id = 3, .load = 3}};
 
   const auto direct = solve(model);
-  vibestran::EigenPCGSolverBackend pcg(1e-10);
+  vibestran::CpuPCGSolverBackend pcg(1e-10);
   const auto iterative = solve(model, pcg);
   ASSERT_TRUE(std::holds_alternative<Results>(direct)) << error_of(direct);
   ASSERT_TRUE(std::holds_alternative<Results>(iterative)) << error_of(iterative);

@@ -26,6 +26,10 @@ namespace vibestran {
 
 struct FactorRatioCheckPolicy;
 
+namespace detail {
+struct AmgPcgResult;
+}
+
 /// The execution chosen for an AMG hierarchy, planned from its exact device
 /// storage once it is built and against the memory free at that moment.
 struct AmgDeviceReport {
@@ -253,24 +257,30 @@ private:
     std::optional<RefinementReport> last_refinement_;
 };
 
-/// CPU backend using Eigen's Preconditioned Conjugate Gradient with Incomplete
-/// Cholesky preconditioning. Memory footprint is O(nnz) — no fill-in from
-/// factorization — making it suitable for very large sparse systems that would
-/// exhaust memory with a direct solver.
+/// CPU backend: conjugate gradients in fp64, preconditioned by smoothed-aggregation
+/// AMG, on OpenMP threads. Memory is O(nnz), with no fill-in from factorization, which
+/// suits large systems that would exhaust memory with a direct solver.
 ///
-/// The solve is restarted PCG with iterative refinement (compensated
-/// residuals, iterative_refinement.hpp): it converges when the estimated
-/// relative error of the solution falls below the tolerance.  A matrix too
-/// ill-conditioned for the preconditioner, or singular, is reported as an
-/// error rather than returned inaccurate.
-class EigenPCGSolverBackend final : public SolverBackend {
+/// Each solve is refined with compensated residuals (iterative_refinement.hpp) and
+/// converges when the estimated relative error of the solution falls below the
+/// tolerance. A matrix too ill-conditioned for the preconditioner, or singular, is
+/// reported as an error rather than returned inaccurate. The result does not depend
+/// on the number of threads, bit for bit.
+class CpuPCGSolverBackend final : public SolverBackend {
 public:
     /// @param tolerance   Target relative error of the solution (corrections
     ///                    ||d||_inf / ||u||_inf); also the relative-residual
     ///                    tolerance of the first CG solve.
-    /// @param max_iters   Maximum CG iterations per solve (0 = Eigen default: 2*n).
-    explicit EigenPCGSolverBackend(double tolerance = 1e-8, int max_iters = 0)
+    /// @param max_iters   Maximum CG iterations per solve (0 = default: 10000).
+    explicit CpuPCGSolverBackend(double tolerance = 1e-8, int max_iters = 0)
         : tolerance_(tolerance), max_iters_(max_iters) {}
+
+    /// The hierarchy is built once for any number of right-hand sides, and refactor()
+    /// with an unchanged pattern keeps its aggregates and transfers.
+    [[nodiscard]] Result<std::unique_ptr<LinearFactor>> factor(
+        const SparseMatrixBuilder::CsrData& K, const FactorOptions& options = {}) override;
+
+    [[nodiscard]] bool uses_near_nullspace(int) const noexcept override { return true; }
 
     [[nodiscard]] std::vector<double> solve(
         const SparseMatrixBuilder::CsrData& K,
@@ -278,15 +288,15 @@ public:
         const FactorRatioCheckPolicy* factor_ratio_policy = nullptr) override;
 
     [[nodiscard]] std::string_view name() const noexcept override {
-        return "Eigen PCG + IncompleteCholesky (CPU)";
+        return "CPU PCG + AMG";
     }
 
     [[nodiscard]] std::vector<std::pair<std::string, std::string>> details() const override;
 
-    /// Number of CG iterations (all solves) used in the most recent solve().
+    /// Number of CG iterations (all solves) used in the most recent solve.
     [[nodiscard]] int last_iteration_count() const noexcept override { return last_iters_; }
 
-    /// Estimated relative error of the solution after the most recent solve().
+    /// Estimated relative error of the solution after the most recent solve.
     [[nodiscard]] double last_estimated_error() const noexcept override { return last_error_; }
 
     [[nodiscard]] std::optional<RefinementReport> last_refinement() const noexcept override {
@@ -294,6 +304,8 @@ public:
     }
 
 private:
+    [[nodiscard]] Status accept_amg(const detail::AmgPcgResult& result);
+
     double tolerance_;
     int    max_iters_;
     int    last_iters_{0};

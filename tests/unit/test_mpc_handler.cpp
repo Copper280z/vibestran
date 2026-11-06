@@ -380,6 +380,105 @@ TEST(MpcHandler, CoupledFullRankDependenciesUsePivotedSolve) {
     EXPECT_DOUBLE_EQ(full[3], 6.0);
 }
 
+// n nodes whose only free DOF is T1, so node k is equation k - 1.
+static DofMap axial_dof_map(const Model& model, int n) {
+    DofMap dof_map = make_full_dof_map(model);
+    std::vector<std::pair<NodeId, int>> constrained;
+    constrained.reserve(static_cast<std::size_t>(n) * 5);
+    for (int node = 1; node <= n; ++node)
+        for (int dof = 1; dof < 6; ++dof)
+            constrained.emplace_back(NodeId{node}, dof);
+    dof_map.constrain_batch(constrained);
+    return dof_map;
+}
+
+static Mpc axial_difference(int a, int b, double rhs = 0.0) {
+    Mpc mpc;
+    mpc.terms = {{NodeId{a}, 1, 1.0}, {NodeId{b}, 1, -1.0}};
+    mpc.rhs = rhs;
+    return mpc;
+}
+
+static std::vector<const Mpc*> pointers_to(const std::vector<Mpc>& mpcs) {
+    std::vector<const Mpc*> out(mpcs.size());
+    std::ranges::transform(mpcs, out.begin(), [](const Mpc& mpc) { return &mpc; });
+    return out;
+}
+
+// The closing equation of a ring is a combination of all the others, and of no fewer,
+// so its dependence can only be seen through the whole block. Other rows are around it.
+TEST(MpcHandler, RingOfEquationsIsJudgedThroughItsWholeBlock) {
+    const int n = 7;
+    const auto build = [&](double closing_rhs) {
+        Model model = make_model_n_nodes(n);
+        DofMap dof_map = axial_dof_map(model, n);
+        std::vector<Mpc> mpcs{axial_difference(6, 7), axial_difference(1, 2, 1.0), axial_difference(2, 3, 2.0),
+                              axial_difference(3, 4, 3.0), axial_difference(4, 5, 4.0),
+                              axial_difference(5, 1, closing_rhs)};
+        const std::vector<const Mpc*> ptrs = pointers_to(mpcs);
+        MpcHandler handler;
+        handler.build(ptrs, dof_map);
+        return handler;
+    };
+
+    const MpcHandler handler = build(-10.0);
+    ASSERT_EQ(handler.num_reduced(), 2);
+    std::vector<double> full(n, 0.0);
+    handler.recover_dependent_dofs(full, {3.0, 5.0});
+    const std::vector<double> expected{13.0, 12.0, 10.0, 7.0, 3.0, 5.0, 5.0};
+    for (int i = 0; i < n; ++i) EXPECT_NEAR(full[static_cast<std::size_t>(i)], expected[static_cast<std::size_t>(i)], 1e-13) << i;
+
+    EXPECT_THROW(build(-9.0), SolverError);
+}
+
+// A pivot depends on its own equations. A stiff row with nothing in common used to
+// raise the rank threshold above them, which moved the dependent to the wrong term.
+TEST(MpcHandler, UnrelatedRowsDoNotChangeWhichTermIsDependent) {
+    const int n = 5;
+    Model model = make_model_n_nodes(n);
+    DofMap dof_map = axial_dof_map(model, n);
+    Mpc stiff;
+    stiff.terms = {{NodeId{3}, 1, 1e13}, {NodeId{4}, 1, -1.0}};
+    const Mpc through = axial_difference(5, 1);
+    const Mpc chained = axial_difference(1, 2);
+    std::vector<const Mpc*> ptrs{&stiff, &through, &chained};
+    MpcHandler handler;
+    handler.build(ptrs, dof_map);
+
+    ASSERT_EQ(handler.num_reduced(), 2);
+    EXPECT_EQ(handler.reduced_index(0), CONSTRAINED_DOF) << "the first term of its equation is the dependent";
+    EXPECT_NE(handler.reduced_index(1), CONSTRAINED_DOF);
+    std::vector<double> full(n, 0.0);
+    handler.recover_dependent_dofs(full, {2.0, 1e13});
+    EXPECT_DOUBLE_EQ(full[0], 2.0);
+    EXPECT_DOUBLE_EQ(full[4], 2.0);
+    EXPECT_DOUBLE_EQ(full[2], 1.0);
+}
+
+// Thousands of chained pairs, as a deck of many small rigid elements has. A check on
+// the whole pivot matrix is quartic in the rows, and doesn't finish here.
+TEST(MpcHandler, SeparateChainsOfManyElementsAreEachTheirOwnBlock) {
+    const int triples = 3000, n = 3 * triples;
+    Model model = make_model_n_nodes(n);
+    DofMap dof_map = axial_dof_map(model, n);
+    std::vector<Mpc> mpcs;
+    mpcs.reserve(2 * static_cast<std::size_t>(triples));
+    for (int t = 0; t < triples; ++t) {
+        mpcs.push_back(axial_difference(3 * t + 1, 3 * t + 2));
+        mpcs.push_back(axial_difference(3 * t + 2, 3 * t + 3));
+    }
+    const std::vector<const Mpc*> ptrs = pointers_to(mpcs);
+    MpcHandler handler;
+    handler.build(ptrs, dof_map);
+
+    ASSERT_EQ(handler.num_reduced(), triples);
+    std::vector<double> reduced(static_cast<std::size_t>(triples));
+    for (int t = 0; t < triples; ++t) reduced[static_cast<std::size_t>(t)] = t + 0.5;
+    std::vector<double> full(static_cast<std::size_t>(n), 0.0);
+    handler.recover_dependent_dofs(full, reduced);
+    for (int i = 0; i < n; ++i) ASSERT_DOUBLE_EQ(full[static_cast<std::size_t>(i)], i / 3 + 0.5) << i;
+}
+
 TEST(MpcHandler, InconsistentDuplicateAffineEquationIsRejected) {
     Model model = make_model_n_nodes(1);
     DofMap dof_map = make_full_dof_map(model);

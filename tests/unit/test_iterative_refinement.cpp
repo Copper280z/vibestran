@@ -229,7 +229,7 @@ TEST(RefinementTest, PcgConvergesOnTheEstimatedErrorNotTheResidual) {
   // cond(H_8) ~ 1.5e10: the refined PCG solution is accurate to its
   // tolerance, and its reported error is the refinement estimate.
   const auto [K, F] = scaled_hilbert(8);
-  EigenPCGSolverBackend pcg(1e-8);
+  CpuPCGSolverBackend pcg(1e-8);
   const std::vector<double> u = pcg.solve(K, F);
   const auto rep = pcg.last_refinement();
   ASSERT_TRUE(rep.has_value());

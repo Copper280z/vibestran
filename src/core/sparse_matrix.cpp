@@ -2,11 +2,16 @@
 #include "core/sparse_matrix.hpp"
 #include "core/dof_map.hpp"
 #include <algorithm>
+#include <format>
 #include <iterator>
+#include <limits>
+#include <memory>
 #include <numeric>
+#include <utility>
 #ifdef HAVE_TBB
 #include <tbb/parallel_for.h>
 #include <tbb/blocked_range.h>
+#include <tbb/task_arena.h>
 #endif
 #include <stdexcept>
 
@@ -52,100 +57,132 @@ void SparseMatrixBuilder::merge_from(SparseMatrixBuilder&& other) {
   if (size_ != other.size_)
     throw std::invalid_argument("SparseMatrixBuilder size mismatch in merge");
 
-  triplets_.insert(triplets_.end(),
-                   std::make_move_iterator(other.triplets_.begin()),
-                   std::make_move_iterator(other.triplets_.end()));
-  other.triplets_.clear();
-  other.triplets_.shrink_to_fit();
+  // Order is kept: this builder's triplets, then the other's.
+  if (!triplets_.empty())
+    merged_.push_back(std::exchange(triplets_, {}));
+  std::ranges::move(other.merged_, std::back_inserter(merged_));
+  other.merged_.clear();
+  if (!other.triplets_.empty())
+    merged_.push_back(std::exchange(other.triplets_, {}));
 }
 
+namespace {
+
+template <class Body> void for_each_index(size_t n, const Body &body) {
+#ifdef HAVE_TBB
+  tbb::parallel_for(tbb::blocked_range<size_t>(0, n), [&](const tbb::blocked_range<size_t> &r) {
+    for (size_t i = r.begin(); i != r.end(); ++i)
+      body(i);
+  });
+#else
+  for (size_t i = 0; i < n; ++i)
+    body(i);
+#endif
+}
+
+} // namespace
+
 SparseMatrixBuilder::CsrData SparseMatrixBuilder::build_csr() {
-  const auto n_trips = static_cast<int>(triplets_.size());
-  bool lower_only = true;
-  for (const auto &t : triplets_) {
-    if (t.row < t.col) {
-      lower_only = false;
-      break;
-    }
+  // A stable counting sort by row. Contiguous groups of triplets each count their
+  // own rows, which tells each group where in a row its triplets go, so they scatter
+  // at the same time and still arrive in insertion order, however many groups there
+  // are: the sums below, and so K, do not depend on the thread count.
+  if (!triplets_.empty())
+    merged_.push_back(std::exchange(triplets_, {}));
+  const size_t total = std::accumulate(merged_.begin(), merged_.end(), size_t(0),
+                                       [](size_t sum, const auto &part) { return sum + part.size(); });
+
+  constexpr size_t kTripletsForThreads = size_t(1) << 16;
+  size_t group_count = 1;
+#ifdef HAVE_TBB
+  if (total >= kTripletsForThreads)
+    group_count = std::clamp<size_t>(static_cast<size_t>(tbb::this_task_arena::max_concurrency()), 1,
+                                     std::max<size_t>(merged_.size(), 1));
+#endif
+  std::vector<size_t> group_parts{0};
+  for (size_t g = 1, seen = 0, p = 0; g <= group_count; ++g) {
+    while (p < merged_.size() && (g == group_count || seen * group_count < total * g))
+      seen += merged_[p++].size();
+    group_parts.push_back(p);
   }
 
-  // Pass 1: histogram of row indices → row-bucket boundaries.
-  // Two O(n) sequential passes over compact data instead of one O(n log n)
-  // global sort over 9+ GB — the global sort is memory-bandwidth-bound and
-  // does not scale with core count.
-  std::vector<int> bucket_ptr(static_cast<size_t>(size_ + 1), 0);
-  for (const auto &t : triplets_)
-    ++bucket_ptr[static_cast<size_t>(t.row + 1)];
-  std::partial_sum(bucket_ptr.begin(), bucket_ptr.end(), bucket_ptr.begin());
+  const auto n = static_cast<size_t>(size_);
+  // Positions are size_t: duplicates are not summed yet, so there can be more
+  // triplets than an int counts, on a matrix whose nonzeros still fit one.
+  std::vector<std::vector<size_t>> cursor(group_count);
+  std::vector<char> has_upper(group_count, 0);
+  for_each_index(group_count, [&](size_t g) {
+    cursor[g].assign(n, 0);
+    for (size_t p = group_parts[g]; p < group_parts[g + 1]; ++p)
+      for (const Triplet &t : merged_[p]) {
+        ++cursor[g][static_cast<size_t>(t.row)];
+        if (t.row < t.col)
+          has_upper[g] = 1;
+      }
+  });
+  std::vector<size_t> row_start(n + 1, 0);
+  for_each_index(n, [&](size_t row) {
+    size_t count = 0;
+    for (size_t g = 0; g < group_count; ++g)
+      count += cursor[g][row];
+    row_start[row + 1] = count;
+  });
+  std::partial_sum(row_start.begin(), row_start.end(), row_start.begin());
+  for_each_index(n, [&](size_t row) {
+    size_t at = row_start[row];
+    for (size_t g = 0; g < group_count; ++g)
+      at += std::exchange(cursor[g][row], at);
+  });
+  // Not zeroed: the scatter touches every entry, in parallel.
+  const auto staged = std::make_unique_for_overwrite<Triplet[]>(total);
+  for_each_index(group_count, [&](size_t g) {
+    for (size_t p = group_parts[g]; p < group_parts[g + 1]; ++p) {
+      for (const Triplet &t : merged_[p])
+        staged[cursor[g][static_cast<size_t>(t.row)]++] = t;
+      merged_[p] = {};
+    }
+    cursor[g] = {};
+  });
+  merged_.clear();
 
-  // Pass 2: scatter triplets into row-ordered staging buffer using cursor
-  // positions derived from bucket_ptr.
-  std::vector<int> cursor(bucket_ptr.begin(), bucket_ptr.begin() + size_);
-  std::vector<Triplet> staged(static_cast<size_t>(n_trips));
-  for (const auto &t : triplets_)
-    staged[static_cast<size_t>(cursor[static_cast<size_t>(t.row)]++)] = t;
-
-  // Free source memory now that scatter is complete.
-  triplets_.clear();
-  triplets_.shrink_to_fit();
-
-  // Pass 3: sort within each row by col.
-  // Each row has O(elements_per_node²) entries (~85 for CHEXA8) — tiny arrays
-  // that fit in L1 cache. Parallel dispatch across rows via TBB when available;
-  // std::execution::par_unseq is not supported by AppleClang.
-  auto sort_row = [&](int row) {
-    auto beg = staged.begin() + bucket_ptr[static_cast<size_t>(row)];
-    auto end = staged.begin() + bucket_ptr[static_cast<size_t>(row + 1)];
-    // Stable: duplicates are summed in insertion (element) order, so the
-    // result does not depend on the sort implementation.
-    std::stable_sort(beg, end, [](const Triplet &a, const Triplet &b) {
-      return a.col < b.col;
-    });
-  };
-#ifdef HAVE_TBB
-  tbb::parallel_for(tbb::blocked_range<int>(0, size_),
-                    [&](const tbb::blocked_range<int> &r) {
-                      for (int row = r.begin(); row != r.end(); ++row)
-                        sort_row(row);
-                    });
-#else
-  for (int row = 0; row < size_; ++row)
-    sort_row(row);
-#endif
-
-  // Pass 4: dedup within each row (staged is now sorted by col within rows),
-  // and write to final CSR arrays.
+  // Each row's entries by column, duplicates summed in insertion order. Rows hold a
+  // few hundred triplets at most, so sorting them takes little memory bandwidth.
   CsrData csr;
   csr.n = size_;
-  csr.row_ptr.resize(static_cast<size_t>(size_ + 1));
-  csr.col_ind.resize(static_cast<size_t>(n_trips)); // upper bound; shrunk below
-  csr.values.resize(static_cast<size_t>(n_trips));
-  csr.row_ptr[0] = 0;
-
-  int out = 0;
-  for (int row = 0; row < size_; ++row) {
-    const int beg = bucket_ptr[static_cast<size_t>(row)];
-    const int end = bucket_ptr[static_cast<size_t>(row + 1)];
-    for (int i = beg; i < end; ++i) {
-      if (i > beg &&
-          staged[static_cast<size_t>(i)].col ==
-              staged[static_cast<size_t>(i - 1)].col) {
-        csr.values[static_cast<size_t>(out - 1)] +=
-            staged[static_cast<size_t>(i)].value;
+  csr.row_ptr.assign(n + 1, 0);
+  for_each_index(n, [&](size_t row) {
+    Triplet *const begin = staged.get() + row_start[row];
+    Triplet *const end = staged.get() + row_start[row + 1];
+    std::stable_sort(begin, end, [](const Triplet &a, const Triplet &b) { return a.col < b.col; });
+    int unique = 0;
+    for (const Triplet *t = begin; t != end; ++t)
+      if (t == begin || t->col != (t - 1)->col)
+        ++unique;
+    csr.row_ptr[row + 1] = unique;
+  });
+  const size_t nnz = std::accumulate(csr.row_ptr.begin(), csr.row_ptr.end(), size_t(0));
+  if (nnz > static_cast<size_t>(std::numeric_limits<int>::max()))
+    throw std::length_error(std::format("SparseMatrixBuilder: a matrix of {} rows has {} nonzeros, more than CSR's int indices can hold",
+                                        n, nnz));
+  std::partial_sum(csr.row_ptr.begin(), csr.row_ptr.end(), csr.row_ptr.begin());
+  csr.nnz = static_cast<int>(nnz);
+  csr.col_ind.resize(nnz);
+  csr.values.resize(nnz);
+  for_each_index(n, [&](size_t row) {
+    auto out = static_cast<size_t>(csr.row_ptr[row]);
+    const Triplet *const begin = staged.get() + row_start[row];
+    const Triplet *const end = staged.get() + row_start[row + 1];
+    for (const Triplet *t = begin; t != end; ++t) {
+      if (t != begin && t->col == (t - 1)->col) {
+        csr.values[out - 1] += t->value;
       } else {
-        csr.col_ind[static_cast<size_t>(out)] =
-            staged[static_cast<size_t>(i)].col;
-        csr.values[static_cast<size_t>(out)] =
-            staged[static_cast<size_t>(i)].value;
+        csr.col_ind[out] = t->col;
+        csr.values[out] = t->value;
         ++out;
       }
     }
-    csr.row_ptr[static_cast<size_t>(row + 1)] = out;
-  }
-
-  csr.nnz = out;
-  csr.col_ind.resize(static_cast<size_t>(out));
-  csr.values.resize(static_cast<size_t>(out));
+  });
+  const bool lower_only = std::ranges::none_of(has_upper, [](char upper) { return upper != 0; });
   csr.symmetry = lower_only ? SymmetryStorage::Lower : SymmetryStorage::Full;
 
   return csr;

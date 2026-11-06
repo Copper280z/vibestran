@@ -1,11 +1,11 @@
 // src/solver/solver_backend.cpp
 #include "solver/solver_backend.hpp"
+#include "amg_cpu.hpp"
 #include "core/factor_ratio_check.hpp"
 #include "core/types.hpp"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <Eigen/SparseCholesky>
-#include <Eigen/IterativeLinearSolvers>
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
@@ -543,12 +543,11 @@ std::vector<std::pair<std::string, std::string>> EigenSolverBackend::details() c
 #endif
 }
 
-std::vector<std::pair<std::string, std::string>> EigenPCGSolverBackend::details() const {
-  return {{"Method", "conjugate gradient, incomplete Cholesky preconditioner"},
+std::vector<std::pair<std::string, std::string>> CpuPCGSolverBackend::details() const {
+  return {{"Method", "conjugate gradient, smoothed-aggregation AMG preconditioner"},
           {"Tolerance", std::format("{:.1e} (estimated relative error)", tolerance_)},
-          {"Iteration limit", max_iters_ > 0 ? std::to_string(max_iters_)
-                                             : std::string("2n per solve")},
-          {"Precision", "fp64"},
+          {"Iteration limit", std::to_string(max_iters_ > 0 ? max_iters_ : detail::kAmgCpuIterationLimit) + " per solve"},
+          {"Precision", "fp64, with an fp32 preconditioner"},
           {"Iterative refinement", "always"}};
 }
 
@@ -591,100 +590,49 @@ EigenSolverBackend::solve(const CsrData &K_csr, const std::vector<double> &F,
 }
 
 
-std::vector<double>
-EigenPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K_csr,
-                              const std::vector<double>& F,
-                              const FactorRatioCheckPolicy*) {
+Status CpuPCGSolverBackend::accept_amg(const detail::AmgPcgResult &result) {
+  last_iters_ = result.iterations;
+  last_error_ = result.refinement.estimated_error;
+  last_refinement_ = result.refinement;
+  if (result.refinement.converged)
+    return std::nullopt;
+  return Error{std::format(
+      "PCG did not converge: after {} iterations and {} refinement correction(s) the "
+      "estimated relative error of the solution is {:.3e} (tolerance {:.3e}). The "
+      "stiffness matrix is too ill-conditioned for AMG PCG, or singular "
+      "(check boundary conditions); use the direct solver (--backend=cpu).",
+      result.iterations, result.refinement.corrections, result.refinement.estimated_error,
+      tolerance_)};
+}
 
-  const int n = K_csr.n;
-  if (n == 0)
-    throw SolverError("Stiffness matrix is empty — no free DOFs");
-  if (static_cast<int>(F.size()) != n)
-    throw SolverError(
-        std::format("Force vector size {} != matrix size {}", F.size(), n));
-
-  const bool lower_only = K_csr.stores_lower_triangle_only();
-
-  Eigen::Map<const ESMR> K_row(
-      n, n, K_csr.nnz,
-      K_csr.row_ptr.data(),
-      K_csr.col_ind.data(),
-      K_csr.values.data());
-
-  const auto t_convert_begin = Clock::now();
-  ESM K(K_row);
-  K.makeCompressed();
-  const auto t_convert_end = Clock::now();
-
-  using Precond = Eigen::IncompleteCholesky<double, Eigen::Lower>;
-
-  // Restarted PCG with iterative refinement: the first solve to the
-  // requested tolerance, then corrections from compensated residuals, solved
-  // to a loose inner tolerance (they only need to be accurate relative to
-  // themselves).  Converged means the corrections fell below the tolerance,
-  // i.e. the estimated relative error of u is below it; the relative
-  // residual ||F - K u|| / ||F|| is not used, because for an ill-conditioned
-  // K it cannot reach a tight tolerance in double precision even for the
-  // exact solution.
-  constexpr double kCorrectionTolerance = 1e-3;
-  constexpr int kMaxCorrections = 20;
-  auto run = [&](auto &cg, const char *storage) {
-    if (max_iters_ > 0)
-      cg.setMaxIterations(max_iters_);
-    const auto t_compute_begin = Clock::now();
-    cg.compute(K);
-    const auto t_compute_end = Clock::now();
-    if (cg.info() != Eigen::Success)
-      throw SolverError(
-          "PCG preconditioner (IncompleteCholesky) setup failed — "
-          "matrix may not be positive definite. Check boundary conditions.");
-
-    int total_iters = 0;
-    const auto inner = [&](const std::vector<double> &rhs, double tol) {
-      cg.setTolerance(tol);
-      const Eigen::Map<const Eigen::VectorXd> b(rhs.data(), n);
-      const Eigen::VectorXd x = cg.solve(b);
-      total_iters += static_cast<int>(cg.iterations());
-      return std::vector<double>(x.data(), x.data() + n);
-    };
-    const auto t_solve_begin = Clock::now();
-    std::vector<double> u = inner(F, tolerance_);
-    RefinementOptions opts;
-    opts.tolerance = tolerance_;
-    opts.max_corrections = kMaxCorrections;
-    const RefinementReport rep = refine_solution(
-        K_csr, F, u, [&](const std::vector<double> &r) { return inner(r, kCorrectionTolerance); },
-        opts);
-    const auto t_solve_end = Clock::now();
-
-    last_iters_ = total_iters;
-    last_error_ = rep.estimated_error;
-    last_refinement_ = rep;
-    spdlog::debug(
-        "[cpu-pcg] storage={}, n={}, nnz={}, Eigen threads={}, convert CSR->Eigen: {:.3f} ms, "
-        "preconditioner: {:.3f} ms, iterative solve: {:.3f} ms, iterations: {}, corrections: {}, "
-        "estimated relative error {:.2e} -> {:.2e}, backward error {:.2e}",
-        storage, n, K.nonZeros(), Eigen::nbThreads(),
-        Ms(t_convert_end - t_convert_begin).count(),
-        Ms(t_compute_end - t_compute_begin).count(),
-        Ms(t_solve_end - t_solve_begin).count(), total_iters, rep.corrections,
-        rep.initial_error, rep.estimated_error, rep.backward_error);
-    if (!rep.converged)
-      throw SolverError(std::format(
-          "PCG did not converge: after {} iterations and {} refinement correction(s) the "
-          "estimated relative error of the solution is {:.3e} (tolerance {:.3e}). The "
-          "stiffness matrix is too ill-conditioned for incomplete-Cholesky PCG, or singular "
-          "(check boundary conditions); use the direct solver (--backend=cpu).",
-          total_iters, rep.corrections, rep.estimated_error, tolerance_));
-    return u;
-  };
-
-  if (lower_only) {
-    Eigen::ConjugateGradient<ESM, Eigen::Lower, Precond> cg;
-    return run(cg, "lower");
+Result<std::unique_ptr<LinearFactor>>
+CpuPCGSolverBackend::factor(const SparseMatrixBuilder::CsrData &K, const FactorOptions &) {
+  if (K.n == 0)
+    return Error{"Stiffness matrix is empty — no free DOFs"};
+  try {
+    return std::unique_ptr<LinearFactor>(std::make_unique<detail::AmgFactor>(
+        K,
+        [this, modes = near_nullspace()](const SparseMatrixBuilder::CsrData &k) {
+          return std::make_unique<detail::AmgSystem>(k, tolerance_, detail::amg_cpu_engine(max_iters_), modes);
+        },
+        [this](const detail::AmgPcgResult &result) { return accept_amg(result); }));
+  } catch (const std::exception &e) {
+    return Error{std::format("{}: {}", name(), e.what())};
   }
-  Eigen::ConjugateGradient<ESM, Eigen::Lower | Eigen::Upper, Precond> cg;
-  return run(cg, "full");
+}
+
+std::vector<double>
+CpuPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr, const std::vector<double> &F,
+                           const FactorRatioCheckPolicy *) {
+  if (K_csr.n == 0)
+    throw SolverError("Stiffness matrix is empty — no free DOFs");
+  if (static_cast<int>(F.size()) != K_csr.n)
+    throw SolverError(std::format("Force vector size {} != matrix size {}", F.size(), K_csr.n));
+  detail::AmgSystem system(K_csr, tolerance_, detail::amg_cpu_engine(max_iters_), near_nullspace());
+  auto result = system.solve(K_csr, F);
+  if (auto e = accept_amg(result))
+    throw SolverError(e->message);
+  return std::move(result.solution);
 }
 
 } // namespace vibestran

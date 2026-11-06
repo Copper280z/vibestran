@@ -97,6 +97,20 @@ std::span<const double> columns(const Eigen::MatrixXd &B) {
 
 /// Forwards solve() to the CPU direct backend but, like cuDSS, declares an
 /// LU fallback, so it only has the default factor() adapter.
+class PlainBackend final : public SolverBackend {
+public:
+    std::vector<double> solve(const CsrData &K, const std::vector<double> &F,
+                              const FactorRatioCheckPolicy *p = nullptr) override {
+        ++solves;
+        return inner_.solve(K, F, p);
+    }
+    [[nodiscard]] std::string_view name() const noexcept override { return "plain"; }
+    int solves{0};
+
+private:
+    EigenSolverBackend inner_;
+};
+
 class IndefiniteFallbackBackend final : public SolverBackend {
 public:
     std::vector<double> solve(const CsrData &K, const std::vector<double> &F,
@@ -392,23 +406,64 @@ TEST(LinearFactor, ShapeErrorsAreReported) {
 }
 
 TEST(LinearFactor, AdapterSolvesThroughAnyBackend) {
-    // EigenPCGSolverBackend has no factor() of its own: each column is a
-    // full PCG solve, refined to its 1e-8 relative-error tolerance.
+    // A backend with no factor() of its own: each column is a full solve.
     const Eigen::MatrixXd A = tridiagonal(40, 0.05);
     const System s = system_for(A, 3);
-    EigenPCGSolverBackend backend;
+    PlainBackend backend;
     auto factor = take(backend.factor(to_csr(A), {.require_spd = true}));
     ASSERT_TRUE(factor);
     EXPECT_EQ(factor->method(), backend.name());
     EXPECT_LT(relative_error(solved(factor->solve(columns(s.B), 3)), s.X), 1e-7);
     EXPECT_EQ(factor->stats().solves, 3);
     EXPECT_EQ(factor->stats().numeric_factorizations, 3);
+    EXPECT_EQ(backend.solves, 3);
 
     // refactor() takes effect on the next solve.
     const Eigen::MatrixXd A2 = tridiagonal(40, 2.0);
     const System s2 = system_for(A2, 1);
     ASSERT_FALSE(factor->refactor(to_csr(A2)));
     EXPECT_LT(relative_error(solved(factor->solve(columns(s2.B), 1)), s2.X), 1e-7);
+}
+
+TEST(LinearFactor, CpuPcgBuildsItsHierarchyOnceForManyRightHandSides) {
+    const auto csr_of = [](double shift) {
+        const int n = 1000;
+        SparseMatrixBuilder b(n);
+        for (int i = 0; i < n; ++i) {
+            b.add(i, i, 2.0 + shift);
+            if (i > 0) { b.add(i, i - 1, -1.0); b.add(i - 1, i, -1.0); }
+        }
+        return b.build_csr();
+    };
+    const auto check = [](const CsrData& k, const std::vector<double>& u, const std::vector<double>& x) {
+        const auto r = k.multiply(u);
+        for (std::size_t i = 0; i < u.size(); ++i) EXPECT_NEAR(r[i], x[i], 1e-5 * (1 + std::abs(x[i]))) << i;
+    };
+    const auto k = csr_of(0.01);
+    std::vector<double> b(2 * std::size_t(k.n));
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::sin(0.01 * double(i));
+
+    CpuPCGSolverBackend backend;
+    auto factor = take(backend.factor(k, {.require_spd = true}));
+    ASSERT_TRUE(factor);
+    EXPECT_EQ(factor->method(), "amg-pcg");
+    auto solution = solved(factor->solve(b, 2));
+    const auto n = std::size_t(k.n);
+    check(k, {solution.begin(), solution.begin() + std::ptrdiff_t(n)}, {b.begin(), b.begin() + std::ptrdiff_t(n)});
+    check(k, {solution.begin() + std::ptrdiff_t(n), solution.end()}, {b.begin() + std::ptrdiff_t(n), b.end()});
+    EXPECT_EQ(factor->stats().solves, 2);
+    EXPECT_EQ(factor->stats().numeric_factorizations, 1);
+    EXPECT_EQ(factor->stats().symbolic_analyses, 1);
+
+    // New values on the same pattern keep the aggregates and solve the new matrix.
+    const auto stiffer = csr_of(0.5);
+    ASSERT_FALSE(factor->refactor(stiffer));
+    const std::vector<double> one(b.begin(), b.begin() + std::ptrdiff_t(n));
+    check(stiffer, solved(factor->solve(one, 1)), one);
+    EXPECT_EQ(factor->stats().numeric_factorizations, 2);
+    EXPECT_EQ(factor->stats().symbolic_analyses, 1);
+
+    EXPECT_TRUE(std::holds_alternative<Error>(backend.factor(CsrData{{0}, {}, {}, 0, 0})));
 }
 
 TEST(LinearFactor, AdapterRefusesSpdWhenTheBackendMayFallBack) {

@@ -217,7 +217,7 @@ int capture(const Options& o) {
 
 std::unique_ptr<SolverBackend> backend(const Options& o) {
     if (o.backend == "cpu") return std::make_unique<EigenSolverBackend>();
-    if (o.backend == "cpu-pcg") return std::make_unique<EigenPCGSolverBackend>();
+    if (o.backend == "cpu-pcg") return std::make_unique<CpuPCGSolverBackend>();
 #ifdef HAVE_VULKAN
     if (o.backend == "vulkan") {
         VulkanSolverConfig cfg;

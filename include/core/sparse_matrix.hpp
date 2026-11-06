@@ -92,16 +92,18 @@ public:
   // cppcheck-suppress unusedFunction -- called by solver assembly setup
   void reserve_triplets(size_t count) { triplets_.reserve(count); }
 
-  /// Move another builder's triplets into this one.
+  /// Take another builder's triplets, after this one's, without copying them.
   void merge_from(SparseMatrixBuilder&& other);
 
-  /// The raw triplet list (useful for testing / inspection)
+  /// The triplets added since the last merge_from. Only used in tests.
+  // cppcheck-suppress unusedFunction -- called from test_sparse_matrix.cpp, which Eigen stops cppcheck on
   [[nodiscard]] const std::vector<Triplet> &triplets() const noexcept {
     return triplets_;
   }
 
 private:
   int size_;
+  std::vector<std::vector<Triplet>> merged_;
   std::vector<Triplet> triplets_;
 };
 

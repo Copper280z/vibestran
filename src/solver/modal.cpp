@@ -109,9 +109,6 @@ ModalSubCaseResults ModalSolver::solve_subcase(const Model& model,
     // ── 3. Assemble K and M ───────────────────────────────────────────────────
     SparseMatrixBuilder K_builder(n);
     SparseMatrixBuilder M_builder(n);
-    const size_t matrix_triplet_capacity = detail::estimate_triplet_capacity(model);
-    K_builder.reserve_triplets(matrix_triplet_capacity);
-    M_builder.reserve_triplets(matrix_triplet_capacity);
 
     assemble_stiffness(model, mpc_handler, K_builder);
     assemble_mass(model, mpc_handler, M_builder, wtmass);

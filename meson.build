@@ -627,6 +627,7 @@ unit_test_sources = files(
   'tests/unit/test_pcg_partition.cpp',
   'tests/unit/test_near_nullspace.cpp',
   'tests/unit/test_amg_vcycle.cpp',
+  'tests/unit/test_amg_cpu.cpp',
   'tests/unit/test_output_writers.cpp',
   'tests/unit/test_coord_sys.cpp',
   'tests/unit/test_mpc_handler.cpp',
@@ -649,7 +650,7 @@ unit_tests = executable(
 )
 
 test('unit_tests', unit_tests,
-  timeout : 60,
+  timeout : 120,
   suite   : 'unit',
 )
 
@@ -702,6 +703,7 @@ endif
 integration_test_sources = files(
   'tests/integration/test_integration.cpp',
   'tests/integration/test_constraint_forces.cpp',
+  'tests/integration/test_parallel_recovery.cpp',
   'tests/integration/test_rod_and_scalar.cpp',
   'tests/integration/test_pbarl_and_springs.cpp',
   'tests/integration/test_mpc_frames.cpp',
@@ -717,6 +719,7 @@ integration_tests = executable(
   integration_test_sources,
   dependencies : [solver_lib_dep, gtest_dep],
   include_directories : inc,
+  cpp_args : tbb_args,
 )
 
 test('integration_tests', integration_tests,

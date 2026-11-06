@@ -733,7 +733,7 @@ TEST(AirGapSolve, MeshMethodIsIdenticalToPlainAir) {
 
   // With a deterministic linear solver every result is bitwise equal: the
   // solver receives the same equations.
-  vibestran::EigenPCGSolverBackend pcg(1e-12);
+  vibestran::CpuPCGSolverBackend pcg(1e-12);
   std::vector<Results> exact(decks.size());
   std::transform(decks.begin(), decks.end(), exact.begin(),
                  [&](const std::string &gap) { return run(gap, pcg); });

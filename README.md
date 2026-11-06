@@ -252,12 +252,18 @@ Ordering row reports the ordering a MAGSTAT solve used.
 
 ### CPU — PCG
 
-Eigen Preconditioned Conjugate Gradient with Incomplete Cholesky preconditioning.
-Iterative solver with O(nnz) memory — suitable for very large systems where the
-direct Cholesky fill-in would exhaust RAM. This is slower than the direct (Cholesky) solution.
-The solve is refined until the estimated relative error is below 1e-8; a model
-too ill-conditioned for incomplete-Cholesky PCG (e.g. a thin solid shell, with
-cond(K) ~ 1e14) is rejected with an error rather than returned inaccurate.
+Conjugate gradients preconditioned by smoothed-aggregation AMG, on OpenMP threads.
+Memory is O(nnz), which suits systems whose Cholesky fill-in would exhaust RAM. On
+3D solids it is also usually faster than the direct solver; on shells of a few hundred
+thousand equations the direct solver is usually faster. Structures use the same
+near-nullspace modes as the GPU backends (`--amg-modes`).
+
+The solve is refined until the estimated relative error is below 1e-8; a model too
+ill-conditioned for it, or singular, is rejected with an error rather than returned
+inaccurate. The result does not depend on the number of threads, bit for bit. Memory
+bandwidth usually limits it before the core count does, so more threads than a few
+per memory channel gain little, and threads beyond the physical cores can cost time:
+set `OMP_NUM_THREADS` to the core count.
 
 ```bash
 vibestran --backend=cpu-pcg model.bdf

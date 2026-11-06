@@ -9,7 +9,7 @@
 // material interfaces, RBEs, and shifted, rotated or rescaled coordinates.
 
 #include <gtest/gtest.h>
-#include "amg_factor.hpp"
+#include "amg_cpu.hpp"
 #include "structural_system.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
@@ -225,18 +225,27 @@ Eigen::MatrixXd dense(const detail::AmgHostCsr& a) {
     return out;
 }
 
-Eigen::MatrixXd applied_cycle(const detail::AmgHierarchy& h) {
-    detail::HostAmg amg(h, nullptr);
-    const auto n = h.levels.front().A->nrows;
+// B of any cycle, from its action on the unit vectors. z = apply(f).
+template<class Apply> Eigen::MatrixXd formed_cycle(std::size_t n, Apply&& apply) {
     Eigen::MatrixXd b = Eigen::MatrixXd::Zero(Eigen::Index(n), Eigen::Index(n));
-    std::vector<double> unit(n, 0.0);
+    std::vector<double> unit(n, 0.0), z(n);
     for (std::size_t c = 0; c < n; ++c) {
         unit[c] = 1;
-        const auto& z = amg.cycle(unit);
+        apply(unit, z);
         b.col(Eigen::Index(c)) = Eigen::Map<const Eigen::VectorXd>(z.data(), Eigen::Index(n));
         unit[c] = 0;
     }
     return b;
+}
+
+Eigen::MatrixXd applied_cycle(const detail::AmgHierarchy& h) {
+    detail::HostAmg amg(h, nullptr);
+    return formed_cycle(h.levels.front().A->nrows, [&](const std::vector<double>& f, std::vector<double>& z) { z = amg.cycle(f); });
+}
+
+Eigen::MatrixXd applied_cpu_cycle(const detail::AmgHierarchy& h) {
+    detail::AmgCpuCycleOf<double> cycle(h);
+    return formed_cycle(h.levels.front().A->nrows, [&](const std::vector<double>& f, std::vector<double>& z) { cycle.apply(f, z); });
 }
 
 struct CycleSpectrum {
@@ -244,8 +253,7 @@ struct CycleSpectrum {
 };
 
 // The eigenvalues of B A, from the similar symmetric L'B L with A = L L'.
-CycleSpectrum spectrum(const detail::AmgHierarchy& h) {
-    const Eigen::MatrixXd b = applied_cycle(h);
+CycleSpectrum spectrum_of(const detail::AmgHierarchy& h, const Eigen::MatrixXd& b) {
     const Eigen::MatrixXd a = dense(*h.levels.front().A);
     const Eigen::LLT<Eigen::MatrixXd> llt(a);
     EXPECT_EQ(llt.info(), Eigen::Success);
@@ -255,6 +263,8 @@ CycleSpectrum spectrum(const detail::AmgHierarchy& h) {
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd>(0.5 * (s + s.transpose()), Eigen::EigenvaluesOnly).eigenvalues();
     return {(b - b.transpose()).cwiseAbs().maxCoeff() / b.cwiseAbs().maxCoeff(), values.minCoeff(), values.maxCoeff()};
 }
+
+CycleSpectrum spectrum(const detail::AmgHierarchy& h) { return spectrum_of(h, applied_cycle(h)); }
 
 double smoother_top(const detail::AmgHostCsr& a, const std::vector<double>& m) {
     const Eigen::VectorXd root = Eigen::Map<const Eigen::VectorXd>(m.data(), Eigen::Index(m.size())).cwiseSqrt();
@@ -309,6 +319,25 @@ TEST(AmgCycle, IsSymmetricPositiveDefiniteWithSpectrumInUnitIntervalAcrossModels
                 expect_valid_cycle(h);
             }
         }
+}
+
+// The CPU's Gauss-Seidel cycle meets the same bound with no weight to bound: any
+// hierarchy of the same links, so even where the coarsest level is smoothed, not solved.
+TEST(AmgCycle, GaussSeidelOnTheCpuIsSymmetricPositiveDefiniteWithSpectrumInUnitInterval) {
+    for (const auto& model : models()) {
+        const auto r = assemble(model.deck(frames().front()), false);
+        const detail::ScaledAmgMatrix scaled(r.k);
+        for (const bool with_modes : {true, false})
+            for (const unsigned coarse_enough : {40u, 1u}) {
+                SCOPED_TRACE(std::format("{}, {}, coarse_enough={}, n={}", model.name, with_modes ? "rigid" : "constant",
+                                         coarse_enough, r.k.n));
+                const detail::AmgHierarchy h(scaled.matrix, with_modes ? r.modes.get() : nullptr, scaled.scale, coarse_enough);
+                const auto s = spectrum_of(h, applied_cpu_cycle(h));
+                EXPECT_LE(s.asymmetry, 1e-10);
+                EXPECT_GT(s.low, 0.0);
+                EXPECT_LE(s.high, 1 + 1e-9);
+            }
+    }
 }
 
 // The coarsest level with nothing left to aggregate is smoothed, not solved: two

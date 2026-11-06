@@ -6,6 +6,7 @@
 #include "core/sparse_matrix.hpp"
 #include "elements/chbdy_element.hpp"
 #include "elements/thermal_elements.hpp"
+#include "assembly_parallel.hpp"
 
 #include <Eigen/Dense>
 #include <algorithm>
@@ -154,7 +155,8 @@ void assemble_system(const Model &model, const SubCase &sc,
                      const DofMap &dof_map,
                      SparseMatrixBuilder &K_builder,
                      std::vector<double> &Q) {
-  auto add_block = [&](std::span<const NodeId> elem_nodes,
+  auto add_block = [&](SparseMatrixBuilder &builder,
+                       std::span<const NodeId> elem_nodes,
                        const Eigen::MatrixXd &Ke) {
     const int n = static_cast<int>(elem_nodes.size());
     for (int i = 0; i < n; ++i) {
@@ -163,7 +165,7 @@ void assemble_system(const Model &model, const SubCase &sc,
       for (int j = 0; j < n; ++j) {
         const EqIndex rj = dof_map.eq_index(elem_nodes[j], 0);
         if (rj == CONSTRAINED_DOF) continue;
-        K_builder.add(ri, rj, Ke(i, j));
+        builder.add(ri, rj, Ke(i, j));
       }
     }
   };
@@ -177,34 +179,48 @@ void assemble_system(const Model &model, const SubCase &sc,
     }
   };
 
-  // 1) Volume / line conductance
-  for (const auto &elem : model.elements) {
-    auto te = make_thermal_element(elem, model);
-    if (!te) continue;
-    add_block(te->node_ids(), te->conductance_matrix());
-  }
+  // 1) Volume / line conductance, each chunk into its own builder so the triplets
+  // arrive in element order whatever the thread count.
+  std::vector<SparseMatrixBuilder> chunk_builders;
+  chunk_builders.reserve(detail::element_chunk_count(model.elements.size()));
+  for (size_t c = 0; c < chunk_builders.capacity(); ++c)
+    chunk_builders.emplace_back(K_builder.size(), 0);
+  detail::for_element_chunks(model.elements.size(), [&](size_t c, size_t first, size_t last) {
+    for (size_t i = first; i < last; ++i) {
+      auto te = make_thermal_element(model.elements[i], model);
+      if (!te) continue;
+      add_block(chunk_builders[c], te->node_ids(), te->conductance_matrix());
+    }
+  });
+  for (auto &chunk_builder : chunk_builders)
+    K_builder.merge_from(std::move(chunk_builder));
 
   // 2) CHBDY convection between corresponding primary and ambient nodes.
   for (const auto &c : model.chbdy_elements) {
     ChbdyElementImpl cb(c, model);
     const auto [nodes, Ka] = augmented_convection(cb);
-    add_block(nodes, Ka);
+    add_block(K_builder, nodes, Ka);
   }
 
   // 3) Apply load-set Q*: QVOL, QHBDY, QBDY1, QBDY2
-  for (const auto &[lp, scale] : model.loads_for_set(sc.load_set)) {
+  const auto loads = model.loads_for_set(sc.load_set);
+  // A load can name every element of the model. As in a search, the first of a
+  // repeated ID is the one found.
+  std::unordered_map<int, const ElementData *> element_by_id;
+  std::unordered_map<int, const ChbdyElement *> chbdy_by_id;
+  if (!loads.empty()) {
+    for (const auto &e : model.elements) element_by_id.emplace(e.id.value, &e);
+    for (const auto &e : model.chbdy_elements) chbdy_by_id.emplace(e.eid.value, &e);
+  }
+  for (const auto &[lp, scale] : loads) {
     std::visit(
         [&](const auto &load) {
           using T = std::decay_t<decltype(load)>;
           if constexpr (std::is_same_v<T, QvolLoad>) {
             for (ElementId eid : load.elements) {
-              auto it = std::find_if(model.elements.begin(),
-                                     model.elements.end(),
-                                     [eid](const ElementData &e) {
-                                       return e.id == eid;
-                                     });
-              if (it == model.elements.end()) continue;
-              auto te = make_thermal_element(*it, model);
+              const auto it = element_by_id.find(eid.value);
+              if (it == element_by_id.end()) continue;
+              auto te = make_thermal_element(*it->second, model);
               if (!te) continue;
               add_rhs(te->node_ids(),
                       te->volumetric_heat_load(scale * load.q_vol));
@@ -214,24 +230,16 @@ void assemble_system(const Model &model, const SubCase &sc,
                     Eigen::VectorXd::Constant(1, scale * load.value));
           } else if constexpr (std::is_same_v<T, Qbdy1Load>) {
             for (ElementId eid : load.elements) {
-              auto it = std::find_if(model.chbdy_elements.begin(),
-                                     model.chbdy_elements.end(),
-                                     [eid](const ChbdyElement &e) {
-                                       return e.eid == eid;
-                                     });
-              if (it == model.chbdy_elements.end()) continue;
-              ChbdyElementImpl cb(*it, model);
+              const auto it = chbdy_by_id.find(eid.value);
+              if (it == chbdy_by_id.end()) continue;
+              ChbdyElementImpl cb(*it->second, model);
               add_rhs(cb.surface_nodes(),
                       cb.applied_flux_load(scale * load.q0));
             }
           } else if constexpr (std::is_same_v<T, Qbdy2Load>) {
-            auto it = std::find_if(model.chbdy_elements.begin(),
-                                   model.chbdy_elements.end(),
-                                   [&load](const ChbdyElement &e) {
-                                     return e.eid == load.element;
-                                   });
-            if (it == model.chbdy_elements.end()) return;
-            ChbdyElementImpl cb(*it, model);
+            const auto it = chbdy_by_id.find(load.element.value);
+            if (it == chbdy_by_id.end()) return;
+            ChbdyElementImpl cb(*it->second, model);
             std::array<double, 4> q{};
             for (int i = 0; i < 4; ++i) q[i] = scale * load.q[i];
             add_rhs(cb.surface_nodes(),
@@ -240,13 +248,9 @@ void assemble_system(const Model &model, const SubCase &sc,
                                                 cb.surface_nodes().size())));
           } else if constexpr (std::is_same_v<T, QvectLoad>) {
             for (ElementId eid : load.elements) {
-              auto it = std::find_if(model.chbdy_elements.begin(),
-                                     model.chbdy_elements.end(),
-                                     [eid](const ChbdyElement &e) {
-                                       return e.eid == eid;
-                                     });
-              if (it == model.chbdy_elements.end()) continue;
-              ChbdyElementImpl cb(*it, model);
+              const auto it = chbdy_by_id.find(eid.value);
+              if (it == chbdy_by_id.end()) continue;
+              ChbdyElementImpl cb(*it->second, model);
               add_rhs(cb.surface_nodes(),
                       cb.directional_flux_load(scale * load.q0,
                                                load.direction));

@@ -157,6 +157,41 @@ TEST(ThermalSteady, CHexa8_VolumetricSource_FixedEndTemps) {
   EXPECT_NEAR(Tc, 1.25, 0.03);  // 10-element 3-D coarsening tolerance
 }
 
+// Enough elements to assemble in several chunks, with a load that names every one.
+// Linear elements on a uniform bar are nodally exact for T = q x (L - x) / (2 k).
+TEST(ThermalSteady, ManyElementsWithASourceOnEachMatchTheAnalyticProfile) {
+  const int n = 2000;
+  const double k = 40.0, q = 3000.0, dx = 0.01, L = n * dx;
+  const auto node = [](int i, int corner) { return 1 + 4 * i + corner; };
+  std::ostringstream bdf;
+  bdf << "SOL 153\nCEND\nSUBCASE 1\nSPC=1\nLOAD=2\nTHERMAL=ALL\nBEGIN BULK\n"
+      << "MAT4,1," << k << "\nPSOLID,1,1\n";
+  for (int i = 0; i <= n; ++i) {
+    const double x = i * dx;
+    bdf << "GRID," << node(i, 0) << ",," << x << ",0.,0.\n"
+        << "GRID," << node(i, 1) << ",," << x << ",1.,0.\n"
+        << "GRID," << node(i, 2) << ",," << x << ",1.,1.\n"
+        << "GRID," << node(i, 3) << ",," << x << ",0.,1.\n";
+  }
+  for (int i = 0; i < n; ++i) {
+    bdf << "CHEXA," << i + 1 << ",1," << node(i, 0) << "," << node(i + 1, 0) << "," << node(i + 1, 1) << ","
+        << node(i, 1) << "," << node(i, 3) << "," << node(i + 1, 3) << ",\n+," << node(i + 1, 2) << ","
+        << node(i, 2) << "\n";
+    bdf << "QVOL,2," << q << ",," << i + 1 << "\n";
+  }
+  for (int c = 0; c < 4; ++c)
+    bdf << "SPC,1," << node(0, c) << ",0,0.\nSPC,1," << node(n, c) << ",0,0.\n";
+  bdf << "ENDDATA\n";
+
+  const auto results = run_thermal(bdf.str());
+  for (int i = 0; i <= n; i += 97) {
+    const double x = i * dx;
+    const double expected = q * x * (L - x) / (2 * k);
+    for (int c = 0; c < 4; ++c)
+      EXPECT_NEAR(temp_at(results, node(i, c)), expected, 1e-9 * (q * L * L / (8 * k))) << "x=" << x;
+  }
+}
+
 TEST(ThermalSteady, CQuad4_PlateInPlaneConduction) {
   // 1×1 plate, 10 elements along x, thickness 0.01, k = 20.
   // x=0 edge T=200, x=1 edge T=0.  Analytic: T(x) = 200(1−x).

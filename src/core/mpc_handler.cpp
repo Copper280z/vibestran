@@ -7,7 +7,9 @@
 #include <cmath>
 #include <format>
 #include <functional>
+#include <iterator>
 #include <map>
+#include <ranges>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -39,6 +41,38 @@ void MpcHandler::build(std::span<const Mpc* const> mpcs, DofMap& dof_map) {
     std::vector<EqIndex> selected_dep_order;
     std::vector<std::map<EqIndex, double>> constraint_rows;
     std::vector<double> constraint_right_hand_sides;
+
+    // The kept rows and their pivot columns form a matrix that is block diagonal
+    // once rows sharing a pivot column are grouped, so only the block a new row
+    // reaches decides its rank. Separate rigid elements are separate blocks, which
+    // on a real deck is a few rows out of thousands.
+    std::unordered_map<EqIndex, std::vector<size_t>> rows_with_column;
+    const auto coupled_rows = [&](const std::vector<EqIndex>& columns) {
+        std::vector<size_t> block;
+        std::unordered_set<size_t> seen;
+        const auto reach = [&](const EqIndex column) {
+            const auto rows = rows_with_column.find(column);
+            if (rows == rows_with_column.end())
+                return;
+            for (const size_t row : rows->second)
+                if (seen.insert(row).second)
+                    block.push_back(row);
+        };
+        for (const EqIndex column : columns)
+            reach(column);
+        for (size_t next = 0; next < block.size(); ++next)
+            for (const auto& [column, value] : constraint_rows[block[next]])
+                if (selected_dep_eqs.contains(column))
+                    reach(column);
+        std::sort(block.begin(), block.end());
+        return block;
+    };
+    const auto pivot_columns_of = [&](const std::map<EqIndex, double>& row) {
+        std::vector<EqIndex> columns;
+        std::ranges::copy_if(row | std::views::keys, std::back_inserter(columns),
+                             [&](const EqIndex column) { return selected_dep_eqs.contains(column); });
+        return columns;
+    };
 
     for (const Mpc* mpc : mpcs) {
         if (mpc->terms.empty())
@@ -78,38 +112,35 @@ void MpcHandler::build(std::span<const Mpc* const> mpcs, DofMap& dof_map) {
             // A column absent from all preceding rows extends the pivot matrix
             // triangularly. Otherwise use pivoted LU so coupled RBE3 blocks do
             // not select a singular dependent-column set.
-            const bool appears_in_previous_row = std::any_of(
-                constraint_rows.begin(), constraint_rows.end(),
-                [&](const auto& previous_row) {
-                    const auto value = previous_row.find(candidate);
-                    return value != previous_row.end() &&
-                           std::abs(value->second) >= 1e-30;
-                });
+            const bool appears_in_previous_row = rows_with_column.contains(candidate);
             bool full_rank = !appears_in_previous_row;
             if (appears_in_previous_row) {
-                const size_t new_size = selected_dep_order.size() + 1;
+                auto columns = pivot_columns_of(row_coefficients);
+                columns.push_back(candidate);
+                const std::vector<size_t> block = coupled_rows(columns);
+                const size_t new_size = block.size() + 1;
                 Eigen::MatrixXd pivot_matrix = Eigen::MatrixXd::Zero(
                     static_cast<Eigen::Index>(new_size),
                     static_cast<Eigen::Index>(new_size));
-                for (size_t row = 0; row < constraint_rows.size(); ++row) {
-                    for (size_t col = 0; col < selected_dep_order.size(); ++col) {
-                        const auto value = constraint_rows[row].find(
-                            selected_dep_order[col]);
-                        if (value != constraint_rows[row].end()) {
+                for (size_t row = 0; row < block.size(); ++row) {
+                    const auto& kept = constraint_rows[block[row]];
+                    for (size_t col = 0; col < block.size(); ++col) {
+                        const auto value = kept.find(selected_dep_order[block[col]]);
+                        if (value != kept.end()) {
                             pivot_matrix(static_cast<Eigen::Index>(row),
                                          static_cast<Eigen::Index>(col)) =
                                 value->second;
                         }
                     }
-                    const auto value = constraint_rows[row].find(candidate);
-                    if (value != constraint_rows[row].end()) {
+                    const auto value = kept.find(candidate);
+                    if (value != kept.end()) {
                         pivot_matrix(static_cast<Eigen::Index>(row),
                                      static_cast<Eigen::Index>(new_size - 1)) =
                             value->second;
                     }
                 }
-                for (size_t col = 0; col < selected_dep_order.size(); ++col) {
-                    const auto value = row_coefficients.find(selected_dep_order[col]);
+                for (size_t col = 0; col < block.size(); ++col) {
+                    const auto value = row_coefficients.find(selected_dep_order[block[col]]);
                     if (value != row_coefficients.end()) {
                         pivot_matrix(static_cast<Eigen::Index>(new_size - 1),
                                      static_cast<Eigen::Index>(col)) = value->second;
@@ -137,27 +168,30 @@ void MpcHandler::build(std::span<const Mpc* const> mpcs, DofMap& dof_map) {
                     mpc->sid.value));
             }
 
-            const size_t size = selected_dep_order.size();
-            Eigen::MatrixXd pivot_matrix(size, size);
-            Eigen::VectorXd current_row(size);
-            for (size_t row = 0; row < size; ++row) {
-                for (size_t col = 0; col < size; ++col) {
-                    const auto value = constraint_rows[row].find(
-                        selected_dep_order[col]);
-                    pivot_matrix(static_cast<Eigen::Index>(row),
-                                 static_cast<Eigen::Index>(col)) =
-                        value == constraint_rows[row].end() ? 0.0 : value->second;
-                }
-                const auto value = row_coefficients.find(selected_dep_order[row]);
-                current_row(static_cast<Eigen::Index>(row)) =
-                    value == row_coefficients.end() ? 0.0 : value->second;
-            }
-            const Eigen::VectorXd combination =
-                pivot_matrix.transpose().fullPivLu().solve(current_row);
+            const std::vector<size_t> block = coupled_rows(pivot_columns_of(row_coefficients));
+            const size_t size = block.size();
             double implied_rhs = 0.0;
-            for (size_t row = 0; row < size; ++row)
-                implied_rhs += combination(static_cast<Eigen::Index>(row)) *
-                               constraint_right_hand_sides[row];
+            if (size > 0) {
+                Eigen::MatrixXd pivot_matrix(size, size);
+                Eigen::VectorXd current_row(size);
+                for (size_t row = 0; row < size; ++row) {
+                    const auto& kept = constraint_rows[block[row]];
+                    for (size_t col = 0; col < size; ++col) {
+                        const auto value = kept.find(selected_dep_order[block[col]]);
+                        pivot_matrix(static_cast<Eigen::Index>(row),
+                                     static_cast<Eigen::Index>(col)) =
+                            value == kept.end() ? 0.0 : value->second;
+                    }
+                    const auto value = row_coefficients.find(selected_dep_order[block[row]]);
+                    current_row(static_cast<Eigen::Index>(row)) =
+                        value == row_coefficients.end() ? 0.0 : value->second;
+                }
+                const Eigen::VectorXd combination =
+                    pivot_matrix.transpose().fullPivLu().solve(current_row);
+                for (size_t row = 0; row < size; ++row)
+                    implied_rhs += combination(static_cast<Eigen::Index>(row)) *
+                                   constraint_right_hand_sides[block[row]];
+            }
             const double rhs_scale = std::max({1.0, std::abs(mpc->rhs),
                                                std::abs(implied_rhs)});
             if (std::abs(mpc->rhs - implied_rhs) <= 1e-12 * rhs_scale)
@@ -169,6 +203,9 @@ void MpcHandler::build(std::span<const Mpc* const> mpcs, DofMap& dof_map) {
         }
         selected_dep_eqs.insert(dep_eq);
         selected_dep_order.push_back(dep_eq);
+        for (const auto& [column, value] : row_coefficients)
+            if (std::abs(value) >= 1e-30)
+                rows_with_column[column].push_back(constraint_rows.size());
         constraint_rows.push_back(row_coefficients);
         constraint_right_hand_sides.push_back(mpc->rhs);
 

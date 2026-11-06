@@ -8,6 +8,9 @@ and **5.38 / 5.72 s** with 90% of its fine-matrix rows on the GPU, versus
 remains below **1.86e-9** at the unchanged **1e-8** target. The complete
 nonlinear motor now runs faster than CPU direct on every GPU backend.
 
+The CPU backend takes about a minute on the largest decks, which is 1.4-1.5x the TITAN V
+over a complete deck. See [CPU PCG](#cpu-pcg).
+
 Measured on 2026-11-02 on bob-desktop.local: Ryzen 7 5700, eight physical cores
 (`taskset -c 0-7`, `OMP_NUM_THREADS=8`), 32 GiB RAM, TITAN V 12 GiB,
 driver 580.178.04, CUDA 12.8, Release Meson build. cuDSS is unchanged.
@@ -734,6 +737,182 @@ Measuring phases also exposed that `factor()` ignored the near-nullspace on CUDA
 and Vulkan, so a retained factor silently ran constant. Tests on each backend now check
 a factored and refactored solve against the host's iteration count. Logs now flush each
 second, since a run killed at its time limit otherwise left an empty log.
+
+## CPU PCG
+
+`--backend=cpu-pcg` was Eigen's CG with incomplete Cholesky, which was slow because of
+its iterations rather than its time per iteration, so threading it would not have
+helped. Since 2026-11-06 it is CG on K in fp64, preconditioned by the same AMG
+hierarchy as the GPU backends through a cycle built for the CPU in
+`src/solver/amg_cpu.hpp`. Incomplete Cholesky is gone.
+
+Complete-deck seconds on bob-desktop, 8 threads pinned to `taskset -c 0-7`, one run
+each. Incomplete Cholesky runs stopped at 240 s:
+
+| Deck | Equations | Incomplete Cholesky | CPU PCG | TITAN V `cuda-pcg` | CPU direct |
+|---|---:|---:|---:|---:|---:|
+| shell-membrane-200 | 241200 | 18.9 | 1.3 | 1.2 | 1.4 |
+| solid-hex-26 | 227448 | 17.5 | 3.2 | 2.5 | 10.9 |
+| thermal-hex-64 | 266175 | 5.1 | 3.5 | 2.4 | 10.8 |
+| shell-thin-200 | 237606 | timeout | 5.0 | 1.9 | 1.5 |
+| stiffened-panel-144 | 250560 | timeout | 5.2 | 2.2 | 2.7 |
+| rbe-assembly-128 | 318726 | timeout | 40.1 | 7.1 | 5.4 |
+| rover-static | 68730 | 40.6 | 3.1 | 1.8 | 1.3 |
+
+Below the old 50000-equation threshold AMG was equal or better on all 18 decks tried,
+so there is no size switch. Direct is often still the fastest at small sizes and on
+thin shells.
+
+The two largest decks now take about a minute, not the hours first feared:
+
+| Deck | Backend | Complete s | Setup s | Iterate s | Iterations | Peak RSS GiB |
+|---|---|---:|---:|---:|---:|---:|
+| solid-hex-70 (4234440 equations, 335M nonzeros) | CPU PCG | 63.3 | 27.4 | 13.6 | 36 | 19.6 |
+| | `cuda-pcg` | 45.9 | 20.5 | 3.4 | 50 | 17.6 |
+| shell-membrane-1258 (9502932 equations, 244M nonzeros) | CPU PCG | 53.5 | 20.0 | 13.8 | 28 | 21.2 |
+| | `cuda-pcg` | 35.9 | 13.8 | 3.0 | 36 | 18.4 |
+
+The two backends' displacements agree to 8e-10 and 2e-8 of the largest value, within
+the F06's printed precision.
+
+### Why the cycle is built this way
+
+**Bytes read.** This Ryzen 7 5700 saturates its memory at about 35-40 GB/s by 2-4
+threads, so threads help the kernels only as far as they read less. On `solid-hex-40`:
+
+| Threads | 1 | 2 | 4 | 8 | 16 |
+|---|---:|---:|---:|---:|---:|
+| Complete deck s | 40.5 | 23.9 | 15.3 | 11.2 | 11.3 |
+| Iterate s | 5.23 | 3.05 | 2.16 | 2.07 | 2.46 |
+
+Past 8, the extra threads share the same cores; an earlier 16-thread run took 2.99 s to
+iterate and 11.8 s in all. Nothing caps the default, which is OpenMP's 16 unless
+`OMP_NUM_THREADS` is set. Since iterations hardly change, the cycle runs entirely in
+fp32 and stores one column list for consecutive rows with identical columns, which
+took about 30% off iterating before the change below. CG and the final accuracy check
+stay in fp64 against K. Rows share a list only when their columns really match: 1.8-2.0
+rows per list on hex and the rover, 1.02 on `shell-membrane-200`, where a uniform mesh
+cancels entries to exact zero, and 1.0 on thermal decks, which have one equation per
+grid.
+
+**Gauss-Seidel.** The GPU cycle smooths with weighted Jacobi, which updates every row
+from the previous values, so that rows can run in any order at once. Gauss-Seidel uses
+each new value as soon as it exists, and reduces error faster per sweep, but a CPU has
+few enough threads to afford the ordering it needs. Here it is exact Gauss-Seidel in a
+thread-shareable order: rows are split into 16 blocks of equal nonzeros; rows with no
+coupling to another block's remaining rows go first, in parallel; the rest are coloured
+by block with at most 4 colours, each a stage; and what's left repeats with half the
+blocks. With M = D + L in that order, M + M' - A = D is positive definite whatever the
+order is, so the symmetric sweep is a valid preconditioner for CG, with eigenvalues of
+BA in (0, 1] and no weight to tune. A test forms the cycle on small models to check
+this. An iteration costs more, 74 ms against 61 ms on `solid-hex-40`, which the fewer
+iterations more than repay. The residual after a forward sweep needs only the upper
+half of the product, which keeps that cost down. An earlier hybrid, Gauss-Seidel inside
+a block and Jacobi between, lost the gain: 44-50 iterations on hex against 29 for
+serial Gauss-Seidel and 41 for Jacobi.
+
+Largest level of each class, both cycles in fp32 at 8 threads. Jacobi comes from a
+prototype of the same code, one run each:
+
+| Class | Equations | Jacobi iterations | Gauss-Seidel iterations | Jacobi iterate s | Gauss-Seidel iterate s |
+|---|---:|---:|---:|---:|---:|
+| shell-membrane | 962400 | 38 | 27 | 1.33 | 1.08 |
+| shell-thick | 955206 | 35 | 24 | 1.23 | 0.93 |
+| solid-hex | 806880 | 41 | 28 | 2.49 | 2.06 |
+| solid-tet10 | 693576 | 67 | 44 | 3.65 | 3.26 |
+| solid-contrast | 806880 | 98 | 59 | 6.03 | 4.85 |
+| thermal-hex | 1009899 | 283 | 239 | 7.74 | 7.46 |
+| shell-foundation | 964800 | 133 | 87 | 4.45 | 3.32 |
+| cubic-lattice | 876408 | 160 | 115 | 3.86 | 3.28 |
+| shell-thin | 955206 | 626 | 407 | 20.27 | 14.78 |
+| shell-cylinder-cd | 994752 | 395 | 220 | 17.42 | 10.67 |
+| stiffened-panel | 998784 | 1350 | 756 | 48.62 | 30.66 |
+| solid-thin | 924480 | 3673 | 2369 | 174.92 | 143.35 |
+| tube-chassis | 998934 | 4407 | 2410 | 90.59 | 54.88 |
+| rbe-assembly | 938886 | 2357 | 1992 | 128.45 | 125.80 |
+
+Gauss-Seidel also won on the magnetic coil, tied on the motor, and lost on one deck
+found: the rover took 0.88 s against 0.75 s, with 229 iterations against 390 at twice
+the time per iteration, probably because its numbering leaves few rows that can run at
+once. Reordering rows breadth-first gained little on most decks and made the panel worse
+(408 iterations), so it was dropped. Flexible CG gained nothing either.
+
+No deck tried has failed in a way that points to fp32, so there is no fp64 fallback. The
+hardest found are `solid-thin` at 58320 equations, 13126 iterations in 44 s, and MYSTRAN's
+`hemisphere with cutout 4e-4`, 33475 equations and about 11900 iterations in 22 s on the
+Mac, where direct takes 0.5 s. Both reached their accuracy, though one CG run stops at
+10000 iterations, so a harder deck would be rejected.
+
+The solution doesn't depend on the thread count, bit for bit: blocks are fixed, and dot
+products sum the blocks in a fixed order.
+
+### Time outside the solver
+
+Assembly and recovery were most of a deck, on every backend. On `solid-hex-40`:
+
+| Stage | Before, s | After, s |
+|---|---:|---:|
+| Assemble K | 1.33 | 0.69 |
+| `build_csr` | 1.59 | 0.63 |
+| Linear solve | 8.0 | 7.1 |
+| `recover_results` | 4.03 | 0.57 |
+| `recover_forces` | 4.59 | 0.71 |
+| Complete deck | 20.9 | 11.2 |
+
+- `build_csr` is a parallel stable counting sort, and `merge_from` moves each chunk's
+  triplets rather than copying them.
+- Element recovery and grid forces run in chunks of 512 elements and merge in chunk
+  order, so results are in element order and the same to the bit whatever the thread
+  count.
+- `MpcHandler::build` factored a dense matrix of every kept row for each row whose
+  pivot appeared in an earlier row, which is quartic in the rows, and took 2.28 s per
+  subcase on the rover. Only the rows a new row can reach through shared pivot columns
+  decide its rank, which took it to 3 ms. Judging a row's rank on its own block also
+  fixes a defect: a stiff row with nothing in common could raise the rank threshold
+  and move the dependent to the wrong term.
+- Thermal assembly is threaded the same way, and a QVOL, QBDY1, QBDY2 or QVECT naming
+  every element no longer searches the model for each.
+- Assembly reserved space for every triplet in a builder it never used, about 12.6 GB
+  of untouched address space on hex-70, which is gone.
+
+The GPU backends gained the same: solid-hex-70 went from 94.4 s to 45.9 s,
+shell-membrane-1258 from 60.1 s to 35.9 s and the rover from 6.5 s to 1.8 s.
+
+### Verification
+
+- The model-class suite solved all 48 levels of 16 classes, and all 13 comparisons
+  against a refined direct solve passed on the structural classes, the worst being a
+  residual of 9.0e-6 on solid-thin, whose limit is 1e-6 with a floor for its
+  conditioning. The rest were 2.9e-8 or less.
+- All 23 e2e cases pass on `--backend=cpu-pcg`.
+- On MYSTRAN's 573 validation decks, run on the Mac, AMG completes every deck direct does
+  except five, and rejects those with an error. All five load a direction with no
+  stiffness, so `K u = F` has no solution as the deck stands. `SB-BAR-GRAV` and
+  `SS-BAR-GRAV` put a moment on the torsion of a bar with no J, and `RBE3 26` loads grids
+  held only by a CQUAD8, which is ignored as unsupported. On those three, Accelerate's
+  direct solve leaves the rows at zero and warns, with a relative residual of 0.18-0.89;
+  CHOLMOD on Linux stops with an error on the two of them tried, `SB-BAR-GRAV` and
+  `RBE3 26`; incomplete Cholesky returned a residual near 1e149. `bar_03` and `AUTOSPC
+  reaction forces` are mechanisms, where direct warns and returns displacements of order
+  1e16 and 1e9 that differ between Mac and Linux, and incomplete Cholesky also fails.
+  Validation records number 1656 failures against direct's 1649. Of
+  the 7 extra, 5 are checks `RBE3 26` passed on direct, and 2 are shear forces of about
+  1e-15 against an expected zero. Failures on both differ only by noise near zero.
+- Rows with no stiffness get a unit diagonal, and a singular coarsest level uses a
+  pseudo-inverse, so a deck that only has unloaded singular directions still solves, on
+  every AMG backend.
+
+### Limits
+
+- Times are one run each, and rbe-assembly, solid-thin and tube-chassis still take
+  thousands of iterations. Direct took 5.4 s against 40.1 s on `rbe-assembly-128`.
+- Setup is now the largest part of a hex deck: on solid-hex-40 AMGCL's matrix products
+  are about 20% of the run's CPU time and Eigen's QR about 10%. The cycle's own
+  preparation is 7.3 s on hex-70 and the fp64 hierarchy stays in memory during iterating,
+  so there is room to cut both.
+
+Scripts are in `benchmarks/pcg/cpu-pcg-20261106/`, and results stay in
+`~/pcg-perf/cpucycle-20261106/` on that machine.
 
 ## Physical decks
 

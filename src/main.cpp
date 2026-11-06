@@ -5,7 +5,7 @@
 // solver when available:
 //   --backend=cpu               Eigen sparse Cholesky (always available,
 //   default)
-//   --backend=cpu-pcg           Eigen PCG + IncompleteCholesky (low memory)
+//   --backend=cpu-pcg           CPU PCG + AMG (low memory)
 //   --backend=cuda              NVIDIA cuDSS sparse direct solver (requires
 //   CUDA)
 //                               For SOL 103 modal: uses the CUDA shift-invert
@@ -118,7 +118,7 @@ make_backend(BackendChoice backend_choice,
              [[maybe_unused]] CudaPrecisionChoice cuda_precision) {
   switch (backend_choice) {
   case BackendChoice::CpuPCG:
-    return std::make_unique<vibestran::EigenPCGSolverBackend>();
+    return std::make_unique<vibestran::CpuPCGSolverBackend>();
   case BackendChoice::Cuda: {
 #ifdef HAVE_CUDA
     const auto precision = cuda_precision == CudaPrecisionChoice::Float32
@@ -187,8 +187,7 @@ static void print_usage() {
       "                      <input.bdf|input.inp> [output.f06]\n"
       "  --backend=cpu              Eigen sparse Cholesky CPU solver "
       "(default)\n"
-      "  --backend=cpu-pcg          Eigen PCG + IncompleteCholesky "
-      "CPU solver (low memory)\n"
+      "  --backend=cpu-pcg          CPU PCG + AMG solver (low memory)\n"
       "  --backend=vulkan           Vulkan PCG GPU solver (requires "
       "Vulkan; SOL 101 only)\n"
       "  --backend=cuda             CUDA cuDSS direct solver "

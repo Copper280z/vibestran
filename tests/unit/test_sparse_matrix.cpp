@@ -4,6 +4,10 @@
 // Also verifies the EigenSolverBackend::name() identification string.
 
 #include <gtest/gtest.h>
+#include <map>
+#ifdef HAVE_TBB
+#include <tbb/task_arena.h>
+#endif
 #include "core/sparse_matrix.hpp"
 #include "solver/solver_backend.hpp"
 #include <array>
@@ -88,6 +92,74 @@ TEST(SparseMatrixBuilder, MergeFromCombinesThreadLocalTriplets) {
     EXPECT_DOUBLE_EQ(csr.values[1], -2.0);
     EXPECT_EQ(csr.col_ind[2], 1);
     EXPECT_DOUBLE_EQ(csr.values[2], 3.5);
+}
+
+// Duplicates are summed in insertion order, and floating-point addition does not
+// associate: 1e16 + 1 - 1e16 is 0 one way and 1 another. So this sees any change of
+// order, whichever part or group the terms arrived in.
+TEST(SparseMatrixBuilder, BuildCsrSumsInInsertionOrderAcrossPartsAndThreads) {
+    constexpr int kRows = 40000;
+    const auto build = [] {
+        SparseMatrixBuilder builder(kRows);
+        for (int part = 0; part < 50; ++part) {
+            SparseMatrixBuilder local(kRows);
+            for (int row = 0; row < kRows; ++row) {
+                const double sign = part % 2 == 0 ? 1.0 : -1.0;
+                local.add(row, row, sign * 1e16);
+                local.add(row, row, part + 1.0);
+                if (row > 0) local.add(row, (row * 7 + part) % row, 1.0 / (part + row));
+            }
+            builder.merge_from(std::move(local));
+            builder.add(part, part, 0.25);
+        }
+        return builder.build_csr();
+    };
+    const auto parallel = build();
+
+    // The serial sum of the same triplets in the same order.
+    std::vector<std::map<int, double>> expected(kRows);
+    for (int part = 0; part < 50; ++part) {
+        for (int row = 0; row < kRows; ++row) {
+            const double sign = part % 2 == 0 ? 1.0 : -1.0;
+            expected[row][row] += sign * 1e16;
+            expected[row][row] += part + 1.0;
+            if (row > 0) expected[row][(row * 7 + part) % row] += 1.0 / (part + row);
+        }
+        expected[part][part] += 0.25;
+    }
+    EXPECT_TRUE(parallel.stores_lower_triangle_only());
+    for (int row = 0; row < kRows; ++row) {
+        const int first = parallel.row_ptr[row];
+        ASSERT_EQ(parallel.row_ptr[row + 1] - first, int(expected[row].size())) << row;
+        int at = first;
+        for (const auto& [column, value] : expected[row]) {
+            ASSERT_EQ(parallel.col_ind[at], column) << row;
+            ASSERT_EQ(parallel.values[at], value) << row;
+            ++at;
+        }
+    }
+#ifdef HAVE_TBB
+    SparseMatrixBuilder::CsrData serial;
+    tbb::task_arena(1).execute([&] { serial = build(); });
+    EXPECT_TRUE(serial.values == parallel.values);
+    EXPECT_TRUE(serial.col_ind == parallel.col_ind);
+    EXPECT_TRUE(serial.row_ptr == parallel.row_ptr);
+#endif
+}
+
+TEST(SparseMatrixBuilder, BuildCsrOfNothingHasEmptyRows) {
+    SparseMatrixBuilder builder(3);
+    const auto csr = builder.build_csr();
+    EXPECT_EQ(csr.nnz, 0);
+    EXPECT_EQ(csr.row_ptr, (std::vector<int>{0, 0, 0, 0}));
+}
+
+TEST(SparseMatrixBuilder, BuildCsrNoticesEntriesAboveTheDiagonal) {
+    SparseMatrixBuilder lower(2), full(2);
+    lower.add(1, 0, 1.0);
+    full.add(0, 1, 1.0);
+    EXPECT_TRUE(lower.build_csr().stores_lower_triangle_only());
+    EXPECT_FALSE(full.build_csr().stores_lower_triangle_only());
 }
 
 TEST(SparseMatrixBuilder, ElementAssemblyBuildsLowerTriangleCsr) {

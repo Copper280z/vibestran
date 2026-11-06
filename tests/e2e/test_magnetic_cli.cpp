@@ -264,7 +264,7 @@ TEST_F(MagneticCli, BackendOptionSelectsTheMagneticSolver) {
   EXPECT_EQ(log.find("PCG"), std::string::npos) << log;
   const double energy = h5_attribute(direct, "/MAGSTAT/subcases/1", "energy_J");
   const auto iterative = solve("pcg", text, true, "--backend=cpu-pcg");
-  EXPECT_NE(log.find("Solver backend: Eigen PCG"), std::string::npos) << log;
+  EXPECT_NE(log.find("Solver backend: CPU PCG"), std::string::npos) << log;
   EXPECT_NEAR(h5_attribute(iterative, "/MAGSTAT/subcases/1", "energy_J"),
               energy, 1e-9 * energy);
   // Structural solver controls stay unavailable.

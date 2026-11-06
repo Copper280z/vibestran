@@ -53,11 +53,13 @@ inline int element_num_dofs(ElementType type) {
   return 0;
 }
 
-inline size_t estimate_triplet_capacity(const Model& model) {
+// Triplets for one triangle of each element in [first, last). Constraints can add
+// more, so a builder may still grow past this.
+inline size_t triplet_capacity(const Model& model, size_t first, size_t last) {
   size_t total = 0;
-  for (const auto& elem : model.elements) {
-    const size_t ndof = static_cast<size_t>(element_num_dofs(elem.type));
-    total += ndof * ndof;
+  for (size_t i = first; i < last; ++i) {
+    const auto ndof = static_cast<size_t>(element_num_dofs(model.elements[i].type));
+    total += ndof * (ndof + 1) / 2;
   }
   return total;
 }
@@ -72,6 +74,34 @@ inline std::vector<double> to_row_major(const LocalKe& matrix) {
   return values;
 }
 
+// Contiguous chunks of elements. Merging what each chunk produced in chunk order
+// gives element order whatever the thread count or scheduling, so sums and lists
+// built from it are bitwise reproducible.
+inline constexpr size_t kElementsPerChunk = 512;
+
+inline size_t element_chunk_count(size_t n_elems) {
+  return (n_elems + kElementsPerChunk - 1) / kElementsPerChunk;
+}
+
+/// body(chunk, first element, one past the last) for each chunk of n_elems.
+template <typename Body>
+inline void for_element_chunks(size_t n_elems, Body&& body) {
+  const size_t n_chunks = element_chunk_count(n_elems);
+  const auto one = [&](size_t c) {
+    body(c, c * kElementsPerChunk, std::min(n_elems, (c + 1) * kElementsPerChunk));
+  };
+#ifdef HAVE_TBB
+  tbb::parallel_for(tbb::blocked_range<size_t>(0, n_chunks, 1),
+                    [&](const tbb::blocked_range<size_t>& range) {
+                      for (size_t c = range.begin(); c != range.end(); ++c)
+                        one(c);
+                    });
+#else
+  for (size_t c = 0; c < n_chunks; ++c)
+    one(c);
+#endif
+}
+
 template <typename MatrixFn>
 inline void assemble_element_matrix(const Model& model,
                                     const MpcHandler& mpc_handler,
@@ -80,41 +110,34 @@ inline void assemble_element_matrix(const Model& model,
   const DofMap& dof_map = mpc_handler.full_dof_map();
 
 #ifdef HAVE_TBB
-  // Contiguous chunks of elements, each into its own builder, merged in
-  // chunk order: the triplets then arrive in element order whatever the
-  // thread count or scheduling, so duplicate entries are summed in the same
-  // order every run and K is bitwise reproducible (with thread-local
-  // builders it varied in the last bits between runs, which moved the
-  // solution of an ill-conditioned model by ~cond(K) eps).
-  constexpr size_t kElementsPerChunk = 512;
+  // Each chunk into its own builder: the triplets then arrive in element order,
+  // so duplicate entries are summed in the same order every run and K is bitwise
+  // reproducible (with thread-local builders it varied in the last bits between
+  // runs, which moved the solution of an ill-conditioned model by ~cond(K) eps).
   const size_t n_elems = model.elements.size();
-  const size_t n_chunks = (n_elems + kElementsPerChunk - 1) / kElementsPerChunk;
+  const size_t n_chunks = element_chunk_count(n_elems);
   std::vector<SparseMatrixBuilder> chunk_builders;
   chunk_builders.reserve(n_chunks);
   for (size_t c = 0; c < n_chunks; ++c)
     chunk_builders.emplace_back(builder.size(), 0);
 
-  tbb::parallel_for(
-      tbb::blocked_range<size_t>(0, n_chunks, 1),
-      [&](const tbb::blocked_range<size_t>& range) {
-        for (size_t c = range.begin(); c != range.end(); ++c) {
-          auto& chunk_builder = chunk_builders[c];
-          const size_t end = std::min(n_elems, (c + 1) * kElementsPerChunk);
-          for (size_t i = c * kElementsPerChunk; i < end; ++i) {
-            const auto& elem_data = model.elements[i];
-            auto elem = make_element(elem_data, model);
-            auto gdofs = elem->global_dof_indices(dof_map);
-            LocalKe matrix = matrix_fn(*elem);
-            auto matrix_row_major = to_row_major(matrix);
-            mpc_handler.apply_to_stiffness(gdofs, matrix_row_major,
-                                           chunk_builder);
-          }
-        }
-      });
+  for_element_chunks(n_elems, [&](size_t c, size_t first, size_t last) {
+    auto& chunk_builder = chunk_builders[c];
+    chunk_builder.reserve_triplets(triplet_capacity(model, first, last));
+    for (size_t i = first; i < last; ++i) {
+      const auto& elem_data = model.elements[i];
+      auto elem = make_element(elem_data, model);
+      auto gdofs = elem->global_dof_indices(dof_map);
+      LocalKe matrix = matrix_fn(*elem);
+      auto matrix_row_major = to_row_major(matrix);
+      mpc_handler.apply_to_stiffness(gdofs, matrix_row_major, chunk_builder);
+    }
+  });
 
   for (auto& chunk_builder : chunk_builders)
     builder.merge_from(std::move(chunk_builder));
 #else
+  builder.reserve_triplets(triplet_capacity(model, 0, model.elements.size()));
   for (const auto& elem_data : model.elements) {
     auto elem = make_element(elem_data, model);
     auto gdofs = elem->global_dof_indices(dof_map);

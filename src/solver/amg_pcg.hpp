@@ -25,6 +25,7 @@
 #include <format>
 #include <string>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -37,7 +38,9 @@ using AmgHostCsr = amgcl::backend::builtin<double, int, int>::matrix;
 
 // D^-1/2 K D^-1/2 as full CSR with sorted rows and exact zeros removed.
 // Lower-triangle storage is expanded here, in parallel, without an
-// intermediate full copy.
+// intermediate full copy. A row with no stiffness at all (a DOF nothing connects to)
+// gets a unit diagonal here, which K does not have: the solve then leaves it at zero
+// unless it is loaded, and a load on it fails refinement against K.
 struct ScaledAmgMatrix {
     std::shared_ptr<AmgHostCsr> matrix;
     std::vector<double> scale;
@@ -69,8 +72,16 @@ struct ScaledAmgMatrix {
             }();
             throw SolverError(std::format("AMG PCG: invalid diagonal {} at row {} (n={})", diag, bad_row, n));
         }
+        std::vector<int> empty_rows;
         for (int i = 0; i < n; ++i) {
-            if (scale[i] == 0) throw SolverError(std::format("AMG PCG: missing diagonal at row {} (n={})", i, n));
+            if (scale[i] == 0) {
+                if (own[i] != 0 || count[i + 1] != 0)
+                    throw SolverError(std::format("AMG PCG: row {} has off-diagonal entries but no diagonal, so the "
+                        "matrix is not positive semidefinite (n={})", i, n));
+                scale[i] = 1;
+                empty_rows.push_back(i);
+                ++own[i];
+            }
             count[i + 1] += own[i];
         }
         std::partial_sum(count.begin(), count.end(), count.begin());
@@ -78,6 +89,10 @@ struct ScaledAmgMatrix {
         a.set_size(n, n, false);
         a.set_nonzeros(count[n]);
         std::copy(count.begin(), count.end(), a.ptr);
+        for (const int i : empty_rows) {
+            a.col[a.ptr[i]] = i;
+            a.val[a.ptr[i]] = 1;
+        }
         std::vector<int> fill(n, 0);
 #pragma omp parallel for schedule(static)
         for (int i = 0; i < n; ++i) {
@@ -215,10 +230,21 @@ private:
         for (Eigen::Index i = 0; i < n; ++i)
             for (int j = a.ptr[i]; j < a.ptr[i + 1]; ++j) dense(i, a.col[j]) = a.val[j];
         const Eigen::LLT<Eigen::MatrixXd> llt(dense);
-        if (llt.info() != Eigen::Success)
-            throw SolverError(std::format("AMG coarse Cholesky failed: n={}, nnz={}, Eigen status={}",
-                n, a.nnz, int(llt.info())));
-        const Eigen::MatrixXd inverse = llt.solve(Eigen::MatrixXd::Identity(n, n));
+        Eigen::MatrixXd inverse;
+        if (llt.info() == Eigen::Success) {
+            inverse = llt.solve(Eigen::MatrixXd::Identity(n, n));
+        } else {
+            // Singular to working precision, as a free-floating part makes it: the
+            // pseudo-inverse, which stays positive semidefinite. With a load the matrix
+            // can balance, conjugate gradients converge in its range; with one it can't,
+            // refinement against K rejects the result.
+            const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen(dense);
+            const Eigen::VectorXd& values = eigen.eigenvalues();
+            const double cutoff = double(n) * std::numeric_limits<double>::epsilon() * values.cwiseAbs().maxCoeff();
+            const Eigen::VectorXd inverted = values.unaryExpr([cutoff](double v) { return v > cutoff ? 1 / v : 0.0; });
+            inverse = eigen.eigenvectors() * inverted.asDiagonal() * eigen.eigenvectors().transpose();
+            log_debug(std::format("[amg-pcg] coarsest level of {} rows is singular: using its pseudo-inverse", n));
+        }
         coarse_inverse.assign(inverse.data(), inverse.data() + inverse.size());
     }
 

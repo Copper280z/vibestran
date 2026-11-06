@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cmath>
 #include <numbers>
+#include <numeric>
 #include <set>
 #include <unordered_set>
 #include <spdlog/spdlog.h>
@@ -568,7 +569,6 @@ void LinearStaticSolver::assemble(const Model &model, const SubCase & /*sc*/,
                                   const MpcHandler &mpc_handler,
                                   SparseMatrixBuilder &K_builder,
                                   std::vector<double> &F) {
-  K_builder.reserve_triplets(detail::estimate_triplet_capacity(model));
   detail::assemble_element_matrix(
       model, mpc_handler, K_builder,
       [](const ElementBase &elem) { return elem.stiffness_matrix(); });
@@ -1193,14 +1193,34 @@ LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
   const auto nodal_temps = subcase_thermal_temperatures(model, sc);
 
   // Element internal forces K_e u_e - f_e,thermal (basic), per element and
-  // grid, and their sum per grid.
+  // grid, and their sum per grid. The elements are computed in chunks, in the
+  // order of their IDs, and summed in that order, as one thread would.
   struct ElementForceAtGrid {
     ElementType etype;
     ElementId eid;
     std::array<double, 6> f{};
   };
-  std::unordered_map<NodeId, std::vector<ElementForceAtGrid>> elem_rows;
-  std::unordered_map<NodeId, std::array<double, 6>> internal;
+  struct GridForceTerm {
+    int grid;
+    int comp;
+    double f;
+  };
+  struct GridRow {
+    int grid;
+    ElementForceAtGrid row;
+  };
+  struct ChunkForces {
+    std::vector<GridForceTerm> terms;
+    std::vector<GridRow> rows;
+  };
+  std::unordered_map<NodeId, int> grid_index;
+  std::vector<NodeId> grid_ids;
+  grid_index.reserve(model.nodes.size());
+  grid_ids.reserve(model.nodes.size());
+  for (const auto &[nid, _] : model.nodes) {
+    grid_index.emplace(nid, static_cast<int>(grid_ids.size()));
+    grid_ids.push_back(nid);
+  }
   std::vector<const ElementData *> sorted_elements;
   sorted_elements.reserve(model.elements.size());
   for (const auto &e : model.elements)
@@ -1208,49 +1228,78 @@ LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
   std::sort(sorted_elements.begin(), sorted_elements.end(),
             [](const ElementData *a, const ElementData *b) { return a->id < b->id; });
 
-  for (const ElementData *ep : sorted_elements) {
-    const ElementData &elem_data = *ep;
-    auto elem = make_element(elem_data, model);
-    const LocalKe ke = elem->stiffness_matrix();
-    if (ke.size() == 0 || ke.cwiseAbs().maxCoeff() == 0.0)
-      continue; // mass-only elements carry no internal force
-    const auto gdofs = elem->global_dof_indices(dof_map);
-    const auto identity = local_dof_identity(elem_data, model);
-    const int ndof = elem->num_dofs();
+  std::vector<ChunkForces> chunks(detail::element_chunk_count(sorted_elements.size()));
+  detail::for_element_chunks(sorted_elements.size(), [&](size_t c, size_t first, size_t last) {
+    ChunkForces &chunk = chunks[c];
+    for (size_t e = first; e < last; ++e) {
+      const ElementData &elem_data = *sorted_elements[e];
+      auto elem = make_element(elem_data, model);
+      const LocalKe ke = elem->stiffness_matrix();
+      if (ke.size() == 0 || ke.cwiseAbs().maxCoeff() == 0.0)
+        continue; // mass-only elements carry no internal force
+      const auto gdofs = elem->global_dof_indices(dof_map);
+      const auto identity = local_dof_identity(elem_data, model);
+      const int ndof = elem->num_dofs();
 
-    Eigen::VectorXd ue = Eigen::VectorXd::Zero(ndof);
-    for (int li = 0; li < ndof; ++li) {
-      const EqIndex eq = gdofs[static_cast<size_t>(li)];
-      if (eq != CONSTRAINED_DOF && eq < static_cast<EqIndex>(u_free.size())) {
-        ue(li) = u_free[static_cast<size_t>(eq)];
-      } else {
+      Eigen::VectorXd ue = Eigen::VectorXd::Zero(ndof);
+      for (int li = 0; li < ndof; ++li) {
+        const EqIndex eq = gdofs[static_cast<size_t>(li)];
+        if (eq != CONSTRAINED_DOF && eq < static_cast<EqIndex>(u_free.size())) {
+          ue(li) = u_free[static_cast<size_t>(eq)];
+        } else {
+          const auto [nid, comp] = identity[static_cast<size_t>(li)];
+          const auto it = spc.find(nid);
+          if (it != spc.end() && it->second[static_cast<size_t>(comp)].active)
+            ue(li) = it->second[static_cast<size_t>(comp)].value;
+        }
+      }
+      Eigen::VectorXd fe = ke * ue;
+      if (!nodal_temps.empty())
+        fe -= element_thermal_vector(*elem, elem_data, model, nodal_temps);
+
+      std::unordered_map<NodeId, std::array<double, 6>> per_grid;
+      for (int li = 0; li < ndof; ++li) {
         const auto [nid, comp] = identity[static_cast<size_t>(li)];
-        const auto it = spc.find(nid);
-        if (it != spc.end() && it->second[static_cast<size_t>(comp)].active)
-          ue(li) = it->second[static_cast<size_t>(comp)].value;
+        if (is_omitted_grid(nid))
+          continue; // an omitted midside grid of a CTETRA10/CHEXA20
+        chunk.terms.push_back({grid_index.at(nid), comp, fe(li)});
+        if (want_gp)
+          per_grid[nid][static_cast<size_t>(comp)] += fe(li);
+      }
+      if (want_gp) {
+        for (const NodeId nid : elem_data.nodes) {
+          const auto it = per_grid.find(nid);
+          if (it == per_grid.end())
+            continue;
+          chunk.rows.push_back({grid_index.at(nid), {elem_data.type, elem_data.id, it->second}});
+          per_grid.erase(it); // a grid listed twice gets one row
+        }
       }
     }
-    Eigen::VectorXd fe = ke * ue;
-    if (!nodal_temps.empty())
-      fe -= element_thermal_vector(*elem, elem_data, model, nodal_temps);
+  });
 
-    std::unordered_map<NodeId, std::array<double, 6>> per_grid;
-    for (int li = 0; li < ndof; ++li) {
-      const auto [nid, comp] = identity[static_cast<size_t>(li)];
-      if (is_omitted_grid(nid))
-        continue; // an omitted midside grid of a CTETRA10/CHEXA20
-      per_grid[nid][static_cast<size_t>(comp)] += fe(li);
-      internal[nid][static_cast<size_t>(comp)] += fe(li);
-    }
-    if (want_gp) {
-      for (const NodeId nid : elem_data.nodes) {
-        const auto it = per_grid.find(nid);
-        if (it == per_grid.end())
-          continue;
-        elem_rows[nid].push_back({elem_data.type, elem_data.id, it->second});
-        per_grid.erase(it); // a grid listed twice gets one row
+  std::vector<double> internal_sum(grid_ids.size() * 6, 0.0);
+  std::vector<char> touched(grid_ids.size(), 0);
+  std::vector<int> touch_order;
+  touch_order.reserve(grid_ids.size());
+  std::vector<std::vector<ElementForceAtGrid>> elem_rows(want_gp ? grid_ids.size() : 0);
+  for (ChunkForces &chunk : chunks) {
+    for (const GridForceTerm &term : chunk.terms) {
+      internal_sum[static_cast<size_t>(term.grid) * 6 + static_cast<size_t>(term.comp)] += term.f;
+      if (!touched[static_cast<size_t>(term.grid)]) {
+        touched[static_cast<size_t>(term.grid)] = 1;
+        touch_order.push_back(term.grid);
       }
     }
+    for (const GridRow &row : chunk.rows)
+      elem_rows[static_cast<size_t>(row.grid)].push_back(row.row);
+    chunk = {};
+  }
+  std::unordered_map<NodeId, std::array<double, 6>> internal;
+  internal.reserve(touch_order.size());
+  for (const int grid : touch_order) {
+    auto &total = internal[grid_ids[static_cast<size_t>(grid)]];
+    std::copy_n(internal_sum.begin() + static_cast<std::ptrdiff_t>(static_cast<size_t>(grid) * 6), 6, total.begin());
   }
 
   // Applied equivalent loads (mechanical) and thermal equivalent loads, per
@@ -1388,14 +1437,12 @@ LinearStaticSolver::GridForceOutput LinearStaticSolver::compute_grid_forces(
     if (has_mpc && any_nonzero(mpc_force))
       add_row(GridForceContribution::Kind::Mpc, mpc_force, ElementType::CBAR,
               ElementId{0});
-    if (const auto it = elem_rows.find(nid); it != elem_rows.end()) {
-      for (const auto &row : it->second) {
-        std::array<double, 6> on_grid{};
-        for (size_t d = 0; d < 6; ++d)
-          on_grid[d] = -row.f[d];
-        add_row(GridForceContribution::Kind::Element,
-                to_grid_frame(model, nid, on_grid), row.etype, row.eid);
-      }
+    for (const auto &row : elem_rows[static_cast<size_t>(grid_index.at(nid))]) {
+      std::array<double, 6> on_grid{};
+      for (size_t d = 0; d < 6; ++d)
+        on_grid[d] = -row.f[d];
+      add_row(GridForceContribution::Kind::Element,
+              to_grid_frame(model, nid, on_grid), row.etype, row.eid);
     }
     if (!gb.rows.empty())
       out.gp_forces.push_back(std::move(gb));
@@ -1495,7 +1542,8 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
   }
 
   // ── Recover element stresses ──────────────────────────────────────────────
-  for (const auto &elem_data : model.elements) {
+  // Each chunk of elements into its own results, appended in chunk order.
+  const auto recover_element = [&](const ElementData &elem_data, SubCaseResults &out) {
     auto elem = make_element(elem_data, model);
     auto gdofs = elem->global_dof_indices(dof_map);
 
@@ -1545,7 +1593,7 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
                    recovery.forces.m1b, recovery.forces.m2b,
                    recovery.forces.v1,  recovery.forces.v2,
                    recovery.forces.axial, recovery.forces.torque};
-      res.line_stresses.push_back(ls);
+      out.line_stresses.push_back(ls);
     } else if (elem_data.type == ElementType::CROD ||
                elem_data.type == ElementType::CONROD) {
       const CRodElement rod(elem_data, model);
@@ -1566,7 +1614,7 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
       rr.torsional_strain = recovered.torsional_strain;
       rr.axial_margin = recovered.axial_margin;
       rr.torsional_margin = recovered.torsional_margin;
-      res.rod_results.push_back(rr);
+      out.rod_results.push_back(rr);
     } else if (elem_data.type == ElementType::CELAS1 ||
                elem_data.type == ElementType::CELAS2) {
       const auto &spring = static_cast<const ScalarSpringElement &>(*elem);
@@ -1576,7 +1624,7 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
       result.force = spring.force(
           std::span<const double>(ue.data(), static_cast<size_t>(ue.size())));
       result.stress = spring.stress_coefficient() * result.force;
-      res.spring_results.push_back(result);
+      out.spring_results.push_back(result);
     } else if (elem_data.type == ElementType::CQUAD4 ||
                elem_data.type == ElementType::CTRIA3) {
       PlateStress ps;
@@ -1648,7 +1696,7 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
           ps.nodal.push_back(pt);
         }
       }
-      res.plate_stresses.push_back(ps);
+      out.plate_stresses.push_back(ps);
     } else if (elem_data.type == ElementType::CHEXA8 ||
                elem_data.type == ElementType::CHEXA20 ||
                elem_data.type == ElementType::CTETRA4 ||
@@ -2045,7 +2093,7 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
       ss.syz = center.sigma(4);
       ss.szx = center.sigma(5);
       ss.von_mises = solid_von_mises(center.sigma);
-      res.solid_stresses.push_back(ss);
+      out.solid_stresses.push_back(ss);
 
       if (want_strain) {
         strain.ex = center.eps(0);
@@ -2055,10 +2103,31 @@ LinearStaticSolver::recover_results(const Model &model, const SubCase &sc,
         strain.eyz = center.eps(4);
         strain.ezx = center.eps(5);
         strain.von_mises = solid_von_mises(center.eps);
-        res.solid_strains.push_back(strain);
+        out.solid_strains.push_back(strain);
       }
     }
-  }
+  };
+  std::vector<SubCaseResults> chunks(detail::element_chunk_count(model.elements.size()));
+  detail::for_element_chunks(model.elements.size(), [&](size_t c, size_t first, size_t last) {
+    for (size_t i = first; i < last; ++i)
+      recover_element(model.elements[i], chunks[c]);
+  });
+  const auto append = [&chunks](auto &to, auto member) {
+    to.reserve(std::accumulate(chunks.begin(), chunks.end(), to.size(), [&](size_t sum, const auto &chunk) {
+      return sum + (chunk.*member).size();
+    }));
+    for (auto &chunk : chunks) {
+      auto &from = chunk.*member;
+      to.insert(to.end(), std::make_move_iterator(from.begin()), std::make_move_iterator(from.end()));
+      from = {};
+    }
+  };
+  append(res.line_stresses, &SubCaseResults::line_stresses);
+  append(res.rod_results, &SubCaseResults::rod_results);
+  append(res.spring_results, &SubCaseResults::spring_results);
+  append(res.plate_stresses, &SubCaseResults::plate_stresses);
+  append(res.solid_stresses, &SubCaseResults::solid_stresses);
+  append(res.solid_strains, &SubCaseResults::solid_strains);
 
   return res;
 }

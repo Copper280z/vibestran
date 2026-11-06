@@ -1,7 +1,7 @@
 // tests/unit/test_pcg_solver.cpp
 // Mathematical correctness tests for PCG solver backends.
 //
-// EigenPCGSolverBackend tests run unconditionally (CPU only, no GPU required).
+// CpuPCGSolverBackend tests run unconditionally (CPU only, no GPU required).
 // CudaPCGSolverBackend tests are skipped gracefully when CUDA is unavailable.
 //
 // Tests verify:
@@ -14,6 +14,7 @@
 //  - Diagnostics (iteration count, residual) are populated correctly
 
 #include <gtest/gtest.h>
+#include "structural_system.hpp"
 #include "solver/solver_backend.hpp"
 #include "core/sparse_matrix.hpp"
 #include "core/exceptions.hpp"
@@ -102,10 +103,10 @@ static SparseMatrixBuilder::CsrData make_diagonal(int n, double val) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// EigenPCGSolverBackend tests
+// CpuPCGSolverBackend tests
 // ══════════════════════════════════════════════════════════════════════════════
 
-class EigenPCGTest : public ::testing::Test {
+class CpuPCGTest : public ::testing::Test {
 protected:
     std::vector<double> solve(const SparseMatrixBuilder::CsrData& csr,
                               const std::vector<double>& force) {
@@ -121,15 +122,15 @@ protected:
     }
 
 private:
-    EigenPCGSolverBackend pcg_;
+    CpuPCGSolverBackend pcg_;
 };
 
 // ── Test 1: 2×2 diagonal system — exact solution ──────────────────────────────
 // K = diag(4, 9), F = [8, 27], u = [2, 3].
-// PCG converges in one iteration for a diagonal system since the
-// IncompleteCholesky preconditioner is exact for diagonal matrices.
+// PCG converges in one iteration: on so few equations the hierarchy is the
+// coarsest level alone, whose inverse is exact.
 
-TEST_F(EigenPCGTest, DiagonalSystemExactSolution) {
+TEST_F(CpuPCGTest, DiagonalSystemExactSolution) {
     SparseMatrixBuilder b(2);
     b.add(0, 0, 4.0);
     b.add(1, 1, 9.0);
@@ -149,7 +150,7 @@ TEST_F(EigenPCGTest, DiagonalSystemExactSolution) {
 // ── Test 2: 5×5 tridiagonal — agrees with direct Eigen ───────────────────────
 // K = tridiag(-1, 3, -1), F = ones.  Condition number moderate (~8).
 
-TEST_F(EigenPCGTest, TridiagonalAgreesWithDirectSolver) {
+TEST_F(CpuPCGTest, TridiagonalAgreesWithDirectSolver) {
     const int n = 5;
     auto csr = make_tridiagonal(n, 3.0, -1.0);
     std::vector<double> F(n, 1.0);
@@ -167,9 +168,9 @@ TEST_F(EigenPCGTest, TridiagonalAgreesWithDirectSolver) {
 
 // ── Test 3: n=500 FEM-like banded SPD matrix ─────────────────────────────────
 // K is a banded diagonally dominant SPD matrix with pattern mimicking 1-D FEM.
-// κ(K) is moderate; PCG with IncompleteCholesky should converge quickly.
+// κ(K) is moderate; PCG should converge quickly.
 
-TEST_F(EigenPCGTest, LargeBandedSpdAgreesWithDirect) {
+TEST_F(CpuPCGTest, LargeBandedSpdAgreesWithDirect) {
     const int n = 500;
     SparseMatrixBuilder b(n);
     for (int i = 0; i < n; ++i) {
@@ -200,7 +201,7 @@ TEST_F(EigenPCGTest, LargeBandedSpdAgreesWithDirect) {
 // Verifies PCG does not converge falsely on a stiff diagonal system.
 // True solution: u_i = 333 / 1.3e9 ≈ 2.56e-7.
 
-TEST_F(EigenPCGTest, StiffDiagonalDoesNotConvergeFalsely) {
+TEST_F(CpuPCGTest, StiffDiagonalDoesNotConvergeFalsely) {
     const double K_diag = 1.3e9;
     const double F_val  = 333.0;
     const int    n      = 100;
@@ -218,7 +219,7 @@ TEST_F(EigenPCGTest, StiffDiagonalDoesNotConvergeFalsely) {
 
 // ── Test 5: zero RHS — returns zero without iterating ────────────────────────
 
-TEST_F(EigenPCGTest, ZeroRhsReturnZeroDisplacement) {
+TEST_F(CpuPCGTest, ZeroRhsReturnZeroDisplacement) {
     auto csr = make_tridiagonal(10, 3.0, -1.0);
     std::vector<double> F(10, 0.0);
 
@@ -231,7 +232,7 @@ TEST_F(EigenPCGTest, ZeroRhsReturnZeroDisplacement) {
 
 // ── Test 6: iteration count and error diagnostics are populated ───────────────
 
-TEST_F(EigenPCGTest, DiagnosticsPopulatedAfterSolve) {
+TEST_F(CpuPCGTest, DiagnosticsPopulatedAfterSolve) {
     auto csr = make_tridiagonal(50, 4.0, -1.0);
     std::vector<double> F(50, 1.0);
 
@@ -245,10 +246,10 @@ TEST_F(EigenPCGTest, DiagnosticsPopulatedAfterSolve) {
 
 // ── Test 7: well-conditioned n=1000 tridiagonal ───────────────────────────────
 // κ ≈ (2n/π)² ≈ 4e5 for tridiag(−1,2,−1) n=1000.
-// IncompleteCholesky reduces the effective condition significantly.
+// AMG removes the low frequencies that dominate the condition number.
 // Test that PCG converges to tolerance 1e-8 within a reasonable iteration count.
 
-TEST_F(EigenPCGTest, LargeTridiagonalConvergesWithinBound) {
+TEST_F(CpuPCGTest, LargeTridiagonalConvergesWithinBound) {
     const int n = 1000;
     auto csr = make_tridiagonal(n, 2.0, -1.0);
     std::vector<double> F(n, 1.0);
@@ -267,16 +268,56 @@ TEST_F(EigenPCGTest, LargeTridiagonalConvergesWithinBound) {
             << "n=1000 tridiagonal: component " << i << " disagrees";
     }
 
-    // IC0 preconditioned CG converges in O(sqrt(n)) iterations for 1D Laplacian.
-    // Upper bound: n / 2 is extremely generous.
-    EXPECT_LT(last_iteration_count(), n / 2)
-        << "PCG iteration count unexpectedly high for 1D Laplacian with IC0";
+    // Multigrid on a 1D Laplacian: nearly independent of n, where a preconditioner
+    // that only removes high frequencies would need on the order of sqrt(n).
+    EXPECT_LT(last_iteration_count(), 20)
+        << "PCG iteration count unexpectedly high for a 1D Laplacian with AMG";
 }
 
-// ── Test 8: name() returns a non-empty string with 'PCG' ─────────────────────
+// ── Test 8: a singular matrix is reported, not returned ──────────────────────
+// An unconstrained 1D bar, tridiag(-1, 2, -1) with free ends, has the rigid body
+// mode in its nullspace: no solution exists for a load with net force, and PCG must
+// not hand back whatever its last iterate was.
 
-TEST(EigenPCGTest_Static, NameContainsPCG) {
-    EigenPCGSolverBackend pcg;
+TEST(CpuPCGSolver, SingularSystemWithNetLoadIsAnError) {
+    const int n = 2000;
+    SparseMatrixBuilder b(n);
+    for (int i = 0; i < n; ++i) {
+        b.add(i, i, i == 0 || i == n - 1 ? 1.0 : 2.0);
+        if (i > 0) { b.add(i, i - 1, -1.0); b.add(i - 1, i, -1.0); }
+    }
+    CpuPCGSolverBackend pcg(1e-8, 200);
+    EXPECT_THROW((void)pcg.solve(b.build_csr(), std::vector<double>(n, 1.0)), SolverError);
+}
+
+// ── Test 9: a real structure, with the modes the analysis supplies ───────────
+// The modes are what make a structure converge in a few dozen iterations, and the
+// analysis supplies them for every system this backend solves.
+
+TEST(CpuPCGSolver, UsesTheNearNullspaceTheAnalysisSupplies) {
+    const auto record = test::assemble(test::shell_sheet(24));
+    ASSERT_TRUE(record.modes);
+    CpuPCGSolverBackend pcg;
+    EXPECT_TRUE(pcg.uses_near_nullspace(record.k.n));
+    EXPECT_TRUE(pcg.uses_near_nullspace(1)) << "no size threshold: a small system gets its modes too";
+
+    const auto without = pcg.solve(record.k, record.f);
+    const int constant = pcg.last_iteration_count();
+    pcg.set_near_nullspace(record.modes);
+    const auto with = pcg.solve(record.k, record.f);
+    const int modes = pcg.last_iteration_count();
+    EXPECT_LT(modes, constant);
+    for (std::size_t i = 0; i < with.size(); ++i) {
+        const double tolerance = 1e-6 * std::max(1e-3, std::abs(record.u[i]));
+        EXPECT_NEAR(with[i], record.u[i], tolerance) << i;
+        EXPECT_NEAR(without[i], record.u[i], tolerance) << i;
+    }
+}
+
+// ── Test 10: name() returns a non-empty string with 'PCG' ─────────────────────
+
+TEST(CpuPCGTest_Static, NameContainsPCG) {
+    CpuPCGSolverBackend pcg;
     EXPECT_FALSE(pcg.name().empty());
     EXPECT_NE(pcg.name().find("PCG"), std::string_view::npos)
         << "Backend name should contain 'PCG'";
