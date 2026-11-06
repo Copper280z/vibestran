@@ -260,8 +260,9 @@ def stiffened_panel(out, n):
     out.write("ENDDATA\n")
 
 
-def space_frame(out, n):
-    """A rigid-jointed CBAR lattice, 1 m bays: a structure growing in size."""
+def cubic_lattice(out, n):
+    """A volume-filling rigid-jointed CBAR lattice with no diagonals, 1 m bays: a
+    structure growing in size, carrying a lateral load by member bending."""
     out.write(STATIC_HEADER + STEEL + "PBAR,1,1,1.-2,1.-5,1.-5,2.-5\n")
     row = n + 1
     def node(i, j, k):
@@ -287,6 +288,211 @@ def space_frame(out, n):
         lines.clear()
     spc1(out, 123456, (node(i, j, 0) for j in range(row) for i in range(row)))
     forces(out, (node(i, j, n) for j in range(row) for i in range(row)), 1e5, (1, 0, 0))
+    out.write("ENDDATA\n")
+
+
+# Locost-proportioned: the wheelbase (88 in), track, width (42 in) and floor to top
+# rail (12 in) of the published figures, with the tube layout my own, not the book's.
+# x runs rearward from the front axle, y to the left, z up; metres.
+# Per station: x, floor half width, top half width, floor z, top z.
+CHASSIS_STATIONS = [
+    (-0.50, 0.170, 0.150, 0.12, 0.40),  # nose
+    (-0.12, 0.220, 0.190, 0.08, 0.46),  # front wishbones, forward
+    (0.14, 0.250, 0.220, 0.05, 0.50),   # front wishbones, rearward
+    (0.62, 0.400, 0.360, 0.02, 0.56),   # engine bay end
+    (1.00, 0.500, 0.480, 0.00, 0.50),   # dash
+    (1.45, 0.510, 0.525, 0.00, 0.305),  # cockpit
+    (1.90, 0.490, 0.533, 0.00, 0.305),  # roll hoop
+    (2.10, 0.360, 0.330, 0.04, 0.40),   # rear wishbones, forward
+    (2.38, 0.310, 0.280, 0.06, 0.43),   # rear wishbones, rearward
+    (2.75, 0.240, 0.200, 0.08, 0.40),   # tail
+]
+CHASSIS_OPEN_TOP = {5}    # the cockpit opening
+# Per tunnel station: floor half width, top half width. It narrows toward the rear axle.
+CHASSIS_TUNNEL = {3: (0.15, 0.13), 4: (0.13, 0.11), 5: (0.12, 0.10), 6: (0.11, 0.09)}
+CHASSIS_MAIN, CHASSIS_LIGHT, CHASSIS_HOOP, CHASSIS_LINK, CHASSIS_SPRING = 1, 2, 3, 4, 5
+CHASSIS_SECTIONS = (
+    "PBAR,1,1,1.5232-4,1.4445-8,1.4445-8,2.1570-8\n"  # 1 in square, 16 ga
+    "PBAR,2,1,8.5440-5,4.8350-9,4.8350-9,7.3150-9\n"  # 3/4 in square, 18 ga
+    "PBAR,3,1,2.7960-4,4.6240-8,4.6240-8,9.2480-8\n"  # 1.5 in round, 2.5 mm wall
+    "PBAR,4,1,8.7960-5,2.3620-9,2.3620-9,4.7240-9\n"  # 16 mm round link, 2 mm wall
+    "PBAR,5,1,5.7143-8,1.-12,1.-12,2.-12\n"           # a 40 kN/m spring at 0.3 m
+)
+# Wheel forces (N) at the contact patches: braking into a right-hand corner over a
+# bump. The three support grids take what the masses would.
+CHASSIS_WHEEL_FORCES = {("front", 1): (2000., 2500., 4000.), ("front", -1): (800., 900., 1500.),
+                        ("rear", 1): (1200., 1800., 3000.), ("rear", -1): (500., 700., 1100.)}
+
+
+def chassis_layout():
+    """The frame's joints and tubes, each suspension corner's links, and the supports.
+
+    The frame is rigid-jointed. Each corner is a rigid upright on six pinned links, two
+    wishbones, a tie rod and a spring, so its wheel force reaches the frame only at the
+    pickups, as axial link forces.
+    """
+    joints, tubes = {}, []
+    stations = CHASSIS_STATIONS
+    last = len(stations) - 1
+    sides = (1, -1)
+    for i, (x, floor_y, top_y, floor_z, top_z) in enumerate(stations):
+        for s in sides:
+            joints["F", i, s] = (x, s * floor_y, floor_z)
+            joints["T", i, s] = (x, s * top_y, top_z)
+    for i, (tunnel_floor, tunnel_top) in CHASSIS_TUNNEL.items():
+        x, _, _, floor_z, _ = stations[i]
+        for s in sides:
+            joints["TF", i, s] = (x, s * tunnel_floor, floor_z)
+            joints["TT", i, s] = (x, s * tunnel_top, 0.30)
+    for s in sides:
+        joints["RACK", s] = (stations[1][0], s * 0.15, stations[1][3])
+        joints["TOE", s] = (stations[8][0], s * 0.15, stations[8][3])
+        joints["ENGINE", s] = (0.40, s * 0.27, 0.09)
+        joints["TOWER", s] = (0.02, s * 0.30, 0.64)
+        joints["REAR_TOWER", s] = (2.235, s * 0.24, 0.62)
+        joints["HOOP_MID", s] = (1.97, s * 0.43, 0.72)
+        joints["HOOP_TOP", s] = (2.01, s * 0.30, 0.98)
+    joints["SCUTTLE"] = (1.00, 0.0, 0.62)
+
+    def tube(a, b, section=CHASSIS_MAIN):
+        tubes.append((a, b, section))
+
+    for s in sides:
+        for i in range(last):
+            tube(("F", i, s), ("F", i + 1, s))
+            tube(("T", i, s), ("T", i + 1, s))
+            # Side panels triangulate, leaning alternately.
+            if i % 2 == 0:
+                tube(("F", i, s), ("T", i + 1, s), CHASSIS_LIGHT)
+            else:
+                tube(("T", i, s), ("F", i + 1, s), CHASSIS_LIGHT)
+        for i in range(last + 1):
+            tube(("F", i, s), ("T", i, s))
+        for a, b in zip(sorted(CHASSIS_TUNNEL), sorted(CHASSIS_TUNNEL)[1:]):
+            tube(("TF", a, s), ("TF", b, s))
+            tube(("TT", a, s), ("TT", b, s))
+            tube(("TF", a, s), ("TT", b, s), CHASSIS_LIGHT)
+        for i in CHASSIS_TUNNEL:
+            tube(("TF", i, s), ("TT", i, s))
+            tube(("F", i, s), ("TF", i, s))
+        for a in ("F", "T"):
+            tube((a, 2, s), ("ENGINE", s), CHASSIS_LIGHT)
+        tube(("F", 3, s), ("ENGINE", s), CHASSIS_LIGHT)
+        tube(("T", 1, s), ("TOWER", s))
+        tube(("T", 2, s), ("TOWER", s))
+        tube(("F", 2, s), ("TOWER", s), CHASSIS_LIGHT)
+        tube(("T", 7, s), ("REAR_TOWER", s))
+        tube(("T", 8, s), ("REAR_TOWER", s))
+        tube(("F", 8, s), ("REAR_TOWER", s), CHASSIS_LIGHT)
+        tube(("F", 1, s), ("RACK", s))
+        tube(("F", 8, s), ("TOE", s))
+        # The hoop, its rear stays and the scuttle.
+        tube(("T", 6, s), ("HOOP_MID", s), CHASSIS_HOOP)
+        tube(("HOOP_MID", s), ("HOOP_TOP", s), CHASSIS_HOOP)
+        tube(("HOOP_TOP", s), ("T", 7, s), CHASSIS_LIGHT)
+        tube(("HOOP_TOP", s), ("REAR_TOWER", s), CHASSIS_LIGHT)
+        tube(("T", 4, s), "SCUTTLE")
+        tube(("T", 3, s), "SCUTTLE", CHASSIS_LIGHT)
+        tube(("TT", 4, s), "SCUTTLE", CHASSIS_LIGHT)
+    for i in range(last + 1):
+        if i not in CHASSIS_TUNNEL and i not in (1, 8):
+            tube(("F", i, 1), ("F", i, -1))
+        if i not in CHASSIS_OPEN_TOP and i != 4:
+            tube(("T", i, 1), ("T", i, -1))
+    for i in CHASSIS_TUNNEL:
+        tube(("TF", i, 1), ("TF", i, -1))
+        tube(("TT", i, 1), ("TT", i, -1))
+    tube(("RACK", 1), ("RACK", -1))
+    tube(("TOE", 1), ("TOE", -1))
+    tube(("TOWER", 1), ("TOWER", -1))
+    tube(("REAR_TOWER", 1), ("REAR_TOWER", -1))
+    tube(("HOOP_TOP", 1), ("HOOP_TOP", -1), CHASSIS_HOOP)
+    tube(("HOOP_MID", 1), ("HOOP_MID", -1), CHASSIS_LIGHT)
+    tube(("HOOP_MID", -1), ("HOOP_TOP", 1), CHASSIS_LIGHT)
+    tube(("ENGINE", 1), ("ENGINE", -1), CHASSIS_LIGHT)
+    # Floor and top panels at each end triangulate in plan.
+    for i in (0, 1, 2, 7, 8):
+        tube(("F", i, 1), ("F", i + 1, -1), CHASSIS_LIGHT)
+        tube(("T", i, -1), ("T", i + 1, 1), CHASSIS_LIGHT)
+
+    corners = []
+    for end, x, half_track, forward, rearward, steer, spring in (
+            ("front", 0.0, 0.680, 1, 2, "RACK", "TOWER"), ("rear", 2.235, 0.675, 7, 8, "TOE", "REAR_TOWER")):
+        for s in sides:
+            corners.append({
+                "end": end, "side": s,
+                "patch": (x, s * half_track, -0.26),
+                "outer": {"lower": (x, s * 0.60, 0.12), "upper": (x + 0.01, s * 0.54, 0.40),
+                          "steer": (x - 0.10, s * 0.61, 0.17), "spring": (x + 0.01, s * 0.52, 0.16)},
+                "links": [(("F", forward, s), "lower", CHASSIS_LINK), (("F", rearward, s), "lower", CHASSIS_LINK),
+                          (("T", forward, s), "upper", CHASSIS_LINK), (("T", rearward, s), "upper", CHASSIS_LINK),
+                          ((steer, s), "steer", CHASSIS_LINK), ((spring, s), "spring", CHASSIS_SPRING)],
+            })
+    # Statically determinate, so the supports cannot stiffen the frame.
+    supports = [(("F", 6, 1), 123), (("F", 6, -1), 13), (("F", 3, 1), 3)]
+    return joints, tubes, corners, supports
+
+
+def tube_chassis(out, per_metre):
+    """A Locost-proportioned tube frame on four suspension corners, loaded at the wheels.
+
+    The parameter is frame elements per metre of tube. CBARs represent a tube exactly at
+    one element, so this refines only the system, and at this size far past what a real
+    chassis model would use: see PCG_LARGE_DECKS.md.
+    """
+    out.write(STATIC_HEADER + STEEL + CHASSIS_SECTIONS)
+    joints, tubes, corners, supports = chassis_layout()
+    grids = {name: i + 1 for i, name in enumerate(joints)}
+    next_grid = len(joints) + 1
+
+    def grid(name, position):
+        out.write(f"GRID,{name},,{num(position[0])},{num(position[1])},{num(position[2])}\n")
+
+    def orientation(a, b):
+        d = [q - p for p, q in zip(a, b)]
+        return "1.,0.,0." if abs(d[2]) > 0.9 * math.sqrt(sum(v * v for v in d)) else "0.,0.,1."
+
+    for name, position in joints.items():
+        grid(grids[name], position)
+    eid = 1
+    lines = []
+    for a, b, section in tubes:
+        pa, pb = joints[a], joints[b]
+        segments = max(1, math.ceil(per_metre * math.dist(pa, pb)))
+        previous, axis = grids[a], orientation(pa, pb)
+        for k in range(1, segments + 1):
+            if k == segments:
+                current = grids[b]
+            else:
+                current = next_grid
+                next_grid += 1
+                grid(current, [p + (q - p) * k / segments for p, q in zip(pa, pb)])
+            lines.append(f"CBAR,{eid},{section},{previous},{current},{axis}\n")
+            eid += 1
+            previous = current
+    out.write("".join(lines))
+    rbe = eid
+    for corner in corners:
+        patch = next_grid
+        next_grid += 1
+        grid(patch, corner["patch"])
+        outer = {}
+        for name, position in corner["outer"].items():
+            outer[name] = next_grid
+            next_grid += 1
+            grid(outer[name], position)
+        for inner, name, section in corner["links"]:
+            # Moments released at both ends and torsion at one: axial load only.
+            axis = orientation(joints[inner], corner["outer"][name])
+            out.write(f"CBAR,{rbe},{section},{grids[inner]},{outer[name]},{axis},,56,456\n")
+            rbe += 1
+        out.write(continued(["RBE2", rbe, patch, 123456], list(outer.values())))
+        rbe += 1
+        fx, fy, fz = CHASSIS_WHEEL_FORCES[corner["end"], corner["side"]]
+        size = math.sqrt(fx * fx + fy * fy + fz * fz)
+        out.write(f"FORCE,2,{patch},0,{num(size)},{num(fx / size)},{num(fy / size)},{num(fz / size)}\n")
+    for name, components in supports:
+        out.write(f"SPC1,1,{components},{grids[name]}\n")
     out.write("ENDDATA\n")
 
 
@@ -362,7 +568,8 @@ CLASSES = {
     "shell-cylinder-cd": (shell_cylinder, [72, 144, 288], H),
     "shell-foundation": (foundation_plate, [100, 200, 400], H),
     "stiffened-panel": (stiffened_panel, [72, 144, 288], H),
-    "space-frame": (space_frame, [21, 33, 52], "domain growth at fixed bay length: size scaling, not h"),
+    "cubic-lattice": (cubic_lattice, [21, 33, 52], "domain growth at fixed bay length: size scaling, not h"),
+    "tube-chassis": (tube_chassis, [135, 540, 2170], "elements per metre of tube: refines the system, not the answer"),
     "rbe-assembly": (rbe_assembly, [64, 128, 192], H),
 }
 SCALAR_CLASSES = {"thermal-hex", "magnetic-motor", "magnetic-coil"}

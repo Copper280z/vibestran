@@ -41,7 +41,7 @@ MODES = ("constant", "rigid")
 CONDITIONS = ("both-resident", "rigid-90", "rigid-75", "rigid-50", "rigid-host", "both-host")
 # The finest level of each class the research plan names, each about a million equations.
 DEFAULT_CLASSES = {"solid-hex": 40, "solid-tet10": 19, "shell-thin": 400, "shell-membrane": 400,
-                   "space-frame": 52, "rbe-assembly": 192}
+                   "cubic-lattice": 52, "tube-chassis": 2170, "rbe-assembly": 192}
 MIB = 1024 * 1024
 MAX_COMPLETE_SLOWDOWN = 2.0
 MAX_SOLVER_SLOWDOWN = 4.0

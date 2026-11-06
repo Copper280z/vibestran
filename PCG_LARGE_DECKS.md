@@ -698,10 +698,14 @@ bandwidth and not by the kernel. `T^T` with 8, 16 or 32 threads per coarse equat
 the same time to within noise. The new kernels hold no large share, and the product
 modes they added cost the same as the old ones.
 
-That bandwidth limit says where the rest of the time is: less to read per nonzero. Column
-indices are a third of what a product reads, and most of them repeat within a grid's block,
-so storing one per block should save memory and time on every product together. It is the
-natural next step, after which fp32 coarse levels would save less.
+That bandwidth limit says where the rest of the time is: less to read per nonzero. A
+measurement of the same product in other formats, on matrices from these hierarchies,
+is in `~/pcg-perf/nnz-20261105/` on that machine and shows the gain depends on the level.
+Rows of a coarse patch share one column list, so fp32 values with shared columns take
+about 37% of the memory and 53% of the time of CSR on the unstructured and rover decks.
+On the fine `K`, shared or 16-bit indices save 15-25% of the memory but at most 7% of the
+time on those decks. The uniform synthetic meshes show much more, up to 29%, because their
+rows repeat one pattern throughout, so they overstate what a real mesh would gain.
 
 ### Limits of these results
 

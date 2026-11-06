@@ -5,7 +5,9 @@ A benchmark that cannot fail proves nothing, so each check here is given the wro
 answer it guards against, through a small fake solver where the process status
 matters.
 """
+import io
 import json
+import math
 import stat
 import subprocess
 import sys
@@ -174,6 +176,88 @@ class ProcessStatus(unittest.TestCase):
 
     def test_an_invalid_cycle_fails_a_required_mode(self):
         self.assertEqual(self.run_suite("indefinite", "--require-solved", "rigid")[0].returncode, 1)
+
+
+class TubeChassis(unittest.TestCase):
+    """The deck keeps the properties that make it a chassis and not another lattice."""
+
+    def setUp(self):
+        self.joints, self.tubes, self.corners, self.supports = suite.chassis_layout()
+
+    def test_only_cross_members_lie_on_an_axis(self):
+        on_axis = [(a, b) for a, b, _ in self.tubes
+                   if sum(abs(q - p) > 1e-9 for p, q in zip(self.joints[a], self.joints[b])) == 1]
+        for a, b in on_axis:
+            self.assertGreater(abs(self.joints[a][1] - self.joints[b][1]), 0, (a, b))
+        self.assertLess(len(on_axis) / len(self.tubes), 0.25)
+
+    def test_the_frame_is_one_structure_with_uneven_connectivity(self):
+        neighbours = {name: set() for name in self.joints}
+        for a, b, _ in self.tubes:
+            neighbours[a].add(b)
+            neighbours[b].add(a)
+        seen, stack = {self.tubes[0][0]}, [self.tubes[0][0]]
+        while stack:
+            for name in neighbours[stack.pop()] - seen:
+                seen.add(name)
+                stack.append(name)
+        self.assertEqual(seen, set(self.joints))
+        valence = {name: sum(name in tube[:2] for tube in self.tubes) for name in self.joints}
+        self.assertLessEqual(min(valence.values()), 2)
+        self.assertGreaterEqual(max(valence.values()), 9)
+
+    def test_each_corner_holds_its_upright_with_no_mechanism(self):
+        for corner in self.corners:
+            matrix = []
+            for inner, name, _ in corner["links"]:
+                a, b = self.joints[inner], corner["outer"][name]
+                length = math.dist(a, b)
+                d = [(q - p) / length for p, q in zip(a, b)]
+                r = [q - p for p, q in zip(corner["patch"], b)]
+                moment = [r[1] * d[2] - r[2] * d[1], r[2] * d[0] - r[0] * d[2], r[0] * d[1] - r[1] * d[0]]
+                matrix.append(d + moment)
+            # Gaussian elimination: a mechanism shows as a vanishing pivot.
+            smallest = math.inf
+            for column in range(6):
+                pivot = max(range(column, 6), key=lambda row: abs(matrix[row][column]))
+                matrix[column], matrix[pivot] = matrix[pivot], matrix[column]
+                smallest = min(smallest, abs(matrix[column][column]))
+                for row in range(column + 1, 6):
+                    factor = matrix[row][column] / matrix[column][column]
+                    matrix[row] = [x - factor * y for x, y in zip(matrix[row], matrix[column])]
+            self.assertGreater(smallest, 1e-3, (corner["end"], corner["side"]))
+
+    def test_the_supports_are_statically_determinate(self):
+        self.assertEqual(sorted(len(str(components)) for _, components in self.supports), [1, 2, 3])
+
+    def test_refinement_splits_tubes_without_moving_them(self):
+        per_metre = 40
+        out = io.StringIO()
+        suite.tube_chassis(out, per_metre)
+        grids, frame_length, longest, used, forces = {}, 0.0, 0.0, set(), [0.0, 0.0, 0.0]
+        lines = out.getvalue().splitlines()
+        for line in lines:
+            f = line.split(",")
+            if f[0] == "GRID":
+                grids[int(f[1])] = tuple(float(v) for v in f[3:6])
+        for line in lines:
+            f = line.split(",")
+            if f[0] == "CBAR":
+                used.update((int(f[3]), int(f[4])))
+                if f[2] not in ("4", "5"):
+                    length = math.dist(grids[int(f[3])], grids[int(f[4])])
+                    frame_length += length
+                    longest = max(longest, length)
+            elif f[0] == "RBE2":
+                used.update(int(v) for v in f[2:3] + f[4:])
+            elif f[0] == "FORCE":
+                for i in range(3):
+                    forces[i] += float(f[4]) * float(f[5 + i])
+        self.assertAlmostEqual(frame_length, sum(math.dist(self.joints[a], self.joints[b]) for a, b, _ in self.tubes), places=6)
+        self.assertLessEqual(longest, 1 / per_metre + 1e-9)
+        self.assertEqual(used, set(grids), "every grid is on an element")
+        for i in range(3):
+            self.assertAlmostEqual(forces[i], sum(v[i] for v in suite.CHASSIS_WHEEL_FORCES.values()), places=4)
 
 
 if __name__ == "__main__":
