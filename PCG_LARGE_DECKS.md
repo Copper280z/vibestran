@@ -17,15 +17,17 @@ driver 580.178.04, CUDA 12.8, Release Meson build. cuDSS is unchanged.
 Measured on 2026-11-03 on the same machine. The timings in the rest of this
 file predate this section and use the scalar configuration,
 `--amg-modes=constant`, the default when they were taken. `rigid` became the
-structural default on 2026-11-04: see "The default" below.
+structural default on 2026-11-04 and `drilling` on 2026-11-05: see "The default"
+below.
 
 Tuning on one deck overfits, so `tools/amg_model_suite.py` judges the AMG setup
 by how iterations grow with refinement in each class of model, iterations ~
 h^-p. Raw results are in `benchmarks/pcg/amg-model-suite-20261103.json`.
 
 Structural solves (SOL 101, 50000 equations or more, GPU PCG backends) use
-`rigid` unless `--amg-modes=constant` (`PARAM,AMGMODES,CONSTANT`) selects the scalar
-hierarchy. Thermal and magnetic solves
+`drilling`, the rigid-body modes plus two columns on CQUAD4 grids, unless
+`--amg-modes=rigid` or `--amg-modes=constant` (`PARAM,AMGMODES,...`) selects otherwise.
+Thermal and magnetic solves
 always use the scalar hierarchy, with unchanged iteration counts. Three changes
 were each necessary; none pays off alone:
 
@@ -64,7 +66,7 @@ above the accuracy target. Constant ran only the two coarsest levels, within
 | stiffened-panel | 63k / 251k / 999k | 100000 / fail | 309 / 644 / 1412 | 1.14 | 0.1 / 0.7 / 5.4 | 3.0-3.7 |
 | rbe-assembly | 55k / 319k / 939k | fail / fail | 1409 / 2616 / 4260 | 0.90 | 0.5 / 5.6 / 29 | 2.2-2.6 |
 | **shell-membrane (t/L 10)** | 61k / 241k / 962k | **202 / 353** | **634 / 1213 / 2167** | 0.84 | 0.2 / 1.1 / 6.7 | 2.8 |
-| **space-frame** | 61k / 229k / 876k | **80 / 97** | **133 / 147 / 160** | 0.19 | 0.04 / 0.1 / 0.5 | 7.5-8.0 |
+| **cubic-lattice** | 61k / 229k / 876k | **80 / 97** | **133 / 147 / 160** | 0.19 | 0.04 / 0.1 / 0.5 | 7.5-8.0 |
 
 This table predates the certified smoother bound, and its p column predates
 refinement-parameter exponents. The current numbers and the stricter comparison with
@@ -100,7 +102,7 @@ equations; the plan's capacity is a linear extrapolation):
 | Class | Constant B/DOF | Rigid B/DOF | Rigid resident capacity |
 |---|---:|---:|---:|
 | Shells | 502 | 885-907 | about 9.5M DOF (17M with constant) |
-| Space frame | 495 | 1109 | about 7.7M DOF (17M with constant) |
+| Cubic lattice | 495 | 1109 | about 7.7M DOF (17M with constant) |
 | RBE assembly | not measured | 2032 | about 4.2M DOF |
 | Solid hexahedra | not measured | 2416 | about 3.5M DOF |
 | CTETRA10 | not measured | 2840 | about 3.0M DOF |
@@ -168,7 +170,7 @@ before, and all three levels now. "fail" means the iteration limit was reached.
 | shell-cylinder-cd | 4258 / 5269 | 3751 / 5764 / 11460 | 580 / 833 | 581 / 1159 / 1452 |
 | shell-foundation | 1969 / 7077 | 1982 / 7671 / 6380 | 104 / 101 | 106 / 100 / 130 |
 | stiffened-panel | 100000 / fail | 100000 / fail / fail | 309 / 644 | 309 / 645 / 1413 |
-| space-frame | 80 / 97 | 79 / 97 / 115 | 133 / 147 | 134 / 148 / 160 |
+| cubic-lattice | 80 / 97 | 79 / 97 / 115 | 133 / 147 | 134 / 148 / 160 |
 | rbe-assembly | fail / fail | 19343 / 12880 / 29154 | 1409 / 2616 | 1413 / 2614 / 4234 |
 | Complete rover (mean of subcases) | 7954 | 3749 | 332 | 329 |
 | Four-wheel rover (mean of subcases) | 2932 | 3465 | 404 | 404 |
@@ -202,7 +204,7 @@ plus iterations) and planned device memory at the finest level of each class:
 | shell-cylinder-cd | 995k | 49 | 9.0 | 873 | 1178 |
 | shell-foundation | 965k | 16 | 1.7 | 453 | 833 |
 | stiffened-panel | 999k | fail | 6.7 | 504 | 957 |
-| space-frame | 876k | 0.7 | 1.9 | 414 | 927 |
+| cubic-lattice | 876k | 0.7 | 1.9 | 414 | 927 |
 | rbe-assembly | 939k | 133 | 33 | 923 | 1820 |
 | Complete rover (both subcases) | 61k | 2.0 | 0.44 | 34 | 62 |
 | Four-wheel rover (both subcases) | 69k | 2.0 | 0.55 | 39 | 70 |
@@ -232,7 +234,7 @@ the point graph uses each block's largest entry, which depends on the axes.
 **Every hierarchy has a plan.** After it is built, against the memory free at that
 moment, each hierarchy is planned from its exact storage as resident, fine-row spill
 or host. The earlier estimate, four times the fine nonzeros, could skip this, and a
-space frame's matrix-plus-transfer complexity reaches 8. Across the 86 device runs,
+cubic lattice's matrix-plus-transfer complexity reaches 8. Across the 86 device runs,
 the memory measured after the first solve was within +48 / -21 MiB of the plan, up to
 2.1 GiB. The headroom is now at least 256 MiB, because a fraction of free memory alone
 fails on a nearly full device: with about 100 MiB reported free, 39 MiB allocations
@@ -259,7 +261,7 @@ residual (8.9e-6 relative for rigid on solid-thin), so the reference's own resid
 sets the floor of that limit.
 
 Growth exponents now come from the refinement parameter, and classes that are not
-h-refinement say so: space-frame grows its domain at fixed bay length, and solid-thin's
+h-refinement say so: cubic-lattice grows its domain at fixed bay length, and solid-thin's
 aspect ratio improves as it refines. rbe-assembly's p is 1.19 by this measure.
 
 ## Equal-budget crossover (Priority 1)
@@ -301,7 +303,7 @@ resident in every column but the last, so its time is one state repeated.
 | | rigid | 47.78 | 59.44 | 97.03 (n=4) | 182.49 (n=6) | 256.48 | 256.48 |
 | shell-membrane | constant | 6.78 | 6.76 | 6.79 | 6.76 | 6.79 | 28.95 |
 | | rigid | 12.45 (n=6) | 13.21 (n=6) | 22.60 | 38.50 (n=6) | 77.26 | 77.26 |
-| space-frame | constant | 4.66 | 4.64 | 4.61 | 4.68 | 4.61 | 7.68 |
+| cubic-lattice | constant | 4.66 | 4.64 | 4.61 | 4.68 | 4.61 | 7.68 |
 | | rigid | 5.92 (n=6) | 5.92 (n=6) | 6.25 | 6.95 (n=6) | 12.25 | 12.25 |
 
 Every pair's rigid / constant ratio of complete-deck time was within 2% of its cell's
@@ -320,9 +322,9 @@ median, so these verdicts do not rest on noise:
 | shell-membrane both resident | 1.84 | constant |
 | shell-membrane rigid 90% | 1.96 | constant |
 | shell-membrane rigid 50% | 5.70 | constant |
-| space-frame both resident | 1.27 | constant |
-| space-frame rigid 90% | 1.28 | constant |
-| space-frame rigid 50% | 1.48 | constant |
+| cubic-lattice both resident | 1.27 | constant |
+| cubic-lattice rigid 90% | 1.28 | constant |
+| cubic-lattice rigid 50% | 1.48 | constant |
 
 Constant fails shell-thin deterministically: three runs at 100000 iterations and 258 s,
 each ending with an estimated error of 1.18e-8 against the 1e-8 target.
@@ -337,7 +339,7 @@ the criteria:
   and 4.6x and 8.0x slower on the solids when both are on the host. The Priority 0
   baseline adds solid-thin and stiffened-panel failures.
 - Rigid solves every cell, but is up to 11.4x slower complete and 33x in the solver on
-  shell-membrane, and 2.7x and 11.7x on space-frame with its hierarchy on the host.
+  shell-membrane, and 2.7x and 11.7x on cubic-lattice with its hierarchy on the host.
 
 ### Realistic decks
 
@@ -372,7 +374,7 @@ D K D, which the unchanged rigid modes fit only approximately.
 | shell-membrane | resident | constant | 0.42 | 1.76 | 1.75 | 0.24 | 1.72 |
 | | | rigid | 1.14 | 6.67 | 6.92 | 0.65 | 6.28 |
 | | rigid 50% | rigid | 1.16 | 32.69 | 33.91 | 0.64 | 30.77 |
-| space-frame | resident | constant | 0.43 | 0.29 | 0.33 | 0.30 | 0.29 |
+| cubic-lattice | resident | constant | 0.43 | 0.29 | 0.33 | 0.30 | 0.29 |
 | | | rigid | 1.40 | 0.53 | 0.57 | 0.94 | 0.51 |
 | | rigid 50% | rigid | 1.39 | 1.53 | 1.63 | 0.95 | 1.51 |
 
@@ -442,12 +444,68 @@ complete-deck ratio, paired where repeated:
   with constant (21.08 s and 1648 iterations against 19.14 s and 949) and 1.6% slower
   with rigid, so fp32 gives no general speedup here.
 
+### A tube chassis
+
+`cubic-lattice` is not what a beam model usually looks like, so `tube-chassis` adds one:
+a rigid-jointed, triangulated frame of 182 square and round tubes, with the proportions
+of a Locost (wheelbase 88 in, 42 in wide, 12 in from floor to top rail) and a tube layout
+of its own, since the book's coordinates are not published. It is not a replica: it has
+more triangulation than the book's frame and double wishbones at the rear in place of a
+live axle. 39 tubes (21%) lie on an axis, all of them cross-members, and joints have 2 to 9
+tubes. Each corner is a rigid upright (RBE2) on six pinned links, one of them a 40 kN/m
+spring. Wheel forces for braking into a corner over a bump are applied at the contact
+patches, and three statically determinate supports stand in for the masses, so they
+cannot stiffen the frame.
+
+The model behaves physically. Reactions balance the wheel forces, and its torsional
+stiffness at the frame is 6935 N m/deg, identical at 10, 20 and 80 elements per metre. That
+is above the 2000 N m/deg or so reported for a book chassis and within the 4000 to 6000+
+reported for stiffened ones, as builders' figures from varied test setups, which fits its
+extra triangulation.
+
+| Equations | Elements per m | Element length | Direct s | Rigid s | Rigid iterations | Constant |
+|---:|---:|---:|---:|---:|---:|---|
+| 62k | 135 | 7.4 mm | 0.42 | 0.90 | 729 | fails, error 1.2e-2 |
+| 249k | 540 | 1.9 mm | 1.35 | 3.12 | 1671 | fails, error 7.7e-3 |
+| 999k | 2170 | 0.46 mm | 5.29 | 19.1 | 4624 | fails, error 1.6e-3 |
+
+Times are the complete deck, from the suite, with the probes on. Rigid agrees with the
+refined direct solve to 1.6e-12 or better in displacement. Constant is not defeated by the
+support or the springs: at 249k equations it still fails with stiff links in place of the
+springs, with the rear pickups clamped as on a torsion rig and wheel loads at the front
+only, and with both, where rigid takes 1531 to 1671 iterations.
+
+At equal budgets at 999k equations, constant fails at every budget on all three backends,
+including mixed's looser target, and times out with both on the host, so rigid meets the
+criteria by default. These are single runs without probes, since there are no pairs to
+form. Complete-deck seconds for rigid:
+
+| Backend | Resident | 90% | 75% | 50% | Host |
+|---|---:|---:|---:|---:|---:|
+| CUDA fp64 | 15.7 | 16.7 | 24.4 | 46.2 | 166.7 |
+| Vulkan | 17.2 | 19.3 | 25.6 | 47.2 | 203.6 |
+| Mixed (1e-6 target) | 12.5 | 12.5 (fp32) | 12.5 (fp32) | 42.7 | 154.4 |
+
+Three limits apply. A real chassis model uses a few elements per tube, about 1000 to 10000
+equations, which is below the 50000 where AMG starts, so it goes to a direct solve and none
+of this applies to it. To reach AMG the class must divide tubes into elements far shorter
+than their 25 mm width, which a CBAR does not need: one element already represents a tube
+exactly, so refinement changes the system and not the answer. And a direct solve wins at
+every size here, 3.6x over rigid at 999k equations, because chains of elements cause almost
+no fill. A deck dominated by beams is better sent to `--backend=cpu`. Scripts and manifest
+are in `benchmarks/pcg/chassis-20261104/`, and results in `~/pcg-perf/chassis-20261104/` on
+the benchmark machine.
+
 ### The default
+
+`drilling` has been the structural default since 2026-11-05, by decision after the
+results under "Drilling modes", which also lists what it costs on decks that don't need
+it. It adds to the following decision.
 
 `rigid` became the structural default on 2026-11-04, by decision after these results
 and not because it passed: neither method meets the criteria on the synthetic classes.
 Constant does not solve shell-thin on CUDA fp64 or Vulkan and times out on rbe-assembly
-with both on the host. Rigid's failures are slowness on shell-membrane and space-frame,
+with both on the host. Rigid's failures are slowness on shell-membrane and cubic-lattice,
 apart from its Vulkan timeout on rbe-assembly with its fixed state on the host, the one
 budget where it fails and constant solves. Rigid meets the criteria on both realistic
 rover decks, and constant does not.
@@ -467,8 +525,8 @@ drilling rotation, and on a rectangle both patterns leave those strains at zero,
 only the drilling penalty resists them. An aggregate carries a column only where it
 isn't zero and isn't in the span of the columns before it, so grids with no CQUAD4 pay
 nothing. A model with no CQUAD4 gets exactly the rigid-body modes. Neither column
-changes the solution, which refinement accepts against the assembled stiffness. It is
-an explicit option, not the default.
+changes the solution, which refinement accepts against the assembled stiffness. It has
+been the default since 2026-11-05; `--amg-modes=rigid` leaves the columns out.
 
 CUDA fp64 on the TITAN V with no budget, one run each, measured 2026-11-05. Scripts are
 in `benchmarks/pcg/amg-drilling-20261105/`, and results and logs are in
@@ -527,12 +585,131 @@ What this shows:
   and beats rigid on all of them, so that is what's implemented.
 - **It doesn't help `stiffened-panel`,** which is limited by something else.
 
+### Computed transfers
+
+A hierarchy with modes builds its finest transfer as `P = (I - M A) T`, where `T` is the
+tentative prolongation from each patch of grids, `A` the fine matrix and `M` the
+smoother's weights, and `R = P^T`. A device already holds `A` and `M`, so it can hold `T`
+instead of `P` and `R`:
+
+```text
+restriction    y -= A (M y)        f_coarse = T^T y
+prolongation   w = T e             x += w - M (A w)
+```
+
+This is the same preconditioner in less memory, for one more product with `A` each way.
+Patches keep `T` as one dense block of values, a row per equation, stored once for `T`
+and `T^T` and without column indices (`AmgTentative`). The AMGCL scalar hierarchy filters
+`A` when it smooths, so it isn't of this form and keeps its stored transfers, which covers
+all thermal and magnetic solves.
+
+No option selects this. The plan takes the first of these that fits the device budget:
+
+1. Everything resident with stored transfers, which is fastest.
+2. Everything resident with computed transfers.
+3. Computed transfers with a suffix of the fine rows on the CPU.
+4. The host hierarchy.
+
+Mixed precision tries the fp32 hierarchy with stored then computed transfers before that
+list. The log reports the kind on the plan line, and `pcg_benchmark` as
+`computed_transfers`. Only placement differs, so plans remain free to change with memory
+without changing the method. A refactor smooths the finest `P` again, because a stored `P`
+left with old values would be a different operator from one computed from the new `A`.
+
+CUDA fp64 on the TITAN V, measured 2026-11-05, default modes, one run each, largest level
+of each class, with the budget set just under the stored plan to force computed. Scripts
+are in `benchmarks/pcg/amg-computed-transfers-20261105/`, results and logs in
+`~/pcg-perf/implicit-20261105/` on that machine. ms/iter is iterate time including
+refinement over iterations:
+
+| Class | Equations | Iterations | Plan MiB, stored to computed | ms/iter, stored to computed |
+|---|---:|---:|---:|---:|
+| solid-hex | 806,880 | 41, 41 | 1870 to 1249 (-33%) | 11.74 to 13.29 (+13%) |
+| solid-tet10 | 693,576 | 67, 67 | 1881 to 1314 (-30%) | 9.83 to 11.38 (+16%) |
+| solid-contrast | 806,880 | 98, 98 | 2085 to 1457 (-30%) | 9.50 to 11.18 (+18%) |
+| solid-thin | 924,480 | 3457, 3457 | 1541 to 1057 (-31%) | 6.06 to 7.72 (+27%) |
+| shell-thin | 955,206 | 626, 626 | 1042 to 628 (-40%) | 3.86 to 4.67 (+21%) |
+| shell-thick | 955,206 | 35, 35 | 1036 to 622 (-40%) | 6.20 to 7.10 (+15%) |
+| shell-membrane | 962,400 | 38, 38 | 1030 to 612 (-41%) | 5.88 to 6.51 (+11%) |
+| shell-cylinder-cd | 994,752 | 395, 395 | 1402 to 971 (-31%) | 5.69 to 7.46 (+31%) |
+| shell-foundation | 964,800 | 133, 133 | 1050 to 632 (-40%) | 4.37 to 5.17 (+18%) |
+| stiffened-panel | 998,784 | 1416, 1417 | 1241 to 783 (-37%) | 4.41 to 5.20 (+18%) |
+| cubic-lattice | 876,408 | 160, 160 | 927 to 546 (-41%) | 3.22 to 3.17 (-2%) |
+| tube-chassis | 998,934 | 4624, 4635 | 680 to 509 (-25%) | 2.72 to 3.35 (+23%) |
+| rbe-assembly | 938,886 | 2186, 2188 | 1872 to 1250 (-33%) | 7.01 to 8.48 (+21%) |
+| rover-complete | 60,606 | 379, 379 | 79 to 54 (-32%) | 0.41 to 0.48 (+17%) |
+| rover-static | 68,730 | 390, 390 | 90 to 61 (-32%) | 0.44 to 0.50 (+14%) |
+
+Vulkan on the same card, in the same plan sizes: shell-membrane 5.51 to 6.08 ms/iter and
+solid-hex 10.47 to 10.55 ms/iter, with the same iterations.
+
+Where it matters is decks that used to spill. Default budget, drilling modes, stored
+transfers before and computed now:
+
+| Deck | Equations | CPU rows | ms/iter | Iterate s | Complete deck s |
+|---|---:|---:|---:|---:|---:|
+| shell-membrane-1258 | 9,502,932 | 8.08M to 0 | 290 to 82 | 10.45 to 2.94 | 68.0 to 60.1 |
+| solid-hex-70 | 4,234,440 | 2.18M to 0 | 210 to 67 | 10.50 to 3.35 | 101.7 to 94.4 |
+
+With budgets for a share of the fine rows on the GPU, plan MiB and ms/iter:
+
+| Deck | 100% | 90% | 75% | 50% |
+|---|---:|---:|---:|---:|
+| shell-membrane-1258 | 6236, 82 | 5971, 98 | 5573, 171 | 4910, 289 |
+| solid-hex-70 | 6795, 67 | 6432, 87 | 5861, 170 | 4908, 312 |
+
+The old plan couldn't reach 50% of the rows of shell-membrane-1258 on this card. On
+solid-hex-70 it held 49% in 8242 MiB at 210 ms/iter; computed transfers at 50% are slower,
+312 ms/iter, because five products reach the CPU rows per iteration instead of three, but
+need 4908 MiB, below the 6268 MiB of the old plan's fixed state alone.
+
+The one measured loss is a deck that only just spilled. shell-membrane-1258 with `rigid`
+needed just 0.39M CPU rows with stored transfers, and computing them instead took it from
+31.5 to 40.5 ms/iter and from 187 to 225 s for the deck, measured with the prototype.
+Computing is preferred anyway, since keeping every row on the GPU gains far more on the
+decks above.
+
+Host memory rises by the patches, about 3% on these two decks (19.2 to 19.9 GiB and
+20.6 to 21.2 GiB of peak RSS). Stored plans hold them too, since a refactor needs `T`.
+
+#### Kernel profile
+
+`nsys --cuda-graph-trace=node`, one iteration in the middle of a solve, computed transfers:
+
+| Part of the iteration | shell-membrane-400, us | solid-hex-40, us |
+|---|---:|---:|
+| Five products with the fine `A` | 2883 (68%) | 6636 (76%) |
+| Level 1 products | 443 (10%) | 1281 (15%) |
+| `T` | 231 (5%) | 119 (1%) |
+| `T^T` | 146 (3%) | 93 (1%) |
+| Fine `M` scalings | 78 (2%) | 66 (1%) |
+| CG vector operations | 181 (4%) | 154 (2%) |
+| Everything else, coarser levels | 288 (7%) | 341 (4%) |
+| Total | 4250 | 8690 |
+
+With stored transfers the same iteration of shell-membrane-400 takes 3525 us, so the true
+per-iteration cost there is +21%, not the +11% in the table above, whose ms/iter also
+holds about 70 ms per solve outside the iterations, in refinement.
+
+Nothing here was wasted. Between kernels the graph has gaps of 0.3-1.4 us, 14-17 us per
+iteration. The fine product reads 12 bytes per nonzero at about 480 GB/s on the shell and
+570 GB/s on the solid, against the card's rated 652 GB/s, so it is limited by memory
+bandwidth and not by the kernel. `T^T` with 8, 16 or 32 threads per coarse equation takes
+the same time to within noise. The new kernels hold no large share, and the product
+modes they added cost the same as the old ones.
+
+That bandwidth limit says where the rest of the time is: less to read per nonzero. Column
+indices are a third of what a product reads, and most of them repeat within a grid's block,
+so storing one per block should save memory and time on every product together. It is the
+natural next step, after which fp32 coarse levels would save less.
+
 ### Limits of these results
 
-- `space-frame` is a cubic lattice filling its whole volume: rigid-jointed CBARs between
-  nearest neighbours, with no diagonals, so a lateral load is carried by member bending.
-  It is not a triangulated space frame, whose members carry mostly axial load, so its
-  results should not be read as evidence about those structures.
+- `cubic-lattice` fills its whole volume with rigid-jointed CBARs between nearest
+  neighbours, with no diagonals, so a lateral load is carried by member bending. It is
+  not a space frame, whose triangulated members carry mostly axial load, so its results
+  should not be read as evidence about those structures. It was named `space-frame` when
+  measured, and the stored results and the scripts under `benchmarks/pcg/` use that name.
 - Clear-cut cells were not repeated, including constant's host failures and rigid's
   host runs on membrane, frame and rbe. The rbe-assembly 75% cell had 3 pairs and
   shell-thin both resident had 2.

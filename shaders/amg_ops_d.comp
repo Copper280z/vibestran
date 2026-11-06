@@ -27,5 +27,7 @@ void main() {
     if (pc.mode == 0u) y[row] = sum;
     else if (pc.mode == 1u) y[row] += sum;
     else if (pc.mode == 2u) y[row] = f[row] - sum;
-    else y[row] = x[row] + m[row] * (f[row] - sum);
+    else if (pc.mode == 3u) y[row] = x[row] + m[row] * (f[row] - sum);
+    else if (pc.mode == 4u) y[row] -= sum;
+    else y[row] += f[row] - m[row] * sum;
 }

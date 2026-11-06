@@ -329,13 +329,13 @@ SolverResults LinearStaticSolver::solve(const Model &model) {
 
 namespace {
 
-/// The command line over PARAM,AMGMODES over the default, the rigid-body modes.
+/// The command line over PARAM,AMGMODES over the default, the drilling modes.
 AmgModes structural_amg_modes(const Model &model, std::optional<AmgModes> override_modes) {
   if (override_modes)
     return *override_modes;
   const auto it = model.params.find("AMGMODES");
   if (it == model.params.end())
-    return AmgModes::Rigid;
+    return AmgModes::Drilling;
   const auto parsed = parse_amg_modes(it->second);
   if (!parsed)
     throw SolverError(std::format("PARAM,AMGMODES,{}: expected CONSTANT, RIGID or DRILLING", it->second));

@@ -2297,8 +2297,8 @@ class CudaAmgEngine final : public detail::AmgEngine {
 public:
     // free_before: free device memory before this engine allocated anything.
     CudaAmgEngine(CudaPCGContext& ctx, const detail::AmgHierarchy& h, std::optional<detail::AmgDevicePartition> partition,
-        int max_iterations, std::size_t free_before)
-        : ctx_(ctx), solver_(h, std::move(partition)), max_iterations_(max_iterations), free_before_(free_before) {}
+        bool computed_transfers, int max_iterations, std::size_t free_before)
+        : ctx_(ctx), solver_(h, std::move(partition), computed_transfers), max_iterations_(max_iterations), free_before_(free_before) {}
     std::pair<int, double> solve(const std::vector<double>& b, double tolerance, std::vector<double>& x) override {
         auto result = solver_.solve(b, tolerance, max_iterations_, x);
         // Allocations and the captured graph are all in place after the first solve.
@@ -2334,10 +2334,12 @@ static bool cuda_device_can_allocate(std::size_t bytes) {
 }
 
 // AMG PCG for n >= 50000. Every hierarchy gets a plan from its exact storage,
-// against the memory free once it is built: resident, a suffix of the fine rows
-// on the CPU, or the host hierarchy when even the fixed device state does not
-// fit. Mixed precision keeps an fp32 hierarchy when that is resident; otherwise
-// it shares the fp64 path.
+// against the memory free once it is built, in this order: resident with stored
+// transfers, which is fastest; the finest transfers computed from A, M and T,
+// which is the same operator in less memory; a suffix of the fine rows on the CPU
+// as well; or the host hierarchy when even the fixed device state does not fit.
+// Mixed precision keeps an fp32 hierarchy when that is resident; otherwise it
+// shares the fp64 path.
 static detail::AmgSystem::EngineFactory cuda_amg_engines(CudaPCGContext& ctx, bool mixed) {
     return [&ctx, mixed](const detail::ScaledAmgMatrix& scaled, const detail::AmgHierarchy& h)
         -> std::unique_ptr<detail::AmgEngine> {
@@ -2347,19 +2349,29 @@ static detail::AmgSystem::EngineFactory cuda_amg_engines(CudaPCGContext& ctx, bo
         auto budget = cuda_device_budget(ctx);
         std::size_t free_bytes = 0, total_bytes = 0;
         throw_if_cuda_failed(cudaMemGetInfo(&free_bytes, &total_bytes), "query device memory");
+        const bool can_compute = h.levels.front().tentative != nullptr;
         if (mixed) {
-            const auto fixed = cuda_amg::Solver<float>::fixed_bytes(h);
-            const auto planned = fixed + detail::amg_csr_bytes(fine, rows);
-            if (planned <= budget && cuda_device_can_allocate(planned)) {
-                log_debug(std::format("[cuda device AMG] fp32 hierarchy resident: {} GPU rows, 0 CPU rows; fixed={} planned={} budget={} bytes",
-                    rows, fixed, planned, budget));
-                ctx.last_amg_device = Report{Report::Execution::Resident, rows, 0, planned, budget, 0};
-                return std::make_unique<CudaAmgEngine<float>>(ctx, h, std::nullopt, ctx.max_iters, free_bytes);
+            for (const bool computed : {false, true}) {
+                if (computed && !can_compute) break;
+                const auto fixed = cuda_amg::Solver<float>::fixed_bytes(h, computed);
+                const auto planned = fixed + detail::amg_csr_bytes(fine, rows);
+                if (planned > budget || !cuda_device_can_allocate(planned)) continue;
+                log_debug(std::format("[cuda device AMG] fp32 hierarchy resident: {} GPU rows, 0 CPU rows; fixed={} planned={} budget={} bytes; {} finest transfers",
+                    rows, fixed, planned, budget, computed ? "computed" : "stored"));
+                ctx.last_amg_device = Report{Report::Execution::Resident, rows, 0, planned, budget, 0, computed};
+                return std::make_unique<CudaAmgEngine<float>>(ctx, h, std::nullopt, computed, ctx.max_iters, free_bytes);
             }
         }
-        const auto fixed = cuda_amg::Solver<double>::fixed_bytes(h);
+        const auto stored_fixed = cuda_amg::Solver<double>::fixed_bytes(h, false);
+        const bool computed = can_compute && stored_fixed + detail::amg_csr_bytes(fine, rows) > budget;
+        const auto fixed = computed ? cuda_amg::Solver<double>::fixed_bytes(h, true) : stored_fixed;
         std::optional<detail::AmgDevicePartition> partition;
         if (budget >= fine.nrows * 80) partition = detail::AmgDevicePartition::plan(fine, budget, fixed);
+        // A budget that keeps only some of the rows also computes the transfers.
+        if (partition && !computed && can_compute) {
+            const auto saved = stored_fixed - cuda_amg::Solver<double>::fixed_bytes(h, true);
+            for (auto& bytes : partition->row_fraction_budgets) bytes -= saved;
+        }
         if (partition && !cuda_device_can_allocate(partition->device_bytes)) {
             log_warn(std::format("[cuda device AMG] {} planned bytes are no longer available; using host hierarchy", partition->device_bytes));
             partition.reset();
@@ -2371,11 +2383,11 @@ static detail::AmgSystem::EngineFactory cuda_amg_engines(CudaPCGContext& ctx, bo
             return std::make_unique<detail::HostAmgEngine>(scaled, h,
                 [budget](const auto& matrix) { return std::make_unique<CudaAmgSpmv>(matrix, budget); }, ctx.max_iters);
         }
-        detail::log_amg_device_plan("cuda", fine, *partition, fixed, budget);
+        detail::log_amg_device_plan("cuda", fine, *partition, fixed, budget, computed);
         const auto gpu_rows = partition->gpu_rows;
         ctx.last_amg_device = Report{gpu_rows == rows ? Report::Execution::Resident : Report::Execution::FineRowSpill,
-            gpu_rows, rows - gpu_rows, partition->device_bytes, budget, 0};
-        return std::make_unique<CudaAmgEngine<double>>(ctx, h, std::move(partition), ctx.max_iters, free_bytes);
+            gpu_rows, rows - gpu_rows, partition->device_bytes, budget, 0, computed};
+        return std::make_unique<CudaAmgEngine<double>>(ctx, h, std::move(partition), computed, ctx.max_iters, free_bytes);
     };
 }
 

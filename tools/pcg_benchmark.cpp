@@ -40,7 +40,7 @@ using Csr = SparseMatrixBuilder::CsrData;
 
 namespace {
 struct Options {
-    std::string backend{"cpu-pcg"}, matrix, rhs, reference, capture_deck, capture_prefix, refactor_from, structural_deck, amg_modes{"rigid"};
+    std::string backend{"cpu-pcg"}, matrix, rhs, reference, capture_deck, capture_prefix, refactor_from, structural_deck, amg_modes{"drilling"};
     int side{24}, repeats{3}, warmups{1};
     double contrast{1.0};
     double budget_mib{0};
@@ -349,13 +349,13 @@ int structural_phases(const Options& o) {
     const auto report = solver->last_amg_device_report();
     std::cout << std::format(
         "{{\"n\":{},\"nnz\":{},\"backend\":\"{}\",\"modes\":\"{}\",\"budget_mib\":{},\"execution\":\"{}\","
-        "\"gpu_rows\":{},\"cpu_rows\":{},\"planned_bytes\":{},\"budget_bytes\":{},\"measured_bytes\":{},"
+        "\"gpu_rows\":{},\"cpu_rows\":{},\"computed_transfers\":{},\"planned_bytes\":{},\"budget_bytes\":{},\"measured_bytes\":{},"
         "\"factor_s\":{:.6f},\"first_solve_s\":{:.6f},\"first_iterations\":{},\"first_residual\":{:.3e},"
         "\"retained_solve_s\":{:.6f},\"retained_iterations\":{},\"retained_residual\":{:.3e},"
         "\"refactor_s\":{:.6f},\"refactored_solve_s\":{:.6f},\"refactored_iterations\":{},\"refactored_residual\":{:.3e},"
         "\"hierarchy_builds\":{}}}\n",
         k.n, k.nnz, o.backend, o.amg_modes, o.budget_mib, report ? execution_name(report->execution) : "none",
-        report ? report->gpu_rows : 0, report ? report->cpu_rows : 0, report ? report->planned_bytes : 0,
+        report ? report->gpu_rows : 0, report ? report->cpu_rows : 0, report && report->computed_transfers, report ? report->planned_bytes : 0,
         report ? report->budget_bytes : 0, report ? report->measured_bytes : 0,
         factor_seconds, first->seconds, first->iterations, first_residual,
         retained->seconds, retained->iterations, retained_residual,

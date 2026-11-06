@@ -46,6 +46,25 @@ private:
 // CG iterations of the host cycle on a recorded system; in amg_host_iterations.cpp.
 int host_amg_iterations(const RecordingBackend::Record& r);
 
+// New values on the same pattern for a refactor, with loads for the same solution:
+// K + D K D with D in bands of equations. Equilibration hides a uniform factor or a
+// diagonal congruence from the hierarchy, while this really changes M A, and so
+// P = (I - M A) T. Assembling a changed deck does not do: a uniform mesh cancels some
+// entries to zero, so the pattern differs and the hierarchy is built again.
+struct ChangedSystem {
+    SparseMatrixBuilder::CsrData k;
+    std::vector<double> f;
+};
+inline ChangedSystem with_stiff_bands(const SparseMatrixBuilder::CsrData& k, const std::vector<double>& u) {
+    ChangedSystem out{k, {}};
+    const auto d = [](int i) { return i / 96 % 2 == 1 ? 5.0 : 1.0; };
+    for (int i = 0; i < k.n; ++i)
+        for (int j = k.row_ptr[std::size_t(i)]; j < k.row_ptr[std::size_t(i) + 1]; ++j)
+            out.k.values[std::size_t(j)] *= 1 + d(i) * d(k.col_ind[std::size_t(j)]);
+    out.f = out.k.multiply(u);
+    return out;
+}
+
 inline RecordingBackend::Record assemble(const std::string& bulk, bool solve_it = true,
                                   std::optional<AmgModes> modes = AmgModes::Rigid,
                                   const std::string& params = {}) {

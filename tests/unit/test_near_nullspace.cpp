@@ -243,7 +243,8 @@ TEST(AmgModes, ChoicePrecedence) {
     const std::string bulk = kSteel +
         "GRID,1,,0.,0.,0.\nGRID,2,,1.,0.,0.\nGRID,3,,1.,1.,0.\nGRID,4,,0.,1.,0.\nCQUAD4,1,2,1,2,3,4\n"
         "SPC1,1,123456,1,2\nFORCE,2,3,0,1.,0.,0.,1.\n";
-    EXPECT_TRUE(assemble(bulk, true, std::nullopt).modes) << "structures default to the rigid-body modes";
+    EXPECT_TRUE(assemble(bulk, true, std::nullopt).modes) << "structures have modes by default";
+    EXPECT_EQ(assemble(bulk, true, std::nullopt).modes->cols, 8) << "with the drilling columns";
     EXPECT_FALSE(assemble(bulk, true, std::nullopt, "PARAM,AMGMODES,CONSTANT\n").modes);
     EXPECT_TRUE(assemble(bulk, true, std::nullopt, "PARAM,AMGMODES,RIGID\n").modes);
     EXPECT_TRUE(assemble(bulk, true, AmgModes::Rigid, "PARAM,AMGMODES,CONSTANT\n").modes)
@@ -762,6 +763,125 @@ TEST(ModeAggregation, AColumnInTheSpanOfTheOthersIsLeftOutButStaysExact) {
 
 // The purpose of the columns: an in-plane load on a CQUAD4 sheet, where the
 // iterations of the rigid-body hierarchy grow with refinement and these do not.
+namespace {
+
+std::vector<double> multiply(const detail::AmgHostCsr& a, const std::vector<double>& x) {
+    std::vector<double> y(a.nrows, 0.0);
+    for (std::size_t i = 0; i < a.nrows; ++i)
+        for (auto j = a.ptr[i]; j < a.ptr[i + 1]; ++j) y[i] += a.val[j] * x[std::size_t(a.col[j])];
+    return y;
+}
+
+std::vector<double> wave(std::size_t n, double phase) {
+    std::vector<double> x(n);
+    for (std::size_t i = 0; i < n; ++i) x[i] = std::sin(phase * double(i)) + 0.3 * std::cos(double(i * i % 97));
+    return x;
+}
+
+// What a device computes for P e and R y, from A, M and T only, against the stored P and R.
+void expect_transfers_computed_from_tentative(const detail::AmgLevel& level) {
+    ASSERT_TRUE(level.tentative);
+    const auto t = level.tentative->csr();
+    const auto tt = amgcl::backend::transpose(*t);
+    const auto e = wave(t->ncols, 0.37);
+    auto te = multiply(*t, e);
+    const auto ate = multiply(*level.A, te);
+    for (std::size_t i = 0; i < te.size(); ++i) te[i] -= level.smoother[i] * ate[i];
+    const auto stored_p = multiply(*level.P, e);
+    const auto y = wave(t->nrows, 0.71);
+    auto my = y;
+    for (std::size_t i = 0; i < my.size(); ++i) my[i] *= level.smoother[i];
+    const auto amy = multiply(*level.A, my);
+    auto residual = y;
+    for (std::size_t i = 0; i < y.size(); ++i) residual[i] -= amy[i];
+    const auto computed_r = multiply(*tt, residual);
+    const auto stored_r = multiply(*level.R, y);
+    const auto top = [](const std::vector<double>& v) { return test::largest_magnitude(v); };
+    ASSERT_GT(top(stored_p), 0.0);
+    for (std::size_t i = 0; i < te.size(); ++i) ASSERT_NEAR(te[i], stored_p[i], 1e-11 * top(stored_p)) << "P row " << i;
+    for (std::size_t i = 0; i < computed_r.size(); ++i) ASSERT_NEAR(computed_r[i], stored_r[i], 1e-11 * top(stored_r)) << "R row " << i;
+}
+
+} // namespace
+
+// T in patches is T, on grids with and without their optional columns, and rows
+// of equations in no aggregate stay empty.
+TEST(ComputedTransfers, PatchesAreTheTentativeProlongation) {
+    for (const auto& deck : {mixed_assembly(8), test::in_plane_sheet(8), hex_bar(4)}) {
+        const auto r = assemble(deck, true, AmgModes::Drilling);
+        const detail::ScaledAmgMatrix scaled(r.k);
+        detail::ModeAggregation aggregation(*r.modes, scaled.scale);
+        const auto groups = aggregation.aggregates(*scaled.matrix);
+        const auto t = aggregation.tentative(groups);
+        const auto& patches = *aggregation.patches();
+        const auto rebuilt = patches.csr();
+        ASSERT_EQ(rebuilt->nrows, t->nrows);
+        ASSERT_EQ(rebuilt->ncols, t->ncols);
+        ASSERT_EQ(rebuilt->nnz, t->nnz);
+        EXPECT_TRUE(std::equal(t->ptr, t->ptr + t->nrows + 1, rebuilt->ptr));
+        EXPECT_TRUE(std::equal(t->col, t->col + t->nnz, rebuilt->col));
+        EXPECT_TRUE(std::equal(t->val, t->val + t->nnz, rebuilt->val));
+        ASSERT_EQ(patches.equation.size(), t->nrows) << "every equation has a row, so T e overwrites all of a work vector";
+        auto seen = patches.equation;
+        std::ranges::sort(seen);
+        for (std::size_t i = 0; i < seen.size(); ++i) ASSERT_EQ(seen[i], int(i));
+        ASSERT_EQ(patches.row_patch.size(), patches.equation.size());
+        EXPECT_EQ(patches.patches.back()[0], int(patches.equation.size()));
+        EXPECT_EQ(patches.patches.back()[1], int(patches.values.size()));
+        EXPECT_EQ(patches.patches.back()[2], int(patches.col_patch.size()));
+        for (std::size_t i = 0; i < t->nrows; ++i)
+            if (groups.id[i] < 0) EXPECT_EQ(t->ptr[i + 1], t->ptr[i]) << i;
+        // Each value once for T and T^T, with no column indices, against two CSRs.
+        EXPECT_LT(patches.bytes(8), 2 * (t->nnz * 12 + (t->nrows + 1) * 4));
+    }
+}
+
+// The identity the device relies on, for each kind of hierarchy with modes: its
+// finest P and R are the stored ones to rounding, for any input.
+TEST(ComputedTransfers, ApplyTheStoredOperators) {
+    for (const auto modes : {AmgModes::Rigid, AmgModes::Drilling})
+        for (const auto& deck : {mixed_assembly(8), test::in_plane_sheet(16), hex_bar(4)}) {
+            const auto r = assemble(deck, true, modes);
+            const detail::ScaledAmgMatrix scaled(r.k);
+            const detail::AmgHierarchy h(scaled.matrix, r.modes.get(), scaled.scale, 40);
+            ASSERT_GE(h.levels.size(), 2U);
+            expect_transfers_computed_from_tentative(h.levels.front());
+            for (std::size_t l = 1; l < h.levels.size(); ++l) EXPECT_FALSE(h.levels[l].tentative) << "finest level only";
+        }
+}
+
+// AMGCL's smoothed aggregation filters A in P, so it is not (I - M A) T.
+TEST(ComputedTransfers, TheScalarHierarchyKeepsItsStoredTransfers) {
+    const auto r = assemble(hex_bar(4));
+    const detail::ScaledAmgMatrix scaled(r.k);
+    const detail::AmgHierarchy h(scaled.matrix, nullptr, {}, 40);
+    ASSERT_GE(h.levels.size(), 2U);
+    for (const auto& level : h.levels) EXPECT_FALSE(level.tentative);
+}
+
+// Whichever way a plan applies the transfers, a refactor must change them the
+// same way: stored P is smoothed again, and the coarse operators follow from it.
+TEST(ComputedTransfers, RefactorSmoothsTheFinestTransferAgain) {
+    const auto r = assemble(test::in_plane_sheet(16), true, AmgModes::Drilling);
+    const detail::ScaledAmgMatrix before(r.k);
+    const detail::ScaledAmgMatrix after(test::with_stiff_bands(r.k, r.u).k);
+    detail::AmgHierarchy h(before.matrix, r.modes.get(), before.scale, 40);
+    const std::vector<double> old_values(h.levels[0].P->val, h.levels[0].P->val + h.levels[0].P->nnz);
+    ASSERT_TRUE(h.rebuild(after.matrix));
+    expect_transfers_computed_from_tentative(h.levels.front());
+    double moved = 0;
+    for (std::size_t i = 0; i < old_values.size(); ++i) moved = std::max(moved, std::abs(old_values[i] - h.levels[0].P->val[i]));
+    EXPECT_GT(moved, 1e-6) << "this congruence must change P, or the test proves nothing";
+    // The coarse operator is formed from the new transfer.
+    const auto p = h.levels[0].P;
+    const auto galerkin = amgcl::backend::product(*h.levels[0].R, *amgcl::backend::product(*h.levels[0].A, *p));
+    const auto& coarse = *h.levels[1].A;
+    const auto e = wave(coarse.nrows, 0.13);
+    const auto expected = multiply(*galerkin, e);
+    const auto actual = multiply(coarse, e);
+    for (std::size_t i = 0; i < actual.size(); ++i) ASSERT_NEAR(actual[i], expected[i], 1e-10 * (1 + std::abs(expected[i]))) << i;
+}
+
 TEST(DrillingAmg, InPlaneLoadsStopGrowingWithRefinementAndTheSolutionIsUnchanged) {
     std::vector<int> rigid, drilling;
     for (const int m : {24, 48, 96}) {

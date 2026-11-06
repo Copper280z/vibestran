@@ -192,19 +192,24 @@ Nastran, and is assessed with a residual computed in compensated
   for an ill-conditioned K it is ~ eps ||K|| ||u|| / ||F|| even for the exact
   solution rounded to double.
 
-On the GPU PCG backends, the AMG preconditioner of SOL 101 uses the model's
-rigid-body modes by default from 50000 equations, which converges on far more
-structures. `--amg-modes=constant` (or `PARAM,AMGMODES,CONSTANT`) uses the scalar
-hierarchy instead, which needs about half the device memory and less host memory,
-and suits nearly decoupled fields such as membrane plates, but does not converge on
-some structures, such as thin shells, stiffened panels and thin solids. The choice
-changes speed and memory, not the solution, which refinement accepts against the
-assembled stiffness either way. `--amg-modes=drilling` (or `PARAM,AMGMODES,DRILLING`)
-adds two patterns of rotation about the shell normal on CQUAD4 grids. It greatly
-reduces iterations on CQUAD4 shells loaded in their plane, such as membrane plates
-(2167 to 38 at 1M equations), for about a quarter more hierarchy memory on an
-all-CQUAD4 model and about 10% more time on bending-dominated decks. Without CQUAD4
-it is the same as `rigid`. See `PCG_LARGE_DECKS.md`.
+On the GPU PCG backends, the AMG preconditioner of SOL 101 uses the model's rigid-body
+modes by default from 50000 equations, plus two patterns of rotation about the shell
+normal on CQUAD4 grids (`--amg-modes=drilling`, or `PARAM,AMGMODES,DRILLING`). This
+converges on far more structures, and the rotation patterns greatly reduce iterations
+on CQUAD4 shells loaded in their plane, such as membrane plates (2167 to 38 at 1M
+equations). `--amg-modes=rigid` leaves those patterns out, for about a fifth less
+hierarchy memory on an all-CQUAD4 model and about 10% less time on bending-dominated
+decks; without CQUAD4 the two are the same. `--amg-modes=constant` (or
+`PARAM,AMGMODES,CONSTANT`) uses the scalar hierarchy instead, which needs about half the
+device memory and less host memory, but does not converge on some structures, such as
+thin shells, stiffened panels and thin solids. The choice changes speed and memory, not
+the solution, which refinement accepts against the assembled stiffness either way.
+
+When a hierarchy with modes does not fit on the GPU, its finest transfer operators are
+computed during the solve instead of stored, which is the same preconditioner in less
+memory for more time per iteration. Fine rows move to the CPU only if it still doesn't
+fit. No option selects this: the plan is made from the memory available, and the debug
+log reports it. See `PCG_LARGE_DECKS.md`.
 
 `--refine` (or `PARAM,REFINE,YES` in the bulk data) refines direct solves with
 their factorization and compensated residuals until the corrections reach

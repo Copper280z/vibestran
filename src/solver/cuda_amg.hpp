@@ -18,7 +18,7 @@ constexpr int kDotBlocks = 256;
 constexpr int kPollIterations = 8;
 constexpr int kFlagConverged = 1, kFlagBreakdown = 2, kFlagLimit = 4;
 
-enum Epilogue : int { kSet, kAdd, kResidual, kSmooth };
+enum Epilogue : int { kSet, kAdd, kResidual, kSmooth, kSubtract, kCorrect };
 
 struct CgState {
     double rho, alpha, beta, norm_b, target, rr;
@@ -30,7 +30,9 @@ __device__ __forceinline__ T epilogue(T sum, int row, const T* y, const T* f, co
     if constexpr (Mode == kSet) return sum;
     else if constexpr (Mode == kAdd) return y[row] + sum;
     else if constexpr (Mode == kResidual) return f[row] - sum;
-    else return x[row] + m[row] * (f[row] - sum);
+    else if constexpr (Mode == kSmooth) return x[row] + m[row] * (f[row] - sum);
+    else if constexpr (Mode == kSubtract) return y[row] - sum;
+    else return y[row] + f[row] - m[row] * sum;
 }
 
 // Lanes threads per row; all threads reach the shuffles.
@@ -71,6 +73,41 @@ __global__ static void scale_kernel(const T* __restrict__ m, const T* __restrict
     if (state->flags) return;
     const int i = int(blockIdx.x * blockDim.x + threadIdx.x);
     if (i < n) x[i] = m[i] * f[i];
+}
+
+// y = T e from the patches of AmgTentative: a thread per row.
+template<class T>
+__global__ static void tentative_kernel(const T* __restrict__ values, const int* __restrict__ equation,
+    const int* __restrict__ row_patch, const int* __restrict__ patches, const T* __restrict__ e, T* __restrict__ y,
+    int rows, const CgState* __restrict__ state) {
+    if (state->flags) return;
+    const int row = int(blockIdx.x * blockDim.x + threadIdx.x);
+    if (row >= rows) return;
+    const int* patch = patches + 4 * row_patch[row];
+    const int first_col = patch[2], width = patch[6] - first_col;
+    const T* block = values + patch[1] + (row - patch[0]) * width;
+    T sum = 0;
+    for (int k = 0; k < width; ++k) sum += block[k] * e[first_col + k];
+    y[equation[row]] = sum;
+}
+
+// y = T^T x: Lanes threads per coarse equation.
+template<class T, int Lanes>
+__global__ static void tentative_transpose_kernel(const T* __restrict__ values, const int* __restrict__ equation,
+    const int* __restrict__ col_patch, const int* __restrict__ patches, const T* __restrict__ x, T* __restrict__ y,
+    int cols, const CgState* __restrict__ state) {
+    if (state->flags) return;
+    const int col = int((blockIdx.x * blockDim.x + threadIdx.x) / Lanes);
+    const int lane = int(threadIdx.x % Lanes);
+    T sum = 0;
+    if (col < cols) {
+        const int* patch = patches + 4 * col_patch[col];
+        const int first_row = patch[0], rows = patch[4] - first_row, width = patch[6] - patch[2];
+        const T* column = values + patch[1] + (col - patch[2]);
+        for (int r = lane; r < rows; r += Lanes) sum += column[r * width] * x[equation[first_row + r]];
+    }
+    for (int d = Lanes / 2; d; d /= 2) sum += __shfl_down_sync(0xffffffffu, sum, d, Lanes);
+    if (lane == 0 && col < cols) y[col] = sum;
 }
 
 // y = C f for the dense coarse inverse: one warp per row.
@@ -228,6 +265,35 @@ template<class T> struct DeviceCsr {
     }
 };
 
+// AmgTentative on the device.
+template<class T> struct DeviceTentative {
+    static constexpr int kLanes = 32;
+    int rows{0}, cols{0};
+    PCGDeviceBuffer<int> equation, row_patch, col_patch, patches;
+    PCGDeviceBuffer<T> values;
+
+    DeviceTentative() = default;
+    explicit DeviceTentative(const detail::AmgTentative& t)
+        : rows(int(t.equation.size())), cols(int(t.col_patch.size())) {
+        equation = PCGDeviceBuffer<int>(t.equation.size()); equation.upload(t.equation.data(), t.equation.size());
+        row_patch = PCGDeviceBuffer<int>(t.row_patch.size()); row_patch.upload(t.row_patch.data(), t.row_patch.size());
+        col_patch = PCGDeviceBuffer<int>(t.col_patch.size()); col_patch.upload(t.col_patch.data(), t.col_patch.size());
+        patches = PCGDeviceBuffer<int>(t.patches.size() * 4); patches.upload(t.patches.front().data(), t.patches.size() * 4);
+        values = PCGDeviceBuffer<T>(t.values.size());
+        if constexpr (std::is_same_v<T, double>) values.upload(t.values.data(), t.values.size());
+        else {
+            const std::vector<T> converted(t.values.begin(), t.values.end());
+            values.upload(converted.data(), converted.size());
+        }
+    }
+    void apply(cudaStream_t s, const T* e, T* y, const CgState* state) const {
+        tentative_kernel<T><<<blocks(std::size_t(rows)), kBlock, 0, s>>>(values.ptr, equation.ptr, row_patch.ptr, patches.ptr, e, y, rows, state);
+    }
+    void apply_transpose(cudaStream_t s, const T* x, T* y, const CgState* state) const {
+        tentative_transpose_kernel<T, kLanes><<<blocks(std::size_t(cols) * kLanes), kBlock, 0, s>>>(values.ptr, equation.ptr, col_patch.ptr, patches.ptr, x, y, cols, state);
+    }
+};
+
 // Uploads into existing storage, so captured graphs keep valid pointers.
 template<class T> void upload_converted(PCGDeviceBuffer<T>& out, std::span<const double> host) {
     if constexpr (std::is_same_v<T, double>) out.upload(host.data(), host.size());
@@ -323,8 +389,9 @@ private:
 template<class T>
 class Solver {
 public:
-    // Device bytes other than the fine operator, for the budget planner.
-    static std::size_t fixed_bytes(const detail::AmgHierarchy& h) {
+    // Device bytes other than the fine operator, for the budget planner. With
+    // computed_transfers the finest P and R are applied from A, M and T.
+    static std::size_t fixed_bytes(const detail::AmgHierarchy& h, bool computed_transfers) {
         const auto n = h.levels.front().A->nrows;
         std::size_t bytes = 5 * n * sizeof(double) + kDotBlocks * sizeof(double) + sizeof(CgState) + 65536;
         for (std::size_t l = 0; l < h.levels.size(); ++l) {
@@ -334,12 +401,13 @@ public:
             bytes += (std::is_same_v<T, double> && l == 0 ? 1 : 3) * rows * sizeof(T);
             bytes += level.smoother.size() * sizeof(T);
             if (l || !std::is_same_v<T, double>) bytes += DeviceCsr<T>::bytes(*level.A, int(rows));
-            if (level.P) bytes += DeviceCsr<T>::bytes(*level.P, int(level.P->nrows)) + DeviceCsr<T>::bytes(*level.R, int(level.R->nrows));
+            if (computed_transfers && l == 0) bytes += level.tentative->bytes(sizeof(T)) + rows * sizeof(T);
+            else if (level.P) bytes += DeviceCsr<T>::bytes(*level.P, int(level.P->nrows)) + DeviceCsr<T>::bytes(*level.R, int(level.R->nrows));
         }
         return bytes + h.coarse_inverse.size() * sizeof(T);
     }
 
-    Solver(const detail::AmgHierarchy& h, std::optional<detail::AmgDevicePartition> partition)
+    Solver(const detail::AmgHierarchy& h, std::optional<detail::AmgDevicePartition> partition, bool computed_transfers)
         : h_(h), n_(int(h.levels.front().A->nrows)), fine_(*h.levels.front().A, std::move(partition)),
           r_(n_), u_(n_), p_(n_), q_(n_), z_(n_), partial_(kDotBlocks), state_(1),
           host_state_(std::make_unique<PcgPinnedBuffer<CgState>>(1)) {
@@ -353,7 +421,8 @@ public:
             d.x = PCGDeviceBuffer<T>(rows);
             if (!level.smoother.empty()) d.m = device_copy<T>(level.smoother);
             if (l || !std::is_same_v<T, double>) d.a = DeviceCsr<T>(*level.A, int(rows));
-            if (level.P) { d.p = DeviceCsr<T>(*level.P, int(level.P->nrows)); d.r = DeviceCsr<T>(*level.R, int(level.R->nrows)); }
+            if (computed_transfers && l == 0) { d.tentative = DeviceTentative<T>(*level.tentative); d.work = PCGDeviceBuffer<T>(rows); }
+            else if (level.P) { d.p = DeviceCsr<T>(*level.P, int(level.P->nrows)); d.r = DeviceCsr<T>(*level.R, int(level.R->nrows)); }
             levels_.push_back(std::move(d));
         }
         if (h.coarse_direct()) coarse_ = device_copy<T>(h.coarse_inverse);
@@ -374,6 +443,7 @@ public:
             auto& d = levels_[l];
             if (!level.smoother.empty()) upload_converted(d.m, level.smoother);
             if (d.a.rows) d.a.upload_values(*level.A);
+            if (level.tentative && d.p.rows) { d.p.upload_values(*level.P); d.r.upload_values(*level.R); }
         }
         if (h_.coarse_direct()) upload_converted(coarse_, h_.coarse_inverse);
     }
@@ -408,8 +478,9 @@ public:
 
 private:
     struct Level {
-        PCGDeviceBuffer<T> f, x, y, m;
+        PCGDeviceBuffer<T> f, x, y, m, work;
         DeviceCsr<T> a, p, r;
+        DeviceTentative<T> tentative;
     };
 
     void sync() { throw_if_cuda_failed(cudaStreamSynchronize(stream_), "AMG stream synchronize"); }
@@ -430,13 +501,27 @@ public:
         scale_kernel<T><<<blocks(rows), kBlock, 0, stream_>>>(levels_[l].m.ptr, f(l), levels_[l].x.ptr, int(rows), state_.ptr);
     }
     void residual(std::size_t l) { level_product<kResidual>(l, levels_[l].x.ptr, y(l), f(l), nullptr); }
-    void restriction(std::size_t l) { levels_[l].r.template launch<kSet>(stream_, y(l), f(l + 1), nullptr, nullptr, state_.ptr); }
+    // R y = T^T (y - A M y). y is not read again before smooth_post writes it.
+    void restriction(std::size_t l) {
+        auto& d = levels_[l];
+        if (!d.tentative.rows) { d.r.template launch<kSet>(stream_, y(l), f(l + 1), nullptr, nullptr, state_.ptr); return; }
+        const auto rows = h_.levels[l].A->nrows;
+        scale_kernel<T><<<blocks(rows), kBlock, 0, stream_>>>(d.m.ptr, y(l), d.work.ptr, int(rows), state_.ptr);
+        level_product<kSubtract>(l, d.work.ptr, y(l), nullptr, nullptr);
+        d.tentative.apply_transpose(stream_, y(l), f(l + 1), state_.ptr);
+    }
     void coarse(std::size_t l) {
         if (!h_.coarse_direct()) { smooth_zero(l); smooth_post(l); return; }
         const int rows = int(h_.levels[l].A->nrows);
         dense_kernel<T><<<blocks(std::size_t(rows) * 32), kBlock, 0, stream_>>>(coarse_.ptr, f(l), y(l), rows, state_.ptr);
     }
-    void prolongation(std::size_t l) { levels_[l].p.template launch<kAdd>(stream_, y(l + 1), levels_[l].x.ptr, nullptr, nullptr, state_.ptr); }
+    // x += P e = T e - M A T e.
+    void prolongation(std::size_t l) {
+        auto& d = levels_[l];
+        if (!d.tentative.rows) { d.p.template launch<kAdd>(stream_, y(l + 1), d.x.ptr, nullptr, nullptr, state_.ptr); return; }
+        d.tentative.apply(stream_, y(l + 1), d.work.ptr, state_.ptr);
+        level_product<kCorrect>(l, d.work.ptr, d.x.ptr, d.work.ptr, d.m.ptr);
+    }
     void smooth_post(std::size_t l) { level_product<kSmooth>(l, levels_[l].x.ptr, y(l), f(l), levels_[l].m.ptr); }
 
 private:

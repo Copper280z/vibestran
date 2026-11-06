@@ -110,6 +110,9 @@ struct AmgLevel {
     // Diagonal smoother weights, within kAmgSmootherBound (empty on a directly
     // solved level).
     std::vector<double> smoother;
+    // With modes, on the finest level: T of P = (I - M A) T, from which a device
+    // can apply P and R without storing them.
+    std::shared_ptr<const AmgTentative> tentative{};
 };
 
 // Levels from fine to coarse. The coarsest level is solved with a dense
@@ -134,6 +137,7 @@ public:
                 levels.push_back(std::move(level));
                 return;
             }
+            if (by_mode && levels.empty()) level.tentative = by_mode->patches();
             amgcl::backend::sort_rows(*level.P);
             amgcl::backend::sort_rows(*level.R);
             a = coarsening_.coarse_operator(*a, *level.P, *level.R);
@@ -144,8 +148,9 @@ public:
         factor_coarse();
     }
 
-    // Same transfer operators, new values: AMGCL's rebuild. Returns false when
-    // the new fine matrix does not share the original sparsity pattern.
+    // Same aggregates, new values: AMGCL's rebuild, with the finest transfer of a
+    // hierarchy with modes smoothed again. Returns false when the new fine matrix
+    // does not share the original sparsity pattern.
     bool rebuild(std::shared_ptr<AmgHostCsr> fine) {
         const auto& old = *levels.front().A;
         if (fine->nrows != old.nrows || fine->nnz != old.nnz ||
@@ -155,6 +160,13 @@ public:
         for (auto& level : levels) {
             level.A = a;
             if (!level.smoother.empty()) level.smoother = smoother(*a);
+            // A device applying P from A and M uses the new values, so stored P
+            // must too: which one a plan chose must not change the operator.
+            if (level.tentative) {
+                std::tie(level.P, level.R) = smoothed_transfer(*a, level.smoother, *level.tentative->csr());
+                amgcl::backend::sort_rows(*level.P);
+                amgcl::backend::sort_rows(*level.R);
+            }
             if (level.P) {
                 a = coarsening_.coarse_operator(*a, *level.P, *level.R);
                 amgcl::backend::sort_rows(*a);

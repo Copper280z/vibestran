@@ -82,50 +82,69 @@ template <class Backend> void check_amg(const char* label) {
     }
 }
 
-// A structure with rigid-body modes on every engine: resident, with fine rows
-// on the CPU, and with the host hierarchy. The modes must reach the hierarchy
-// (without them this bar takes tens of thousands of iterations), every engine
-// must converge to the direct solution, and the budget changes where the
-// products run but not the method.
-template <class Backend> void check_structure(const char* label, const std::string& deck, AmgModes modes, std::size_t partial_mib) {
+// A structure with modes on every engine: stored transfers, computed transfers,
+// computed with fine rows on the CPU, and the host hierarchy. The modes must reach
+// the hierarchy (without them this bar takes tens of thousands of iterations),
+// every engine must converge to the direct solution, and the budget changes where
+// and how the products run but not the method: the same operator, so the same
+// iterations. Each budget comes from the plan above it, on any size of deck.
+template <class Backend> void check_structure(const char* label, const std::string& deck, AmgModes modes) {
+    using Execution = AmgDeviceReport::Execution;
     const auto r = test::assemble(deck, true, modes);
     ASSERT_GE(r.k.n, 50000);
     ASSERT_TRUE(r.modes);
     const double top = test::largest_magnitude(r.u);
+    const auto changed = test::with_stiff_bands(r.k, r.u);
     // The host cycle is the one proved SPD with its spectrum in (0, 1] by
     // test_amg_vcycle.cpp. The device cycles apply the same operator, so CG sees
     // the same iterations, up to rounding (and fp32 rounding in the mixed hierarchy).
     const int host_iterations = test::host_amg_iterations(r);
-    for (const std::size_t budget : {std::size_t(0), partial_mib * 1024 * 1024, std::size_t(1024) * 1024}) {
+    std::optional<int> changed_iterations;
+    const auto run = [&](std::size_t budget) {
         auto backend = create<Backend>(budget);
-        if (!backend) GTEST_SKIP() << "CUDA not available on this system";
+        EXPECT_TRUE(backend);
         SCOPED_TRACE(std::string(label) + " budget=" + std::to_string(budget));
-        ASSERT_TRUE(backend->uses_near_nullspace(r.k.n));
+        EXPECT_TRUE(backend->uses_near_nullspace(r.k.n));
         backend->set_near_nullspace(r.modes);
         const auto x = backend->solve(r.k, r.f);
-        ASSERT_TRUE(backend->last_refinement() && backend->last_refinement()->converged);
+        EXPECT_TRUE(backend->last_refinement() && backend->last_refinement()->converged);
         EXPECT_LE(backend->last_iteration_count(), 120);
         EXPECT_NEAR(double(backend->last_iteration_count()), double(host_iterations), 0.15 * host_iterations + 2);
-        for (std::size_t i = 0; i < x.size(); ++i) ASSERT_NEAR(x[i], r.u[i], 1e-6 * top) << i;
-        // A factor keeps the same hierarchy across solves and a refactor; 2K solves to half.
+        for (std::size_t i = 0; i < x.size(); ++i) { EXPECT_NEAR(x[i], r.u[i], 1e-6 * top) << i; if (::testing::Test::HasFailure()) break; }
+        const auto report = backend->last_amg_device_report().value_or(AmgDeviceReport{});
+        // A factor keeps the same hierarchy across a refactor. New values change P:
+        // a stored P left with the old ones would take other iterations than one
+        // computed from the new A and M.
         auto made = backend->factor(r.k);
-        ASSERT_TRUE(std::holds_alternative<std::unique_ptr<LinearFactor>>(made));
+        EXPECT_TRUE(std::holds_alternative<std::unique_ptr<LinearFactor>>(made));
         auto factor = std::get<std::unique_ptr<LinearFactor>>(std::move(made));
-        for (const double scale : {1.0, 2.0}) {
-            SCOPED_TRACE(scale);
-            if (scale != 1.0) {
-                auto doubled = r.k;
-                std::transform(doubled.values.begin(), doubled.values.end(), doubled.values.begin(),
-                               [scale](double value) { return value * scale; });
-                ASSERT_FALSE(factor->refactor(doubled));
-            }
-            auto solved = factor->solve(r.f);
-            ASSERT_TRUE(std::holds_alternative<std::vector<double>>(solved));
-            const auto& u = std::get<std::vector<double>>(solved);
-            EXPECT_NEAR(double(backend->last_iteration_count()), double(host_iterations), 0.15 * host_iterations + 2);
-            for (std::size_t i = 0; i < u.size(); ++i) ASSERT_NEAR(u[i], r.u[i] / scale, 1e-6 * top) << i;
-        }
-    }
+        EXPECT_FALSE(factor->refactor(changed.k));
+        auto solved = factor->solve(changed.f);
+        EXPECT_TRUE(std::holds_alternative<std::vector<double>>(solved));
+        const auto& u = std::get<std::vector<double>>(solved);
+        for (std::size_t i = 0; i < u.size(); ++i) { EXPECT_NEAR(u[i], r.u[i], 1e-6 * top) << i; if (::testing::Test::HasFailure()) break; }
+        const int iterations = backend->last_iteration_count();
+        if (changed_iterations) EXPECT_NEAR(double(iterations), double(*changed_iterations), 0.03 * *changed_iterations + 1);
+        else changed_iterations = iterations;
+        return report;
+    };
+    if (!create<Backend>(0)) GTEST_SKIP() << "CUDA not available on this system";
+    const auto stored = run(0);
+    EXPECT_EQ(stored.execution, Execution::Resident);
+    EXPECT_FALSE(stored.computed_transfers);
+    const auto computed = run(stored.planned_bytes - 1);
+    EXPECT_EQ(computed.execution, Execution::Resident);
+    EXPECT_TRUE(computed.computed_transfers);
+    EXPECT_LT(computed.planned_bytes, stored.planned_bytes * 95 / 100);
+    // Mixed precision goes through the fp64 plans first, without the fp32 copy of A.
+    auto spilled = run(computed.planned_bytes * 9 / 10);
+    while (spilled.execution == Execution::Resident) spilled = run(spilled.planned_bytes * 9 / 10);
+    EXPECT_EQ(spilled.execution, Execution::FineRowSpill);
+    EXPECT_TRUE(spilled.computed_transfers);
+    EXPECT_GT(spilled.cpu_rows, 0);
+    const auto host = run(1024 * 1024);
+    EXPECT_EQ(host.execution, Execution::Host);
+    EXPECT_FALSE(host.computed_transfers);
 }
 
 // Every hierarchy gets a plan from its exact storage, whatever the size of the
@@ -163,9 +182,24 @@ template <class Backend> void check_plan(const char* label) {
     EXPECT_GE(double(resident.measured_bytes), 0.9 * double(resident.planned_bytes));
     EXPECT_LE(double(resident.measured_bytes), 1.1 * double(resident.planned_bytes) + double(64 * kMiB));
 
-    // A budget below the resident plan moves fine rows to the CPU, within it.
-    const auto spill = solve(resident.planned_bytes * 9 / 10);
+    EXPECT_FALSE(resident.computed_transfers) << "stored transfers are faster and fit";
+
+    // A budget below that plan computes the finest transfers instead, and costs
+    // no rows: that saves the most memory for the least time.
+    const auto computed = solve(resident.planned_bytes - 1);
+    EXPECT_EQ(computed.execution, Execution::Resident);
+    EXPECT_TRUE(computed.computed_transfers);
+    EXPECT_EQ(computed.cpu_rows, 0);
+    EXPECT_LE(computed.planned_bytes, computed.budget_bytes);
+    EXPECT_GE(double(computed.measured_bytes), 0.9 * double(computed.planned_bytes));
+    EXPECT_LE(double(computed.measured_bytes), 1.1 * double(computed.planned_bytes) + double(64 * kMiB));
+
+    // Below that, fine rows move to the CPU as well, within the budget.
+    // Mixed precision goes through the fp64 plans first, without the fp32 copy of A.
+    auto spill = solve(computed.planned_bytes * 9 / 10);
+    while (spill.execution == Execution::Resident) spill = solve(spill.planned_bytes * 9 / 10);
     EXPECT_EQ(spill.execution, Execution::FineRowSpill);
+    EXPECT_TRUE(spill.computed_transfers);
     EXPECT_GT(spill.cpu_rows, 0);
     EXPECT_EQ(spill.gpu_rows + spill.cpu_rows, r.k.n);
     EXPECT_LE(spill.planned_bytes, spill.budget_bytes);
@@ -178,12 +212,17 @@ template <class Backend> void check_plan(const char* label) {
 
     // The same, from memory really in use with no budget given. The plan must see
     // what is free once the hierarchy is built, not what a budget says. What is
-    // left: the headroom plus 75% of the resident plan, then under the headroom.
+    // left: the headroom plus each plan's share, then under the headroom.
     constexpr std::size_t kHeadroom = 256 * kMiB;
-    const auto tight = solve(0, kHeadroom + resident.planned_bytes * 3 / 4);
+    const auto tight_computed = solve(0, kHeadroom + (resident.planned_bytes + computed.planned_bytes) / 2);
+    EXPECT_EQ(tight_computed.execution, Execution::Resident);
+    EXPECT_TRUE(tight_computed.computed_transfers);
+    EXPECT_LE(tight_computed.planned_bytes, tight_computed.budget_bytes);
+    const auto tight = solve(0, kHeadroom + spill.planned_bytes * 19 / 20);
     EXPECT_EQ(tight.execution, Execution::FineRowSpill);
+    EXPECT_TRUE(tight.computed_transfers);
     EXPECT_LE(tight.planned_bytes, tight.budget_bytes);
-    EXPECT_LE(tight.budget_bytes, resident.planned_bytes);
+    EXPECT_LT(tight.budget_bytes, computed.planned_bytes);
     const auto full = solve(0, 64 * kMiB);
     EXPECT_EQ(full.execution, Execution::Host);
     EXPECT_EQ(full.budget_bytes, 0U);
@@ -208,21 +247,21 @@ TEST(CudaPcgAmg, MixedHierarchyResidentSpilledAndOnTheHost) {
 }
 
 TEST(CudaPcgAmg, StableBackendCarriesRigidBodyModes) {
-    check_structure<CudaPCGSolverBackend>("stable", test::hex_bar(17), AmgModes::Rigid, 120);
+    check_structure<CudaPCGSolverBackend>("stable", test::hex_bar(17), AmgModes::Rigid);
 }
 
 TEST(CudaPcgAmg, MixedBackendCarriesRigidBodyModes) {
-    check_structure<CudaMixedPCGSolverBackend>("mixed", test::hex_bar(17), AmgModes::Rigid, 120);
+    check_structure<CudaMixedPCGSolverBackend>("mixed", test::hex_bar(17), AmgModes::Rigid);
 }
 
 // Aggregates with different numbers of coarse equations reach the device too:
 // without the drilling columns this sheet takes hundreds of iterations.
 TEST(CudaPcgAmg, StableBackendCarriesDrillingModes) {
-    check_structure<CudaPCGSolverBackend>("stable", test::in_plane_sheet(100), AmgModes::Drilling, 62);
+    check_structure<CudaPCGSolverBackend>("stable", test::in_plane_sheet(100), AmgModes::Drilling);
 }
 
 TEST(CudaPcgAmg, MixedBackendCarriesDrillingModes) {
-    check_structure<CudaMixedPCGSolverBackend>("mixed", test::in_plane_sheet(100), AmgModes::Drilling, 62);
+    check_structure<CudaMixedPCGSolverBackend>("mixed", test::in_plane_sheet(100), AmgModes::Drilling);
 }
 
 #endif

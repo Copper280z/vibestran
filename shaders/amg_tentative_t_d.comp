@@ -1,0 +1,48 @@
+// y = T^T x from the patches of AmgTentative: LANES invocations per coarse equation.
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+#extension GL_KHR_shader_subgroup_shuffle_relative : enable
+#extension GL_GOOGLE_include_directive : require
+#define STATE_BINDING 6
+#include "amg_state.glsl"
+
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const uint LANES = 32;
+// Subgroup shuffles when the device supports them for LANES <= subgroup size.
+layout(constant_id = 1) const bool SUBGROUP = false;
+layout(push_constant) uniform PC { uint start, count; } pc;
+layout(set = 0, binding = 0) readonly buffer Values { double v[]; };
+layout(set = 0, binding = 1) readonly buffer Equation { int equation[]; };
+layout(set = 0, binding = 2) readonly buffer ColPatch { int col_patch[]; };
+layout(set = 0, binding = 3) readonly buffer Patches { ivec4 patches[]; };
+layout(set = 0, binding = 4) readonly buffer X { double x[]; };
+layout(set = 0, binding = 5) buffer Y { double y[]; };
+shared double partial[256];
+
+void main() {
+    if (st.flags != 0) return;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint lane = tid % LANES;
+    const uint local = (gl_WorkGroupID.x * 256u + tid) / LANES;
+    const uint col = pc.start + local;
+    double sum = 0;
+    if (local < pc.count) {
+        const int g = col_patch[col];
+        const int first_row = patches[g].x, rows = patches[g + 1].x - first_row;
+        const int width = patches[g + 1].z - patches[g].z;
+        const int column = patches[g].y + (int(col) - patches[g].z);
+        for (int r = int(lane); r < rows; r += int(LANES)) sum += v[column + r * width] * x[equation[first_row + r]];
+    }
+    if (SUBGROUP) {
+        for (uint d = LANES / 2u; d > 0u; d >>= 1u) sum += subgroupShuffleDown(sum, d);
+    } else {
+        partial[tid] = sum;
+        barrier();
+        for (uint s = LANES / 2u; s > 0u; s >>= 1u) {
+            if (lane < s) partial[tid] += partial[tid + s];
+            barrier();
+        }
+        sum = partial[tid];
+    }
+    if (lane == 0u && local < pc.count) y[col] = sum;
+}

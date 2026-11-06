@@ -94,10 +94,10 @@ struct AmgDevicePartition {
 };
 
 inline void log_amg_device_plan(const char* backend, const AmgHostCsr& a,
-    const AmgDevicePartition& p, std::size_t fixed_bytes, std::size_t budget) {
-    log_debug(std::format("[{} device AMG] {} GPU rows, {} CPU rows, {} gathered inputs, {} vector bytes/SpMV; fixed={} planned={} budget={} bytes",
+    const AmgDevicePartition& p, std::size_t fixed_bytes, std::size_t budget, bool computed_transfers) {
+    log_debug(std::format("[{} device AMG] {} GPU rows, {} CPU rows, {} gathered inputs, {} vector bytes/SpMV; fixed={} planned={} budget={} bytes; {} finest transfers",
         backend, p.gpu_rows, a.nrows - p.gpu_rows, p.input_columns.size(),
-        8 * (p.input_columns.size() + a.nrows - p.gpu_rows), fixed_bytes, p.device_bytes, budget));
+        8 * (p.input_columns.size() + a.nrows - p.gpu_rows), fixed_bytes, p.device_bytes, budget, computed_transfers ? "computed" : "stored"));
     log_debug(std::format("[{} device AMG] row budgets: 50%={} 75%={} 90%={} bytes", backend,
         p.row_fraction_budgets[0], p.row_fraction_budgets[1], p.row_fraction_budgets[2]));
 }

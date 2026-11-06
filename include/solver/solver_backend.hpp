@@ -41,6 +41,9 @@ struct AmgDeviceReport {
     std::size_t budget_bytes{0};  ///< Free memory less headroom, within any explicit budget.
     /// Device memory the engine took, measured after its first solve; 0 until then.
     std::size_t measured_bytes{0};
+    /// The device applies the finest P and R from A, the smoother and T instead
+    /// of storing them: the same operator in less memory, for more products.
+    bool computed_transfers{false};
 };
 
 /// Options for SolverBackend::factor().

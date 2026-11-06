@@ -1,0 +1,27 @@
+// y = T x from the patches of AmgTentative: an invocation per row.
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+#extension GL_GOOGLE_include_directive : require
+#define STATE_BINDING 6
+#include "amg_state.glsl"
+
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC { uint start, count; } pc;
+layout(set = 0, binding = 0) readonly buffer Values { double v[]; };
+layout(set = 0, binding = 1) readonly buffer Equation { int equation[]; };
+layout(set = 0, binding = 2) readonly buffer RowPatch { int row_patch[]; };
+layout(set = 0, binding = 3) readonly buffer Patches { ivec4 patches[]; };
+layout(set = 0, binding = 4) readonly buffer X { double x[]; };
+layout(set = 0, binding = 5) buffer Y { double y[]; };
+
+void main() {
+    if (st.flags != 0) return;
+    if (gl_GlobalInvocationID.x >= pc.count) return;
+    const int row = int(pc.start + gl_GlobalInvocationID.x);
+    const int g = row_patch[row];
+    const int first_col = patches[g].z, width = patches[g + 1].z - first_col;
+    const int block = patches[g].y + (row - patches[g].x) * width;
+    double sum = 0;
+    for (int k = 0; k < width; ++k) sum += v[block + k] * x[first_col + k];
+    y[equation[row]] = sum;
+}

@@ -193,7 +193,8 @@ have_vulkan_backend = vulkan_dep.found() and glslc.found()
 if have_vulkan_backend
   shader_names = ['spmv', 'dot_reduce', 'axpby', 'jacobi_precond',
                   'spmv_d', 'dot_reduce_d', 'axpby_d', 'jacobi_precond_d', 'amg_gather_d',
-                  'amg_spmv_d', 'amg_ops_d', 'amg_cg_d', 'amg_scalar_d', 'amg_dense_d']
+                  'amg_spmv_d', 'amg_ops_d', 'amg_cg_d', 'amg_scalar_d', 'amg_dense_d',
+                  'amg_tentative_d', 'amg_tentative_t_d']
   foreach name : shader_names
     spv = custom_target(name + '_spv',
       input   : 'shaders' / name + '.comp',

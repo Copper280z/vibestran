@@ -19,6 +19,8 @@
 #include <vector>
 #include <algorithm>
 #include <numeric>
+#include <optional>
+#include <variant>
 
 using namespace vibestran;
 
@@ -43,68 +45,79 @@ TEST(VulkanAmgTest, ResidentAndBudgetedHierarchyPreserveMaterialInterface) {
     }
 }
 
-static void check_structure(const std::string& deck, AmgModes modes, std::size_t partial_mib) {
+// Stored transfers, computed transfers, computed with fine rows on the CPU, and the
+// host hierarchy, each budget from the plan above it: the same operator, so the same
+// iterations, including after a refactor with values that change P.
+static void check_structure(const std::string& deck, AmgModes modes) {
+    using Execution = AmgDeviceReport::Execution;
     auto context = VulkanContext::create();
     if (!context || !context->device_info().supports_float64) GTEST_SKIP() << "Vulkan fp64 unavailable";
     const auto r = test::assemble(deck, true, modes);
     ASSERT_TRUE(r.modes);
     const auto full = r.k.expanded_symmetric();
     const double top = test::largest_magnitude(r.u);
+    const auto changed = test::with_stiff_bands(full, r.u);
     // The device cycle applies the operator test_amg_vcycle.cpp proves SPD on the
     // host, so CG sees the same iterations, up to rounding.
     const int host_iterations = test::host_amg_iterations(r);
-    for (const std::size_t budget : {std::size_t(0), partial_mib * 1024 * 1024, std::size_t(1024) * 1024}) {
+    std::optional<int> changed_iterations;
+    const auto run = [&](std::size_t budget) {
         SCOPED_TRACE(budget);
         VulkanSolverConfig cfg;
         cfg.min_dofs_for_gpu = 0;
         cfg.device_memory_budget = budget;
         auto backend = VulkanSolverBackend::try_create(cfg);
-        ASSERT_TRUE(backend);
-        ASSERT_TRUE(backend->uses_near_nullspace(full.n));
+        EXPECT_TRUE(backend);
+        EXPECT_TRUE(backend->uses_near_nullspace(full.n));
         backend->set_near_nullspace(r.modes);
         const auto x = backend->solve(full, r.f);
-        ASSERT_TRUE(backend->last_refinement()->converged);
-        EXPECT_EQ(backend->last_solve_was_full_gpu(), budget == 0);
+        EXPECT_TRUE(backend->last_refinement()->converged);
         EXPECT_LE(backend->last_iteration_count(), 120);
         EXPECT_NEAR(double(backend->last_iteration_count()), double(host_iterations), 0.15 * host_iterations + 2);
-        for (std::size_t i = 0; i < x.size(); ++i) ASSERT_NEAR(x[i], r.u[i], 1e-6 * top) << i;
-        const auto report = backend->last_amg_device_report();
-        ASSERT_TRUE(report);
-        EXPECT_EQ(report->execution == AmgDeviceReport::Execution::Resident, budget == 0);
-        EXPECT_EQ(report->execution == AmgDeviceReport::Execution::Host, budget == 1024 * 1024);
-        EXPECT_LE(report->planned_bytes, report->budget_bytes);
-        EXPECT_EQ(report->gpu_rows + report->cpu_rows, full.n);
-        // A factor keeps the same hierarchy across solves and a refactor; 2K solves to half.
+        for (std::size_t i = 0; i < x.size(); ++i) { EXPECT_NEAR(x[i], r.u[i], 1e-6 * top) << i; if (::testing::Test::HasFailure()) break; }
+        const auto report = backend->last_amg_device_report().value_or(AmgDeviceReport{});
+        EXPECT_LE(report.planned_bytes, report.budget_bytes);
+        EXPECT_EQ(report.gpu_rows + report.cpu_rows, full.n);
+        EXPECT_EQ(backend->last_solve_was_full_gpu(), report.cpu_rows == 0 && report.execution == Execution::Resident);
         auto made = backend->factor(full);
-        ASSERT_TRUE(std::holds_alternative<std::unique_ptr<LinearFactor>>(made));
+        EXPECT_TRUE(std::holds_alternative<std::unique_ptr<LinearFactor>>(made));
         auto factor = std::get<std::unique_ptr<LinearFactor>>(std::move(made));
-        for (const double scale : {1.0, 2.0}) {
-            SCOPED_TRACE(scale);
-            if (scale != 1.0) {
-                auto doubled = full;
-                std::transform(doubled.values.begin(), doubled.values.end(), doubled.values.begin(),
-                               [scale](double value) { return value * scale; });
-                ASSERT_FALSE(factor->refactor(doubled));
-            }
-            auto solved = factor->solve(r.f);
-            ASSERT_TRUE(std::holds_alternative<std::vector<double>>(solved));
-            const auto& u = std::get<std::vector<double>>(solved);
-            EXPECT_NEAR(double(backend->last_iteration_count()), double(host_iterations), 0.15 * host_iterations + 2);
-            for (std::size_t i = 0; i < u.size(); ++i) ASSERT_NEAR(u[i], r.u[i] / scale, 1e-6 * top) << i;
-        }
-    }
+        EXPECT_FALSE(factor->refactor(changed.k));
+        auto solved = factor->solve(changed.f);
+        EXPECT_TRUE(std::holds_alternative<std::vector<double>>(solved));
+        const auto& u = std::get<std::vector<double>>(solved);
+        for (std::size_t i = 0; i < u.size(); ++i) { EXPECT_NEAR(u[i], r.u[i], 1e-6 * top) << i; if (::testing::Test::HasFailure()) break; }
+        const int iterations = backend->last_iteration_count();
+        if (changed_iterations) EXPECT_NEAR(double(iterations), double(*changed_iterations), 0.03 * *changed_iterations + 1);
+        else changed_iterations = iterations;
+        return report;
+    };
+    const auto stored = run(0);
+    EXPECT_EQ(stored.execution, Execution::Resident);
+    EXPECT_FALSE(stored.computed_transfers);
+    const auto computed = run(stored.planned_bytes - 1);
+    EXPECT_EQ(computed.execution, Execution::Resident);
+    EXPECT_TRUE(computed.computed_transfers);
+    EXPECT_LT(computed.planned_bytes, stored.planned_bytes * 95 / 100);
+    const auto spilled = run(computed.planned_bytes * 9 / 10);
+    EXPECT_EQ(spilled.execution, Execution::FineRowSpill);
+    EXPECT_TRUE(spilled.computed_transfers);
+    EXPECT_GT(spilled.cpu_rows, 0);
+    const auto host = run(1024 * 1024);
+    EXPECT_EQ(host.execution, Execution::Host);
+    EXPECT_FALSE(host.computed_transfers);
 }
 
 // A structure's rigid-body modes must reach the hierarchy on every engine:
 // without them this bar takes tens of thousands of iterations.
 TEST(VulkanAmgTest, RigidBodyModesConvergeResidentAndBudgeted) {
-    check_structure(test::hex_bar(17), AmgModes::Rigid, 120);
+    check_structure(test::hex_bar(17), AmgModes::Rigid);
 }
 
 // Aggregates with different numbers of coarse equations reach the device too:
 // without the drilling columns this sheet takes hundreds of iterations.
 TEST(VulkanAmgTest, DrillingModesConvergeResidentAndBudgeted) {
-    check_structure(test::in_plane_sheet(100), AmgModes::Drilling, 62);
+    check_structure(test::in_plane_sheet(100), AmgModes::Drilling);
 }
 
 TEST(VulkanAmgTest, FactorSolvesEveryColumnAndRefactorUploadsTheNewValues) {

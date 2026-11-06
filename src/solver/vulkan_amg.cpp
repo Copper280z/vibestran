@@ -15,6 +15,8 @@
 #include "amg_cg_d_spv.h"
 #include "amg_scalar_d_spv.h"
 #include "amg_dense_d_spv.h"
+#include "amg_tentative_d_spv.h"
+#include "amg_tentative_t_d_spv.h"
 #include <algorithm>
 #include <map>
 
@@ -29,14 +31,16 @@ static_assert(sizeof(CgState) == 64);
 
 constexpr std::uint32_t kGroups = 256;   // fixed reduction grid (amg_cg_d.comp)
 constexpr int kPollIterations = 8;
-enum Mode : std::uint32_t { kSet, kAdd, kResidual, kSmooth };
-enum Kernel { kSpmv4, kSpmv8, kSpmv16, kSpmv32, kOps, kCg, kScalar, kDense, kKernels };
+enum Mode : std::uint32_t { kSet, kAdd, kResidual, kSmooth, kSubtract, kCorrect };
+enum Kernel { kSpmv4, kSpmv8, kSpmv16, kSpmv32, kTentativeT, kOps, kCg, kScalar, kDense, kTentative, kKernels };
+constexpr std::uint32_t kTentativeLanes = 32;
 
 struct PcSpmv { std::uint32_t row_start, rows, mode; };
 struct PcOps { std::uint32_t n, op, offset, mode; };
 struct PcCg { std::uint32_t n, op; };
 struct PcScalar { std::uint32_t op; };
 struct PcDense { std::uint32_t n; };
+struct PcTentative { std::uint32_t start, count; };
 
 void check(VkResult status, const char* action) {
     if (status != VK_SUCCESS)
@@ -69,10 +73,12 @@ public:
             {amg_spmv_d_spv, amg_spmv_d_spv_len, 8, sizeof(PcSpmv)},
             {amg_spmv_d_spv, amg_spmv_d_spv_len, 8, sizeof(PcSpmv)},
             {amg_spmv_d_spv, amg_spmv_d_spv_len, 8, sizeof(PcSpmv)},
+            {amg_tentative_t_d_spv, amg_tentative_t_d_spv_len, 7, sizeof(PcTentative)},
             {amg_ops_d_spv, amg_ops_d_spv_len, 6, sizeof(PcOps)},
             {amg_cg_d_spv, amg_cg_d_spv_len, 6, sizeof(PcCg)},
             {amg_scalar_d_spv, amg_scalar_d_spv_len, 2, sizeof(PcScalar)},
             {amg_dense_d_spv, amg_dense_d_spv_len, 4, sizeof(PcDense)},
+            {amg_tentative_d_spv, amg_tentative_d_spv_len, 7, sizeof(PcTentative)},
         };
         const auto subgroup = shuffle_lanes(ctx);
         for (int k = 0; k < kKernels; ++k) {
@@ -93,15 +99,15 @@ public:
             li.setLayoutCount = 1; li.pSetLayouts = &dsl_[k];
             li.pushConstantRangeCount = 1; li.pPushConstantRanges = &range;
             check(vkCreatePipelineLayout(device_, &li, nullptr, &layout_[k]), "create pipeline layout");
-            // Sparse products specialize LANES and SUBGROUP.
-            const std::uint32_t lanes = 4u << k;
+            // Products that reduce over lanes specialize LANES and SUBGROUP.
+            const std::uint32_t lanes = k == kTentativeT ? kTentativeLanes : 4u << k;
             const std::array<std::uint32_t, 2> constants{lanes, subgroup >= lanes ? 1u : 0u};
             const std::array<VkSpecializationMapEntry, 2> entries{{{0, 0, 4}, {1, 4, 4}}};
             const VkSpecializationInfo si{2, entries.data(), sizeof(constants), constants.data()};
             VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
             ci.layout = layout_[k];
             ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
-                VK_SHADER_STAGE_COMPUTE_BIT, modules_[k], "main", k <= kSpmv32 ? &si : nullptr};
+                VK_SHADER_STAGE_COMPUTE_BIT, modules_[k], "main", k <= kTentativeT ? &si : nullptr};
             check(vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &ci, nullptr, &pipeline_[k]), "create pipeline");
         }
     }
@@ -178,31 +184,42 @@ struct DeviceCsr {
     VulkanBuffer rp, ci, val;
 };
 
+// AmgTentative on the device.
+struct DeviceTentative {
+    std::size_t rows{0}, cols{0};
+    VulkanBuffer values, equation, row_patch, col_patch, patches;
+};
+
 class Solver {
 public:
-    // Device bytes other than the fine operator, for the budget planner.
-    static std::size_t fixed_bytes(const AmgHierarchy& h) {
+    // Device bytes other than the fine operator, for the budget planner. With
+    // computed_transfers the finest P and R are applied from A, M and T.
+    static std::size_t fixed_bytes(const AmgHierarchy& h, bool computed_transfers) {
         const auto n = h.levels.front().A->nrows;
         std::size_t bytes = 5 * n * 8 + kGroups * 8 + sizeof(CgState) + 65536;
         for (std::size_t l = 0; l < h.levels.size(); ++l) {
             const auto& level = h.levels[l];
             bytes += (l == 0 ? 1 : 3) * level.A->nrows * 8 + level.smoother.size() * 8;
             if (l) bytes += amg_csr_bytes(*level.A, int(level.A->nrows));
-            if (level.P) bytes += amg_csr_bytes(*level.P, int(level.P->nrows)) + amg_csr_bytes(*level.R, int(level.R->nrows));
+            if (computed_transfers && l == 0) bytes += level.tentative->bytes(8) + level.A->nrows * 8;
+            else if (level.P) bytes += amg_csr_bytes(*level.P, int(level.P->nrows)) + amg_csr_bytes(*level.R, int(level.R->nrows));
         }
         return bytes + h.coarse_inverse.size() * 8;
     }
     // Every buffer must fit one storage-buffer descriptor.
-    static bool bindable(const AmgHierarchy& h, std::size_t limit) {
+    static bool bindable(const AmgHierarchy& h, std::size_t limit, bool computed_transfers) {
         const auto fits = [limit](const AmgHostCsr* a) {
             return !a || (a->nnz * 8 <= limit && (a->nrows + 1) * 8 <= limit);
         };
+        std::size_t l = 0;
         return std::ranges::all_of(h.levels, [&](const AmgLevel& level) {
-                   return fits(level.A.get()) && fits(level.P.get()) && fits(level.R.get());
+                   const bool computed = computed_transfers && l++ == 0;
+                   return fits(level.A.get()) && (computed ? level.tentative->values.size() * 8 <= limit
+                                                           : fits(level.P.get()) && fits(level.R.get()));
                }) && h.coarse_inverse.size() * 8 <= limit;
     }
 
-    Solver(VulkanContext& ctx, Pipelines& pl, const AmgHierarchy& h, std::optional<AmgDevicePartition> partition)
+    Solver(VulkanContext& ctx, Pipelines& pl, const AmgHierarchy& h, std::optional<AmgDevicePartition> partition, bool computed_transfers)
         : ctx_(ctx), pl_(pl), kernels_(kernels(ctx, pl)), sets_(ctx.device(), kernels_), h_(h), n_(int(h.levels.front().A->nrows)), partition_(std::move(partition)),
           r_(buffer(std::size_t(n_) * 8)), u_(buffer(std::size_t(n_) * 8)), p_(buffer(std::size_t(n_) * 8)),
           q_(buffer(std::size_t(n_) * 8)), z_(buffer(std::size_t(n_) * 8)),
@@ -217,7 +234,8 @@ public:
             d.m = buffer(std::max<std::size_t>(level.smoother.size(), 1) * 8);
             if (!level.smoother.empty()) upload(d.m, level.smoother);
             d.a = csr(*level.A, l == 0 && partition_ ? partition_->gpu_rows : int(count));
-            if (level.P) { d.p = csr(*level.P, int(level.P->nrows)); d.r = csr(*level.R, int(level.R->nrows)); }
+            if (computed_transfers && l == 0) { d.tentative = tentative(*level.tentative); d.work = buffer(count * 8); }
+            else if (level.P) { d.p = csr(*level.P, int(level.P->nrows)); d.r = csr(*level.R, int(level.R->nrows)); }
             levels_.push_back(std::move(d));
         }
         coarse_ = buffer(std::max<std::size_t>(h.coarse_inverse.size(), 1) * 8);
@@ -252,6 +270,10 @@ public:
             auto& d = levels_[l];
             if (!level.smoother.empty()) upload(d.m, level.smoother);
             if (d.a.rows) d.a.val.upload<double>(ctx_, {level.A->val, std::size_t(level.A->ptr[d.a.rows])});
+            if (level.tentative && d.p.rows) {
+                d.p.val.upload<double>(ctx_, {level.P->val, level.P->nnz});
+                d.r.val.upload<double>(ctx_, {level.R->val, level.R->nnz});
+            }
         }
         if (h_.coarse_direct()) upload(coarse_, h_.coarse_inverse);
     }
@@ -286,17 +308,30 @@ public:
     // V-cycle operations (amg_vcycle), recorded into the current segment.
     void smooth_zero(std::size_t l) { ops(0, rows(l), 0, kSet, f(l), levels_[l].x, f(l), levels_[l].m, f(l)); }
     void residual(std::size_t l) { product(l, kResidual, levels_[l].x, y(l), f(l), f(l)); }
-    void restriction(std::size_t l) { spmv(levels_[l].r, kSet, y(l), f(l + 1), y(l), y(l)); }
+    // R y = T^T (y - A M y). y is not read again before smooth_post writes it.
+    void restriction(std::size_t l) {
+        auto& d = levels_[l];
+        if (!d.tentative.rows) { spmv(d.r, kSet, y(l), f(l + 1), y(l), y(l)); return; }
+        ops(0, rows(l), 0, kSet, y(l), d.work, y(l), d.m, y(l));
+        product(l, kSubtract, d.work, y(l), y(l), y(l));
+        tentative_dispatch(kTentativeT, d.tentative, y(l), f(l + 1));
+    }
     void coarse(std::size_t l) {
         if (!h_.coarse_direct()) { smooth_zero(l); smooth_post(l); return; }
         const auto n = std::uint32_t(rows(l));
         kernels_.dispatch(cmd_, kDense, sets_.get(kDense, {&coarse_, &f(l), &y(l), &state_}), PcDense{n}, n);
     }
-    void prolongation(std::size_t l) { spmv(levels_[l].p, kAdd, y(l + 1), levels_[l].x, y(l + 1), y(l + 1)); }
+    // x += P e = T e - M A T e.
+    void prolongation(std::size_t l) {
+        auto& d = levels_[l];
+        if (!d.tentative.rows) { spmv(d.p, kAdd, y(l + 1), d.x, y(l + 1), y(l + 1)); return; }
+        tentative_dispatch(kTentative, d.tentative, y(l + 1), d.work);
+        product(l, kCorrect, d.work, d.x, d.work, d.m);
+    }
     void smooth_post(std::size_t l) { product(l, kSmooth, levels_[l].x, y(l), f(l), levels_[l].m); }
 
 private:
-    struct Level { VulkanBuffer f, x, y, m; DeviceCsr a, p, r; };
+    struct Level { VulkanBuffer f, x, y, m, work; DeviceCsr a, p, r; DeviceTentative tentative; };
     struct Segment { VkCommandBuffer cmd{VK_NULL_HANDLE}; VkFence fence{VK_NULL_HANDLE}; bool gather{false}; };
 
     bool partitioned() const { return partition_ && partition_->gpu_rows < n_; }
@@ -328,6 +363,33 @@ private:
             d.val.upload<double>(ctx_, {a.val, nnz});
         }
         return d;
+    }
+
+    DeviceTentative tentative(const AmgTentative& t) {
+        DeviceTentative d;
+        d.rows = t.equation.size(); d.cols = t.col_patch.size();
+        d.values = buffer(t.values.size() * 8); d.equation = buffer(t.equation.size() * 4);
+        d.row_patch = buffer(t.row_patch.size() * 4); d.col_patch = buffer(t.col_patch.size() * 4);
+        d.patches = buffer(t.patches.size() * 16);
+        upload(d.values, t.values);
+        d.equation.upload<int>(ctx_, t.equation);
+        d.row_patch.upload<int>(ctx_, t.row_patch);
+        d.col_patch.upload<int>(ctx_, t.col_patch);
+        d.patches.upload<int>(ctx_, std::span<const int>(t.patches.front().data(), t.patches.size() * 4));
+        return d;
+    }
+    // y = T x or y = T^T x, split like spmv() where a dispatch would pass the limit.
+    void tentative_dispatch(int kernel, const DeviceTentative& t, const VulkanBuffer& x, VulkanBuffer& out) {
+        const bool transpose = kernel == kTentativeT;
+        const auto total = transpose ? t.cols : t.rows;
+        const std::size_t per_group = transpose ? 256 / kTentativeLanes : 256;
+        const std::size_t chunk = std::size_t(ctx_.device_info().max_workgroup_count_x) * per_group;
+        const auto& index = transpose ? t.col_patch : t.row_patch;
+        for (std::size_t start = 0; start < total; start += chunk) {
+            const auto count = std::min(chunk, total - start);
+            kernels_.dispatch(cmd_, kernel, sets_.get(kernel, {&t.values, &t.equation, &index, &t.patches, &x, &out, &state_}),
+                PcTentative{std::uint32_t(start), std::uint32_t(count)}, div_up(count, per_group));
+        }
     }
 
     void spmv(const DeviceCsr& a, Mode mode, const VulkanBuffer& x, VulkanBuffer& out,
@@ -495,8 +557,8 @@ std::unique_ptr<detail::AmgSystem> make_vulkan_amg(VulkanContext& ctx, Pipelines
     const int max = max_iterations > 0 ? max_iterations : 10000;
     class Engine final : public AmgEngine {
     public:
-        Engine(VulkanContext& c, Pipelines& p, const AmgHierarchy& h, std::optional<AmgDevicePartition> part, int m)
-            : solver_(c, p, h, std::move(part)), max_(m) {}
+        Engine(VulkanContext& c, Pipelines& p, const AmgHierarchy& h, std::optional<AmgDevicePartition> part, bool computed, int m)
+            : solver_(c, p, h, std::move(part), computed), max_(m) {}
         std::pair<int, double> solve(const std::vector<double>& b, double tol, std::vector<double>& x) override {
             return solver_.solve(b, tol, max_, x);
         }
@@ -513,23 +575,34 @@ std::unique_ptr<detail::AmgSystem> make_vulkan_amg(VulkanContext& ctx, Pipelines
             const auto& fine = *h.levels.front().A;
             const auto rows = int(fine.nrows);
             const auto limit = ctx.device_info().max_storage_buffer_range;
-            const auto fixed = Solver::fixed_bytes(h);
             // Queried now: the previous hierarchy of a refactor is gone and setup took time.
             const auto available = budget();
+            // Stored transfers when all of it fits and binds; otherwise computed, the
+            // same operator in less memory, and then rows on the CPU as well.
+            const bool can_compute = h.levels.front().tentative != nullptr;
+            const auto stored_fixed = Solver::fixed_bytes(h, false);
+            const bool computed = can_compute &&
+                (stored_fixed + amg_csr_bytes(fine, rows) > available || !Solver::bindable(h, limit, false));
+            const auto fixed = computed ? Solver::fixed_bytes(h, true) : stored_fixed;
             std::optional<AmgDevicePartition> partition;
             if (available >= fine.nrows * 80 && fine.nrows * 8 <= limit &&
-                (fine.nrows + 255) / 256 <= ctx.device_info().max_workgroup_count_x && Solver::bindable(h, limit))
+                (fine.nrows + 255) / 256 <= ctx.device_info().max_workgroup_count_x && Solver::bindable(h, limit, computed))
                 partition = AmgDevicePartition::plan(fine, available, fixed, limit);
+            // A budget that keeps only some of the rows also computes the transfers.
+            if (partition && !computed && can_compute) {
+                const auto saved = stored_fixed - Solver::fixed_bytes(h, true);
+                for (auto& bytes : partition->row_fraction_budgets) bytes -= saved;
+            }
             fully_resident = false;
             if (!partition) {
                 log_debug(std::format("[vulkan device AMG] workspace does not fit: fixed={} budget={} bytes; using host hierarchy", fixed, available));
                 report = Report{Report::Execution::Host, 0, rows, 0, available, 0};
                 return std::make_unique<HostAmgEngine>(scaled, h, vulkan_partitioned_spmv(ctx, pl, available), max);
             }
-            log_amg_device_plan("vulkan", fine, *partition, fixed, available);
+            log_amg_device_plan("vulkan", fine, *partition, fixed, available, computed);
             report = Report{partition->gpu_rows == rows ? Report::Execution::Resident : Report::Execution::FineRowSpill,
-                partition->gpu_rows, rows - partition->gpu_rows, partition->device_bytes, available, 0};
-            auto engine = std::make_unique<Engine>(ctx, pl, h, std::move(partition), max);
+                partition->gpu_rows, rows - partition->gpu_rows, partition->device_bytes, available, 0, computed};
+            auto engine = std::make_unique<Engine>(ctx, pl, h, std::move(partition), computed, max);
             fully_resident = engine->fully_resident();
             return engine;
         }, std::move(modes));

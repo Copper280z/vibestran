@@ -211,7 +211,7 @@ static void print_usage() {
       "  --amg-modes=constant|rigid|drilling\n"
       "                             Near-nullspace of the AMG preconditioner\n"
       "                             for SOL 101 on GPU PCG backends;\n"
-      "                             rigid is the default (also\n"
+      "                             drilling is the default (also\n"
       "                             PARAM,AMGMODES)\n"
       "  --dump-system=<prefix>     Write each subcase's reduced K (and M,\n"
       "                             F, u) in Matrix Market format and its\n"

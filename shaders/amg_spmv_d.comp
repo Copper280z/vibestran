@@ -20,7 +20,8 @@ layout(set = 0, binding = 5) readonly buffer F { double f[]; };
 layout(set = 0, binding = 6) readonly buffer M { double m[]; };
 shared double partial[256];
 
-// mode 0: y = Ax; 1: y += Ax; 2: y = f - Ax; 3: y = x + m (f - Ax)
+// mode 0: y = Ax; 1: y += Ax; 2: y = f - Ax; 3: y = x + m (f - Ax);
+//      4: y -= Ax; 5: y += f - m Ax
 void main() {
     if (st.flags != 0) return;
     const uint tid = gl_LocalInvocationID.x;
@@ -45,5 +46,7 @@ void main() {
     if (pc.mode == 0u) y[row] = sum;
     else if (pc.mode == 1u) y[row] += sum;
     else if (pc.mode == 2u) y[row] = f[row] - sum;
-    else y[row] = x[row] + m[row] * (f[row] - sum);
+    else if (pc.mode == 3u) y[row] = x[row] + m[row] * (f[row] - sum);
+    else if (pc.mode == 4u) y[row] -= sum;
+    else y[row] += f[row] - m[row] * sum;
 }
