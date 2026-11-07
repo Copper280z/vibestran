@@ -175,6 +175,39 @@ def solid_tet10(out, n):
     out.write("ENDDATA\n")
 
 
+def solid_hex20(out, n):
+    """The same bar in CHEXA20: 4n x n x n cells, with their edge midpoints on a lattice of half cells."""
+    out.write(STATIC_HEADER + STEEL + "PSOLID,1,1\n")
+    nx, ny, nz = 8 * n, 2 * n, 2 * n
+    def node(i, j, k):
+        return 1 + i + (nx + 1) * (j + (ny + 1) * k)
+    # A lattice point is a corner, or an edge midpoint with one odd coordinate.
+    def used(i, j, k):
+        return i % 2 + j % 2 + k % 2 <= 1
+    for k in range(nz + 1):
+        out.write("".join(f"GRID,{node(i, j, k)},,{num(4 * i / nx)},{num(j / ny)},{num(k / nz)}\n"
+                          for j in range(ny + 1) for i in range(nx + 1) if used(i, j, k)))
+    corners = [(0, 0, 0), (2, 0, 0), (2, 2, 0), (0, 2, 0), (0, 0, 2), (2, 0, 2), (2, 2, 2), (0, 2, 2)]
+    edges = [(0, 1), (1, 2), (2, 3), (3, 0), (0, 4), (1, 5), (2, 6), (3, 7), (4, 5), (5, 6), (6, 7), (7, 4)]
+    eid = 1
+    lines = []
+    for k in range(0, nz, 2):
+        for j in range(0, ny, 2):
+            for i in range(0, nx, 2):
+                g = [node(i + c[0], j + c[1], k + c[2]) for c in corners]
+                for a, b in edges:
+                    p, q = corners[a], corners[b]
+                    g.append(node(i + (p[0] + q[0]) // 2, j + (p[1] + q[1]) // 2, k + (p[2] + q[2]) // 2))
+                lines.append(f"CHEXA,{eid},1,{','.join(map(str, g[:6]))},+\n+,{','.join(map(str, g[6:14]))},+\n"
+                             f"+,{','.join(map(str, g[14:]))}\n")
+                eid += 1
+        out.write("".join(lines))
+        lines.clear()
+    spc1(out, 123, (node(0, j, k) for k in range(nz + 1) for j in range(ny + 1) if used(0, j, k)))
+    forces(out, (node(nx, j, k) for k in range(nz + 1) for j in range(ny + 1) if used(nx, j, k)), 1e6, (0, 0, -1))
+    out.write("ENDDATA\n")
+
+
 def solid_contrast(out, n):
     """The hexahedral bar as a 10^6:1 stiffness checkerboard of a fixed pattern."""
     out.write(STATIC_HEADER + "MAT1,1,1.+9,,0.3\nMAT1,2,1.+3,,0.3\nPSOLID,1,1\nPSOLID,2,2\n")
@@ -560,6 +593,7 @@ CLASSES = {
     "magnetic-coil": (text_deck(lambda n: magnetic_deck("coil", n=n, element="tet")), [32, 40, 48], H),
     "solid-hex": (solid_cantilever, [17, 26, 40], H),
     "solid-tet10": (solid_tet10, [8, 12, 19], H),
+    "solid-hex20": (solid_hex20, [10, 15, 24], H),
     "solid-contrast": (solid_contrast, [17, 26, 40], H),
     "solid-thin": (solid_plate, [80, 160, 320], "in-plane h only: two layers, so the aspect ratio improves from 12.5 to 3.1"),
     "shell-thin": (shell_bending(0.001), [100, 200, 400], H),
