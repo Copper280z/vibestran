@@ -1,6 +1,7 @@
 #pragma once
 #include "io/f06_header.hpp"
 #include "magnetic/mesh.hpp"
+#include <complex>
 #include <limits>
 #include <optional>
 
@@ -75,8 +76,42 @@ struct DriveSummary {
   std::vector<double> lag;
   std::vector<int> phases; // indices into Results::circuits
 };
+struct EddyStep {
+  double time{0}, loss{0}; // seconds, watts
+  double electrical_input{0}, winding_loss{0}; // watts
+  std::vector<double> voltage; // V, in circuit order
+  std::vector<double> property_loss; // ordered as TransientSummary::properties
+  std::vector<Vector> current_density; // cell average, A/m², when BFIELD writes
+  std::vector<double> loss_density; // cell average, W/m³, when BFIELD writes
+};
+struct TransientSummary {
+  double dt{0}, cycle_residual{0}, power_residual{0};
+  double mean_load{0}, peak_to_peak{0}, mean_loss{0}; // N or N·m, W
+  double mean_electrical_input{0}, mean_winding_loss{0}; // W
+  int steps_per_cycle{0}, cycles{0}, symbolic_analyses{0}, numeric_factorizations{0};
+  bool converged{false};
+  std::vector<int> properties;
+  std::vector<double> mean_property_loss;
+};
+struct TerminalResult {
+  int id{0};
+  std::complex<double> voltage, current; // peak V and A, current into conductor
+};
+struct HarmonicResult {
+  double frequency{0}, mean_loss{0}, mean_input{0}, power_residual{0};
+  std::vector<int> properties;
+  std::vector<double> property_loss, loss_density;
+  Eigen::VectorXd potential_imag;
+  std::vector<Vector> b_imag, h_imag, current_real, current_imag;
+  std::vector<std::complex<double>> winding_current, linkage;
+  std::vector<TerminalResult> terminals;
+};
 // One solved state: a static subcase, or one position of a MOTION subcase.
 struct CaseResults {
+  // Why this state or sweep can't be trusted, for the fatal message; empty when all is well.
+  std::string failure;
+  // False when a failed solve left nothing to report: the rest of this case is empty.
+  bool has_results{true};
   int id{0}, iterations{0};
   double residual{0}, energy{0}, coenergy{0};
   bool extrapolated{false};
@@ -115,6 +150,9 @@ struct CaseResults {
   std::optional<AirGap> air_gap;
   std::optional<DriveState> drive;          // a DRIVE step
   std::optional<DriveSummary> drive_summary; // a DRIVE subcase
+  std::optional<EddyStep> eddy;               // a MAGTRANS time step
+  std::optional<TransientSummary> transient; // a MAGTRANS subcase
+  std::optional<HarmonicResult> harmonic;    // a MAGHARM subcase
 };
 struct Results {
   Mesh mesh;

@@ -19,6 +19,85 @@
 
 using namespace tube_deck;
 
+TEST(LineMotion, TransientAntiPeriodicPitchMatchesTheFullPeriod) {
+  // The sleeve crosses the pitch boundary, while the magnet edges are inside
+  // and across it. Compare current return and history with two explicit
+  // pitches, which require only ordinary periodicity at their ends.
+  for (bool planar : {false, true}) {
+    SCOPED_TRACE(planar ? "flat" : "tubular");
+    const double speed = planar ? -2. : 2.;
+    auto run = [&](int pitches) {
+      const Tube tube{.pitches = pitches, .rows = 12, .offset = 2, .layers = 0,
+                      .gap = true, .planar = planar, .teeth = 1};
+      auto m = parsed(travelling(tube, {.start = .001}));
+      m.options.transient = true;
+      m.motions[1].speed = speed;
+      m.subcases[0].time_step = 1;
+      m.subcases[0].field.enabled = false;
+      m.time_steps[1] = {.maximum_dt = .00061, .max_cycles = 6};
+      m.conductivity = {{2, 5e4}, {3, 6e5}};
+      return solved(m);
+    };
+    const auto half = run(1), whole = run(2);
+    ASSERT_EQ(half.cases.size(), 1U);
+    ASSERT_EQ(whole.cases.size(), 1U);
+    const auto &a = half.cases[0], &b = whole.cases[0];
+    ASSERT_TRUE(a.transient->converged) << a.failure;
+    ASSERT_TRUE(b.transient->converged) << b.failure;
+    const auto &t = *a.transient;
+    ASSERT_EQ(t.steps_per_cycle, b.transient->steps_per_cycle);
+    EXPECT_NEAR(t.dt * t.steps_per_cycle, 2 * pitch / std::abs(speed), 1e-15);
+    EXPECT_GT(t.mean_loss, 0.);
+    EXPECT_LT(t.mean_load * speed, 0.);
+    EXPECT_NEAR(t.mean_loss, b.transient->mean_loss, 1e-7 * t.mean_loss);
+    EXPECT_NEAR(t.mean_load, b.transient->mean_load, 1e-7 * std::abs(t.mean_load));
+    const auto count = static_cast<size_t>(t.steps_per_cycle);
+    for (size_t k = 1; k <= count; ++k)
+      EXPECT_NEAR(a.steps[a.steps.size() - k].torque, b.steps[b.steps.size() - k].torque,
+                  1e-7 * t.peak_to_peak + 1e-10);
+  }
+}
+
+TEST(LineMotion, TranslatingTubularSleeveApproachesTheWeakReactionLoss) {
+  // A uniform tubular sleeve moves through the fixed coils' DC field.
+  // In the weak reaction limit its hoop electric field is v B_r, so
+  // power follows from the magnetostatic radial field in the sleeve.
+  const Tube t{.pitches = 2, .machine = 2, .rows = 24, .layers = 0,
+               .current = 3., .gap = true};
+  auto m = parsed(travelling(t, {}));
+  m.materials[3].br = 0.;
+  m.materials[5] = {};
+  m.properties[5] = {5};
+  auto stationary = m;
+  stationary.subcases[0].motion = 0;
+  const auto reference = solved(stationary);
+  ASSERT_EQ(reference.cases.size(), 1U);
+  constexpr double speed = .5, sigma = 1e4;
+  double radial_energy = 0;
+  for (const auto &c : reference.mesh.cells)
+    if (c.property == 5)
+      for (const auto &q : quadrature(reference.mesh, c)) {
+        const auto curl = edge_curls(c, q.position);
+        double radial = 0;
+        for (size_t i = 0; i < curl.size(); ++i)
+          radial += c.radial.dot(curl[i]) * reference.cases[0].potential[c.edges[i]];
+        radial_energy += q.weight * out_of_plane(reference.mesh, q.position) * radial * radial;
+      }
+  const double expected = sigma * speed * speed * radial_energy;
+  ASSERT_GT(expected, 1e-8);
+  m.options.transient = true;
+  m.conductivity[5] = sigma;
+  m.motions[1].speed = speed;
+  m.subcases[0].time_step = 1;
+  m.subcases[0].field.enabled = false;
+  m.time_steps[1] = {.maximum_dt = .00061, .max_cycles = 5};
+  const auto run = solved(m);
+  ASSERT_EQ(run.cases.size(), 1U);
+  const auto &c = run.cases.front();
+  ASSERT_TRUE(c.transient->converged) << c.failure;
+  EXPECT_NEAR(c.transient->mean_loss, expected, .03 * expected);
+}
+
 TEST(LineMotion, EachPositionIsTheStaticDeckMovedByHand) {
   // A position is the static deck with the mover's grids moved by hand
   // (the gap's elements, which the element does not use, sheared): the same

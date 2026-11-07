@@ -251,8 +251,11 @@ void write_motion_f06(std::ostream &f06, const Model &model,
 void write_f06(std::ostream &f06, const Model &model, const Results &results,
                const F06RunInfo *run) {
   write_f06_header(f06,
-                   "S O L   M A G S T A T   M A G N E T O S T A T I C   A N A "
-                   "L Y S I S",
+                   model.options.transient
+                       ? "S O L   M A G T R A N S   T R A N S I E N T   M A G N E T I C S"
+                       : model.options.harmonic
+                       ? "S O L   M A G H A R M   H A R M O N I C   M A G N E T I C S"
+                       : "S O L   M A G S T A T   M A G N E T O S T A T I C   A N A L Y S I S",
                    results.summary, run);
   f06 << std::setprecision(12);
   for (const auto &source : results.sources)
@@ -270,6 +273,49 @@ void write_f06(std::ostream &f06, const Model &model, const Results &results,
   }
   for (size_t ci = 0; ci < results.cases.size(); ++ci) {
     const auto &c = results.cases[ci];
+    if (!c.has_results) {
+      f06 << "\nSUBCASE " << c.id << "\nNo results: " << c.failure << '\n';
+      continue;
+    }
+    if (c.harmonic) {
+      const auto &h = *c.harmonic;
+      f06 << "\nSUBCASE " << c.id << "\nFrequency (Hz) " << h.frequency
+          << "  mean eddy loss (W) " << h.mean_loss
+          << "  mean terminal and winding input (W) " << h.mean_input << '\n';
+      if (std::isfinite(h.power_residual))
+        f06 << "Power-balance residual (W) " << h.power_residual << '\n';
+      for (size_t p = 0; p < h.properties.size(); ++p)
+        f06 << "PID " << h.properties[p] << "  mean eddy loss (W) "
+            << h.property_loss[p] << '\n';
+      for (const auto &terminal : h.terminals)
+        f06 << "MTERM " << terminal.id << "  peak V " << terminal.voltage
+            << "  peak A into conductor " << terminal.current << '\n';
+      continue;
+    }
+    if (c.transient) {
+      const auto &t = *c.transient;
+      const auto &motion = model.motions.at(model.subcases[ci].motion);
+      f06 << "\nSUBCASE " << c.id << "\nMOTION " << motion.id << " at "
+          << motion.speed << (motion.translate ? " m/s" : " rpm")
+          << ", dt (s) " << t.dt << ", " << t.cycles
+          << " complete cycles\nPeriodic steady state "
+          << (t.converged ? "converged" : "unsettled")
+          << "  relative cycle residual " << t.cycle_residual << '\n';
+      if (t.cycles) {
+        f06 << "Last complete cycle\n"
+            << (motion.translate ? "Force (N) mean " : "Torque (Nm) mean ")
+            << t.mean_load << "  peak-to-peak "
+            << t.peak_to_peak << "\nMean eddy loss (W) " << t.mean_loss
+            << "  power-balance residual (W) " << t.power_residual << '\n';
+        if (!results.circuits.empty())
+          f06 << "Mean electrical input (W) " << t.mean_electrical_input
+              << "  mean winding loss (W) " << t.mean_winding_loss << '\n';
+        for (size_t p = 0; p < t.properties.size(); ++p)
+          f06 << "PID " << t.properties[p] << "  mean eddy loss (W) "
+              << t.mean_property_loss[p] << '\n';
+      }
+      continue;
+    }
     if (!c.steps.empty()) {
       write_motion_f06(f06, model, model.subcases[ci], c);
       continue;
@@ -645,6 +691,8 @@ struct BlockState {
   std::vector<Vector> points;
   std::vector<std::pair<std::string, std::vector<Vector>>> fields;
   std::vector<double> potential; // empty for none
+  std::vector<double> potential_imag; // harmonic only
+  std::vector<double> joule; // W/m³, empty for magnetostatics
 };
 // A subcase state: B and H on the cells, the planar potential at the
 // points, and on the gap cells the air-gap element's own field (B at each
@@ -668,6 +716,49 @@ BlockState field_state(const BlockTopology &t, const Model &model,
     h.push_back(b.back() / mu0);
   }
   out.fields = {{"B_T", std::move(b)}, {"H_A_per_m", std::move(h)}};
+  if (const auto &harmonic = state.harmonic) {
+    out.fields[0].first = "B_real_T";
+    out.fields[1].first = "H_real_A_per_m";
+    std::vector<Vector> bi, hi, jr, ji;
+    for (int c : t.cells) {
+      bi.push_back(harmonic->b_imag[c]);
+      hi.push_back(harmonic->h_imag[c]);
+      jr.push_back(harmonic->current_real[c]);
+      ji.push_back(harmonic->current_imag[c]);
+      out.joule.push_back(harmonic->loss_density[c]);
+    }
+    if (gap) {
+      const AirGapSeries imaginary(*gap, harmonic->potential_imag);
+      for (const auto &x : t.gap_centroids) {
+        bi.push_back(imaginary.field(x));
+        hi.push_back(bi.back() / mu0);
+      }
+      for (int n : t.nodes)
+        out.potential_imag.push_back(harmonic->potential_imag[n]);
+      for (int id : t.gap_grids)
+        out.potential_imag.push_back(imaginary.potential(model.nodes.at(id).position));
+    } else if (mesh.planar) {
+      for (int n : t.nodes)
+        out.potential_imag.push_back(harmonic->potential_imag[n]);
+    }
+    jr.resize(t.types.size(), Vector::Zero());
+    ji.resize(t.types.size(), Vector::Zero());
+    out.joule.resize(t.types.size(), 0.);
+    out.fields.emplace_back("B_imag_T", std::move(bi));
+    out.fields.emplace_back("H_imag_A_per_m", std::move(hi));
+    out.fields.emplace_back("J_eddy_real_A_per_m2", std::move(jr));
+    out.fields.emplace_back("J_eddy_imag_A_per_m2", std::move(ji));
+  }
+  if (const auto &eddy = state.eddy) {
+    std::vector<Vector> current;
+    for (int c : t.cells) {
+      current.push_back(eddy->current_density[c]);
+      out.joule.push_back(eddy->loss_density[c]);
+    }
+    current.resize(t.types.size(), Vector::Zero());
+    out.joule.resize(t.types.size(), 0.);
+    out.fields.emplace_back("J_eddy_A_per_m2", std::move(current));
+  }
   if (mesh.planar &&
       state.potential.size() >= static_cast<Eigen::Index>(mesh.nodes.size())) {
     for (int n : t.nodes)
@@ -714,13 +805,24 @@ void write_block(Hdf5File &h5, hid_t vtkhdf, const std::string &name,
                     state.fields[f].second.end());
     h5.vectors(cell_data.get(), states.front().fields[f].first, values);
   }
+  if (!states.front().joule.empty()) {
+    std::vector<double> values;
+    for (const auto &state : states)
+      values.insert(values.end(), state.joule.begin(), state.joule.end());
+    h5.values(cell_data.get(), "eddy_loss_W_per_m3", values);
+  }
   const bool potential = !states.front().potential.empty();
   if (potential) {
     auto point_data = h5.group(block.get(), "PointData");
     std::vector<double> values;
     for (const auto &state : states)
       values.insert(values.end(), state.potential.begin(), state.potential.end());
-    h5.values(point_data.get(), "A_normal_Wb_per_m", values);
+    if (states.front().potential_imag.empty())
+      h5.values(point_data.get(), "A_normal_Wb_per_m", values);
+    else {
+      h5.values(point_data.get(), "A_normal_real_Wb_per_m", values);
+      h5.values(point_data.get(), "A_normal_imag_Wb_per_m", states.front().potential_imag);
+    }
   }
   if (times.empty())
     return;
@@ -744,6 +846,8 @@ void write_block(Hdf5File &h5, hid_t vtkhdf, const std::string &name,
   h5.values(cell_offsets.get(), "element_id", zeros);
   for (const auto &[field, values] : states.front().fields)
     h5.values(cell_offsets.get(), field, scaled(cells));
+  if (!states.front().joule.empty())
+    h5.values(cell_offsets.get(), "eddy_loss_W_per_m3", scaled(cells));
   if (potential) {
     auto point_offsets = h5.group(steps.get(), "PointDataOffsets");
     h5.values(point_offsets.get(), "A_normal_Wb_per_m", scaled(points));
@@ -892,13 +996,18 @@ Status write_hdf5(const std::string &path, const Model &model,
     if (model.subcases[ci].field.enabled)
       for (const auto &step : results.cases[ci].steps)
         if (!step.b.empty())
-          times.push_back(step.position);
+          times.push_back(step.eddy ? step.eddy->time : step.position);
   std::sort(times.begin(), times.end());
   times.erase(std::unique(times.begin(), times.end()), times.end());
   auto held = [&times](const std::vector<double> &positions) {
     std::vector<int64_t> out;
     if (times.empty())
       return out;
+    if (positions == times) {
+      out.resize(times.size());
+      std::iota(out.begin(), out.end(), int64_t{0});
+      return out;
+    }
     for (double t : times) {
       int64_t best = -1;
       for (size_t k = 0; k < positions.size(); ++k)
@@ -915,7 +1024,12 @@ Status write_hdf5(const std::string &path, const Model &model,
   for (size_t ci = 0; ci < results.cases.size(); ++ci) {
     const auto &c = results.cases[ci];
     const auto &request = model.subcases[ci].field;
-    if (!request.enabled)
+    if (!request.enabled || !c.has_results)
+      continue;
+    // Every position BFIELD wanted may have failed.
+    if (!c.steps.empty() && std::ranges::all_of(c.steps, [](const CaseResults &step) {
+          return step.b.empty();
+        }))
       continue;
     std::vector<int> cells;
     if (request.set)
@@ -935,7 +1049,7 @@ Status write_hdf5(const std::string &path, const Model &model,
         continue;
       states.push_back(field_state(topology, model, results.mesh, step.nodes, step,
                                    step.air_gap ? &*step.air_gap : nullptr));
-      positions.push_back(step.position);
+      positions.push_back(step.eddy ? step.eddy->time : step.position);
     }
     const auto name = "SUBCASE_" + std::to_string(c.id);
     write_block(h5, vtkhdf.get(), name, index++, topology, states, times,
@@ -964,6 +1078,136 @@ Status write_hdf5(const std::string &path, const Model &model,
         sources_node = h5.group(assembly.get(), "sources");
       h5.link(sources_node.get(), name, "/VTKHDF/" + name);
     }
+
+  if (model.options.harmonic) {
+    auto root = h5.group(h5.root(), "MAGHARM");
+    h5.attribute(root.get(), "schema", int64_t{1});
+    h5.attribute(root.get(), "phasors", std::string("peak, real and imaginary, exp(i omega t)"));
+    auto cases = h5.group(root.get(), "subcases");
+    const auto complex_values = [&](hid_t group, const char *name,
+                                    const std::vector<std::complex<double>> &values) {
+      std::vector<double> flat;
+      flat.reserve(2 * values.size());
+      for (const auto &value : values)
+        flat.insert(flat.end(), {value.real(), value.imag()});
+      h5.array(group, name, flat, {values.size(), 2});
+    };
+    for (const auto &c : results.cases) {
+      const auto &h = *c.harmonic;
+      auto group = h5.group(cases.get(), std::to_string(c.id));
+      h5.attribute(group.get(), "frequency_Hz", h.frequency);
+      h5.attribute(group.get(), "mean_eddy_loss_W", h.mean_loss);
+      h5.attribute(group.get(), "mean_electrical_input_W", h.mean_input);
+      h5.attribute(group.get(), "power_residual_W", h.power_residual);
+      h5.values(group.get(), "property_id", std::vector<int64_t>(h.properties.begin(), h.properties.end()));
+      h5.values(group.get(), "property_loss_W", h.property_loss);
+      if (!h.terminals.empty()) {
+        std::vector<int64_t> ids;
+        std::vector<std::complex<double>> voltage, current;
+        for (const auto &terminal : h.terminals) {
+          ids.push_back(terminal.id);
+          voltage.push_back(terminal.voltage);
+          current.push_back(terminal.current);
+        }
+        h5.values(group.get(), "terminal_id", ids);
+        complex_values(group.get(), "terminal_voltage_V", voltage);
+        complex_values(group.get(), "terminal_current_A", current);
+      }
+      if (!results.circuits.empty()) {
+        std::vector<int64_t> ids;
+        for (const auto &circuit : results.circuits)
+          ids.push_back(circuit.id);
+        h5.values(group.get(), "circuit_id", ids);
+        complex_values(group.get(), "winding_current_A", h.winding_current);
+        complex_values(group.get(), "winding_linkage_Wb", h.linkage);
+      }
+    }
+    cases.reset();
+    root.reset();
+    sources_node.reset();
+    fields_node.reset();
+    assembly.reset();
+    vtkhdf.reset();
+    return h5.finish();
+  }
+  if (model.options.transient) {
+    auto root = h5.group(h5.root(), "MAGTRANS");
+    h5.attribute(root.get(), "schema", int64_t{1});
+    h5.attribute(root.get(), "units", std::string("SI"));
+    auto cases = h5.group(root.get(), "subcases");
+    for (size_t ci = 0; ci < results.cases.size(); ++ci) {
+      const auto &c = results.cases[ci];
+      const auto &t = *c.transient;
+      auto group = h5.group(cases.get(), std::to_string(c.id));
+      const auto &motion = model.motions.at(model.subcases[ci].motion);
+      const bool line = motion.translate;
+      h5.attribute(group.get(), line ? "speed_m_per_s" : "speed_rpm", motion.speed);
+      h5.attribute(group.get(), "dt_s", t.dt);
+      h5.attribute(group.get(), "steps_per_cycle", static_cast<int64_t>(t.steps_per_cycle));
+      h5.attribute(group.get(), "cycles", static_cast<int64_t>(t.cycles));
+      h5.attribute(group.get(), "symbolic_analyses", static_cast<int64_t>(t.symbolic_analyses));
+      h5.attribute(group.get(), "numeric_factorizations",
+                   static_cast<int64_t>(t.numeric_factorizations));
+      h5.attribute(group.get(), "converged", static_cast<int64_t>(t.converged));
+      h5.attribute(group.get(), "cycle_residual", t.cycle_residual);
+      h5.attribute(group.get(), "power_residual_W", t.power_residual);
+      h5.attribute(group.get(), line ? "mean_force_N" : "mean_torque_Nm", t.mean_load);
+      h5.attribute(group.get(), line ? "force_peak_to_peak_N" : "torque_peak_to_peak_Nm",
+                   t.peak_to_peak);
+      h5.attribute(group.get(), "mean_eddy_loss_W", t.mean_loss);
+      h5.attribute(group.get(), "mean_electrical_input_W", t.mean_electrical_input);
+      h5.attribute(group.get(), "mean_winding_loss_W", t.mean_winding_loss);
+      if (!c.failure.empty())
+        h5.attribute(group.get(), "failure", c.failure);
+      std::vector<double> time, position, torque, loss, regional, electrical, winding;
+      std::vector<double> current, linkage, voltage;
+      for (const auto &step : c.steps) {
+        time.push_back(step.eddy->time);
+        position.push_back(step.position);
+        torque.push_back(step.torque);
+        loss.push_back(step.eddy->loss);
+        regional.insert(regional.end(), step.eddy->property_loss.begin(),
+                        step.eddy->property_loss.end());
+        electrical.push_back(step.eddy->electrical_input);
+        winding.push_back(step.eddy->winding_loss);
+        for (const auto &circuit : step.circuits) {
+          current.push_back(circuit.current);
+          linkage.push_back(circuit.linkage);
+        }
+        voltage.insert(voltage.end(), step.eddy->voltage.begin(), step.eddy->voltage.end());
+      }
+      h5.values(group.get(), "time_s", time);
+      h5.values(group.get(), line ? "position_m" : "angle_deg", position);
+      h5.values(group.get(), line ? "force_N" : "torque_Nm", torque);
+      h5.values(group.get(), "eddy_loss_W", loss);
+      h5.values(group.get(), "electrical_input_W", electrical);
+      h5.values(group.get(), "winding_loss_W", winding);
+      h5.values(group.get(), "property_id", std::vector<int64_t>(t.properties.begin(),
+                                                               t.properties.end()));
+      h5.values(group.get(), "mean_property_loss_W", t.mean_property_loss);
+      if (!regional.empty())
+        h5.array(group.get(), "property_loss_W", regional,
+                 {static_cast<hsize_t>(time.size()),
+                  static_cast<hsize_t>(t.properties.size())});
+      if (!results.circuits.empty()) {
+        std::vector<int64_t> ids;
+        for (const auto &circuit : results.circuits)
+          ids.push_back(circuit.id);
+        h5.values(group.get(), "circuit_id", ids);
+        const std::vector<hsize_t> dims{time.size(), ids.size()};
+        h5.array(group.get(), "current_A", current, dims);
+        h5.array(group.get(), "linkage_Wb", linkage, dims);
+        h5.array(group.get(), "voltage_V", voltage, dims);
+      }
+    }
+    cases.reset();
+    root.reset();
+    sources_node.reset();
+    fields_node.reset();
+    assembly.reset();
+    vtkhdf.reset();
+    return h5.finish();
+  }
 
   // Scalar results. Rows of each definition table line up with the rows of
   // the same-named group in every subcase.

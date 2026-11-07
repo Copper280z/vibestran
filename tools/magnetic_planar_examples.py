@@ -84,7 +84,7 @@ def planar_deck(kind="winding", n=12, element="quad", depth=.02, angle=0., curre
     return "\n".join(lines+["ENDDATA",""])
 
 
-def machine_deck(case_control, bulk="", rotor_div=24, stator_div=36):
+def machine_deck(case_control, bulk="", rotor_div=24, stator_div=36, *, open_circuit=False):
     """A two-pole magnet rotor (PID 3, ESET 20) in a wound iron stator (PID 2)
     with the meshed air gap between them as PAIRGAP 9. case_control and bulk
     are added as given, e.g. MOTION subcases and MOTION cards."""
@@ -130,16 +130,26 @@ def machine_deck(case_control, bulk="", rotor_div=24, stator_div=36):
     lines += [f"GRID,{i},,{x:.16g},{y:.16g},0" for i, (x, y) in enumerate(grids, 1)]
     lines += [f"{'CTRIA3' if len(c) == 3 else 'CQUAD4'},{e},{p}," + ",".join(map(str, c))
               for e, (p, c) in enumerate(cells, 1)]
-    for slot, ids in slots.items():
-        lines += [f"ESET,{slot},{e}" for e in ids]
-    lines += ["COIL2D,11,1,40", "COIL2D,12,2,-40", "CIRCUIT,1,,11,1,12,1", "ICIRC,1,1,5.",
-              "MPROBE,1,0,.0205,.001,0"]
+    if not open_circuit:
+        for slot, ids in slots.items():
+            lines += [f"ESET,{slot},{e}" for e in ids]
+        lines += ["COIL2D,11,1,40", "COIL2D,12,2,-40", "CIRCUIT,1,,11,1,12,1",
+                  "ICIRC,1,1,5.", "MPROBE,1,0,.0205,.001,0"]
     return "\n".join(lines + ["ENDDATA", ""])
+
+
+def transient_deck():
+    """Small conducting rotor in a slotted stator with open windings."""
+    return machine_deck(
+        ["MOTION = 1", "TSTEP = 1", "BFIELD(EVERY=5) = ALL"],
+        "MOTION,1,20,0,ROTATE,0.\n,-600.\nTSTEP,1,.0022,5\nMATCOND,3,6.E5",
+        rotor_div=16, stator_div=20, open_circuit=True,
+    ).replace("SOL MAGSTAT", "SOL MAGTRANS", 1)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("kind",choices=["uniform","winding","motor"])
+    parser.add_argument("kind",choices=["uniform","winding","motor","transient"])
     parser.add_argument("output",type=Path)
     parser.add_argument("--n",type=int,default=12)
     parser.add_argument("--element",choices=["tri","quad","mixed"],default="quad")
@@ -147,7 +157,10 @@ def main():
     parser.add_argument("--angle",type=float,default=0)
     parser.add_argument("--current",type=float,default=1)
     args = parser.parse_args()
-    text = planar_deck(args.kind,args.n,args.element,args.depth,args.angle,args.current)
+    if args.kind == "transient":
+        text = transient_deck()
+    else:
+        text = planar_deck(args.kind,args.n,args.element,args.depth,args.angle,args.current)
     if text is None:
         parser.error(f"Cannot generate {args.kind}: n={args.n}, element={args.element}, "
                      f"depth={args.depth}, angle={args.angle}; require n>=2, positive "

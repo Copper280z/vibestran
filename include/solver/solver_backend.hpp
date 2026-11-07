@@ -55,6 +55,9 @@ struct FactorOptions {
     /// Report a matrix that is not numerically positive definite as an error
     /// instead of falling back to an indefinite (LDLT or LU) factorization.
     bool require_spd{false};
+    /// The matrix is known to be indefinite. Backends that would first try
+    /// without pivoting skip that attempt.
+    bool indefinite{false};
     /// PARAM,MAXRATIO check of the factor diagonal, applied where the backend
     /// can inspect it. Copied by factor(); it need not outlive the call.
     const FactorRatioCheckPolicy* factor_ratio_policy{nullptr};

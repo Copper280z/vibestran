@@ -8,12 +8,14 @@
 #include "magnetic/motion.hpp"
 #include "magnetic/solver.hpp"
 #include "machine_deck.hpp"
+#include "../../src/magnetic/diffusion.hpp"
 #ifdef VIBESTRAN_HAS_HDF5
 #include "../common/hdf5_results.hpp"
 #endif
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -54,6 +56,231 @@ Subcase subcase(int id, int load, int motion) {
 }
 
 } // namespace
+
+TEST(MagneticTransient, FloatingComponentsCancelIndependentUniformOffsets) {
+  const std::vector<Vector> points{{0, 0, 0}, {1, 0, 0}, {1, 1, 0},
+                                   {0, 1, 0}, {3, 0, 0}, {4, 0, 0},
+                                   {3, 1, 0}};
+  auto built = make_mesh(points, std::vector<NodeList>{{0, 1, 2}, {0, 2, 3}, {4, 5, 6}},
+                         true);
+  ASSERT_TRUE(std::holds_alternative<Mesh>(built)) << error_of(built);
+  auto mesh = std::get<Mesh>(std::move(built));
+  for (auto &cell : mesh.cells)
+    cell.material = cell.property = 1;
+  Model m;
+  m.conductivity[1] = 1.;
+  const CellGeometry geometry(mesh);
+  const Diffusion diffusion(m, mesh, geometry);
+  const Eigen::VectorXd initial = Eigen::VectorXd::Zero(7);
+  Eigen::VectorXd a(7);
+  a << -4., -4., -4., -4., 11., 11., 11.;
+  auto eddy = diffusion.sample(mesh, geometry, diffusion.increment(a, initial), 1., true);
+  EXPECT_NEAR(eddy.loss, 0., 1e-27);
+
+  // A linear potential rate across each cross section. The offsets are
+  // independent even though the conductors have the same material and PID.
+  a[1] += 1.;
+  a[2] += 1.;
+  a[5] += 1.;
+  eddy = diffusion.sample(mesh, geometry, diffusion.increment(a, initial), 1., true);
+  const auto axial = [&](size_t i) { return mesh.cells[i].volume * eddy.current_density[i].z(); };
+  EXPECT_NEAR(axial(0) + axial(1), 0., 1e-14);
+  EXPECT_NEAR(axial(2), 0., 1e-14);
+  EXPECT_NEAR(axial(0), -1. / 12, 1e-14);
+  EXPECT_NEAR(eddy.loss, 1. / 12 + 1. / 36, 1e-14);
+}
+
+TEST(MagneticTransient, InsulatingRotorReproducesTheStaticTorqueAtEveryAngle) {
+  Machine g;
+  g.rotor_div = 16;
+  g.stator_div = 20;
+  g.rotor_rings = g.stator_rings = 2;
+  g.rotor_property = 2;
+  g.cards = magnetized_rotor(1.) + rotor_motion(7, -15, 25) +
+            "MBC,1,0,UNIFORM,.3,0,0\n";
+  auto m = model(g);
+  m.subcases[0].motion = 1;
+  m.subcases[0].boundary = 1;
+  m.subcases[0].field.enabled = false;
+  const auto baseline = solved(m);
+  m.options.transient = true;
+  m.motions[1].step = 0;
+  m.motions[1].count = 1;
+  m.motions[1].speed = -600;
+  m.subcases[0].time_step = 1;
+  m.time_steps[1] = {.maximum_dt = .0042, .max_cycles = 3};
+  const auto run = solved(m);
+  ASSERT_EQ(run.cases.size(), 1U);
+  const auto &c = run.cases.front();
+  ASSERT_TRUE(c.transient->converged) << c.failure;
+  ASSERT_EQ(c.transient->steps_per_cycle, 24);
+  ASSERT_EQ(c.steps.size(), 49U);
+  const auto &reference = baseline.cases.front().steps;
+  for (size_t k = 0; k < reference.size(); ++k) {
+    EXPECT_EQ(c.steps[k].position, reference[k].position);
+    EXPECT_NEAR(c.steps[k].torque, reference[k].torque, 1e-10);
+    EXPECT_EQ(c.steps[k].eddy->loss, 0.);
+  }
+}
+
+TEST(MagneticTransient, RotatingDiskDissipatesAndBrakesInAStationaryField) {
+  // In the weak-diffusion limit B is uniform and Jz = -sigma * B * omega * x.
+  // Integrating Jz²/sigma over a circular cylinder gives the reference power.
+  Machine g;
+  g.rotor_div = g.stator_div = 24;
+  g.rotor_rings = g.stator_rings = 3;
+  g.rotor_property = 2;
+  g.cards = "MATMAG,2,1.\nPMAG2D,2,2\nMATCOND,2,1.E6\n"
+            "MBC,1,0,UNIFORM,.2,0,0\nESET,20,PROP,2\n";
+  auto m = model(g);
+  m.options.transient = true;
+  m.subcases[0].motion = 1;
+  m.subcases[0].boundary = 1;
+  m.subcases[0].field.enabled = false;
+  m.subcases[0].time_step = 1;
+  m.time_steps[1] = {.maximum_dt = .0022, .max_cycles = 5};
+  for (double speed : {600., -600.}) {
+    SCOPED_TRACE(speed);
+    m.motions[1] = {.id = 1, .set = 20, .speed = speed};
+    const auto run = solved(m);
+    ASSERT_EQ(run.cases.size(), 1U);
+    const auto &c = run.cases.front();
+    const auto &t = *c.transient;
+    ASSERT_TRUE(t.converged) << c.failure;
+    const double omega = 2 * pi * speed / 60;
+    const double power = 1e6 * std::pow(.2 * omega, 2) * pi *
+                         std::pow(g.rotor, 4) / 4 * m.options.depth;
+    EXPECT_NEAR(t.mean_loss, power, .06 * power);
+    EXPECT_LT(t.mean_load * omega, 0.);
+    EXPECT_NEAR(t.mean_loss, -t.mean_load * omega, .05 * power);
+  }
+}
+
+TEST(MagneticTransient, RotatingCylinderConvergesToTheTransverseDiffusionSolution) {
+  // In the lab the solution is steady. For A = Im(F(r) exp(i*theta)),
+  // the conducting cylinder has F proportional to I1(r sqrt(i*mu*sigma*omega)).
+  // The insulating exterior has F = U*r + V/r. Match A and its radial
+  // derivative at the cylinder and prescribe a uniform transverse B at R.
+  using Complex = std::complex<double>;
+  constexpr double sigma = 3e7, b0 = .2, speed = 600.;
+  const double omega = 2 * pi * speed / 60;
+  const Complex wave = std::sqrt(Complex(0, mu0 * sigma * omega));
+  const auto bessel = [](Complex z) {
+    Complex term = z / 2., value = term, derivative_times_z = term;
+    for (int k = 1; k < 24; ++k) {
+      term *= z * z / (4. * k * (k + 1));
+      value += term;
+      derivative_times_z += (2. * k + 1.) * term;
+    }
+    return std::pair{value, derivative_times_z};
+  };
+  Machine g;
+  g.rotor_property = 2;
+  g.cards = "MATMAG,2,1.\nPMAG2D,2,2\nMATCOND,2,3.E7\n"
+            "MBC,1,0,UNIFORM,.2,0,0\nESET,20,PROP,2\n";
+  const double a = g.rotor, r = g.stator;
+  const auto [at_surface, gradient] = bessel(wave * a);
+  const Complex scale = b0 * r /
+      (at_surface * a / r + (at_surface + gradient) * (r - a * a / r) / (2 * a));
+  const Complex expected = scale * at_surface;
+  double integral = 0;
+  for (int j = 0; j < 2048; ++j) {
+    const double x = a * (j + .5) / 2048;
+    integral += x * std::norm(scale * bessel(wave * x).first) * a / 2048;
+  }
+  double previous_error = 1., previous_power_error = 1.;
+  for (int divisions : {24, 48}) {
+    SCOPED_TRACE(divisions);
+    g.rotor_div = g.stator_div = divisions;
+    g.rotor_rings = g.stator_rings = divisions / 6;
+    const auto geo = geometry(g);
+    auto m = parsed(g, geo);
+    m.options.transient = true;
+    m.subcases[0].motion = m.subcases[0].boundary = m.subcases[0].time_step = 1;
+    m.motions[1] = {.id = 1, .set = 20, .speed = speed};
+    m.time_steps[1] = {.maximum_dt = .1 / (3 * divisions), .max_cycles = 7};
+    const auto run = solved(m);
+    ASSERT_EQ(run.cases.size(), 1U);
+    const auto &c = run.cases.front();
+    ASSERT_TRUE(c.transient->converged) << c.failure;
+    const auto n = static_cast<size_t>(c.transient->steps_per_cycle);
+    const int grid = run.mesh.node_index.at(geo.rotor_edge.front());
+    Complex coefficient;
+    for (size_t i = c.steps.size() - n; i < c.steps.size(); ++i)
+      coefficient += c.steps[i].potential[grid] *
+                     std::exp(Complex(0, -degree * c.steps[i].position));
+    coefficient *= Complex(0, 2. / n);
+    const double power = pi * sigma * omega * omega * m.options.depth * integral;
+    const double error = std::abs(coefficient - expected) / std::abs(expected);
+    EXPECT_LT(error, .55 * previous_error);
+    EXPECT_LT(error, .02);
+    const double power_error = std::abs(c.transient->mean_loss - power) / power;
+    // The coarse polygon and first-order time step together give about
+    // 3.2% power error. Refinement must reduce it along with the field error.
+    EXPECT_LT(power_error, .04);
+    EXPECT_LT(power_error, .6 * previous_power_error);
+    previous_error = error;
+    previous_power_error = power_error;
+
+    // A linearly polarized field on a stationary disk uses the same radial
+    // diffusion solution, with half the power of the rotating excitation.
+    m.options.transient = false;
+    m.options.harmonic = true;
+    m.motions.clear();
+    m.time_steps.clear();
+    m.subcases[0].motion = m.subcases[0].time_step = 0;
+    m.subcases[0].frequency = speed / 60;
+    const auto harmonic = solved(m);
+    ASSERT_EQ(harmonic.cases.size(), 1U);
+    const auto &c_ac = harmonic.cases.front();
+    const int transverse = harmonic.mesh.node_index.at(geo.rotor_edge[divisions / 4]);
+    const auto &ac = *c_ac.harmonic;
+    const Complex stationary(c_ac.potential[transverse], ac.potential_imag[transverse]);
+    EXPECT_LT(std::abs(stationary - expected) / std::abs(expected), .015);
+    EXPECT_NEAR(ac.mean_loss, power / 2, .018 * power);
+  }
+}
+
+TEST(MagneticTransient, ShortedWindingFollowsTheFieldCircuitEquationAndBrakes) {
+  Machine g;
+  g.rotor_div = g.stator_div = 24;
+  g.rotor_rings = 2;
+  g.stator_rings = 5;
+  g.rotor_property = 2;
+  g.cards = magnetized_rotor(1.) + "ESET,20,PROP,2\n";
+  auto m = model(g);
+  wind(m, 40., .4);
+  m.currents.clear();
+  m.options.transient = true;
+  auto &sc = m.subcases[0];
+  sc.load = 0;
+  sc.motion = sc.time_step = sc.voltage = 1;
+  sc.field.enabled = false;
+  m.motions[1] = {.id = 1, .set = 20, .speed = 600.};
+  m.time_steps[1] = {.maximum_dt = .00051, .max_cycles = 9};
+  constexpr double resistance = 2., end_inductance = .001;
+  m.circuit_data[1] = {resistance, end_inductance};
+  m.voltages.push_back({.set = 1, .target = 1});
+  const auto run = solved(m);
+  ASSERT_EQ(run.cases.size(), 1U);
+  const auto &c = run.cases.front();
+  const auto &t = *c.transient;
+  ASSERT_TRUE(t.converged) << c.failure;
+  const auto count = static_cast<size_t>(t.steps_per_cycle);
+  double max_current = 0;
+  for (size_t k = c.steps.size() - count; k < c.steps.size(); ++k) {
+    const auto &now = c.steps[k].circuits.front(), &prior = c.steps[k - 1].circuits.front();
+    const double voltage = resistance * now.current +
+        (end_inductance * (now.current - prior.current) + now.linkage - prior.linkage) / t.dt;
+    EXPECT_NEAR(voltage, 0., 1e-10);
+    max_current = std::max(max_current, std::abs(now.current));
+  }
+  EXPECT_GT(max_current, .1);
+  EXPECT_NEAR(t.mean_electrical_input, 0., 1e-10);
+  EXPECT_GT(t.mean_winding_loss, 0.);
+  EXPECT_LT(t.mean_load, 0.);
+  EXPECT_NEAR(-t.mean_load * 20 * pi, t.mean_winding_loss, .06 * t.mean_winding_loss);
+}
 
 TEST(Motion, EachPositionIsTheRotatedStaticDeck) {
   for (const bool saturating : {false, true}) {

@@ -89,7 +89,7 @@ bool zero_diagonal_with_coupling(int n, const std::vector<int32_t> &Ap, const st
 class LdltFactor final : public LinearFactor {
 public:
   LdltFactor(const FactorOptions &options, Notices &notices)
-      : require_spd_(options.require_spd), notices_(notices),
+      : require_spd_(options.require_spd), indefinite_(options.indefinite), notices_(notices),
         ordering_(options.dense_block || options.minimum_degree ? LDLT_ORDER_AMD
                                                                 : LDLT_ORDER_METIS) {}
 
@@ -136,14 +136,15 @@ public:
     }
 
     const auto t_factor = Clock::now();
-    pivoted_ = false;
-    if (auto e = factorize(LDLT_PIVOT_NONE, Ax))
+    pivoted_ = indefinite_;
+    if (auto e = factorize(indefinite_ ? LDLT_PIVOT_THRESHOLD : LDLT_PIVOT_NONE, Ax))
       return e;
     ldlt_factor_info info{};
     ldlt_get_info(numeric_.get(), &info);
     // Without pivoting an indefinite matrix can lose all accuracy, and the threshold path
     // costs little more than the second factorization.
-    if (!require_spd_ && (info.n_negative > 0 || zero_diagonal_with_coupling(n_, Ap_, Ai_, Ax))) {
+    if (!indefinite_ && !require_spd_ &&
+        (info.n_negative > 0 || zero_diagonal_with_coupling(n_, Ap_, Ai_, Ax))) {
       if (auto e = factorize(LDLT_PIVOT_THRESHOLD, Ax))
         return e;
       ldlt_get_info(numeric_.get(), &info);
@@ -236,6 +237,7 @@ private:
   }
 
   bool require_spd_;
+  bool indefinite_{false};
   Notices &notices_;
   ldlt_ordering ordering_;
   int n_{0};

@@ -1,10 +1,13 @@
 #include "magnetic/solver.hpp"
+#include "diffusion.hpp"
+#include "solid_diffusion.hpp"
 #include "core/notices.hpp"
 #include "magnetic/air_gap.hpp"
 #include "magnetic/drive.hpp"
 #include "magnetic/motion.hpp"
 #include "solver/solver_backend.hpp"
 #include "solver/tangent_solver.hpp"
+#include <Eigen/Cholesky>
 #include <algorithm>
 #include <cmath>
 #include <format>
@@ -26,6 +29,18 @@ namespace vibestran::magnetic {
 namespace {
 using Sparse = Eigen::SparseMatrix<double>;
 using Triplet = Eigen::Triplet<double>;
+SparseMatrixBuilder::CsrData lower_csr(const Sparse &matrix) {
+  const Eigen::SparseMatrix<double, Eigen::RowMajor> lower =
+      matrix.triangularView<Eigen::Lower>();
+  SparseMatrixBuilder::CsrData csr;
+  csr.n = static_cast<int>(lower.rows());
+  csr.nnz = static_cast<int>(lower.nonZeros());
+  csr.row_ptr.assign(lower.outerIndexPtr(), lower.outerIndexPtr() + csr.n + 1);
+  csr.col_ind.assign(lower.innerIndexPtr(), lower.innerIndexPtr() + csr.nnz);
+  csr.values.assign(lower.valuePtr(), lower.valuePtr() + csr.nnz);
+  csr.symmetry = SymmetryStorage::Lower;
+  return csr;
+}
 // The gauged tangent, solved with the backend's factorization. Newton
 // iterations, continuation stages, subcases and inductances all assemble the
 // same pattern, so its symbolic analysis is done once. Every factorization
@@ -42,16 +57,7 @@ public:
   Tangent(SolverBackend &backend, bool planar, bool dense_block, int reuse)
       : solver_(backend, options(planar, dense_block, reuse)), reuse_(reuse > 0) {}
   Status update(const Sparse &stiffness) {
-    const Eigen::SparseMatrix<double, Eigen::RowMajor> lower =
-        stiffness.triangularView<Eigen::Lower>();
-    SparseMatrixBuilder::CsrData csr;
-    csr.n = static_cast<int>(lower.rows());
-    csr.nnz = static_cast<int>(lower.nonZeros());
-    csr.row_ptr.assign(lower.outerIndexPtr(), lower.outerIndexPtr() + csr.n + 1);
-    csr.col_ind.assign(lower.innerIndexPtr(), lower.innerIndexPtr() + csr.nnz);
-    csr.values.assign(lower.valuePtr(), lower.valuePtr() + csr.nnz);
-    csr.symmetry = SymmetryStorage::Lower;
-    return solver_.update(std::move(csr));
+    return solver_.update(lower_csr(stiffness));
   }
   // Solves for every column of rhs with the last update()'s tangent, each to
   // a relative residual of tolerance (0: a direct solve).
@@ -73,6 +79,7 @@ public:
 
   // The last analysis's fill-reducing ordering; empty for an adapter.
   [[nodiscard]] std::string_view ordering() const { return solver_.ordering(); }
+  [[nodiscard]] const TangentSolverStats &stats() const { return solver_.stats(); }
   // Work done so far, for the F06 header.
   [[nodiscard]] std::string usage() const {
     const auto &s = solver_.stats();
@@ -550,12 +557,69 @@ struct Equilibrium {
   int iterations{0};
   double residual{0};
 };
+struct ImplicitStep {
+  const Diffusion &diffusion;
+  const Sparse &tangent;
+  const Eigen::VectorXd &previous;
+  double dt;
+};
+// Eliminating the voltage-driven currents adds G C^-1 G^T to the
+// tangent. Solve that low-rank update without assembling a dense winding
+// block. C is (dt R + Lend) divided by the number of modeled periods.
+struct VoltageStep {
+  Eigen::MatrixXd full, reduced;
+  Eigen::VectorXd impedance, history;
+
+  [[nodiscard]] Eigen::VectorXd currents(const Eigen::VectorXd &a) const {
+    return (history - full.transpose() * a).cwiseQuotient(impedance);
+  }
+
+  [[nodiscard]] Result<Eigen::VectorXd> solve(Tangent &tangent,
+                                               const Eigen::VectorXd &rhs) const {
+    const auto fields = reduced.rows(), count = reduced.cols();
+    Eigen::MatrixXd columns = Eigen::MatrixXd::Zero(rhs.size(), 1 + count);
+    columns.col(0) = rhs;
+    columns.topRightCorner(fields, count) = reduced;
+    auto solved = tangent.solve(columns, 0);
+    if (const auto *e = std::get_if<Error>(&solved))
+      return *e;
+    const auto &x = std::get<Eigen::MatrixXd>(solved);
+    const auto responses = x.rightCols(count);
+    Eigen::MatrixXd schur = reduced.transpose() * responses.topRows(fields);
+    schur.diagonal() += impedance;
+    const Eigen::LLT<Eigen::MatrixXd> factor(schur);
+    if (factor.info() != Eigen::Success)
+      return Error{"MAGTRANS voltage circuit Schur complement is not positive definite"};
+    Eigen::VectorXd out = x.col(0) - responses *
+        factor.solve(reduced.transpose() * x.col(0).head(fields));
+    if (!out.allFinite())
+      return Error{"MAGTRANS voltage circuit update produced nonfinite values"};
+    return out;
+  }
+};
 Result<Equilibrium> equilibrium(const Model &model, const Setup &setup,
-                                Tangent &tangent, Eigen::VectorXd a,
-                                const Eigen::VectorXd &load) {
+                        Tangent &tangent, Eigen::VectorXd a,
+                        const Eigen::VectorXd &load,
+                        const ImplicitStep *implicit = nullptr,
+                        const VoltageStep *voltage = nullptr) {
   const Mesh &mesh = setup.mesh;
   const Gauge &gauge = setup.gauge;
-  auto state = assemble(setup, a, load);
+  const auto evaluate = [&](const Eigen::VectorXd &potential) {
+    auto state = assemble(setup, potential, load);
+    if (implicit) {
+      const auto delta = implicit->diffusion.increment(potential, implicit->previous);
+      const auto eddy = implicit->diffusion.residual(delta, gauge, implicit->dt);
+      state.residual.conservativeResize(eddy.size());
+      state.residual.tail(eddy.size() - gauge.size).setZero();
+      state.residual += eddy;
+      state.stiffness.conservativeResize(eddy.size(), eddy.size());
+      state.stiffness += implicit->tangent;
+    }
+    if (voltage)
+      state.residual.head(gauge.size).noalias() -= voltage->reduced * voltage->currents(potential);
+    return state;
+  };
+  auto state = evaluate(a);
   double load_norm = 0;
   for (size_t e = 0; e < mesh.dofs(); ++e)
     if (gauge.equations[e] >= 0)
@@ -574,7 +638,7 @@ Result<Equilibrium> equilibrium(const Model &model, const Setup &setup,
   for (; iteration <= model.options.max_iterations; ++iteration) {
     const double norm = state.residual.norm();
     if (norm / reference <= model.options.nonlinear_tolerance ||
-        gauge.size == 0)
+        state.residual.size() == 0)
       return Equilibrium{std::move(a), std::move(state), iteration,
                          norm / reference};
     if (iteration == model.options.max_iterations)
@@ -591,18 +655,24 @@ Result<Equilibrium> equilibrium(const Model &model, const Setup &setup,
     previous = norm;
     if (auto e = tangent.update(state.stiffness))
       return Error{std::format("Magnetic tangent factorization failed ({}); "
-                               "check mesh, gauge and material data",
-                               e->message)};
-    auto solved = tangent.solve(-state.residual, tangent.reuses() ? eta : 0);
-    if (auto *e = std::get_if<Error>(&solved))
+                               "check mesh, gauge and material data", e->message)};
+    const auto direction = [&]() -> Result<Eigen::VectorXd> {
+      if (voltage)
+        return voltage->solve(tangent, -state.residual);
+      auto solved = tangent.solve(-state.residual, tangent.reuses() ? eta : 0);
+      if (const auto *e = std::get_if<Error>(&solved))
+        return *e;
+      return Eigen::VectorXd(std::get<Eigen::MatrixXd>(std::move(solved)));
+    }();
+    if (const auto *e = std::get_if<Error>(&direction))
       return Error{std::format("Magnetic linear solve failed ({})", e->message)};
-    const Eigen::VectorXd step = std::get<Eigen::MatrixXd>(std::move(solved));
+    const auto &step = std::get<Eigen::VectorXd>(direction);
     bool accepted = false;
     double alpha = 1;
     for (int trial = 0; trial < 30; ++trial) {
       Eigen::VectorXd candidate = a;
       gauge.expand(step, candidate, alpha);
-      auto next = assemble(setup, candidate, load);
+      auto next = evaluate(candidate);
       if (next.residual.allFinite() &&
           next.residual.norm() <= (1 - 1e-4 * alpha) * norm) {
         a = std::move(candidate);
@@ -1522,6 +1592,508 @@ Result<DriveSummary> auto_alignment(const Model &model, const Setup &base,
   const auto &a = std::get<Alignment>(aligned);
   return DriveSummary{drive.id, a.theta0, true, a.linkage, a.lag, phases};
 }
+
+// The right endpoints of the last cycle sample each position once and
+// provide the backward Euler quadrature for dissipated power.
+void summarize_cycle(CaseResults &output, double state_change, double speed,
+                     double cycle_distance) {
+  auto &summary = *output.transient;
+  const auto count = static_cast<size_t>(summary.steps_per_cycle);
+  const size_t first = output.steps.size() - count;
+  const bool compare = summary.cycles > 1;
+  double torque = 0, loss = 0, energy = 0, minimum = output.steps[first].torque;
+  double maximum = minimum, torque_change = 0, loss_change = 0, torque_scale = 0;
+  double electrical = 0, winding = 0, current_change = 0, current_scale = 0;
+  std::ranges::fill(summary.mean_property_loss, 0.);
+  for (size_t i = first; i < output.steps.size(); ++i) {
+    const auto &step = output.steps[i];
+    torque += step.torque;
+    loss += step.eddy->loss;
+    electrical += step.eddy->electrical_input;
+    winding += step.eddy->winding_loss;
+    energy = std::max(energy, step.energy);
+    minimum = std::min(minimum, step.torque);
+    maximum = std::max(maximum, step.torque);
+    torque_scale = std::max(torque_scale, std::abs(step.torque));
+    for (size_t p = 0; p < summary.properties.size(); ++p)
+      summary.mean_property_loss[p] += step.eddy->property_loss[p];
+    if (compare) {
+      const auto &prior = output.steps[i - count];
+      torque_change = std::max(torque_change, std::abs(step.torque - prior.torque));
+      loss_change += std::abs(step.eddy->loss - prior.eddy->loss);
+      torque_scale = std::max(torque_scale, std::abs(prior.torque));
+      for (size_t c = 0; c < step.circuits.size(); ++c) {
+        const double i_now = step.circuits[c].current, i_prior = prior.circuits[c].current;
+        current_scale = std::max({current_scale, std::abs(i_now), std::abs(i_prior)});
+        current_change = std::max(current_change, std::abs(i_now - i_prior));
+      }
+    }
+  }
+  summary.mean_load = torque / count;
+  summary.peak_to_peak = maximum - minimum;
+  summary.mean_loss = loss / count;
+  summary.mean_electrical_input = electrical / count;
+  summary.mean_winding_loss = winding / count;
+  for (double &power : summary.mean_property_loss)
+    power /= count;
+  // The floors prevent round-off in a torque or loss approaching zero
+  // from keeping a settled electromagnetic state from passing the check.
+  const double torque_floor = 1e-5 * energy / cycle_distance;
+  const double power_floor = std::abs(speed) * torque_floor;
+  summary.cycle_residual = std::max(
+      {state_change, torque_change / std::max({torque_scale, torque_floor, 1e-30}),
+       (loss_change / count) / std::max({summary.mean_loss, power_floor, 1e-30}),
+       current_change / std::max(current_scale, 1e-12)});
+  summary.power_residual = summary.mean_loss + summary.mean_winding_loss +
+                           speed * summary.mean_load - summary.mean_electrical_input;
+}
+
+struct TransientExcitation {
+  const Drive *drive{nullptr};
+  double theta0{0};
+  std::vector<int> phases;
+  std::vector<double> fixed_current;
+  std::vector<CircuitData> circuit_data;
+  std::vector<std::pair<size_t, const Voltage *>> applied_voltage;
+  VoltageStep voltage;
+};
+
+Result<TransientExcitation> transient_excitation(const Model &model, const Setup &base,
+                                                 const Subcase &subcase, const Motion &motion,
+                                                 const MovingPart &part, Tangent &tangent,
+                                                 double repeat, double dt, int steps) {
+  TransientExcitation out;
+  auto prescribed = circuit_currents(model, base.circuits, subcase.load);
+  if (const auto *e = std::get_if<Error>(&prescribed))
+    return *e;
+  out.fixed_current = std::get<std::vector<double>>(std::move(prescribed));
+  if (subcase.drive) {
+    out.drive = &model.drives.at(subcase.drive);
+    const double periods = motion.translate ? repeat / (2 * out.drive->pitch)
+                                            : out.drive->poles;
+    if (periods < 1 || std::abs(periods - std::round(periods)) > 1e-9 ||
+        2 * periods >= steps)
+      return Error{"MAGTRANS DRIVE needs whole electrical periods in the motion cycle "
+                   "and more than two time steps per electrical period"};
+    auto indices = phase_indices(*out.drive, base.circuits);
+    if (const auto *e = std::get_if<Error>(&indices))
+      return *e;
+    out.phases = std::get<std::vector<int>>(std::move(indices));
+    if (out.drive->theta0)
+      out.theta0 = *out.drive->theta0;
+    else {
+      int iterations = 0;
+      auto aligned = auto_alignment(model, base, motion, part, *out.drive,
+                                    out.phases, subcase, tangent, iterations);
+      if (const auto *e = std::get_if<Error>(&aligned))
+        return Error{"MAGTRANS DRIVE THETA0 AUTO: " + e->message};
+      out.theta0 = std::get<DriveSummary>(aligned).theta0;
+    }
+  }
+  for (size_t i = 0; i < base.circuits.size(); ++i) {
+    const auto &circuit = base.circuits[i];
+    const auto data = model.circuit_data.find(circuit.id);
+    out.circuit_data.push_back(data == model.circuit_data.end() ? CircuitData{} : data->second);
+    for (const auto &v : model.voltages)
+      if (subcase.voltage == v.set && circuit.id == v.target) {
+        if (v.peak > 0 && 2. * v.order >= steps)
+          return Error{std::format("VCIRC {} circuit {} harmonic {} needs more time steps",
+                                   v.set, v.target, v.order)};
+        out.applied_voltage.emplace_back(i, &v);
+      }
+    if (!circuit.closed &&
+        (out.fixed_current[i] != 0 ||
+         std::ranges::find(out.phases, static_cast<int>(i)) != out.phases.end() ||
+         (!out.applied_voltage.empty() && out.applied_voltage.back().first == i)))
+      return Error{std::format("MAGTRANS excitation requires closed circuit {}", circuit.id)};
+  }
+  const auto count = static_cast<Eigen::Index>(out.applied_voltage.size());
+  out.voltage.full.resize(base.mesh.dofs(), count);
+  out.voltage.reduced.resize(base.gauge.size, count);
+  out.voltage.impedance.resize(count);
+  out.voltage.history.resize(count);
+  const int sectors = base.mesh.period ? base.mesh.period->sectors : 1;
+  for (Eigen::Index p = 0; p < count; ++p) {
+    const auto i = out.applied_voltage[p].first;
+    out.voltage.full.col(p) = base.circuit_coupling[i];
+    out.voltage.reduced.col(p) = base.gauge.reduce(base.circuit_coupling[i]);
+    const auto &data = out.circuit_data[i];
+    out.voltage.impedance[p] = (dt * data.resistance + data.end_inductance) / sectors;
+    if (!(out.voltage.impedance[p] > 0) || !std::isfinite(out.voltage.impedance[p]))
+      return Error{std::format("CIRCDAT {} gives an unrepresentable time-step impedance",
+                               base.circuits[i].id)};
+  }
+  return out;
+}
+
+Result<CaseResults> solve_transient(const Model &model, const Setup &base,
+                                    const Subcase &subcase, const Motion &motion,
+                                    const MovingPart &part, Tangent &tangent) {
+  const auto &control = model.time_steps.at(subcase.time_step);
+  const auto &base_gap = *base.mesh.air_gap;
+  const double repeat = motion.translate ? base_gap.length : 360.;
+  const double distance = motion.translate ? repeat : 2 * std::numbers::pi;
+  const char *speed_unit = motion.translate ? "m/s" : "rpm";
+  const double period = (motion.translate ? repeat : 60.) / std::abs(motion.speed);
+  const double steps = std::max(4., std::ceil(period / control.maximum_dt));
+  if (!std::isfinite(period * control.max_cycles) ||
+      steps * control.max_cycles >= std::numeric_limits<int>::max())
+    return Error{std::format("TSTEP {} at SPEED {} {} produces an unrepresentable time grid",
+                             subcase.time_step, motion.speed, speed_unit)};
+  const double dt = period / steps;
+  const double sweep = std::copysign(repeat, motion.speed);
+  const double speed = std::copysign(distance / period, motion.speed);
+  if (!(dt > 0) || !std::isfinite(speed))
+    return Error{std::format("TSTEP {} at SPEED {} {} produces an unrepresentable time step",
+                             subcase.time_step, motion.speed, speed_unit)};
+  const double sectors = base.mesh.period ? base.mesh.period->sectors : 1;
+  const double gap_scale = base.mesh.depth * (motion.translate ? sectors / base_gap.sectors : 1);
+  const int steps_per_cycle = static_cast<int>(steps);
+  const int last_step = steps_per_cycle * control.max_cycles;
+  const Diffusion diffusion(model, base.mesh, base.geometry);
+  const auto conductivity = diffusion.tangent(base.gauge, dt);
+  auto excitation = transient_excitation(model, base, subcase, motion, part, tangent,
+                                          repeat, dt, steps_per_cycle);
+  if (const auto *e = std::get_if<Error>(&excitation))
+    return *e;
+  auto &drive = std::get<TransientExcitation>(excitation);
+  CaseResults output;
+  output.id = subcase.id;
+  auto &summary = output.transient.emplace();
+  summary.dt = dt;
+  summary.steps_per_cycle = steps_per_cycle;
+  summary.properties = diffusion.properties();
+  summary.mean_property_loss.resize(summary.properties.size());
+  Eigen::VectorXd previous, cycle_start;
+  const double start = std::remainder(motion.start, repeat);
+  for (int k = 0; k <= last_step; ++k) {
+    const double cycle_fraction = (k % steps_per_cycle) / steps;
+    const double pose = start + sweep * cycle_fraction;
+    const double time = k * dt;
+    const auto at = std::format("MOTION {} at t={:.8g} s ({:.8g} {})",
+                                motion.id, time, pose, motion.unit());
+    const Model moved = moved_model(model, motion, part, pose);
+    std::optional<Setup> own;
+    if (pose != 0) {
+      auto built = prepare(moved, base.normal_boundary, &base);
+      if (const auto *e = std::get_if<Error>(&built))
+        return Error{std::format("{}: {}", at, e->message)};
+      own = std::get<Setup>(std::move(built));
+    }
+    const auto &setup = own ? *own : base;
+    if (setup.gauge.equations != base.gauge.equations || setup.gauge.sign != base.gauge.sign)
+      return Error{at + ": magnetic gauge changed during rigid motion"};
+    auto prescribed = boundary_potential(moved, setup.mesh, setup.gauge, setup.natural, subcase);
+    if (const auto *e = std::get_if<Error>(&prescribed))
+      return Error{std::format("{}: {}", at, e->message)};
+    auto initial = std::get<Eigen::VectorXd>(std::move(prescribed));
+    if (k)
+      for (size_t i = 0; i < setup.gauge.equations.size(); ++i)
+        if (setup.gauge.equations[i] >= 0)
+          initial[i] = previous[i];
+    auto currents = drive.fixed_current;
+    if (drive.drive) {
+      const auto phase = phase_currents(*drive.drive,
+          electrical_angle(*drive.drive, motion, drive.theta0, pose));
+      for (size_t i = 0; i < phase.size(); ++i)
+        currents[drive.phases[i]] = phase[i];
+    }
+    Eigen::VectorXd load = Eigen::VectorXd::Zero(base.mesh.dofs());
+    for (size_t i = 0; i < currents.size(); ++i)
+      if (currents[i] != 0)
+        load.noalias() += currents[i] * base.circuit_coupling[i];
+    const auto voltage_count = static_cast<Eigen::Index>(drive.applied_voltage.size());
+    for (Eigen::Index p = 0; k && p < voltage_count; ++p) {
+      const auto [i, card] = drive.applied_voltage[p];
+      const double phase = std::remainder(card->phase, 360.) * std::numbers::pi / 180;
+      const double turns = std::copysign(cycle_fraction, motion.speed) * card->order;
+      const double applied = card->dc + card->peak * std::cos(2 * std::numbers::pi * turns + phase);
+      const auto &prior = output.steps.back().circuits[i];
+      drive.voltage.history[p] = (dt * applied +
+          drive.circuit_data[i].end_inductance * prior.current + prior.linkage) / sectors;
+    }
+    const ImplicitStep implicit{diffusion, conductivity, previous, dt};
+    auto attempted = equilibrium(moved, setup, tangent, std::move(initial), load,
+                                 k && !diffusion.empty() ? &implicit : nullptr,
+                                 k && voltage_count ? &drive.voltage : nullptr);
+    if (const auto *e = std::get_if<Error>(&attempted)) {
+      output.failure = std::format("{}: {}", at, e->message);
+      break;
+    }
+    auto &solved = std::get<Equilibrium>(attempted);
+    const auto &gap = *setup.mesh.air_gap;
+    const double direction = part.sign * (part.inner ? 1 : -1);
+    CaseResults step;
+    step.position = motion.start + sweep * k / steps;
+    step.energy = sectors * solved.assembly.energy;
+    step.torque = direction * gap_scale * air_gap_torque(gap, solved.a);
+    step.residual = solved.residual;
+    step.extrapolated = solved.assembly.extrapolated;
+    const bool fields = subcase.field.enabled && k % subcase.field.every == 0;
+    const auto delta = diffusion.increment(solved.a, k ? previous : solved.a);
+    step.eddy = diffusion.sample(base.mesh, base.geometry, delta, dt, fields);
+    step.eddy->time = time;
+    if (k && voltage_count) {
+      const auto induced = drive.voltage.currents(solved.a);
+      for (Eigen::Index p = 0; p < voltage_count; ++p)
+        currents[drive.applied_voltage[p].first] = induced[p];
+    }
+    const double unavailable = std::numeric_limits<double>::quiet_NaN();
+    for (size_t i = 0; i < currents.size(); ++i) {
+      const auto &circuit = base.circuits[i];
+      const double current = currents[i];
+      const double linkage = circuit.closed ? sectors * base.circuit_coupling[i].dot(solved.a)
+                                            : unavailable;
+      step.circuits.push_back({circuit.id, current, linkage});
+      double voltage = unavailable;
+      if (k && circuit.closed) {
+        const auto &prior = output.steps.back().circuits[i];
+        const auto &data = drive.circuit_data[i];
+        voltage = data.resistance * current +
+                  (data.end_inductance * (current - prior.current) + linkage - prior.linkage) / dt;
+        step.eddy->electrical_input += voltage * current;
+        step.eddy->winding_loss += data.resistance * current * current;
+      }
+      step.eddy->voltage.push_back(voltage);
+    }
+    if (fields) {
+      step.nodes = setup.mesh.nodes;
+      step.air_gap = gap;
+      step.potential = solved.a;
+      step.b = std::move(solved.assembly.b);
+      step.h = std::move(solved.assembly.h);
+    }
+    previous = std::move(solved.a);
+    output.residual = std::max(output.residual, step.residual);
+    output.extrapolated |= step.extrapolated;
+    output.steps.push_back(std::move(step));
+    if (k % steps_per_cycle == 0) {
+      if (k) {
+        ++summary.cycles;
+        const double state_change = (previous - cycle_start).norm() /
+            std::max({previous.norm(), cycle_start.norm(), 1e-30});
+        summarize_cycle(output, state_change, speed, distance);
+        constexpr double cycle_tolerance = 1e-6;
+        if (summary.cycles > 1 && summary.cycle_residual <= cycle_tolerance) {
+          summary.converged = true;
+          break;
+        }
+      }
+      cycle_start = previous;
+    }
+  }
+  output.has_results = !output.steps.empty();
+  summary.symbolic_analyses = tangent.stats().symbolic_analyses;
+  summary.numeric_factorizations = tangent.stats().numeric_factorizations;
+  if (!summary.converged && output.failure.empty())
+    output.failure = std::format("TSTEP {} did not reach periodic steady state in {} cycles "
+                                  "(relative cycle residual {:.3e})",
+                                  subcase.time_step, summary.cycles, summary.cycle_residual);
+  return output;
+}
+
+// Reorder the real and imaginary equations into a real symmetric
+// indefinite system. This keeps sparse pivoting in SolverBackend.
+Result<Eigen::VectorXd> harmonic_solve(const Sparse &stiffness, const Sparse &loss,
+                                       const Eigen::VectorXd &rhs, SolverBackend &backend) {
+  const int n = static_cast<int>(loss.rows());
+  if (!n)
+    return Eigen::VectorXd{};
+  std::vector<Triplet> entries;
+  entries.reserve(2 * static_cast<size_t>(stiffness.nonZeros() + loss.nonZeros()));
+  for (int col = 0; col < stiffness.outerSize(); ++col)
+    for (Sparse::InnerIterator it(stiffness, col); it; ++it) {
+      entries.emplace_back(it.row(), col, it.value());
+      entries.emplace_back(n + it.row(), n + col, -it.value());
+    }
+  for (int col = 0; col < loss.outerSize(); ++col)
+    for (Sparse::InnerIterator it(loss, col); it; ++it) {
+      entries.emplace_back(it.row(), n + col, -it.value());
+      entries.emplace_back(n + it.row(), col, -it.value());
+    }
+  Sparse matrix(2 * n, 2 * n);
+  matrix.setFromTriplets(entries.begin(), entries.end());
+  auto factored = backend.factor(lower_csr(matrix), FactorOptions{.indefinite = true});
+  if (const auto *e = std::get_if<Error>(&factored))
+    return Error{"MAGHARM requires a pivoted symmetric indefinite factorization: " + e->message};
+  const auto &factor = std::get<std::unique_ptr<LinearFactor>>(factored);
+  auto result = factor->solve({rhs.data(), static_cast<size_t>(rhs.size())});
+  if (const auto *e = std::get_if<Error>(&result))
+    return *e;
+  const auto &solution = std::get<std::vector<double>>(result);
+  Eigen::VectorXd x = Eigen::Map<const Eigen::VectorXd>(solution.data(), rhs.size());
+  const Eigen::VectorXd applied = matrix * x;
+  const double relative = (applied - rhs).norm() / std::max({rhs.norm(), applied.norm(), 1e-30});
+  if (!x.allFinite() || !std::isfinite(relative) || relative > 1e-8)
+    return Error{std::format("MAGHARM linear solve failed residual check ({:.6g})", relative)};
+  return x;
+}
+
+Result<CaseResults> harmonic_case(const Model &model, const Setup &setup,
+                                   const Subcase &sc, const Diffusion *planar,
+                                   const SolidDiffusion *solid, SolverBackend &backend) {
+  using Complex = std::complex<double>;
+  const double omega = 2 * std::numbers::pi * sc.frequency;
+  if (!std::isfinite(omega) || !std::isfinite(1 / omega))
+    return Error{"MAGHARM angular frequency is outside the numerical range"};
+  const auto factors = load_factors(model, sc.load);
+  if (const auto *e = std::get_if<Error>(&factors))
+    return *e;
+  const auto &loads = std::get<std::map<int, double>>(factors);
+  const auto field_dofs = static_cast<Eigen::Index>(setup.mesh.dofs());
+  const int field_rows = setup.gauge.size;
+  CaseResults result;
+  result.id = sc.id;
+  auto &out = result.harmonic.emplace();
+  out.frequency = sc.frequency;
+  out.winding_current.resize(setup.circuits.size());
+  Eigen::VectorXd load_real = Eigen::VectorXd::Zero(field_dofs), load_imag = load_real;
+  for (const auto &source : model.currents)
+    if (const auto factor = loads.find(source.set); factor != loads.end())
+      for (size_t i = 0; i < setup.circuits.size(); ++i)
+        if (setup.circuits[i].id == source.target) {
+          const double phase = std::remainder(source.phase, 360.) * std::numbers::pi / 180;
+          const Complex current = (factor->second * source.amperes) * std::exp(Complex(0, phase));
+          if (current != Complex{} && !setup.circuits[i].closed)
+            return Error{std::format("MAGHARM ICIRC requires closed circuit {}", source.target)};
+          out.winding_current[i] += current;
+          load_real.noalias() += current.real() * setup.circuit_coupling[i];
+          load_imag.noalias() += current.imag() * setup.circuit_coupling[i];
+        }
+
+  SolidConditions conditions;
+  if (solid) {
+    auto made = solid->conditions(model, setup.mesh, setup.gauge, sc.voltage);
+    if (const auto *e = std::get_if<Error>(&made))
+      return *e;
+    conditions = std::get<SolidConditions>(std::move(made));
+  } else
+    conditions.gauge = planar->augmented_gauge(setup.gauge);
+  const auto &gauge = conditions.gauge;
+  const auto &mass = solid ? solid->mass() : planar->mass();
+  auto prescribed = boundary_potential(model, setup.mesh, setup.gauge, setup.natural, sc);
+  if (const auto *e = std::get_if<Error>(&prescribed))
+    return *e;
+  Eigen::VectorXd real = Eigen::VectorXd::Zero(mass.rows()), imag = real;
+  real.head(field_dofs) = std::get<Eigen::VectorXd>(prescribed);
+  const bool boundary_power = real.head(field_dofs).squaredNorm() != 0;
+  for (const auto &electrode : conditions.electrodes) {
+    const Complex phi = electrode.voltage * Complex(0, -1 / omega);
+    for (int dof : electrode.equations) {
+      real[dof] = phi.real();
+      imag[dof] = phi.imag();
+    }
+  }
+  auto ar = assemble(setup, real.head(field_dofs), load_real);
+  auto ai = assemble(setup, imag.head(field_dofs), load_imag);
+  Eigen::VectorXd rhs(2 * gauge.size);
+  rhs.head(gauge.size) = omega * gauge.reduce(mass * imag);
+  rhs.tail(gauge.size) = omega * gauge.reduce(mass * real);
+  rhs.head(field_rows) -= ar.residual;
+  rhs.segment(gauge.size, field_rows) += ai.residual;
+  auto solved = harmonic_solve(ar.stiffness, reduce_conductivity(mass, gauge, omega), rhs, backend);
+  if (const auto *e = std::get_if<Error>(&solved))
+    return *e;
+  const auto &x = std::get<Eigen::VectorXd>(solved);
+  gauge.expand(x.head(gauge.size), real);
+  gauge.expand(x.tail(gauge.size), imag);
+
+  const Eigen::VectorXd field_real = real.head(field_dofs), field_imag = imag.head(field_dofs);
+  if (sc.field.enabled) {
+    result.potential = field_real;
+    out.potential_imag = field_imag;
+    ar = assemble(setup, field_real, load_real);
+    ai = assemble(setup, field_imag, load_imag);
+    result.b = std::move(ar.b);
+    result.h = std::move(ar.h);
+    out.b_imag = std::move(ai.b);
+    out.h_imag = std::move(ai.h);
+  }
+  if (solid)
+    solid->sample(setup.mesh, real, imag, omega, out);
+  else {
+    const auto r = planar->sample(setup.mesh, setup.geometry, real, 1 / omega, sc.field.enabled);
+    const auto i = planar->sample(setup.mesh, setup.geometry, imag, 1 / omega, sc.field.enabled);
+    out.mean_loss = .5 * (r.loss + i.loss);
+    out.properties = planar->properties();
+    for (size_t k = 0; k < out.properties.size(); ++k)
+      out.property_loss.push_back(.5 * (r.property_loss[k] + i.property_loss[k]));
+    for (size_t k = 0; k < r.current_density.size(); ++k) {
+      out.current_real.push_back(-i.current_density[k]);
+      out.current_imag.push_back(r.current_density[k]);
+      out.loss_density.push_back(.5 * (r.loss_density[k] + i.loss_density[k]));
+    }
+  }
+  const int sectors = setup.mesh.period ? setup.mesh.period->sectors : 1;
+  for (size_t i = 0; i < setup.circuits.size(); ++i) {
+    if (!setup.circuits[i].closed) {
+      const double nan = std::numeric_limits<double>::quiet_NaN();
+      out.linkage.emplace_back(nan, nan);
+      continue;
+    }
+    const auto &coupling = setup.circuit_coupling[i];
+    const auto linkage = static_cast<double>(sectors) *
+        Complex(coupling.dot(field_real), coupling.dot(field_imag));
+    out.linkage.push_back(linkage);
+    out.mean_input += .5 * (Complex(0, omega) * linkage * std::conj(out.winding_current[i])).real();
+  }
+  if (!conditions.electrodes.empty()) {
+    const Eigen::VectorXd reaction_real = mass * real, reaction_imag = mass * imag;
+    for (const auto &electrode : conditions.electrodes) {
+      Complex current;
+      for (int node : electrode.equations)
+        current += omega * Complex(-reaction_imag[node], reaction_real[node]);
+      out.terminals.push_back({electrode.id, electrode.voltage, current});
+      out.mean_input += .5 * (electrode.voltage * std::conj(current)).real();
+    }
+  }
+  out.power_residual = boundary_power ? std::numeric_limits<double>::quiet_NaN()
+                                      : out.mean_loss - out.mean_input;
+  return result;
+}
+
+Result<Results> solve_harmonic(const Model &input, SolverBackend &backend) {
+  Model model = input;
+  // Remanence is DC in this fixed-geometry linear solve.
+  for (auto &material : model.materials)
+    material.second.br = 0;
+  auto prepared = prepare(model);
+  if (const auto *e = std::get_if<Error>(&prepared))
+    return *e;
+  auto &base = std::get<Setup>(prepared);
+  std::optional<Diffusion> planar;
+  std::optional<SolidDiffusion> solid;
+  if (base.mesh.planar)
+    planar.emplace(model, base.mesh, base.geometry);
+  else
+    solid.emplace(model, base.mesh);
+  Results out;
+  out.summary.solution.add("Solution", "SOL MAGHARM fixed-geometry magnetics, peak phasors");
+  out.summary.solution.add("Field cells", std::to_string(base.mesh.cells.size()));
+  out.summary.solver = solver_section(backend);
+  for (const auto &sc : model.subcases) {
+    std::optional<Setup> separate;
+    if (const int normal = normal_boundary(model, sc)) {
+      auto made = prepare(model, normal, &base);
+      if (const auto *e = std::get_if<Error>(&made))
+        return *e;
+      separate = std::get<Setup>(std::move(made));
+    }
+    const auto &setup = separate ? *separate : base;
+    auto solved = harmonic_case(model, setup, sc, planar ? &*planar : nullptr,
+                                 solid ? &*solid : nullptr, backend);
+    const auto context = std::format("Subcase {}", sc.id);
+    if (const auto *e = std::get_if<Error>(&solved))
+      return Error{std::format("{}: {}", context, e->message)};
+    collect_fatals(out.summary, backend.notices().take_fatals(), context);
+    collect_notices(out.summary, backend.notices().take(), context);
+    out.cases.push_back(std::get<CaseResults>(std::move(solved)));
+  }
+  out.mesh = std::move(base.mesh);
+  out.sources = std::move(base.sources);
+  out.circuits = std::move(base.circuits);
+  return out;
+}
 } // namespace
 
 Result<Results> solve(const Model &model) {
@@ -1532,6 +2104,8 @@ Result<Results> solve(const Model &model) {
 Result<Results> solve(const Model &model, SolverBackend &backend) {
   if (auto e = validate(model))
     return *e;
+  if (model.options.harmonic)
+    return solve_harmonic(model, backend);
   auto prepared = prepare(model);
   if (auto *e = std::get_if<Error>(&prepared))
     return *e;
@@ -1541,7 +2115,9 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
             nc = static_cast<int>(base.circuits.size());
   Results result;
   auto &solution = result.summary.solution;
-  solution.add("Solution", "SOL MAGSTAT magnetostatics, SI units");
+  solution.add("Solution", model.options.transient
+                               ? "SOL MAGTRANS transient magnetics, SI units"
+                               : "SOL MAGSTAT magnetostatics, SI units");
   solution.add("Formulation",
                mesh.axisymmetric
                    ? std::string("axisymmetric (MAGAXI), nodal A_phi on "
@@ -1764,7 +2340,22 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
       normal_bases.emplace(gauge_key, std::get<Setup>(std::move(built)));
     }
     const Setup &case_base = gauge_key ? normal_bases.at(gauge_key) : base;
-    if (!subcase.motion) {
+    if (model.options.transient) {
+      const auto &motion = model.motions.at(subcase.motion);
+      auto state = solve_transient(model, case_base, subcase, motion,
+                                   parts.at(subcase.motion), tangent);
+      if (const auto *e = std::get_if<Error>(&state))
+        return Error{std::format("{}: {}", context, e->message)};
+      auto output = std::get<CaseResults>(std::move(state));
+      if (!output.failure.empty())
+        notices.add_fatal(output.failure);
+      if (output.extrapolated)
+        notices.add("The B-H curve was exceeded; its vacuum-slope extrapolation was used");
+      solution.add(context, std::format("MOTION {} at {:.6g} {}, {} accepted time steps",
+                                        motion.id, motion.speed, motion.translate ? "m/s" : "rpm",
+                                        output.has_results ? output.steps.size() - 1 : 0));
+      result.cases.push_back(std::move(output));
+    } else if (!subcase.motion) {
       bool continued = false;
       auto state = solve_state(model, case_base, subcase, tangent, nullptr, continued);
       if (auto *e = std::get_if<Error>(&state))
@@ -1919,6 +2510,10 @@ Result<Results> solve(const Model &model, SolverBackend &backend) {
                                iterations_text(output.iterations), fewest, most,
                                output.residual));
       result.cases.push_back(std::move(output));
+    }
+    if (model.options.transient) {
+      collect_fatals(result.summary, backend.notices().take_fatals(), context);
+      collect_fatals(result.summary, notices.take_fatals(), context);
     }
     collect_notices(result.summary, backend.notices().take(), context);
     collect_notices(result.summary, notices.take(), context);

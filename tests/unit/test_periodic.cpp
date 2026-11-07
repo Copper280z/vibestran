@@ -298,6 +298,35 @@ Difference compare(const Mesh &sector_mesh, const CaseResults &sector, const Mes
 
 } // namespace
 
+TEST(Periodic, TransientAntiPeriodicHalfMatchesTheWholeMachine) {
+  // The conducting iron wraps around the rotor and stator. Its floating
+  // potential offset must vanish in the anti-periodic half but is a solved
+  // unknown on the full circle. The separated magnets have local offsets.
+  Design d;
+  d.cards = "MOTION,1,20,0,ROTATE,0.\n,1200.\nMATCOND,2,1.E5\nMATCOND,3,6.E5\n";
+  d.control = "MOTION = 1\nBFIELD = NONE\n";
+  const auto run = [](Model m) {
+    m.options.transient = true;
+    m.subcases[0].time_step = 1;
+    m.time_steps[1] = {.maximum_dt = .0011, .max_cycles = 8};
+    return solved(m);
+  };
+  const auto half = run(model_of(d)), full = run(model_of(whole(d)));
+  ASSERT_EQ(half.cases.size(), 1U);
+  ASSERT_EQ(full.cases.size(), 1U);
+  const auto &a = half.cases[0], &b = full.cases[0];
+  ASSERT_TRUE(a.transient->converged) << a.failure;
+  ASSERT_TRUE(b.transient->converged) << b.failure;
+  const auto &t = *a.transient;
+  EXPECT_GT(t.mean_loss, 0.);
+  EXPECT_NEAR(t.mean_loss, b.transient->mean_loss, 1e-7 * t.mean_loss);
+  EXPECT_NEAR(t.mean_load, b.transient->mean_load, 1e-7 * std::abs(t.mean_load));
+  const auto count = static_cast<size_t>(t.steps_per_cycle);
+  for (size_t k = 1; k <= count; ++k)
+    EXPECT_NEAR(a.steps[a.steps.size() - k].torque, b.steps[b.steps.size() - k].torque,
+                1e-7 * t.peak_to_peak + 1e-10);
+}
+
 TEST(Periodic, AntiPeriodicHalfIsTheWholeMachine) {
   // 12 slots, 14 poles: turning by 180 degrees takes each pole to one of
   // opposite polarity and each tooth coil to one of the same phase wound

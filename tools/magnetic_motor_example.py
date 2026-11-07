@@ -130,7 +130,7 @@ def coil_layout():
     return out
 
 
-def build_mesh():
+def build_mesh(mesh_scale=1.):
     gmsh.initialize()
     gmsh.option.setNumber("General.Verbosity", 2)
     gmsh.model.add("motor")
@@ -174,6 +174,7 @@ def build_mesh():
     gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
     gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
     gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
+    gmsh.option.setNumber("Mesh.MeshSizeFactor", mesh_scale)
     gmsh.option.setNumber("Mesh.Algorithm", 6)
     gmsh.model.mesh.generate(2)
     gmsh.model.mesh.optimize("Laplace2D")
@@ -190,21 +191,23 @@ def build_mesh():
     return nodes, elements
 
 
-def write_deck(path, nodes, elements):
-    layout = coil_layout()
+def write_deck(path, nodes, elements, *, cogging_samples=None):
     pitch = 360.0 / POLE_PAIRS
     rated = 120          # positions over one electrical period
     cogging = 40         # positions over one cogging period
     cogging_period = 360.0 / math.lcm(SLOTS, 2 * POLE_PAIRS)
-    lines = [
-        "SOL MAGSTAT", "CEND",
-        "TITLE = 12-SLOT 14-POLE SURFACE-MAGNET MOTOR",
-        "SUBCASE 1", "  LABEL = RATED", "  MOTION = 1", "  DRIVE = 10", "  MSTEP = ALL",
-        f"  BFIELD(EVERY={rated // 4}) = ALL",
-        "SUBCASE 2", "  LABEL = NO LOAD", "  MOTION = 1", "  DRIVE = 11", "  MSTEP = ALL",
-        f"  BFIELD(EVERY={rated}) = ALL", "  LDQ = INCREMENTAL",
-        "SUBCASE 3", "  LABEL = COGGING", "  MOTION = 2", "  MSTEP = ALL", "  BFIELD = NONE",
-        "  MPROBE = NONE",
+    open_circuit = cogging_samples is not None
+    lines = ["SOL MAGSTAT", "CEND", "TITLE = 12-SLOT 14-POLE SURFACE-MAGNET MOTOR"]
+    if not open_circuit:
+        lines += [
+            "SUBCASE 1", "  LABEL = RATED", "  MOTION = 1", "  DRIVE = 10", "  MSTEP = ALL",
+            f"  BFIELD(EVERY={rated // 4}) = ALL",
+            "SUBCASE 2", "  LABEL = NO LOAD", "  MOTION = 1", "  DRIVE = 11", "  MSTEP = ALL",
+            f"  BFIELD(EVERY={rated}) = ALL", "  LDQ = INCREMENTAL",
+        ]
+    lines += [
+        f"SUBCASE {1 if open_circuit else 3}",
+        "  LABEL = COGGING", "  MOTION = 2", "  MSTEP = ALL", "  BFIELD = NONE", "  MPROBE = NONE",
         "BEGIN BULK",
         f"MAG2D,0,{DEPTH}",
         "CORD2C,10,,0.,0.,0.,0.,0.,1.", ",1.,0.,0.",
@@ -218,18 +221,21 @@ def write_deck(path, nodes, elements):
     flat = [f"{v:g}" for pair in STEEL for v in pair] + ["ENDT"]
     for k in range(0, len(flat), 8):
         lines.append("," + ",".join(flat[k:k + 8]))
-    lines += [
-        f"ESET,20,PROP,{ROTOR_IRON},{MAGNET_OUT},{MAGNET_IN},{ROTOR_AIR}",
-        f"MOTION,1,20,0,ROTATE,0.,{pitch / rated:.12g},{rated}", f",{SPEED}",
-        f"MOTION,2,20,0,ROTATE,0.,{cogging_period / cogging:.12g},{cogging}",
-        f"DRIVE,10,SINE,{POLE_PAIRS},{PEAK},0.", ",1,2,3",
-        f"DRIVE,11,SINE,{POLE_PAIRS},0.,0.", ",1,2,3",
-    ]
-    # Probes at mid-gap, fixed in space: the AGE gives the field there.
-    middle = (R_MAGNET + R_BORE) / 2
-    for k in range(GAP_PROBES):
-        x, y = polar(middle, 2 * math.pi * k / GAP_PROBES)
-        lines.append(f"MPROBE,{k + 1},0,{x:.15g},{y:.15g},0.")
+    lines.append(f"ESET,20,PROP,{ROTOR_IRON},{MAGNET_OUT},{MAGNET_IN},{ROTOR_AIR}")
+    if open_circuit:
+        lines.append(f"MOTION,2,20,0,ROTATE,0.,{360 / cogging_samples:.17g},{cogging_samples}")
+    else:
+        lines += [
+            f"MOTION,1,20,0,ROTATE,0.,{pitch / rated:.12g},{rated}", f",{SPEED}",
+            f"MOTION,2,20,0,ROTATE,0.,{cogging_period / cogging:.12g},{cogging}",
+            f"DRIVE,10,SINE,{POLE_PAIRS},{PEAK},0.", ",1,2,3",
+            f"DRIVE,11,SINE,{POLE_PAIRS},0.,0.", ",1,2,3",
+        ]
+        # Probes at mid-gap, fixed in space: the AGE gives the field there.
+        middle = (R_MAGNET + R_BORE) / 2
+        for k in range(GAP_PROBES):
+            x, y = polar(middle, 2 * math.pi * k / GAP_PROBES)
+            lines.append(f"MPROBE,{k + 1},0,{x:.15g},{y:.15g},0.")
     used = sorted({n for _, tri in elements for n in tri})
     for n in used:
         x, y = nodes[n]
@@ -237,12 +243,14 @@ def write_deck(path, nodes, elements):
     coils = {}
     for eid, (role, tri) in enumerate(elements, start=1):
         if role[0] == "coil":
-            coils.setdefault((role[1], role[2]), []).append(eid)
+            if not open_circuit:
+                coils.setdefault((role[1], role[2]), []).append(eid)
             pid = AIR
         else:
             pid = role[1]
         lines.append(f"CTRIA3,{eid},{pid},{tri[0]},{tri[1]},{tri[2]}")
     members = {0: [], 1: [], 2: []}
+    layout = coil_layout() if not open_circuit else []
     for index, ((tooth, side), eids) in enumerate(sorted(coils.items()), start=1):
         phase, polarity = layout[tooth]
         lines.append(f"ESET,{100 + index}," + ",".join(map(str, eids)))
@@ -251,7 +259,8 @@ def write_deck(path, nodes, elements):
         lines.append(f"COIL2D,{100 + index},{100 + index},{side * polarity * TURNS}")
         members[phase].append(100 + index)
     for phase, ids in members.items():
-        lines.append(f"CIRCUIT,{phase + 1},1," + ",".join(f"{i},1" for i in ids))
+        if ids:
+            lines.append(f"CIRCUIT,{phase + 1},1," + ",".join(f"{i},1" for i in ids))
     lines.append("ENDDATA")
     path.write_text("\n".join(lines) + "\n")
     return layout

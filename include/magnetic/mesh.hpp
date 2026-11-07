@@ -225,6 +225,8 @@ public:
   // out_of_plane at the point: weight times measure integrates over the
   // field (DEPTH, 2 pi r for MAGAXI, 1 in 3D).
   [[nodiscard]] double measure(int cell, int point) const;
+  // Values of the planar nodal basis functions at a quadrature point.
+  [[nodiscard]] std::span<const double> nodal_values(int cell, int point) const;
   // The curls of the cell's basis functions at the point, as edge_curls
   // gives them at its position; out holds one per basis function.
   void curls(const Mesh &mesh, int cell, int point, std::span<Vector> out) const;

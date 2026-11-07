@@ -412,7 +412,9 @@ int main(int argc, const char *argv[]) {
           return 1;
         }
         const auto& magnetic_model = std::get<vibestran::magnetic::Model>(parsed);
-        spdlog::info("Magnetostatics: {} elements, {} winding regions, {} wire segments",
+        spdlog::info("{}: {} elements, {} winding regions, {} wire segments",
+                     magnetic_model.options.transient ? "Transient magnetics"
+                     : magnetic_model.options.harmonic ? "Harmonic magnetics" : "Magnetostatics",
                      magnetic_model.elements.size(), magnetic_model.coils.size()+magnetic_model.planar_coils.size(), magnetic_model.wires.size());
         const auto backend = make_backend(backend_choice, cuda_precision);
         if (!backend)
@@ -429,7 +431,16 @@ int main(int argc, const char *argv[]) {
           return 1;
         }
         for (const auto& result : results.cases)
-          if (result.steps.empty())
+          if (!result.has_results)
+            spdlog::error("Magnetic subcase {}: no results: {}", result.id, result.failure);
+          else if (result.transient)
+            spdlog::info("Magnetic subcase {}: {} cycles, periodic steady state {}",
+                         result.id, result.transient->cycles,
+                         result.transient->converged ? "converged" : "unsettled");
+          else if (result.harmonic)
+            spdlog::info("Magnetic subcase {}: {:.6g} Hz, mean eddy loss {:.6g} W",
+                         result.id, result.harmonic->frequency, result.harmonic->mean_loss);
+          else if (result.steps.empty())
             spdlog::info("Magnetic subcase {}: residual {:.3e}, energy {:.8e} J{}", result.id,
                          result.residual, result.energy,
                          result.extrapolated ? " (BH extrapolated)" : "");
@@ -438,7 +449,8 @@ int main(int argc, const char *argv[]) {
                          result.id, result.steps.size(), result.residual,
                          result.extrapolated ? " (BH extrapolated)" : "");
         spdlog::info("Wrote magnetic F06 and VTKHDF results: {}", f06_path.string());
-        return 0;
+        return magnetic_model.options.transient || magnetic_model.options.harmonic
+                   ? exit_code_of(results.summary) : 0;
       }
     }
     vibestran::Model model = (ext == ".inp")

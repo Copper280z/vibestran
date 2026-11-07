@@ -1,4 +1,4 @@
-# Static magnetics
+# Magnetic analysis
 
 `SOL MAGSTAT` adds separate 3D and planar 2D magnetostatic models, a parser, current
 preprocessing and results. Structural SOL 101/103 and thermal SOL 153 keep their
@@ -1980,6 +1980,119 @@ stator and restricts its demonstration angles to +/-20 degrees. Arbitrary
 prepared meshes can be used with the solver. A full BLDC sweep requires suitable
 meshes and phase-current subcases (one CIRCUIT per phase); no transient,
 voltage-driven or sliding-band model is implied.
+
+## Eddy currents and speed-dependent cogging
+
+`SOL MAGTRANS` solves magnetic diffusion on body-attached `MAG2D` and
+`MAGAXI` meshes at a prescribed constant speed. It uses the existing
+`PAIRGAP` AGE for rotary or linear motion and accepts periodic and
+anti-periodic models. `MATCOND,MID,SIGMA` associates conductivity in S/m
+with `MATMAG`. Field materials without conductivity are insulating.
+Planar current flows normal to the plane and satisfies zero net current
+in each isolated cross section, accounting for electrical contact across
+periodic sides. Tubular models have closed azimuthal currents.
+
+Use one subcase per speed. Select `MOTION = ID` and `TSTEP = ID`. Give
+`MOTION` a starting position and a signed `SPEED` in rpm for rotation or
+m/s for translation, leaving its static `STEP` and `COUNT` fields blank.
+`TSTEP,ID,DTMAX,MAXCYCLES` specifies a positive maximum step in seconds
+and at least two cycles. A cycle is one mechanical revolution or one
+unfolded gap period in translation. The solver uses backward Euler and
+subdivides a cycle into equal steps, at least four. It compares successive
+cycles at matched positions to a relative tolerance of 1e-6. An unsettled
+run returns a fatal status and writes its accepted steps. A translation's
+field mesh wraps at the repeat boundary and its scalar position is unwrapped.
+
+```text
+SOL MAGTRANS
+CEND
+SUBCASE 1
+  MOTION = 10
+  TSTEP = 20
+  BFIELD(EVERY=20) = ALL
+BEGIN BULK
+MAG2D,0,0.025
+MOTION,10,90,0,ROTATE,0.
+,1000.
+TSTEP,20,2.0E-5,12
+MATMAG,5,1.05,,1.2
+MATCOND,5,6.0E5
+$ Add the mesh, PMAG2D properties, moving ESET 90 and PAIRGAP.
+ENDDATA
+```
+
+Leaving the windings open gives the speed-dependent counterpart to the
+static cogging sweep. Use `LOAD` or `DRIVE` to prescribe winding currents.
+For terminal voltage, use `VOLTAGE = SID` with the following cards.
+
+| Card | Fields after the name |
+| --- | --- |
+| `CIRCDAT` | `ID,R,LEND`, circuit ID, positive terminal resistance in ohms and nonnegative end-winding inductance in H |
+| `VCIRC` | `SID,ID,DC,PEAK,ORDER,PHASE`, terminal voltage in V with an optional cosine harmonic. `ORDER` counts harmonics per motion cycle and `PHASE` is in degrees at the start. Harmonic phase advances with signed motion. |
+
+Each active winding needs a closed circuit and takes at most one kind of
+excitation. A zero-volt `VCIRC` with a physical winding resistance models
+a short circuit. Voltage-driven windings start with zero current, and
+prescribed windings start at their commanded current at the initial
+position. Winding loss is included where `CIRCDAT` supplies resistance.
+
+The F06 reports the settled mean and peak-to-peak torque or thrust, mean
+eddy loss by property, winding power and the mean power-balance residual
+in watts. Over a settled open-circuit cycle, the eddy watts should
+approach the mechanical power required to overcome braking as the step
+and mesh are refined. `/MAGTRANS/subcases/<ID>` contains scalar step data
+in SI units including `time_s`, `angle_deg` or `position_m`,
+`torque_Nm` or `force_N`, `eddy_loss_W`, and winding current, linkage,
+voltage and power when applicable. The initial step has no voltage
+derivative. `BFIELD(EVERY=n)` controls ParaView field sampling in
+physical seconds, independently of scalar sampling. Its cell arrays
+include `J_eddy_A_per_m2` and `eddy_loss_W_per_m3`.
+
+Run the 12-slot, 14-pole comparison using the worked example dependencies
+above. This coarse trial exercises the workflow.
+
+```sh
+.venv/bin/python tools/magnetic_cogging_speed.py /tmp/cogging \
+  --rpm 600 -600 --mesh-scale 4 --samples-per-cogging 8
+```
+
+The script solves one static reference on the same mesh and writes
+`cogging_speed.csv`, `cogging_waveforms.csv`, and `cogging_orders.csv`. The summary separates
+mean braking, order-84 amplitude and phase, and loss by region. The
+waveform file compares torques at the same rotor angles. The orders file
+also reports higher multiples below the angular sampling limit, with
+`--harmonics` selecting how many to report. The output
+also records settling cycles, factorization counts, runtime and solver
+peak memory. Refine the time step and mesh separately before interpreting
+small amplitude or phase shifts. Check the local conductor frequencies
+and skin depth when choosing the mesh. The 2D rotary result represents
+the modeled axial return constraint. End returns and axial segmentation
+can change the losses.
+
+### Fixed-geometry harmonic eddy currents
+
+`SOL MAGHARM` solves one frequency per subcase on fixed, linear magnetic
+geometry. Select `FREQUENCY = Hz`. An `ICIRC,SID,ID,PEAK,PHASE` selected
+by `LOAD` supplies peak current in amperes and an optional phase in
+degrees. The phasor convention is the real part of the reported complex
+amplitude times exp(i omega t). Static permanent-magnet remanence is a
+DC contribution. Use a pivoted direct backend such as `--backend=cpu`.
+
+For 3D conductors, the edge potential couples to a nodal electric
+potential in each conducting component. Unspecified faces are electrically
+insulating. To apply a solid terminal voltage, use `MTERM,ID,FSET` on
+conducting faces at the exterior of the field domain. Select a set with
+`VOLTAGE = SID` and specify `VTERM,SID,ID,VREAL,VIMAG` in peak volts.
+Active terminal face sets have disjoint conducting grids. Terminal
+currents are positive into the conductor. The surrounding 3D field
+domain uses the existing magnetic tree gauge.
+
+The F06 and `/MAGHARM` report mean loss, terminal current and the input
+power available from the specified sources. Phasor tables use real and
+imaginary columns. ParaView gets separate real and imaginary field
+arrays and a cycle-mean loss density. With an imposed `MBC UNIFORM` field,
+the boundary can supply power and the reported input covers the winding
+and terminal sources only. [S8 implementation plan](MAGNETICS_S8_PLAN.md)
 
 ## Verification
 

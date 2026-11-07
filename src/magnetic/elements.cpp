@@ -435,6 +435,11 @@ double CellGeometry::weight(int cell, int point) const {
 double CellGeometry::measure(int cell, int point) const {
   return measures_[cells_[static_cast<size_t>(cell)].weight + static_cast<size_t>(point)];
 }
+std::span<const double> CellGeometry::nodal_values(int cell, int point) const {
+  const Rule &rule = rules_[cells_[static_cast<size_t>(cell)].rule];
+  const auto count = static_cast<size_t>(rule.functions);
+  return std::span<const double>(rule.values).subspan(static_cast<size_t>(point) * count, count);
+}
 void CellGeometry::curls(const Mesh &mesh, int cell, int point,
                          std::span<Vector> out) const {
   const Entry &entry = cells_[static_cast<size_t>(cell)];

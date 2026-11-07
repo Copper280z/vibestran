@@ -109,6 +109,39 @@ Eigen::Vector2d dq(double theta_e, const Eigen::Vector3d &abc) {
 
 } // namespace
 
+TEST(Drive, TransientPrescribedCurrentsRecoverTheStaticSweepWithoutConductivity) {
+  ThreePhase t;
+  t.g.rotor_div = 24;
+  t.g.stator_div = 48;
+  t.g.rotor_rings = 2;
+  t.g.stator_rings = 4;
+  t.cards = motion_card(0., 15., 25) + drive_card(3., 12., "8.");
+  t.control = std::string(driven) + "LDQ = INCREMENTAL\nBFIELD = NONE\n";
+  auto m = three_phase(t);
+  const auto baseline = solved(m);
+  m.options.transient = true;
+  m.motions[1].step = 0;
+  m.motions[1].count = 1;
+  m.motions[1].speed = 600.;
+  m.subcases[0].time_step = 1;
+  m.time_steps[1] = {.maximum_dt = .0042, .max_cycles = 3};
+  const auto transient = solved(m);
+  ASSERT_EQ(transient.cases.size(), 1U);
+  const auto &c = transient.cases.front();
+  ASSERT_TRUE(c.transient->converged) << c.failure;
+  const auto &reference = baseline.cases.front().steps;
+  ASSERT_GE(c.steps.size(), reference.size());
+  for (size_t k = 0; k < reference.size(); ++k) {
+    const auto &step = c.steps[k];
+    EXPECT_NEAR(step.torque, reference[k].torque, 1e-10);
+    ASSERT_EQ(step.circuits.size(), 3U);
+    for (size_t j = 0; j < step.circuits.size(); ++j) {
+      EXPECT_NEAR(step.circuits[j].current, reference[k].circuits[j].current, 1e-12);
+      EXPECT_NEAR(step.circuits[j].linkage, reference[k].circuits[j].linkage, 1e-12);
+    }
+  }
+}
+
 TEST(Drive, PhaseCurrentsParkTransformAndFit) {
   // SINE: the Park transform of the phase currents is (-I sin gamma,
   // I cos gamma) at every electrical angle, and the currents sum to zero.

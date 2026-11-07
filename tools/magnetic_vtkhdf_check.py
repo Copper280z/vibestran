@@ -33,7 +33,7 @@ except ImportError as missing:
     sys.exit(77)
 
 from magnetic_examples import deck
-from magnetic_planar_examples import machine_deck, planar_deck
+from magnetic_planar_examples import machine_deck, planar_deck, transient_deck
 from magnetic_sweep import run
 
 
@@ -122,12 +122,14 @@ def main():
             "motion": machine_deck(["SUBCASE 1", "LOAD=1", "MOTION=1", "BFIELD(EVERY=2)=ALL",
                                     "SUBCASE 2", "LOAD=1", "SUBCASE 3", "LOAD=1", "MOTION=2"],
                                    "MOTION,1,20,0,ROTATE,0.,10.,4\nMOTION,2,20,0,ROTATE,5.,20.,2"),
+            "transient": transient_deck(),
         }
         expected = {
             "uniform_tet": {"SUBCASE_1"}, "uniform_hex": {"SUBCASE_1"},
             "uniform_wedge": {"SUBCASE_1"}, "planar_mixed": {"SUBCASE_1"},
             "winding": {"SUBCASE_1", "COIL_11", "COIL_12"},
             "motion": {"SUBCASE_1", "SUBCASE_2", "SUBCASE_3", "COIL_11", "COIL_12"},
+            "transient": {"SUBCASE_1"},
         }
         for name, text in cases.items():
             with solve(executable, output/f"{name}.bdf", text) as result:
@@ -141,6 +143,13 @@ def main():
                     times = reader.GetOutputInformation(0).Get(
                         vtk.vtkStreamingDemandDrivenPipeline.TIME_STEPS())
                     assert list(times) == [0, 5, 20, 25], times
+                if name == "transient":
+                    reader, _, _ = read_step(result.filename, None)
+                    times = reader.GetOutputInformation(0).Get(
+                        vtk.vtkStreamingDemandDrivenPipeline.TIME_STEPS())
+                    case = result["MAGTRANS/subcases/1"]
+                    assert np.array_equal(times, case["time_s"][::5])
+                    assert np.all(np.diff(case["angle_deg"][:]) < 0)
         # Fixed-current virtual work from the prepared-deck sweep: zero torque
         # for a uniform field, blank at the endpoints.
         manifest = output/"sweep.json"

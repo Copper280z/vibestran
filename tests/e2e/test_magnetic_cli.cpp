@@ -11,6 +11,7 @@
 #include <format>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <sys/wait.h>
 #include <numbers>
 #include <set>
 #include <sstream>
@@ -83,6 +84,7 @@ protected:
                          (options.empty() ? "" : " ") + quoted(deck) + " > " +
                          quoted(log_path) + " 2>&1";
     const int status = std::system(command.c_str());
+    exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     log = read(log_path);
     if (expect_success)
       EXPECT_EQ(status, 0) << log;
@@ -91,6 +93,8 @@ protected:
     return directory_ / (name + ".mag.vtkhdf");
   }
   std::string log;
+  int exit_code{-1};
+  [[nodiscard]] const fs::path &directory() const { return directory_; }
 
 private:
   fs::path directory_;
@@ -137,6 +141,100 @@ TEST_F(MagneticCli, UniformFieldEnergyFieldsAndProbes) {
     at = next;
   }
   EXPECT_NE(f06.find((fs::path(file).parent_path() / "uniform.bdf").string()), std::string::npos);
+}
+
+TEST_F(MagneticCli, TransientReportsSettledBrakingAndDecimatesOnlyFields) {
+  const std::string group = "/MAGTRANS/subcases/1";
+  const auto deck = generate("magnetic_planar_examples.py", "transient");
+  const auto file = solve("transient", deck);
+  ASSERT_EQ(exit_code, 0) << log;
+  const auto time = h5_table(file, group + "/time_s");
+  const auto angle = h5_table(file, group + "/angle_deg");
+  const auto loss = h5_table(file, group + "/eddy_loss_W");
+  const auto torque = h5_table(file, group + "/torque_Nm");
+  const auto regional = h5_table(file, group + "/property_loss_W");
+  ASSERT_GT(time.rows(), 80U);
+  ASSERT_EQ(angle.rows(), time.rows());
+  ASSERT_EQ(loss.rows(), time.rows());
+  EXPECT_EQ(h5_attribute(file, group, "converged"), 1.);
+  EXPECT_EQ(h5_attribute(file, group, "speed_rpm"), -600.);
+  EXPECT_NEAR(angle.at(46), -360., 1e-12);
+  EXPECT_NEAR(time.at(46), .1, 1e-12);
+  EXPECT_EQ(regional.values, loss.values);
+  EXPECT_GT(h5_attribute(file, group, "mean_eddy_loss_W"), 0.);
+  EXPECT_GT(h5_attribute(file, group, "mean_torque_Nm"), 0.);
+  const std::string block = "/VTKHDF/SUBCASE_1";
+  const auto fields = h5_table(file, block + "/Steps/Values");
+  ASSERT_GT(fields.rows(), 1U);
+  EXPECT_EQ(fields.at(1), time.at(5));
+  EXPECT_TRUE(h5_exists(file, block + "/CellData/J_eddy_A_per_m2"));
+  EXPECT_TRUE(h5_exists(file, block + "/Steps/CellDataOffsets/eddy_loss_W_per_m3"));
+
+  const auto scalar_only = solve("scalar", replace_all(deck, "BFIELD(EVERY=5) = ALL",
+                                                       "BFIELD = NONE"));
+  EXPECT_EQ(h5_table(scalar_only, group + "/torque_Nm").values, torque.values);
+  EXPECT_EQ(h5_table(scalar_only, group + "/eddy_loss_W").values, loss.values);
+  EXPECT_FALSE(h5_exists(scalar_only, block));
+}
+
+TEST_F(MagneticCli, TransientRejectsStaticMotionControlsAndReportsUnsettledRuns) {
+  const auto deck = generate("magnetic_planar_examples.py", "transient");
+  solve("invalid", replace_all(deck, "ROTATE,0.", "ROTATE,0.,1.,2"), false);
+  EXPECT_NE(exit_code, 0);
+  EXPECT_NE(log.find("blank STEP and COUNT"), std::string::npos);
+
+  // High conductivity makes the initial equilibrium a poor approximation to
+  // the settled state. Leave only two revolutions for the currents to decay.
+  auto short_run = replace_all(deck, "TSTEP,1,.0022,5", "TSTEP,1,.0022,2");
+  short_run = replace_all(short_run, "MATCOND,3,6.E5", "MATCOND,3,6.E10");
+  const auto file = solve("unsettled", short_run, false);
+  ASSERT_EQ(exit_code, 5) << log;
+  EXPECT_EQ(h5_attribute(file, "/MAGTRANS/subcases/1", "converged"), 0.);
+  EXPECT_GT(h5_table(file, "/MAGTRANS/subcases/1/torque_Nm").rows(), 1U);
+  EXPECT_NE(read(directory() / "unsettled.F06").find("periodic steady state"),
+            std::string::npos);
+}
+
+TEST_F(MagneticCli, HarmonicSolidElectrodesWriteComplexCurrentAndMeanLoss) {
+  const auto file = solve("terminals", R"(SOL MAGHARM
+CEND
+FREQUENCY = 60
+VOLTAGE = 1
+BEGIN BULK
+GRID,1,,0,0,0
+GRID,2,,1,0,0
+GRID,3,,1,1,0
+GRID,4,,0,1,0
+GRID,5,,0,0,1
+GRID,6,,1,0,1
+GRID,7,,1,1,1
+GRID,8,,0,1,1
+CHEXA,1,1,1,2,3,4,5,6
+,7,8
+PSOLID,1,1
+MATMAG,1,1
+MATCOND,1,5
+FSET,1,1,1,4,8,5
+FSET,2,1,2,3,7,6
+MTERM,1,1
+MTERM,2,2
+VTERM,1,1,1,2
+VTERM,1,2,0,0
+ENDDATA
+)");
+  ASSERT_EQ(exit_code, 0) << log;
+  const std::string group = "/MAGHARM/subcases/1";
+  EXPECT_NEAR(h5_attribute(file, group, "mean_eddy_loss_W"), 12.5, 1e-11);
+  EXPECT_NEAR(h5_attribute(file, group, "power_residual_W"), 0., 1e-11);
+  const auto terminal = h5_table(file, group + "/terminal_current_A");
+  ASSERT_EQ(terminal.dims, (std::vector<hsize_t>{2, 2}));
+  EXPECT_NEAR(terminal.at(0, 0), 5., 1e-11);
+  EXPECT_NEAR(terminal.at(0, 1), 10., 1e-11);
+  EXPECT_NEAR(terminal.at(0, 0) + terminal.at(1, 0), 0., 1e-11);
+  EXPECT_NEAR(terminal.at(0, 1) + terminal.at(1, 1), 0., 1e-11);
+  const std::string fields = "/VTKHDF/SUBCASE_1/CellData";
+  expect_rows(h5_table(file, fields + "/J_eddy_real_A_per_m2"), {5., 0., 0.}, 1e-11);
+  expect_rows(h5_table(file, fields + "/J_eddy_imag_A_per_m2"), {10., 0., 0.}, 1e-11);
 }
 
 TEST_F(MagneticCli, NativeAndWarpedSolidsReproduceUniformFields) {

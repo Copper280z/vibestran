@@ -329,8 +329,10 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
   for (size_t i = 0; i < lines.size(); ++i) {
     const auto text = upper(trim(lines[i].text));
     if (const auto solution = solution_name(text)) {
-      if (*solution != "MAGSTAT")
-        return Error{lines[i].location + ": expected SOL MAGSTAT"};
+      if (*solution != "MAGSTAT" && *solution != "MAGTRANS" && *solution != "MAGHARM")
+        return Error{lines[i].location + ": expected SOL MAGSTAT, MAGTRANS or MAGHARM"};
+      m.options.transient = *solution == "MAGTRANS";
+      m.options.harmonic = *solution == "MAGHARM";
       sol = true;
       continue;
     }
@@ -380,6 +382,12 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
           sc.boundary = r.integer(1);
         else if (key == "MOTION")
           sc.motion = r.integer(1);
+        else if (key == "TSTEP" && m.options.transient)
+          sc.time_step = r.integer(1);
+        else if (key == "VOLTAGE" && (m.options.transient || m.options.harmonic))
+          sc.voltage = r.integer(1);
+        else if (key == "FREQUENCY" && m.options.harmonic)
+          sc.frequency = r.real(1);
         else if (key == "DRIVE")
           sc.drive = r.integer(1);
         else if (key == "LDQ") {
@@ -513,11 +521,41 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
         return Error{r.where + ": MOTION TYPE must be ROTATE or TRANSLATE"};
       motion.translate = type == "TRANSLATE";
       motion.start = r.real(5);
+      if (m.options.transient && (!r.get(6).empty() || !r.get(7).empty()))
+        return Error{r.where + ": MAGTRANS MOTION requires blank STEP and COUNT; use TSTEP"};
       motion.step = r.real(6);
       motion.count = r.integer(7, 1);
       motion.speed = r.real(9);
       r.last(9);
       insert_unique(m.motions, motion.id, motion, r);
+    } else if (key == "TSTEP" && m.options.transient) {
+      const int id = r.integer(1);
+      const TimeStep step{r.real(2), r.integer(3)};
+      r.last(3);
+      insert_unique(m.time_steps, id, step, r);
+    } else if (key == "CIRCDAT" && m.options.transient) {
+      const int id = r.integer(1);
+      const CircuitData data{r.real(2), r.real(3)};
+      r.last(3);
+      insert_unique(m.circuit_data, id, data, r);
+    } else if (key == "VCIRC" && m.options.transient) {
+      Voltage voltage;
+      voltage.set = r.integer(1);
+      voltage.target = r.integer(2);
+      voltage.dc = r.real(3);
+      voltage.peak = r.real(4);
+      voltage.order = r.integer(5);
+      voltage.phase = r.real(6);
+      r.last(6);
+      m.voltages.push_back(voltage);
+    } else if (key == "MTERM" && m.options.harmonic) {
+      const int id = r.integer(1), faces = r.integer(2);
+      r.last(2);
+      insert_unique(m.terminals, id, faces, r);
+    } else if (key == "VTERM" && m.options.harmonic) {
+      const TerminalVoltage voltage{r.integer(1), r.integer(2), r.real(3), r.real(4)};
+      r.last(4);
+      m.terminal_voltages.push_back(voltage);
     } else if (key == "DRIVE") {
       Drive drive;
       drive.id = r.integer(1);
@@ -705,7 +743,9 @@ Result<Model> parse_lines(const std::vector<Line> &lines) {
       c.set = r.integer(1);
       c.target = r.integer(2);
       c.amperes = r.real(3);
-      r.last(3);
+      if (m.options.harmonic)
+        c.phase = r.real(4);
+      r.last(m.options.harmonic ? 4 : 3);
       m.currents.push_back(c);
     } else if (key == "LOAD") {
       int id = r.integer(1);
@@ -936,10 +976,74 @@ Result<bool> is_magnetic_deck(const std::filesystem::path &path) {
   std::set<std::filesystem::path> stack;
   std::error_code ec;
   stack.insert(std::filesystem::weakly_canonical(path, ec));
-  return scan_solution(in, path.parent_path(), stack).solution == "MAGSTAT";
+  const auto solution = scan_solution(in, path.parent_path(), stack).solution;
+  return solution == "MAGSTAT" || solution == "MAGTRANS" || solution == "MAGHARM";
 }
 
 Status validate(const Model &m) {
+  if (m.options.harmonic) {
+    if (m.options.transient)
+      return Error{"A magnetic deck must select one solution"};
+    if (!m.motions.empty() || !m.drives.empty() || !m.forces.empty() || !m.probes.empty())
+      return Error{"MAGHARM is fixed geometry; MOTION, DRIVE, MFORCE and MPROBE are unavailable"};
+    if (m.options.planar && !m.terminals.empty())
+      return Error{"MAGHARM solid terminals require a 3D field mesh"};
+    for (const auto &[id, material] : m.materials)
+      if (material.bh_table)
+        return Error{std::format("MAGHARM requires linear permeability on MATMAG {}", id)};
+    for (const auto &[id, faces] : m.terminals)
+      if (id <= 0 || !m.face_sets.contains(faces))
+        return Error{std::format("MTERM {} requires a defined FSET", id)};
+    std::set<std::pair<int, int>> terminals;
+    for (const auto &v : m.terminal_voltages)
+      if (v.set <= 0 || !m.terminals.contains(v.terminal) ||
+          !std::isfinite(v.real) || !std::isfinite(v.imag) ||
+          !terminals.emplace(v.set, v.terminal).second)
+        return Error{std::format("VTERM {} requires a unique defined MTERM {} and finite voltage",
+                                 v.set, v.terminal)};
+    for (const auto &sc : m.subcases) {
+      if (!(sc.frequency > 0) || !std::isfinite(sc.frequency))
+        return Error{std::format("MAGHARM subcase {} requires finite FREQUENCY > 0 Hz", sc.id)};
+      if (sc.voltage && std::ranges::none_of(m.terminal_voltages,
+                           [&](const TerminalVoltage &v) { return v.set == sc.voltage; }))
+        return Error{std::format("MAGHARM subcase {} references undefined VTERM set {}",
+                                 sc.id, sc.voltage)};
+    }
+  }
+  if (m.options.transient || m.options.harmonic)
+    for (const auto &entry : m.conductivity)
+      if (!m.materials.contains(entry.first) &&
+          std::ranges::none_of(m.wire_properties, [&](const auto &wire) {
+            return wire.second.material == entry.first;
+          }))
+        return Error{std::format("MATCOND {} requires a matching MATMAG or PWIRE material ID",
+                                 entry.first)};
+  if (m.options.transient) {
+    if (!m.options.planar)
+      return Error{"MAGTRANS requires MAG2D or MAGAXI"};
+    if (m.air_gaps.size() != 1 || !m.meshed_air_gaps.empty() ||
+        m.options.air_gap_method.value_or(m.air_gaps.begin()->second.method) != AirGapMethod::Age)
+      return Error{"MAGTRANS requires one PAIRGAP solved by METHOD AGE"};
+    if (m.subcases.size() != 1)
+      return Error{"MAGTRANS requires one subcase per speed"};
+    if (!m.forces.empty() || !m.probes.empty())
+      return Error{"MAGTRANS reports air-gap torque and BFIELD; MFORCE and MPROBE are unavailable"};
+    for (const auto &[id, step] : m.time_steps)
+      if (id <= 0 || !(step.maximum_dt > 0) || !std::isfinite(step.maximum_dt) ||
+          step.max_cycles < 2)
+        return Error{std::format("MAGTRANS TSTEP {} requires finite DTMAX > 0 and MAXCYCLES >= 2", id)};
+    const auto &sc = m.subcases.front();
+    if (!sc.motion || !m.motions.contains(sc.motion))
+      return Error{std::format("MAGTRANS subcase {} requires a defined MOTION", sc.id)};
+    const auto &motion = m.motions.at(sc.motion);
+    if (motion.step != 0 || motion.count != 1 ||
+        !std::isfinite(motion.start) || !std::isfinite(motion.speed) || motion.speed == 0)
+      return Error{std::format("MAGTRANS MOTION {} requires blank STEP and COUNT and finite nonzero SPEED", sc.motion)};
+    if (!sc.time_step || !m.time_steps.contains(sc.time_step))
+      return Error{std::format("MAGTRANS subcase {} requires a defined TSTEP", sc.id)};
+    if (sc.field.every < 1)
+      return Error{"MAGTRANS requires BFIELD(EVERY=n) with n >= 1"};
+  }
   if (m.elements.empty())
     return Error{"MAGSTAT requires a magnetic mesh"};
   if (m.subcases.empty())
@@ -1218,7 +1322,7 @@ Status validate(const Model &m) {
                                  source)};
     }
   for (const auto &c : m.currents) {
-    if (c.set <= 0 || !std::isfinite(c.amperes))
+    if (c.set <= 0 || !std::isfinite(c.amperes) || !std::isfinite(c.phase))
       return Error{"ICIRC requires a positive SID and a finite current"};
     if (members.contains(c.target))
       return Error{std::format("ICIRC {} targets source {}, which belongs to "
@@ -1228,6 +1332,25 @@ Status validate(const Model &m) {
       return Error{std::format("ICIRC {} references undefined circuit or "
                                "source {}",
                                c.set, c.target)};
+  }
+  for (const auto &[id, data] : m.circuit_data) {
+    if (!sources.contains(id) || members.contains(id))
+      return Error{std::format("CIRCDAT {} requires a circuit ID, not a member source", id)};
+    if (!(data.resistance > 0) || !std::isfinite(data.resistance) ||
+        !(data.end_inductance >= 0) || !std::isfinite(data.end_inductance))
+      return Error{std::format("CIRCDAT {} requires finite R > 0 and LEND >= 0", id)};
+  }
+  std::set<std::pair<int, int>> voltage_targets;
+  for (const auto &v : m.voltages) {
+    if (v.set <= 0 || !m.circuit_data.contains(v.target) ||
+        !voltage_targets.emplace(v.set, v.target).second)
+      return Error{std::format("VCIRC {} requires a unique target with CIRCDAT (circuit {})",
+                               v.set, v.target)};
+    if (!std::isfinite(v.dc) || !std::isfinite(v.peak) || !std::isfinite(v.phase) ||
+        v.peak < 0 || v.order < 0 || (v.peak > 0 && v.order == 0))
+      return Error{std::format("VCIRC {} circuit {} requires finite voltages and phase, "
+                               "PEAK >= 0 and ORDER >= 1 for AC",
+                               v.set, v.target)};
   }
   ids.clear();
   for (const auto &probe : m.probes) {
@@ -1454,6 +1577,23 @@ Status validate(const Model &m) {
     auto r = load_factors(m, sc.load);
     if (auto *e = std::get_if<Error>(&r))
       return *e;
+    if (sc.voltage && m.options.transient) {
+      const auto &factors = std::get<std::map<int, double>>(r);
+      bool found = false;
+      for (const auto &v : m.voltages)
+        if (v.set == sc.voltage) {
+          found = true;
+          if (std::ranges::any_of(m.currents, [&](const Current &i) {
+                return i.target == v.target && factors.contains(i.set);
+              }) || (m.drives.contains(sc.drive) &&
+                     std::ranges::find(m.drives.at(sc.drive).phases, v.target) !=
+                         m.drives.at(sc.drive).phases.end()))
+            return Error{std::format("Subcase {} prescribes both current and voltage on circuit {}",
+                                     sc.id, v.target)};
+        }
+      if (!found)
+        return Error{std::format("Subcase {} references undefined VCIRC set {}", sc.id, sc.voltage)};
+    }
     if (!sc.drive)
       continue;
     if (!m.drives.contains(sc.drive))

@@ -105,6 +105,18 @@ struct Circuit {
 struct Current {
   int set{0}, target{0};
   double amperes{0};
+  double phase{0}; // degrees, MAGHARM only
+};
+struct CircuitData {
+  double resistance{0}, end_inductance{0}; // ohms, H
+};
+struct Voltage {
+  int set{0}, target{0}, order{0}; // harmonic order per transient repeat
+  double dc{0}, peak{0}, phase{0}; // volts, volts, degrees
+};
+struct TerminalVoltage {
+  int set{0}, terminal{0};
+  double real{0}, imag{0}; // peak volts
 };
 struct Combination {
   double scale{1};
@@ -121,6 +133,9 @@ struct Subcase {
   int id{1}, load{0}, boundary{0};
   int motion{0}; // MOTION ID; 0 for a single static solve
   int drive{0};  // DRIVE ID: phase currents from the MOTION position
+  int time_step{0}; // TSTEP ID in MAGTRANS
+  int voltage{0}; // VCIRC set in MAGTRANS
+  double frequency{0}; // Hz in MAGHARM
   std::string label;
   FieldOutput field;
   bool probes{true};
@@ -128,6 +143,10 @@ struct Subcase {
   // LDQ = APPARENT (default) adds the frozen-permeability L_dq to the
   // incremental one in a DRIVE subcase; LDQ = INCREMENTAL omits it.
   bool apparent{true};
+};
+struct TimeStep {
+  double maximum_dt{0}; // seconds
+  int max_cycles{0};
 };
 // MOTION: rigid motion of the cells of ESET set to the positions
 // start + k * step (k = 0 .. count - 1) relative to the mesh as given.
@@ -213,6 +232,8 @@ struct AirGapProperty {
   int band_layers{0}; // NLAYER; 0 for about square band elements
 };
 struct Options {
+  bool transient{false}; // SOL MAGTRANS
+  bool harmonic{false}; // SOL MAGHARM
   double length_scale{1}, nonlinear_tolerance{1e-8};
   int max_iterations{80}, wire_sides{16}, wire_layers{2};
   // PARAM,MAGPCG: CG iterations per solve with an earlier tangent's factor
@@ -245,7 +266,11 @@ struct Model {
   std::vector<Wire> wires;
   std::vector<WirePath> wire_paths;
   std::map<int, Circuit> circuits;
+  std::map<int, CircuitData> circuit_data;
   std::vector<Current> currents;
+  std::vector<Voltage> voltages;
+  std::map<int, int> terminals; // MTERM ID -> FSET
+  std::vector<TerminalVoltage> terminal_voltages;
   std::map<int, Combination> combinations;
   std::map<int, Boundary> boundaries;
   std::vector<Subcase> subcases;
@@ -257,6 +282,7 @@ struct Model {
   std::map<int, AirGapProperty> air_gaps;
   std::map<int, std::string> meshed_air_gaps; // PID -> what selected MESH
   std::map<int, Motion> motions;
+  std::map<int, TimeStep> time_steps;
   std::map<int, Drive> drives;
   std::optional<Periodic> period;
   Options options;

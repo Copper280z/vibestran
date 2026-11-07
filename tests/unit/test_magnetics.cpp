@@ -1144,6 +1144,83 @@ Model planar_box(int n, bool triangles = false, bool mixed = false) {
 }
 } // namespace
 
+TEST(MagneticHarmonic, SolidTerminalCurrentsAndPowerApproachTheOhmicLimit) {
+  // At low frequency a 2 m cube between two whole-face electrodes has
+  // conductance sigma * area / length = 20 S for each supported element.
+  const std::complex<double> voltage(1, 2);
+  for (int type = 0; type < 3; ++type) {
+    SCOPED_TRACE(type);
+    auto m = type == 0 ? box(2) : brick_box(2, type == 2);
+    const auto mesh = std::get<Mesh>(make_mesh(m));
+    for (size_t i = 0; i < mesh.faces.size(); ++i) {
+      const auto &f = mesh.faces[i];
+      if (f.cells[1] < 0 && std::abs(std::abs(f.center.x()) - 1.) < 1e-12)
+        m.face_sets[f.center.x() < 0 ? 1 : 2].push_back(face_selection(mesh, i, 1));
+    }
+    m.options.harmonic = true;
+    m.subcases[0].frequency = 1.;
+    m.subcases[0].voltage = 1;
+    m.conductivity[1] = 10.;
+    m.terminals = {{10, 1}, {20, 2}};
+    m.terminal_voltages = {{1, 10, voltage.real(), voltage.imag()}, {1, 20, 0, 0}};
+    const auto solved = solve(m);
+    ASSERT_TRUE(std::holds_alternative<Results>(solved)) << error_of(solved);
+    const auto &out = *std::get<Results>(solved).cases.front().harmonic;
+    ASSERT_EQ(out.terminals.size(), 2U);
+    EXPECT_LT(std::abs(out.terminals[0].current - 20. * voltage), .01);
+    EXPECT_LT(std::abs(out.terminals[0].current + out.terminals[1].current), 1e-10);
+    EXPECT_NEAR(out.mean_loss, 50., .01);
+    EXPECT_NEAR(out.mean_input, out.mean_loss, 1e-10);
+    for (size_t i = 0; i < mesh.cells.size(); ++i) {
+      EXPECT_LT((out.current_real[i] - Vector(5, 0, 0)).norm(), .002);
+      EXPECT_LT((out.current_imag[i] - Vector(10, 0, 0)).norm(), .002);
+    }
+  }
+}
+
+TEST(MagneticHarmonic, InsulatingSegmentationChangesThe3dCurrentLoops) {
+  // An imposed transverse flux induces loops in the yz plane. Two slabs
+  // separated along z each carry a closed loop, even with the same MID.
+  auto m = box(4);
+  m.options.harmonic = true;
+  m.subcases[0].frequency = 50.;
+  m.subcases[0].boundary = 1;
+  m.boundaries[1] = {0, Vector(.1, 0, 0)};
+  m.conductivity[1] = 1e3;
+  const auto whole = solve(m);
+  ASSERT_TRUE(std::holds_alternative<Results>(whole)) << error_of(whole);
+  m.materials[2] = {};
+  m.properties[2] = {2};
+  for (auto &c : m.elements) {
+    double z = 0;
+    for (int node : c.nodes)
+      z += m.nodes.at(node).position.z() / c.nodes.size();
+    if (std::abs(z) < .5)
+      c.property = 2;
+  }
+  const auto segmented = solve(m);
+  ASSERT_TRUE(std::holds_alternative<Results>(segmented)) << error_of(segmented);
+  const auto &result = std::get<Results>(segmented);
+  const auto &out = *result.cases.front().harmonic;
+  EXPECT_GT(out.mean_loss, 0.);
+  EXPECT_LT(out.mean_loss, .4 * std::get<Results>(whole).cases.front().harmonic->mean_loss);
+  for (double sign : {-1., 1.}) {
+    Vector total_real = Vector::Zero(), total_imag = Vector::Zero();
+    double current_scale = 0;
+    for (size_t i = 0; i < result.mesh.cells.size(); ++i) {
+      const auto &c = result.mesh.cells[i];
+      if (c.property == 1 && c.origin.z() * sign >= 0) {
+        total_real += c.volume * out.current_real[i];
+        total_imag += c.volume * out.current_imag[i];
+        current_scale += c.volume * out.current_imag[i].norm();
+      }
+    }
+    ASSERT_GT(current_scale, 1.);
+    EXPECT_LT(total_real.norm(), 1e-10 * current_scale);
+    EXPECT_LT(total_imag.norm(), 1e-10 * current_scale);
+  }
+}
+
 TEST(MagneticMappedBasis, HexAndWedgeMomentsCurlGradientAndFluxOnTaperedCells) {
   for (bool wedge : {false, true})
     for (bool reflected : {false, true}) {
