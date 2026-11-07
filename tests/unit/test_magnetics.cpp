@@ -3539,7 +3539,7 @@ public:
   std::string notice; // added to notices() by each factor() when set
 
 private:
-  vibestran::EigenSolverBackend inner_;
+  vibestran::LdltSolverBackend inner_;
 };
 
 // Declares an LU fallback, as cuDSS does, so it cannot promise SPD.
@@ -3553,7 +3553,7 @@ public:
   bool may_factor_indefinite() const noexcept override { return true; }
 
 private:
-  vibestran::EigenSolverBackend inner_;
+  vibestran::LdltSolverBackend inner_;
 };
 } // namespace
 

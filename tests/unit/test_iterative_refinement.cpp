@@ -107,7 +107,7 @@ TEST(RefinementTest, DirectSolveOfAnIllConditionedSystemIsRefinedToFullAccuracy)
   // A backward-stable Cholesky leaves a forward error of about cond eps
   // (1e-4 to 1e-2 here); refinement with compensated residuals removes it.
   const auto [K, F] = scaled_hilbert(10);
-  EigenSolverBackend direct;
+  LdltSolverBackend direct;
   direct.set_refinement(true);
   const std::vector<double> u = direct.solve(K, F);
   const auto rep = direct.last_refinement();
@@ -122,7 +122,7 @@ TEST(RefinementTest, DirectSolvesAreNotRefinedByDefault) {
   // Refinement of a direct solve is opt-in (--refine, PARAM,REFINE,YES): by
   // default the single solve is returned, with its cond(K) eps error.
   const auto [K, F] = scaled_hilbert(10);
-  EigenSolverBackend direct;
+  LdltSolverBackend direct;
   const std::vector<double> u = direct.solve(K, F);
   EXPECT_FALSE(direct.last_refinement().has_value());
   EXPECT_GT(max_error_from_one(u), 1e-7);
@@ -147,11 +147,25 @@ TEST(RefinementTest, EpsilonSeparatesAMechanismFromAnIllConditionedSystem) {
   // Ill-conditioned but regular: H_10 (cond 1.6e13) solved once is wrong
   // by more than 1e-7, yet its epsilon is small, so no mechanism is flagged.
   const auto [H, G] = scaled_hilbert(10);
-  EigenSolverBackend direct;
+  LdltSolverBackend direct;
   std::vector<double> v = direct.solve(H, G);
   const auto ill = refine_solution(H, G, v, nullptr, RefinementOptions{.max_corrections = 0});
   EXPECT_LT(std::abs(ill.epsilon), 1e-6);
   EXPECT_FALSE(indicates_mechanism(ill, /*refined=*/false));
+}
+
+TEST(RefinementTest, AResidualTheErrorEstimateCannotSeeStillIndicatesAMechanism) {
+  // AMG's pseudo-inverse: refinement converged in the range of K, with the load's null
+  // component left over. Measured: at least 0.05 on loaded mechanisms, at most 1.4e-7 healthy.
+  RefinementReport loaded;
+  loaded.converged = true;
+  loaded.estimated_error = 1e-12;
+  loaded.relative_residual = 0.05;
+  EXPECT_TRUE(indicates_mechanism(loaded, /*refined=*/true));
+  loaded.relative_residual = 1.4e-7;
+  EXPECT_FALSE(indicates_mechanism(loaded, /*refined=*/true));
+  loaded.relative_residual = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_TRUE(indicates_mechanism(loaded, /*refined=*/true));
 }
 
 TEST(RefinementTest, CorrectionsThatDoNotContractEndRefinement) {

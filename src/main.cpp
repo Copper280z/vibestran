@@ -1,10 +1,11 @@
 // src/main.cpp
 // Command-line driver: vibestran [options] <input.bdf> [output.f06]
 //
-// Default backend is the Eigen CPU solver.  Use --backend to select a GPU
-// solver when available:
-//   --backend=cpu               Eigen sparse Cholesky (always available,
-//   default)
+// Default backend is the vendored LDL^T library.  Use --backend to select
+// another solver when available:
+//   --backend=cpu               LDL^T library (always available, default)
+//   --backend=cpu-eigen         Eigen sparse Cholesky: Accelerate, else CHOLMOD,
+//                               else simplicial, to check the default against
 //   --backend=cpu-pcg           CPU PCG + AMG (low memory)
 //   --backend=cuda              NVIDIA cuDSS sparse direct solver (requires
 //   CUDA)
@@ -23,10 +24,19 @@
 //   --cuda-precision=<fp32|fp64> Precision for the CUDA cuDSS direct solver.
 //
 // Thread control (CPU backends):
-//   Set OMP_NUM_THREADS before running to limit parallelism, e.g.:
-//     OMP_NUM_THREADS=8 vibestran input.bdf
-//   On hyperthreaded CPUs, setting this to the physical core count often
-//   improves performance.
+//   The default is one thread per physical core: on hyperthreaded CPUs more
+//   than that is slower, up to twice as slow for a direct solve of a solid.
+//   Set OMP_NUM_THREADS before running to choose another count, e.g.:
+//     OMP_NUM_THREADS=4 vibestran input.bdf
+//
+// Exit codes:
+//   0  solved
+//   1  bad command line or unavailable backend
+//   2  deck could not be parsed
+//   3  solver error before any results were written
+//   4  any other error
+//   5  results were written under a fatal message at the top of the F06: a
+//      singular K, a solution that does not carry the load, or a failed solve
 //
 // Output:
 //   <stem>.f06   F06 text results (always written)
@@ -45,6 +55,7 @@
 
 #include "core/logger.hpp"
 #include "core/quality_checks.hpp"
+#include "core/threads.hpp"
 #include "io/bdf_parser.hpp"
 #include "io/inp_parser.hpp"
 #include "io/results.hpp"
@@ -76,10 +87,17 @@
 #include <memory>
 #include <spdlog/spdlog.h>
 #include <string_view>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+/// Results were written, but under a fatal message at the top of the F06.
+static constexpr int kExitFatal = 5;
 
 enum class BackendChoice {
   Auto,
   Cpu,
+  CpuEigen,
   CpuPCG,
   Vulkan,
   Cuda,
@@ -88,8 +106,17 @@ enum class BackendChoice {
 };
 enum class CudaPrecisionChoice { Float64, Float32 };
 
-static void configure_eigen_threads() {
-  int eigen_threads = Eigen::nbThreads();
+static int exit_code_of(const vibestran::SolveSummary &summary) {
+  if (summary.fatals.empty())
+    return 0;
+  spdlog::error("{} fatal message(s) at the top of the F06; the results are not to be trusted",
+                summary.fatals.size());
+  return kExitFatal;
+}
+
+/// OMP_NUM_THREADS if set, else one thread per physical core for OpenMP and Eigen.
+static void configure_threads() {
+  int eigen_threads = vibestran::physical_core_count();
   const char *omp_threads_env = std::getenv("OMP_NUM_THREADS");
   if (omp_threads_env != nullptr && omp_threads_env[0] != '\0') {
     char *end = nullptr;
@@ -104,10 +131,13 @@ static void configure_eigen_threads() {
 
   Eigen::setNbThreads(eigen_threads);
   if (omp_threads_env != nullptr && omp_threads_env[0] != '\0') {
-    spdlog::info("Eigen CPU threads: {} (from OMP_NUM_THREADS={})",
-                 Eigen::nbThreads(), omp_threads_env);
+    spdlog::info("CPU threads: {} (from OMP_NUM_THREADS={})", Eigen::nbThreads(),
+                 omp_threads_env);
   } else {
-    spdlog::info("Eigen CPU threads: {} (OpenMP default)", Eigen::nbThreads());
+#ifdef _OPENMP
+    omp_set_num_threads(eigen_threads);
+#endif
+    spdlog::info("CPU threads: {} (physical cores)", Eigen::nbThreads());
   }
 }
 
@@ -117,6 +147,8 @@ static std::unique_ptr<vibestran::SolverBackend>
 make_backend(BackendChoice backend_choice,
              [[maybe_unused]] CudaPrecisionChoice cuda_precision) {
   switch (backend_choice) {
+  case BackendChoice::CpuEigen:
+    return std::make_unique<vibestran::EigenSolverBackend>();
   case BackendChoice::CpuPCG:
     return std::make_unique<vibestran::CpuPCGSolverBackend>();
   case BackendChoice::Cuda: {
@@ -171,13 +203,13 @@ make_backend(BackendChoice backend_choice,
   case BackendChoice::Cpu:
     break;
   }
-  return std::make_unique<vibestran::EigenSolverBackend>();
+  return std::make_unique<vibestran::LdltSolverBackend>();
 }
 
 static void print_usage() {
   spdlog::error(
       "Usage: vibestran "
-      "[--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg|cuda-pcg-mixed>]\n"
+      "[--backend=<cpu|cpu-eigen|cpu-pcg|vulkan|cuda|cuda-pcg|cuda-pcg-mixed>]\n"
       "                      [--cuda-precision=<fp32|fp64>] [--csv]\n"
       "                      [--log-file=<path>] "
       "[--checkmode=lenient]\n"
@@ -185,8 +217,8 @@ static void print_usage() {
       "                      [--refine]\n"
       "                      [--amg-modes=<constant|rigid|drilling>]\n"
       "                      <input.bdf|input.inp> [output.f06]\n"
-      "  --backend=cpu              Eigen sparse Cholesky CPU solver "
-      "(default)\n"
+      "  --backend=cpu              LDL^T library CPU solver (default)\n"
+      "  --backend=cpu-eigen        Eigen sparse Cholesky CPU solver\n"
       "  --backend=cpu-pcg          CPU PCG + AMG solver (low memory)\n"
       "  --backend=vulkan           Vulkan PCG GPU solver (requires "
       "Vulkan; SOL 101 only)\n"
@@ -221,6 +253,7 @@ static void print_usage() {
 }
 
 int main(int argc, const char *argv[]) {
+  int exit_code = 0;
   // ── Argument parsing ─────────────────────────────────────────────────────
   BackendChoice backend_choice = BackendChoice::Auto;
   CudaPrecisionChoice cuda_precision = CudaPrecisionChoice::Float64;
@@ -283,6 +316,8 @@ int main(int argc, const char *argv[]) {
       std::string_view val = arg.substr(std::string_view("--backend=").size());
       if (val == "cpu")
         backend_choice = BackendChoice::Cpu;
+      else if (val == "cpu-eigen")
+        backend_choice = BackendChoice::CpuEigen;
       else if (val == "cpu-pcg")
         backend_choice = BackendChoice::CpuPCG;
       else if (val == "vulkan")
@@ -296,7 +331,7 @@ int main(int argc, const char *argv[]) {
       else {
         // init_logger with no file so error() goes somewhere
         vibestran::init_logger();
-        spdlog::error("Unknown backend '{}'. Valid: cpu, cpu-pcg, vulkan, "
+        spdlog::error("Unknown backend '{}'. Valid: cpu, cpu-eigen, cpu-pcg, vulkan, "
                       "cuda, cuda-pcg, cuda-pcg-mixed",
                       val);
         print_usage();
@@ -324,7 +359,7 @@ int main(int argc, const char *argv[]) {
 
   // Initialise logger (and optional file sink) before any logging.
   vibestran::init_logger(log_file_path);
-  configure_eigen_threads();
+  configure_threads();
 
   if (cuda_precision != CudaPrecisionChoice::Float64 &&
       backend_choice != BackendChoice::Cuda) {
@@ -481,6 +516,7 @@ int main(int argc, const char *argv[]) {
       // Write thermal F06
       vibestran::F06Writer::write_thermal(thermal_results, heat_model, f06_path, stamp());
       spdlog::info("F06 written: {}", f06_path.string());
+      exit_code = exit_code_of(thermal_results.summary);
 
       // ── STATICS chain ────────────────────────────────────────────────────
       if (!stat_subcases.empty()) {
@@ -521,8 +557,8 @@ int main(int argc, const char *argv[]) {
           stat_model.analysis.subcases.push_back(sc);
         }
 
-        spdlog::info("Solving structural chain with: Apple Accelerate (CPU)");
-        auto chain_backend = std::make_unique<vibestran::EigenSolverBackend>();
+        auto chain_backend = std::make_unique<vibestran::LdltSolverBackend>();
+        spdlog::info("Solving structural chain with: {}", chain_backend->name());
         chain_backend->set_refinement(refine);
         vibestran::LinearStaticSolver lsolver(std::move(chain_backend));
         lsolver.set_system_dump(dump_prefix);
@@ -542,6 +578,7 @@ int main(int argc, const char *argv[]) {
             std::filesystem::path(f06_path).replace_extension(".structural.op2");
         vibestran::Op2Writer::write(stat_results, stat_model, struct_op2);
         spdlog::info("OP2 written: {}", struct_op2.string());
+        exit_code = std::max(exit_code, exit_code_of(stat_results.summary));
       }
     } else if (model.analysis.sol == vibestran::SolutionType::Modal) {
       // ── SOL 103 Modal Analysis ───────────────────────────────────────────
@@ -612,6 +649,7 @@ int main(int argc, const char *argv[]) {
 
       vibestran::Op2Writer::write(results, model, op2_path);
       spdlog::info("OP2 written: {}", op2_path.string());
+      exit_code = exit_code_of(results.summary);
 
       // ── Write CSV (if requested via --csv or PARAM,CSVOUT,YES) ──────────
       bool write_csv = force_csv;
@@ -637,5 +675,5 @@ int main(int argc, const char *argv[]) {
     spdlog::error("Error: {}", e.what());
     return 4;
   }
-  return 0;
+  return exit_code;
 }

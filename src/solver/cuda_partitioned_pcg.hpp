@@ -121,7 +121,7 @@ static std::vector<double> solve_cuda_partitioned(CudaPCGContext& ctx,
     ctx.last_refinement = refine_solution(original, rhs, solution, inner, options);
     ctx.last_iters = total;
     ctx.last_rel_res = ctx.last_refinement->relative_residual;
-    require_refined(ctx, "cuda-pcg partitioned");
+    require_refined(ctx, solution, "cuda-pcg partitioned");
     return solution;
 }
 

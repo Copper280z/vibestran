@@ -703,18 +703,9 @@ CudaSolverBackend::solve_typed(const SparseMatrixBuilder::CsrData &K,
                         std::to_string(n) +
                         ") -- stiffness matrix may be singular. Check boundary "
                         "conditions (SPCs)");
-    // cuDSS perturbs tiny pivots instead of failing, so a singular K
-    // factorizes; its solution then does not equilibrate the load.
-    if (!fp32 && indicates_mechanism(report, refine))
-      throw SolverError(
-          "CUDA solver: the LU" + suffix + " solution does not equilibrate the load (" +
-          std::format("epsilon {:.2e}, relative residual {:.2e}", report.epsilon,
-                      report.relative_residual) +
-          (refine ? std::format(", estimated relative error {:.2e} after {} correction(s)",
-                                report.estimated_error, report.corrections)
-                  : std::string()) +
-          ", n=" + std::to_string(n) +
-          ") -- stiffness matrix is singular. Check boundary conditions (SPCs)");
+    // cuDSS perturbs tiny pivots instead of failing, so a singular K factorizes; its solution
+    // then does not equilibrate the load, which the analysis reports as fatal from the
+    // refinement report.
     last_cholesky_ = false;
     notices().add("The matrix is not numerically positive definite: cuDSS Cholesky" +
                   suffix + " failed and it was solved with LU");

@@ -65,7 +65,7 @@ const StaticRun &static_run(const std::string &deck) {
   if (const auto it = cache.find(deck); it != cache.end())
     return it->second;
   StaticRun run{BdfParser::parse_file(deck_path(deck)), {}, {}};
-  LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+  LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
   run.results = solver.solve(run.model);
   for (const auto &nd : run.results.subcases.at(0).displacements)
     run.disp[nd.node.value] = nd.d;

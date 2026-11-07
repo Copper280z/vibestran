@@ -124,7 +124,7 @@ SolverResults run(const std::string &bdf) {
         << bdf;
   }
   Model model = BdfParser::parse_string(bdf);
-  LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+  LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
   return solver.solve(model);
 }
 

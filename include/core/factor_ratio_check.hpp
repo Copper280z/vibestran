@@ -10,9 +10,16 @@
 
 namespace vibestran {
 
+/// A K_ii/D_i above this is taken as a singular K unless the deck sets PARAM,MAXRATIO.
+/// Measured: at least 1.39e12 with a null mode (or an exact zero pivot), at most 6.6e9 without,
+/// and the ratio moves by a factor of 40 with the ordering, so this sits midway between them.
+/// Nastran's 1e7 would stop healthy models: a stiffened panel reaches 2.15e7.
+inline constexpr double kDefaultFatalRatio = 1.0e11;
+
 struct FactorRatioCheckPolicy {
-  double maxratio{1.0e7};
-  bool fatal{true};
+  double maxratio{1.0e7};                 ///< A breach is a warning.
+  double fatal_ratio{kDefaultFatalRatio}; ///< A breach is fatal, when fatal is set.
+  bool fatal{true};                       ///< PARAM,BAILOUT,0 and not lenient.
   std::string context;
   std::string matrix_name;
 };
@@ -38,7 +45,11 @@ build_factor_ratio_check_policy(const Model &model, std::string context,
   policy.context = std::move(context);
   policy.matrix_name = std::move(matrix_name);
 
-  policy.maxratio = model.param_real("MAXRATIO").value_or(policy.maxratio);
+  // A limit in the deck is what the deck asks to stop at, as in Nastran.
+  if (const auto maxratio = model.param_real("MAXRATIO")) {
+    policy.maxratio = *maxratio;
+    policy.fatal_ratio = *maxratio;
+  }
   const auto bailout_param = model.param_integer("BAILOUT");
   int bailout = bailout_param.value_or(0);
 

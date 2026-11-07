@@ -97,7 +97,7 @@ TEST(TangentSolver, CellChangesConvergeWithinTheirRankPlusOne) {
     const Eigen::MatrixXd K1 = laplacian(kGrid, mu), K2 = laplacian(kGrid, saturated);
     const Eigen::VectorXd b = load(K1.rows());
 
-    EigenSolverBackend backend;
+    LdltSolverBackend backend;
     TangentSolverOptions options;
     options.factor.require_spd = true;
     options.reuse_factor = true;
@@ -132,7 +132,7 @@ TEST(TangentSolver, DistantTangentRefactorsAndSolvesExactly) {
     const Eigen::MatrixXd K1 = laplacian(kGrid, mu), K2 = laplacian(kGrid, varied);
     const Eigen::VectorXd b = load(K1.rows());
 
-    EigenSolverBackend backend;
+    LdltSolverBackend backend;
     TangentSolverOptions options;
     options.factor.require_spd = true;
     options.reuse_factor = true;
@@ -168,7 +168,7 @@ TEST(TangentSolver, IndefiniteTangentFallsBackToItsOwnFactorization) {
     ASSERT_LT(Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd>(K2).eigenvalues()[0], 0);
     const Eigen::VectorXd b = load(K1.rows());
 
-    EigenSolverBackend backend;
+    LdltSolverBackend backend;
     TangentSolverOptions options;
     options.reuse_factor = true;
     TangentSolver solver(backend, options);
@@ -190,7 +190,7 @@ TEST(TangentSolver, ExactSolvesAndNewPatternsFactorTheCurrentTangent) {
     B.col(0) = load(K1.rows());
     const std::span<const double> rhs{B.data(), static_cast<size_t>(B.size())};
 
-    EigenSolverBackend backend;
+    LdltSolverBackend backend;
     TangentSolverOptions options;
     options.factor.require_spd = true;
     options.reuse_factor = true;
@@ -230,7 +230,7 @@ TEST(TangentSolver, WithoutReuseEveryTangentIsFactored) {
     const Eigen::MatrixXd K2 = laplacian(kGrid, changed);
     const Eigen::VectorXd b = load(K2.rows());
 
-    EigenSolverBackend backend;
+    LdltSolverBackend backend;
     TangentSolver solver(backend, {});
     ASSERT_FALSE(solver.update(lower_csr(laplacian(kGrid, mu))));
     ASSERT_FALSE(solver.update(lower_csr(K2)));

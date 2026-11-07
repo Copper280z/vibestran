@@ -72,7 +72,7 @@ Notable current limitations:
 - `ACCEL` is parsed but not yet applied in the static solver.
 - PLOAD1 support is limited to CBAR and CBEAM.
 - CTUBE and CDAMPi are not implemented. CELAS3/4 and CMASS3/4 are stored and reported as CELAS1/2 and CMASS1/2.
-- AUTOSPC looks at one grid at a time, as Nastran's does, so it can't see a mechanism that spans grids: a rod with J > 0 whose rotations are free at both ends can still spin about its axis. What happens then depends on the backend. Linux CPU direct stops even when nothing loads the spin, and when a load does, some backends finish with exit code 0 and a wrong answer.
+- AUTOSPC looks at one grid at a time, as Nastran's does, so it can't see a mechanism that spans grids: a rod with J > 0 whose rotations are free at both ends can still spin about its axis. The default CPU backend holds that spin at zero and reports it as a [fatal message](#fatal-messages-and-exit-codes), naming the grids. The PCG and cuDSS backends expose no pivots, so a mechanism nothing loads gets at most a warning from them; when a load does reach it, every backend gives a fatal message.
 - A PSHELL with a blank MID2 has no bending, coupling or transverse shear stiffness, whatever MID3 and MID4 say, as in Nastran. A blank MID1 is rejected rather than treated as having no membrane stiffness, and with a MID2, a blank MID3 takes its shear from MID2 rather than making the section rigid in shear.
 - Stress recovery is not yet implemented for CBUSH and CMASS1-4.
 - PBARL supports ROD, TUBE, BAR, BOX, CHAN, T and I1. Its J is the closed-form thin-wall value and differs by up to 2% from MSC Nastran's numerical one; its K1 and K2 are 5/6 for BAR, Cowper's for ROD and TUBE, and wall-area estimates for the rest. CELAS GE is accepted and has no effect, as no solution here computes a damped response.
@@ -126,7 +126,7 @@ Optional solver backends are detected automatically at configure time.
 ## Usage
 
 ```
-vibestran [--backend=<cpu|cpu-pcg|vulkan|cuda|cuda-pcg|cuda-pcg-mixed>]
+vibestran [--backend=<cpu|cpu-eigen|cpu-pcg|vulkan|cuda|cuda-pcg|cuda-pcg-mixed>]
          [--cuda-precision=<fp32|fp64>] [--csv]
          [--log-file=<path>] [--dump-system=<prefix>] [--refine]
          [--amg-modes=<constant|rigid|drilling>]
@@ -186,8 +186,8 @@ Nastran, and is assessed with a residual computed in compensated
 - **epsilon** = u · (F − K u) / u · F, Nastran's load-sequence epsilon. It roughly
   tracks the relative error of the solution: below 1e-10 for ordinary models,
   ~1e-4 for a thin CHEXA8 shell with cond(K) ~ 6e14, and O(1) for a loaded
-  mechanism. |epsilon| > 1e-2 is reported as a mechanism (results not
-  meaningful), |epsilon| > 1e-6 as an ill-conditioned model.
+  mechanism. |epsilon| > 1e-2 is a fatal message for a mechanism (results not
+  meaningful), |epsilon| > 1e-6 a warning for an ill-conditioned model.
 - the normwise **backward error**, which is round-off for any stable solve;
 - the relative residual ||F − K u|| / ||F||, which is not an accuracy measure:
   for an ill-conditioned K it is ~ eps ||K|| ||u|| / ||F|| even for the exact
@@ -221,24 +221,67 @@ The PCG backends and fp32 factorizations always refine: that is how they reach
 double accuracy at all. Assembly is deterministic, so K is identical bit for
 bit between runs.
 
-### CPU — Cholesky (default)
+### Fatal messages and exit codes
 
-Sparse direct CPU solve. Always available, no extra dependencies. Uses Apple
-Accelerate on macOS when available, SuiteSparse CHOLMOD when available on other
-platforms, and otherwise falls back to Eigen's simplicial factorizations.
+A run that reaches a solution always writes it: this solver has several backends with
+different failure modes, and a partial answer is more use for finding what went wrong
+than none. What can't be trusted is reported in a `FATAL MESSAGES` block at the top of
+the F06, and the run exits with code 5.
+
+| Condition | Message |
+|---|---|
+| A pivot comes out exactly zero | Fatal: the unknowns held at zero are named by grid and component |
+| K_ii/D_i above 1e11 | Fatal: numerically singular |
+| K_ii/D_i above `PARAM,MAXRATIO` (default 1e7) | Warning |
+| ‖F − K u‖ / ‖F‖ above 1e-3, or \|epsilon\| above 1e-2 | Fatal: the solution does not equilibrate the load |
+| An iterative solve doesn't converge, or a solve fails | Fatal |
+
+Healthy models measure K_ii/D_i of at most 6.6e9 and a residual of at most 1.4e-7;
+singular ones at least 1.4e12 and 0.05. MSC stops at a K_ii/D_i of 1e7, which stiffened
+panels and laminates pass while being accurate, so 1e7 is only a warning here. A
+`PARAM,MAXRATIO` in the deck sets both limits: the deck's limit is where it stops.
+`PARAM,BAILOUT,-1` turns the zero pivot, ratio and residual fatals into warnings. It
+can't change a failed solve, which has no result to write for that subcase, though the
+other subcases are still solved. The two pivot rows need the default backend, since the
+others don't expose pivots, though cuDSS warns when Cholesky fails. Non-convergence stays
+fatal under `PARAM,BAILOUT,-1`.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Solved |
+| 1 | Bad command line, or the backend isn't available |
+| 2 | The input couldn't be parsed |
+| 3 | Solver error before any results |
+| 4 | Any other error |
+| 5 | Results written under a fatal message |
+
+The MAGSTAT and modal solutions don't use this block yet: their failures stop the run with
+exit code 3.
+
+### CPU threads
+
+CPU backends use one thread per physical core by default, since a second hyperthread on a
+core adds no memory bandwidth and slows these solvers down. `OMP_NUM_THREADS` overrides it.
+The F06's RUN section reports the count.
+
+### CPU — LDLᵀ (default)
+
+Sparse multifrontal LDLᵀ from the library vendored in `src/solver/ldlt`, on all
+platforms. It builds against Accelerate on macOS and against OpenBLAS (or another CBLAS)
+elsewhere, and requires METIS and AMD. Linear statics, heat transfer and MAGSTAT use it;
+SOL 103 does not yet.
 
 ```bash
 vibestran --backend=cpu model.bdf
 ```
 
-On macOS, the Accelerate sparse ordering can be selected with:
+It factors without pivoting first, which reports the inertia, K_ii/D_i at every row and
+any pivot that came out exactly zero, and holds such a pivot's unknown at zero. If a pivot
+comes out negative, or a zero diagonal has a nonzero coupling, the matrix is not positive
+semidefinite and it is factored again with threshold pivoting, with a notice in the F06.
 
-```bash
-VIBESTRAN_ACCELERATE_ORDER=metis vibestran --backend=cpu model.bdf
-```
-
-The default is METIS, except for planar MAGSTAT models, which the CPU
-backends order with minimum degree (AMD; CHOLMOD with AMD only). At their
+The default ordering is METIS, except for planar MAGSTAT models, which use minimum degree
+(AMD). At their
 sizes (up to about 10^5 unknowns) AMD's fill is within about 15% of nested
 dissection's and it orders several times faster, which matters with a
 sliding band, whose pattern changes at every MOTION position. cuDSS keeps
@@ -250,6 +293,20 @@ through the sparse rest of the gap's dense block and roughly triple the
 factorization's work. CHOLMOD also stops setting the block's dense rows aside
 in AMD, which otherwise inflates AMD's fill estimate. The F06 header's
 Ordering row reports the ordering a MAGSTAT solve used.
+
+### CPU — Accelerate, CHOLMOD or Eigen
+
+The factorizations used before the library: Apple Accelerate on macOS, SuiteSparse
+CHOLMOD on other platforms when available, and otherwise Eigen's simplicial
+factorization.
+
+```bash
+vibestran --backend=cpu-eigen model.bdf
+```
+
+On macOS the Accelerate ordering can be selected with
+`VIBESTRAN_ACCELERATE_ORDER=metis|amd|default`. CHOLMOD and the simplicial factorization stop
+at a zero pivot, so a singular model ends in a failed solve instead of a named mechanism.
 
 ### CPU — PCG
 
@@ -415,7 +472,10 @@ when it is not already cached.
 
 | Dependency | Required | Purpose |
 |---|---|---|
-| C++20 compiler (GCC 11+, Clang 13+) | Yes | |
+| C++20 compiler (GCC 11+, Clang 13+) and a C11 compiler | Yes | |
+| METIS and AMD (`libmetis-dev`, `libsuitesparse-dev`) | Yes | Orderings for the LDLᵀ library |
+| OpenMP | Yes | Threads for the LDLᵀ library and CPU PCG |
+| BLAS with a C interface (Accelerate, OpenBLAS) | Yes | Dense kernels for the LDLᵀ library; reference BLAS works, slowly |
 | Eigen 3.4+ | Yes | Core linear algebra and sparse CPU backends |
 | Spectra | Yes | CPU generalized eigensolver for SOL 103 |
 | TBB | No | Optional parallel execution support |

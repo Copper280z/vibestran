@@ -77,7 +77,7 @@ report_factor_ratio_result(const FactorRatioCheckPolicy& policy,
         policy.context, matrix_name, result.max_ratio, policy.maxratio,
         result.row_1based, result.matrix_diag, result.factor_diag,
         backend_label);
-    if (policy.fatal)
+    if (policy.fatal && result.max_ratio > policy.fatal_ratio)
         throw SolverError(message);
     notices.add(message);
 }

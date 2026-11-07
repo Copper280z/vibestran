@@ -30,7 +30,7 @@ namespace {
 
 SubCaseResults solve_static(const std::string& deck) {
     Model model = BdfParser::parse_string(deck);
-    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
     return solver.solve(model).subcases.at(0);
 }
 
@@ -42,7 +42,7 @@ ModalSubCaseResults solve_modal(const std::string& deck) {
 
 SubCaseResults solve_heat(const std::string& deck) {
     Model model = BdfParser::parse_string(deck);
-    HeatTransferSteadySolver solver(std::make_unique<EigenSolverBackend>());
+    HeatTransferSteadySolver solver(std::make_unique<LdltSolverBackend>());
     return solver.solve(model).subcases.at(0);
 }
 
@@ -381,9 +381,11 @@ TEST(RodAutoSpc, ParamNoLeavesTheSingularityToTheSolver) {
     Model off = BdfParser::parse_string(static_deck("PARAM,AUTOSPC,NO\n" + bulk));
     EXPECT_EQ(build_analysis_dof_map(on, on.analysis.subcases.at(0)).num_free_dofs(), 2);
     EXPECT_EQ(build_analysis_dof_map(off, off.analysis.subcases.at(0)).num_free_dofs(), 6);
-    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
     const SolverResults results = solver.solve(off);
-    EXPECT_FALSE(results.summary.notices.empty());
+    ASSERT_FALSE(results.summary.fatals.empty());
+    EXPECT_NE(results.summary.fatals[0].find("grid 2 T2"), std::string::npos) << results.summary.fatals[0];
+    EXPECT_NE(results.summary.fatals[0].find("grid 2 R3"), std::string::npos) << results.summary.fatals[0];
 }
 
 TEST(RodAutoSpc, MpcComponentsAreLeftToTheMpc) {
@@ -861,7 +863,7 @@ TEST(ConrodHeat, ConductionFollowsFouriersLawAndKeepsItsName) {
     Model model = BdfParser::parse_string(
         "SOL 153\nCEND\nSPC = 1\nLOAD = 1\nFLUX = ALL\nBEGIN BULK\nMAT4,1,50.\nGRID,1,,0.,0.,0.\n"
         "GRID,2,,10.,0.,0.\nCONROD,1,1,2,1,2.0\nSPC,1,1,0,20.\nSLOAD,1,2,100.\nENDDATA\n");
-    HeatTransferSteadySolver solver(std::make_unique<EigenSolverBackend>());
+    HeatTransferSteadySolver solver(std::make_unique<LdltSolverBackend>());
     const SolverResults results = solver.solve(model);
     const SubCaseResults& r = results.subcases.at(0);
     EXPECT_NEAR(temperature(r, 2), 20.0 + 100.0 * 10.0 / (50.0 * 2.0), 1e-9);

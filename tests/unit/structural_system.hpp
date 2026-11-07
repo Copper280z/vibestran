@@ -40,7 +40,7 @@ public:
 private:
     Record& record_;
     bool solve_it_;
-    EigenSolverBackend direct_;
+    LdltSolverBackend direct_;
 };
 
 // CG iterations of the host cycle on a recorded system; in amg_host_iterations.cpp.

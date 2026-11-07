@@ -18,13 +18,13 @@ solver log, F06 path, and comparison message. Per-deck solver output is in
 
 ## Current Summary
 
-The suite contains 3,226 definitions. The current run has 1,648 final failure
+The suite contains 3,226 definitions. The current run has 1,634 final failure
 records:
 
 | Bucket | Failure records | Unique decks | Current disposition |
 |---|---:|---:|---|
-| `unsupported_input` | 874 | 147 | Requires unsupported cards, solution sequences, elements, or formulations |
-| `numerical_mismatch` | 599 | 218 | Result exists but differs from the reference or comparator expectation |
+| `unsupported_input` | 862 | 147 | Requires unsupported cards, solution sequences, elements, or formulations |
+| `numerical_mismatch` | 597 | 218 | Result exists but differs from the reference or comparator expectation |
 | `input_parse_error` | 141 | 12 | Parser rejects syntax or a card variant used by a valid deck |
 | `missing_result_data` | 30 | 8 | Solver completes but does not emit the requested result family |
 | `solver_model_error` | 4 | 1 | Parsed model is rejected by a geometry gate |
@@ -662,4 +662,4 @@ most recent entry.
   stiffness. No deck in the suite leaves MID2 blank with a MID1, so direct stays at 1,648
   and CPU PCG at 1,656, and CPU PCG's bulk counts don't move at all. Membrane-only CTRIA3
   no longer returns zeros, which its condensed bubble rotations caused by dividing by zero.
-
+- **The LDLᵀ library becomes the default CPU backend, and untrustworthy results are written under a fatal message (1,648 → 1,634 final failure records).** On the same code `--backend=cpu-eigen` (Accelerate LLT here) has 1,636, and no record fails on the library that passes on LLT. The two it fixes are `QX` values at 1e-14 in `shell force per length components`; 9 bulk records move by 1 to 21 bad values in either direction, all at round-off, on values already failing. The other 12 of the 14 come from writing results: 11 `quad8 no ...` decks pass `SC/1/DISPLACEMENTS ABSENT` because an empty K now writes an F06 with no displacements, where no F06 used to fail the record, and `NAS S30 AUTOSPC reaction forces` passes grid 10 TX. 51 decks exit 5: 39 have only CQUAD8 and so an empty K, and 12 have a genuine mechanism, including the two `BAILOUT default` bar decks and the `solid` one, while their `BAILOUT -1` versions exit 0. Their `SC/1/DISPLACEMENTS ABSENT` records still fail, since the results are now written under the fatal message by design. `test.py` now fails a record when the solver exits nonzero with nothing to compare, and classifies an empty K as writing no results, so the buckets keep their meaning.

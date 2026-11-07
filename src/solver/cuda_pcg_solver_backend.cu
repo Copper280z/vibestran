@@ -63,6 +63,8 @@ CudaPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
     ctx_->near_nullspace = near_nullspace();
     auto u = solve_cuda_pcg_stable(*ctx_, K, F);
     notices().keep(std::exchange(ctx_->notices, {}));
+    for (auto& fatal : std::exchange(ctx_->fatals, {}))
+        notices().add_fatal(std::move(fatal));
     return u;
 }
 

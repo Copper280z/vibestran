@@ -159,6 +159,34 @@ TEST(F06Header, RunNoticesAndEmptySectionsAreOmitted) {
     EXPECT_EQ(text.find(block), std::string::npos) << block;
 }
 
+TEST(F06Header, FatalMessagesComeBeforeEverySectionAndWrapUnderTheirText) {
+  SolveSummary s;
+  s.solution.add("Solution", "SOL 101 linear static");
+  s.notices.push_back("a warning");
+  std::string long_message;
+  for (int i = 0; i < 60; ++i)
+    long_message += "word" + std::to_string(i) + " ";
+  collect_fatals(s, {long_message + "tail", "second"}, "Subcase 2");
+  ASSERT_EQ(s.fatals.size(), 2u);
+  EXPECT_EQ(s.fatals[1], "Subcase 2: second");
+  const std::string text = header_text(s, nullptr);
+  const auto lines = lines_of(text);
+  only_line(lines, " FATAL MESSAGES");
+  const auto title = text.find("FATAL MESSAGES");
+  EXPECT_LT(title, text.find(" BUILD"));
+  EXPECT_LT(title, text.find(" SOLUTION"));
+  EXPECT_LT(title, text.find(" NOTICES"));
+  const size_t first = only_line(lines, "   *** FATAL: Subcase 2: second") ;
+  // The long message came first and wrapped under its own text, not under the prefix.
+  EXPECT_GT(first, 4u);
+  EXPECT_EQ(lines.at(first - 1).find("tail"), lines.at(first - 1).size() - 4);
+  EXPECT_EQ(lines.at(first - 1).find_first_not_of(' '), std::string_view("   *** FATAL: ").size());
+  // Line 3 stays first for the validation parser, and the title stays under it.
+  EXPECT_EQ(lines.at(2).rfind(" VIBESTRAN Version", 0), 0u);
+  for (const auto &line : lines)
+    EXPECT_LE(line.size(), 132u) << line;
+}
+
 TEST(F06Header, CollectNoticesPrefixesContextAndDropsImmediateRepeats) {
   SolveSummary s;
   collect_notices(s, {"a", "a", "b"}, "Subcase 1");
@@ -199,7 +227,7 @@ public:
   }
 
 private:
-  EigenSolverBackend inner_;
+  LdltSolverBackend inner_;
 };
 
 constexpr const char *kSpringDeck = R"(SOL 101

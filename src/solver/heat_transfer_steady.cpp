@@ -3,10 +3,12 @@
 #include "solver/heat_transfer_steady.hpp"
 
 #include "core/dof_map.hpp"
+#include "core/factor_ratio_check.hpp"
 #include "core/sparse_matrix.hpp"
 #include "elements/chbdy_element.hpp"
 #include "elements/thermal_elements.hpp"
 #include "assembly_parallel.hpp"
+#include "solver/analysis_support.hpp"
 
 #include <Eigen/Dense>
 #include <algorithm>
@@ -307,6 +309,8 @@ SolverResults HeatTransferSteadySolver::solve(const Model &model) {
   results.summary.solver = solver_section(*backend_);
   for (const auto &sc : model.analysis.subcases) {
     results.subcases.push_back(solve_subcase(model, sc, results.summary));
+    collect_fatals(results.summary, backend_->notices().take_fatals(),
+                   std::format("Subcase {}", sc.id));
     collect_notices(results.summary, backend_->notices().take(),
                     std::format("Subcase {}", sc.id));
   }
@@ -346,7 +350,40 @@ SubCaseResults HeatTransferSteadySolver::solve_subcase(const Model &model,
       expanded = csr.expanded_symmetric();
       solve_csr = &expanded;
     }
-    T_free = backend_->solve(*solve_csr, Q, nullptr);
+    // As in LinearStaticSolver: a failed solve ends this subcase and the F06 says why.
+    try {
+      T_free = backend_->solve(*solve_csr, Q, nullptr);
+    } catch (const SolverError &e) {
+      backend_->notices().add_fatal(e.what());
+      SubCaseResults failed;
+      failed.id = sc.id;
+      failed.label = sc.label;
+      return failed;
+    }
+    const FactorRatioCheckPolicy policy =
+        build_factor_ratio_check_policy(model, std::format("[subcase {}]", sc.id), "conductance matrix");
+    if (const auto pivots = backend_->last_pivot_report())
+      report_pivots(*pivots, policy, [](int row) { return std::format("equation {}", row + 1); },
+                    backend_->notices());
+    std::optional<RefinementReport> rep = backend_->last_refinement();
+    const bool refined = rep.has_value();
+    if (!refined) {
+      std::vector<double> T_probe = T_free;
+      RefinementOptions probe;
+      probe.max_corrections = 0;
+      rep = refine_solution(csr, Q, T_probe, nullptr, probe);
+    }
+    if (indicates_mechanism(*rep, refined)) {
+      std::string message = std::format(
+          "the solution does not balance the heat load (relative residual {:.2e}): the "
+          "conductance matrix is singular, so part of the model likely has no prescribed "
+          "temperature or convection path, and results are not meaningful",
+          rep->relative_residual);
+      if (policy.fatal)
+        backend_->notices().add_fatal(std::move(message));
+      else
+        backend_->notices().add(std::move(message));
+    }
     const auto t1 = Clock::now();
     spdlog::debug("[heat subcase {}] solve: {:.3f} ms", sc.id, Ms(t1 - t0).count());
   }

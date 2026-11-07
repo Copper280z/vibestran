@@ -195,11 +195,11 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
         notices().add(std::format("Vulkan backend: {} equations is below the GPU "
                                   "threshold of {}; solved with the CPU direct solver",
                                   n, cfg_.min_dofs_for_gpu));
-        EigenSolverBackend eigen;
-        eigen.set_refinement(refine_direct_);
-        auto u = eigen.solve(K, F, factor_ratio_policy);
-        notices().keep(eigen.notices().take());
-        last_refinement_ = eigen.last_refinement();
+        LdltSolverBackend direct;
+        direct.set_refinement(refine_direct_);
+        auto u = direct.solve(K, F, factor_ratio_policy);
+        notices().keep(direct.notices().take());
+        last_refinement_ = direct.last_refinement();
         last_residual_   = last_refinement_ ? last_refinement_->relative_residual : 0.0;
         return u;
     }
@@ -303,7 +303,7 @@ VulkanSolverBackend::solve(const SparseMatrixBuilder::CsrData& K,
     last_residual_   = rep.relative_residual;
     last_refinement_ = rep;
     if (!rep.converged)
-        throw SolverError(std::format(
+        notices().add_fatal(std::format(
             "Vulkan PCG could not reach the target relative error {:.1e} (estimated {:.2e} "
             "after {} refinement correction(s), {} PCG iterations; n = {}): the stiffness "
             "matrix is too ill-conditioned for Jacobi PCG{}, or singular (check SPCs). "

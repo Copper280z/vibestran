@@ -26,7 +26,7 @@ namespace {
 
 SubCaseResults solve_static(const std::string& deck) {
     Model model = BdfParser::parse_string(deck);
-    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
     return solver.solve(model).subcases.at(0);
 }
 

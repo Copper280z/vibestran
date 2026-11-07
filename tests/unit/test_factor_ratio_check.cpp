@@ -7,6 +7,20 @@
 
 using namespace vibestran;
 
+TEST(FactorRatioCheckPolicy, OnlyALimitInTheDeckMovesTheFatalLimit) {
+    Model model;
+    const auto defaults = build_factor_ratio_check_policy(model, "", "K");
+    EXPECT_DOUBLE_EQ(defaults.maxratio, 1.0e7);
+    EXPECT_DOUBLE_EQ(defaults.fatal_ratio, kDefaultFatalRatio);
+    EXPECT_GT(defaults.fatal_ratio, 6.6e9);  // the highest healthy deck measured
+    EXPECT_LT(defaults.fatal_ratio, 1.39e12); // the lowest singular one
+
+    model.params["MAXRATIO"] = "1.+3";
+    const auto lower = build_factor_ratio_check_policy(model, "", "K");
+    EXPECT_DOUBLE_EQ(lower.maxratio, 1.0e3);
+    EXPECT_DOUBLE_EQ(lower.fatal_ratio, 1.0e3);
+}
+
 TEST(FactorRatioCheckPolicy, DefaultsAreStrictAndFatal) {
     Model model;
     const FactorRatioCheckPolicy policy =

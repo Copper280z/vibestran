@@ -429,9 +429,29 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   // results follow from those values. A model with no element at all, usually
   // because its cards were unsupported, still goes to the backend, which rejects it.
   const bool fully_prescribed = csr.n == 0 && !model.elements.empty();
+  const std::string context = std::format("Subcase {}", sc.id);
   std::vector<double> u_reduced;
-  if (!fully_prescribed)
-    u_reduced = backend_->solve(*solve_csr, F, &factor_ratio_policy);
+  if (!fully_prescribed) {
+    // The backends report failure by throwing. Here that ends this subcase, not the run: the
+    // F06 says why at the top, the other subcases are still solved, and the run exits nonzero.
+    try {
+      u_reduced = backend_->solve(*solve_csr, F, &factor_ratio_policy);
+    } catch (const SolverError &e) {
+      notices.add_fatal(e.what());
+      if (!dump_prefix_.empty()) {
+        write_matrix_market(system_dump_path(dump_prefix_, sc.id, "K.mtx"), csr);
+        write_matrix_market(system_dump_path(dump_prefix_, sc.id, "F.mtx"), F);
+        write_dof_map(system_dump_path(dump_prefix_, sc.id, "dofs.txt"), model, mpc_handler);
+      }
+      collect_fatals(summary, backend_->notices().take_fatals(), context);
+      collect_fatals(summary, notices.take_fatals(), context);
+      collect_notices(summary, backend_->notices().take(), context);
+      SubCaseResults failed;
+      failed.id = sc.id;
+      failed.label = sc.label;
+      return failed;
+    }
+  }
   const auto t6 = Clock::now();
   spdlog::debug("[subcase {}] linear solve: {:.3f} ms", sc.id, Ms(t6 - t5b).count());
   if (!dump_prefix_.empty()) {
@@ -461,6 +481,13 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
   // solution rounded to double.  Refined solves (--refine, PARAM,REFINE,YES,
   // and all PCG backends) report the refinement's error estimate instead.
   if (!fully_prescribed) {
+    if (const auto pivots = backend_->last_pivot_report()) {
+      const bool has_news = !pivots->held_rows.empty() || pivots->max_ratio > factor_ratio_policy.maxratio;
+      const auto dofs = has_news ? reduced_equation_dofs(model, mpc_handler) : std::vector<EquationDof>{};
+      report_pivots(*pivots, factor_ratio_policy,
+                    [&dofs](int row) { return equation_dof_name(dofs.at(static_cast<std::size_t>(row))); },
+                    notices);
+    }
     std::optional<RefinementReport> rep = backend_->last_refinement();
     const bool refined = rep.has_value();
     if (!refined) {
@@ -489,14 +516,19 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
     constexpr double kAccuracyWarning = 1e-6;
     constexpr double kBackwardErrorWarning = 1e-10;
     if (indicates_mechanism(*rep, refined)) {
-      notices.add(std::format(
-          "the solution does not equilibrate the load ({}): the "
+      std::string message = std::format(
+          "the solution does not equilibrate the load (relative residual {:.2e}, {}): the "
           "stiffness matrix is singular or too ill-conditioned for double "
           "precision; the model likely has an unrestrained mechanism loaded by the "
           "applied forces, and results are not meaningful",
+          rep->relative_residual,
           refined ? std::format("estimated relative error {:.2e} after refinement",
                                 rep->estimated_error)
-                  : std::format("epsilon {:.2e}", rep->epsilon)));
+                  : std::format("epsilon {:.2e}", rep->epsilon));
+      if (factor_ratio_policy.fatal)
+        notices.add_fatal(std::move(message));
+      else
+        notices.add(std::move(message));
     } else if (refined && !rep->converged && rep->estimated_error > kAccuracyWarning) {
       notices.add(std::format("the stiffness matrix is very ill-conditioned: the solution "
                               "is only accurate to about {:.0e} (relative)",
@@ -547,7 +579,8 @@ SubCaseResults LinearStaticSolver::solve_subcase(const Model &model,
 
   spdlog::debug("[subcase {}] total: {:.3f} ms", sc.id, Ms(t7 - t0).count());
 
-  const std::string context = std::format("Subcase {}", sc.id);
+  collect_fatals(summary, backend_->notices().take_fatals(), context);
+  collect_fatals(summary, notices.take_fatals(), context);
   collect_notices(summary, backend_->notices().take(), context);
   collect_notices(summary, notices.take(), context);
   return result;

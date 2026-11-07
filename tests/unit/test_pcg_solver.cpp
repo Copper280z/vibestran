@@ -157,7 +157,7 @@ TEST_F(CpuPCGTest, TridiagonalAgreesWithDirectSolver) {
 
     auto u_pcg = solve(csr, F);
 
-    EigenSolverBackend direct;
+    LdltSolverBackend direct;
     auto u_direct = direct.solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u_pcg.size()), n);
@@ -184,7 +184,7 @@ TEST_F(CpuPCGTest, LargeBandedSpdAgreesWithDirect) {
 
     auto u_pcg = solve(csr, F);
 
-    EigenSolverBackend direct;
+    LdltSolverBackend direct;
     auto u_direct = direct.solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u_pcg.size()), n);
@@ -260,7 +260,7 @@ TEST_F(CpuPCGTest, LargeTridiagonalConvergesWithinBound) {
     ASSERT_EQ(static_cast<int>(u.size()), n);
 
     // Verify by comparing with direct solver on a subset of components.
-    EigenSolverBackend direct;
+    LdltSolverBackend direct;
     auto u_direct = direct.solve(csr, F);
     for (int i = 0; i < n; i += 100) {
         const double tol = std::max(1e-6, std::abs(u_direct[i]) * 1e-10);
@@ -279,7 +279,7 @@ TEST_F(CpuPCGTest, LargeTridiagonalConvergesWithinBound) {
 // mode in its nullspace: no solution exists for a load with net force, and PCG must
 // not hand back whatever its last iterate was.
 
-TEST(CpuPCGSolver, SingularSystemWithNetLoadIsAnError) {
+TEST(CpuPCGSolver, SingularSystemWithNetLoadWritesItsIterateUnderAFatalMessage) {
     const int n = 2000;
     SparseMatrixBuilder b(n);
     for (int i = 0; i < n; ++i) {
@@ -287,7 +287,17 @@ TEST(CpuPCGSolver, SingularSystemWithNetLoadIsAnError) {
         if (i > 0) { b.add(i, i - 1, -1.0); b.add(i - 1, i, -1.0); }
     }
     CpuPCGSolverBackend pcg(1e-8, 200);
-    EXPECT_THROW((void)pcg.solve(b.build_csr(), std::vector<double>(n, 1.0)), SolverError);
+    const auto csr = b.build_csr();
+    const std::vector<double> F(n, 1.0);
+    const auto u = pcg.solve(csr, F);
+    ASSERT_TRUE(pcg.last_refinement().has_value());
+    EXPECT_FALSE(pcg.last_refinement()->converged);
+    const auto fatals = pcg.notices().take_fatals();
+    ASSERT_EQ(fatals.size(), 1u);
+    EXPECT_NE(fatals[0].find("did not converge"), std::string::npos) << fatals[0];
+    // A net load on a free system has no solution, so the iterate cannot carry it.
+    EXPECT_TRUE(indicates_mechanism(*pcg.last_refinement(), /*refined=*/true));
+    EXPECT_EQ(u.size(), F.size());
 }
 
 // ── Test 9: a real structure, with the modes the analysis supplies ───────────
@@ -384,7 +394,7 @@ TEST_F(CudaPCGTest, TridiagonalAgreesWithEigen) {
 
     auto u_cuda = backend_->solve(csr, F);
 
-    EigenSolverBackend eigen;
+    LdltSolverBackend eigen;
     auto u_eigen = eigen.solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u_cuda.size()), n);
@@ -401,7 +411,7 @@ TEST_F(CudaPCGTest, LowerTriangularTridiagonalAgreesWithEigen) {
 
     auto u_cuda = backend_->solve(csr, F);
 
-    EigenSolverBackend eigen;
+    LdltSolverBackend eigen;
     auto u_eigen = eigen.solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u_cuda.size()), n);
@@ -420,7 +430,7 @@ TEST_F(CudaPCGTest, LargerTridiagonalConverges) {
 
     auto u_cuda = backend_->solve(csr, F);
 
-    EigenSolverBackend eigen;
+    LdltSolverBackend eigen;
     auto u_eigen = eigen.solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u_cuda.size()), n);
@@ -479,7 +489,7 @@ TEST_F(CudaPCGTest, LargeBandedSpdAgreesWithEigen) {
 
     auto u_cuda = backend_->solve(csr, F);
 
-    EigenSolverBackend eigen;
+    LdltSolverBackend eigen;
     auto u_eigen = eigen.solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u_cuda.size()), n);
@@ -505,7 +515,7 @@ TEST_F(CudaMixedPCGTest, TridiagonalAgreesWithEigenAfterRefinement) {
 
     auto u_cuda = backend_->solve(csr, F);
 
-    EigenSolverBackend eigen;
+    LdltSolverBackend eigen;
     auto u_eigen = eigen.solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u_cuda.size()), n);
@@ -567,9 +577,15 @@ TEST_F(CudaMixedPCGTest, Fp32InnerSolvesAreRefinedToTheTargetError) {
 
 // A matrix too ill-conditioned for fp32 corrections (H_9, cond 4.9e11) must
 // be reported as a failure, not returned as a converged solution.
-TEST_F(CudaMixedPCGTest, HopelesslyIllConditionedSystemIsRejected) {
+TEST_F(CudaMixedPCGTest, HopelesslyIllConditionedSystemIsReportedFatal) {
     const auto [K, F] = test::scaled_hilbert(9);
-    EXPECT_THROW((void)backend_->solve(K, F), SolverError);
+    const auto u = backend_->solve(K, F);
+    EXPECT_EQ(u.size(), F.size());
+    ASSERT_TRUE(backend_->last_refinement().has_value());
+    EXPECT_FALSE(backend_->last_refinement()->converged);
+    const auto fatals = backend_->notices().take_fatals();
+    ASSERT_EQ(fatals.size(), 1u);
+    EXPECT_NE(fatals[0].find("did not converge"), std::string::npos) << fatals[0];
 }
 
 #endif // HAVE_CUDA

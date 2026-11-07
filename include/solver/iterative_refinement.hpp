@@ -97,11 +97,18 @@ using CorrectionSolve = std::function<std::vector<double>(const std::vector<doub
 /// |epsilon| roughly tracks the forward error of a stable solve.
 inline constexpr double kMechanismEpsilon = 1e-2;
 
+/// ||F - K u|| / ||F|| above which a solution of any backend does not carry the load.
+/// Measured: at most 1.4e-7 on healthy decks with a direct solve and 3.7e-8 with
+/// PCG, at least 0.05 on loaded mechanisms. AMG cannot see a residual in a null
+/// direction, so its error estimate stays small and only this catches it.
+inline constexpr double kMechanismResidual = 1e-3;
+
 /// True when `r` indicates the solution of a singular K (an unrestrained
-/// mechanism under load) rather than of an ill-conditioned one: for a
-/// refined solve, refinement that did not converge with an estimated error
-/// above 1e-2 (or NaN); for an unrefined one (an assessment with no
-/// corrections), |epsilon| above kMechanismEpsilon (or NaN).
+/// mechanism under load) rather than of an ill-conditioned one: a relative
+/// residual above kMechanismResidual (or NaN), or for a refined solve,
+/// refinement that did not converge with an estimated error above 1e-2 (or
+/// NaN), or for an unrefined one (an assessment with no corrections),
+/// |epsilon| above kMechanismEpsilon (or NaN).
 [[nodiscard]] bool indicates_mechanism(const RefinementReport &r, bool refined);
 
 } // namespace vibestran

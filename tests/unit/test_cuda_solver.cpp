@@ -7,6 +7,7 @@
 // LU fallback path handles non-SPD matrices correctly.
 
 #include <gtest/gtest.h>
+#include "solver/iterative_refinement.hpp"
 #include "solver/solver_backend.hpp"
 #include "core/sparse_matrix.hpp"
 #include "core/types.hpp"
@@ -75,7 +76,7 @@ TEST_F(CudaTest, DiagonalSystemExactSolution) {
 
 // ── Test 2: 5×5 tridiagonal SPD — agrees with Eigen ─────────────────────────
 // K = tridiag(-1, 3, -1) of size 5, F = ones.
-// Verify CUDA solution matches EigenSolverBackend to double precision.
+// Verify CUDA solution matches LdltSolverBackend to double precision.
 
 TEST_F(CudaTest, TridiagonalSystemAgreesWithEigen) {
     const int n = 5;
@@ -90,7 +91,7 @@ TEST_F(CudaTest, TridiagonalSystemAgreesWithEigen) {
 
     auto u_cuda = backend_->solve(csr, F);
 
-    EigenSolverBackend eigen;
+    LdltSolverBackend eigen;
     auto u_eigen = eigen.solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u_cuda.size()), n);
@@ -119,7 +120,7 @@ TEST_F(CudaTest, LowerTriangularTridiagonalAgreesWithEigen) {
 
     auto u_cuda = backend_->solve(csr, F);
 
-    EigenSolverBackend eigen;
+    LdltSolverBackend eigen;
     auto u_eigen = eigen.solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u_cuda.size()), n);
@@ -146,7 +147,7 @@ TEST_F(CudaTest, LargerTridiagonalHighAccuracy) {
 
     auto u_cuda = backend_->solve(csr, F);
 
-    EigenSolverBackend eigen;
+    LdltSolverBackend eigen;
     auto u_eigen = eigen.solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u_cuda.size()), n);
@@ -182,18 +183,13 @@ TEST_F(CudaTest, StiffDiagonalSystemIsExact) {
             << "Stiff diagonal: component " << i << " wrong";
 }
 
-// ── Test 5: singular matrix throws SolverError ────────────────────────────────
-// A matrix with a zero row (det = 0, structurally rank-deficient) must cause
-// solve() to throw SolverError with a descriptive message.
-//
-// Note: the CUDA backend uses a direct sparse solver (cuSOLVER), not a
-// preconditioned iterative method.  A matrix that is merely missing a diagonal
-// entry but remains non-singular (e.g. a 3×3 matrix with off-diagonal entries
-// that make det ≠ 0) will be solved correctly.  Only a truly singular matrix
-// (zero row → det = 0) triggers the singularity detection.
-// K = [[2, -2], [-2, 2]] — det = 4-4 = 0, symmetric singular matrix.
+// ── Test 5: a singular matrix under a net load ─────────────────────────────
+// K = [[2, -2], [-2, 2]] is singular and its rows sum to zero, so r_0 + r_1 = F_0 + F_1 = 2
+// for every u: no solution can carry the load, and the relative residual is at least 1. The
+// solve returns what cuDSS gives, for the analysis to report under a fatal message; the check
+// is written so that a NaN fails it too.
 
-TEST_F(CudaTest, SingularMatrixThrowsSolverError) {
+TEST_F(CudaTest, SingularMatrixUnderANetLoadLeavesAResidualTheAnalysisReports) {
     SparseMatrixBuilder builder(2);
     builder.add(0, 0,  2.0);
     builder.add(0, 1, -2.0);
@@ -202,9 +198,12 @@ TEST_F(CudaTest, SingularMatrixThrowsSolverError) {
     auto csr = builder.build_csr();
     std::vector<double> F = {1.0, 1.0};
 
-    EXPECT_THROW({
-        (void)backend_->solve(csr, F);
-    }, SolverError) << "Truly singular matrix (det=0) must throw SolverError";
+    const auto u = backend_->solve(csr, F);
+    ASSERT_EQ(u.size(), 2u);
+    const double r0 = F[0] - (2.0 * u[0] - 2.0 * u[1]);
+    const double r1 = F[1] - (-2.0 * u[0] + 2.0 * u[1]);
+    EXPECT_FALSE(std::hypot(r0, r1) / std::hypot(F[0], F[1]) <= kMechanismResidual)
+        << "u = " << u[0] << ", " << u[1];
 }
 
 // ── Ill-conditioned systems are refined to full accuracy ─────────────────────
@@ -277,7 +276,7 @@ TEST_F(CudaTest, LargeRandomSpdSystemAgreesWithEigen) {
 
     auto u_cuda = backend_->solve(csr, F);
 
-    EigenSolverBackend eigen;
+    LdltSolverBackend eigen;
     auto u_eigen = eigen.solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u_cuda.size()), n);

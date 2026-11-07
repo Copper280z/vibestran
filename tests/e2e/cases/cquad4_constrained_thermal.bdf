@@ -43,6 +43,9 @@ $ Fix T2 (y) of node 1 — prevents y rigid-body translation
 $ Fix T2 (y) of node 2 — prevents rotation about z
 SPC1,1,2,1
 SPC1,1,2,2
+$ Out of plane: T3 at three corners holds the plate's three rigid-body modes, which this
+$ in-plane load never reaches but which would leave K singular.
+SPC1,1,3,1,2,3
 $ Uniform temperature T = 100 °C
 TEMP,1,1,100.0
 TEMP,1,2,100.0

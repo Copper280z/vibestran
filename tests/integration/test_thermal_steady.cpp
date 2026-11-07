@@ -34,7 +34,7 @@ namespace {
 
 SolverResults run_thermal(const std::string &bdf) {
   Model m = BdfParser::parse_string(bdf);
-  HeatTransferSteadySolver solver(std::make_unique<EigenSolverBackend>());
+  HeatTransferSteadySolver solver(std::make_unique<LdltSolverBackend>());
   return solver.solve(m);
 }
 
@@ -358,7 +358,7 @@ TEST(ThermalSteady, CoupledHeatToStaticsBar) {
   Model heat_m = m;
   heat_m.analysis.subcases = heat;
   SolverResults th =
-      HeatTransferSteadySolver(std::make_unique<EigenSolverBackend>()).solve(heat_m);
+      HeatTransferSteadySolver(std::make_unique<LdltSolverBackend>()).solve(heat_m);
 
   // Materialize TEMP loads from thermal result, then run statics
   int sid = 9999;
@@ -376,7 +376,7 @@ TEST(ThermalSteady, CoupledHeatToStaticsBar) {
   // Need LinearStaticSolver included
   SolverResults sr;
   {
-    LinearStaticSolver lss(std::make_unique<EigenSolverBackend>());
+    LinearStaticSolver lss(std::make_unique<LdltSolverBackend>());
     sr = lss.solve(stat_m);
   }
   ASSERT_FALSE(sr.subcases.empty());

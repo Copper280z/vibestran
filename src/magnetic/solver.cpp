@@ -1525,7 +1525,7 @@ Result<DriveSummary> auto_alignment(const Model &model, const Setup &base,
 } // namespace
 
 Result<Results> solve(const Model &model) {
-  EigenSolverBackend backend;
+  LdltSolverBackend backend;
   return solve(model, backend);
 }
 

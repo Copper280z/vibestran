@@ -253,7 +253,7 @@ TEST_F(VulkanTest, DiagonalSystemConvergesInOneIteration) {
 
 // ── Test 2: 5×5 tridiagonal SPD — agrees with Eigen ─────────────────────────
 // K = tridiag(-1, 3, -1) of size 5, F = [1, 1, 1, 1, 1].
-// Verify Vulkan PCG solution matches EigenSolverBackend to 1e-8.
+// Verify Vulkan PCG solution matches LdltSolverBackend to 1e-8.
 
 TEST_F(VulkanTest, TridiagonalSystemAgreesWithEigen) {
     const int n = 5;
@@ -268,7 +268,7 @@ TEST_F(VulkanTest, TridiagonalSystemAgreesWithEigen) {
 
     auto u_vulkan = backend_->solve(csr, F);
 
-    EigenSolverBackend eigen_backend;
+    LdltSolverBackend eigen_backend;
     auto u_eigen = eigen_backend.solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u_vulkan.size()), n);
@@ -298,7 +298,7 @@ TEST_F(VulkanTest, LargerTridiagonalAgreesWithEigen) {
 
     auto u_vulkan = backend_->solve(csr, F);
 
-    EigenSolverBackend eigen_backend;
+    LdltSolverBackend eigen_backend;
     auto u_eigen = eigen_backend.solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u_vulkan.size()), n);
@@ -407,7 +407,7 @@ TEST_F(VulkanTest, TiledPathProducesCorrectSolution) {
     EXPECT_FALSE(tiled_backend->last_solve_was_full_gpu())
         << "vram_headroom=0.9999 must force the tiled path";
 
-    EigenSolverBackend eigen_backend;
+    LdltSolverBackend eigen_backend;
     auto u_eigen = eigen_backend.solve(csr, F);
 
     // Tiled path uses float32 SpMV, so 1e-5 is appropriate for float32 precision.
@@ -495,7 +495,7 @@ TEST_F(VulkanTest, LargeStiffDiagonalSucceedsWithDefaultConfig) {
 }
 
 // ── Test 10: Small problem falls back to CPU ──────────────────────────────────
-// When n < min_dofs_for_gpu the backend delegates to EigenSolverBackend.
+// When n < min_dofs_for_gpu the backend delegates to LdltSolverBackend.
 // Verify last_solve_was_full_gpu()==false and the result matches Eigen directly.
 
 TEST_F(VulkanTest, SmallProblemFallsBackToCpu) {
@@ -525,7 +525,7 @@ TEST_F(VulkanTest, SmallProblemFallsBackToCpu) {
     EXPECT_FALSE(cpu_fallback_backend->last_solve_was_full_gpu())
         << "n=5 is below min_dofs_for_gpu=50000 — must use CPU fallback";
 
-    EigenSolverBackend eigen_backend;
+    LdltSolverBackend eigen_backend;
     auto u_eigen = eigen_backend.solve(csr, F);
     for (int i = 0; i < n; ++i)
         EXPECT_NEAR(u[i], u_eigen[i], 1e-12)
@@ -596,7 +596,7 @@ TEST_F(VulkanTest, Float64PathAgreesWithEigenToDoublePrecision) {
 
     auto u_vulkan = dbl_backend->solve(csr, F);
 
-    EigenSolverBackend eigen_backend;
+    LdltSolverBackend eigen_backend;
     auto u_eigen = eigen_backend.solve(csr, F);
 
     ASSERT_EQ(static_cast<int>(u_vulkan.size()), n);
@@ -723,7 +723,7 @@ TEST_F(VulkanTest, IllConditionedTridiagonalConverges) {
     for (int i = 0; i < n; ++i)
         F[i] = (i % 2 == 0) ? 1.0 : -1.0;
 
-    EigenSolverBackend eigen_backend;
+    LdltSolverBackend eigen_backend;
     auto u_eigen = eigen_backend.solve(csr, F);
 
     // Use float64 to avoid float32 precision issues on this ill-conditioned system.

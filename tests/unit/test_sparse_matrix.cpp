@@ -1,7 +1,7 @@
 // tests/unit/test_sparse_matrix.cpp
 // Tests for SparseMatrixBuilder: verifies that add() and triplets() accumulate
 // entries correctly, and that build_csr() produces the expected structure.
-// Also verifies the EigenSolverBackend::name() identification string.
+// Also verifies the LdltSolverBackend::name() identification string.
 
 #include <gtest/gtest.h>
 #include <map>
@@ -254,10 +254,10 @@ TEST(SparseMatrixBuilder, SizeReturnsConstructorArg) {
     EXPECT_EQ(builder.size(), 42);
 }
 
-// ── EigenSolverBackend::name (only used in tests) ─────────────────────────────
+// ── LdltSolverBackend::name (only used in tests) ─────────────────────────────
 
-TEST(EigenSolverBackend, NameIsNonEmpty) {
-    EigenSolverBackend backend;
+TEST(LdltSolverBackend, NameIsNonEmpty) {
+    LdltSolverBackend backend;
     EXPECT_FALSE(backend.name().empty());
 }
 

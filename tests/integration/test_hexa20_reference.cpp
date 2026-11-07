@@ -54,7 +54,7 @@ const StaticRun &static_run(const std::string &deck) {
   if (const auto it = cache.find(deck); it != cache.end())
     return it->second;
   StaticRun run{BdfParser::parse_file(deck_path(deck)), {}, {}};
-  LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+  LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
   run.results = solver.solve(run.model);
   for (const auto &nd : run.results.subcases.at(0).displacements)
     run.disp[nd.node.value] = nd.d;
@@ -280,7 +280,7 @@ TEST(Hexa20Reference, Pload4OnAQuadraticFaceGivesUniformStress) {
   bdf += "PLOAD4,1,1,100.,,,,5,7\n";
   bdf += "SPC1,1,3,1,2,3,4,9,10,11,12\nSPC1,1,1,1,4,12\nSPC1,1,2,1,2,9\nENDDATA\n";
   Model model = BdfParser::parse_string(bdf);
-  LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+  LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
   const SolverResults res = solver.solve(model);
   for (const auto &nd : res.subcases.at(0).displacements) {
     const Vec3 &x = model.node(nd.node).position;

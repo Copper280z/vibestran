@@ -80,7 +80,7 @@ static double get_disp(const SolverResults& res, int node_id, int dof_0based);
 
 static SolverResults run_analysis(const std::string& bdf) {
     Model model = BdfParser::parse_string(bdf);
-    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
     return solver.solve(model);
 }
 
@@ -279,7 +279,7 @@ static const LineStress* get_line_stress(const SolverResults& res, int elem_id) 
 }
 
 static SolverResults run_analysis(const Model& model) {
-    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
     return solver.solve(model);
 }
 
@@ -1035,7 +1035,7 @@ ENDDATA
     model.analysis.subcases.clear();
     model.analysis.subcases.push_back({1, "AXIAL", LoadSetId{1}, SpcSetId{1}});
 
-    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
     SolverResults res = solver.solve(model);
 
     // δ = F*L/(E*A) = 1000*10/(1e6*0.1) = 0.1
@@ -1140,7 +1140,7 @@ ENDDATA
     model.analysis.subcases.clear();
     model.analysis.subcases.push_back({1, "AXIAL_TET", LoadSetId{1}, SpcSetId{1}});
 
-    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
     SolverResults res = solver.solve(model);
 
     // Expected axial displacement of top face
@@ -1215,7 +1215,7 @@ ENDDATA
     sc.t_ref = 0.0; // reference temperature = 0
     model.analysis.subcases.push_back(sc);
 
-    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
     SolverResults res = solver.solve(model);
 
     // Expected: alpha * dT * L = 1e-5 * 100 * 1.0 = 1e-3
@@ -1289,7 +1289,7 @@ ENDDATA
     model.analysis.subcases.clear();
     model.analysis.subcases.push_back({1, "HEXA_AXIAL", LoadSetId{1}, SpcSetId{1}});
 
-    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
     SolverResults res = solver.solve(model);
 
     // CHEXA8 trilinear shape functions exactly represent the linear displacement field
@@ -1482,7 +1482,7 @@ TEST(Integration, CTetra10AxialExtension) {
     model.analysis.subcases.clear();
     model.analysis.subcases.push_back({1, "CTETRA10_AXIAL", LoadSetId{1}, SpcSetId{1}});
 
-    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
     SolverResults res = solver.solve(model);
 
     // Verify element type was routed to CTETRA10

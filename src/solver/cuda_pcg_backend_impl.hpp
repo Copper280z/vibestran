@@ -2113,6 +2113,8 @@ struct CudaPCGContext {
     std::optional<vibestran::AmgDeviceReport> last_amg_device;
     /// Preconditioner fallbacks of the solves since the backend last took them.
     std::vector<std::string> notices;
+    /// Solves that missed their target, since the backend last took them.
+    std::vector<std::string> fatals;
 };
 
 static std::unique_ptr<CudaPCGContext>
@@ -2198,22 +2200,35 @@ static void validate_pcg_inputs(
 static constexpr double kCudaPcgCorrectionTolerance = 1e-3;
 static constexpr int kCudaPcgMaxCorrections = 20;
 
-static void require_refined(const CudaPCGContext& ctx, const char* label) {
+/// Why the last solve missed the target, or nothing when it reached it.
+static std::optional<std::string> refinement_failure(const CudaPCGContext& ctx, const char* label) {
     const vibestran::RefinementReport& rep = *ctx.last_refinement;
     vibestran::log_debug(std::format(
         "[{}] {} refinement correction(s), estimated relative error {:.2e} -> {:.2e}, "
         "backward error {:.2e}, inner iterations {}",
         label, rep.corrections, rep.initial_error, rep.estimated_error,
         rep.backward_error, ctx.last_iters));
-    if (!rep.converged)
-        throw SolverError(std::format(
-            "{}: did not converge: after {} iterations and {} refinement correction(s) the "
-            "estimated relative error of the solution is {:.2e} (tolerance {:.1e}). The "
-            "stiffness matrix is too ill-conditioned for this preconditioner{}, or singular "
-            "(check boundary conditions); use a direct solver (--backend=cpu or "
-            "--backend=cuda).",
-            label, ctx.last_iters, rep.corrections, rep.estimated_error, ctx.tolerance,
-            std::string_view(label) == "cuda-pcg-mixed" ? " in fp32" : ""));
+    if (rep.converged)
+        return std::nullopt;
+    return std::format(
+        "{}: did not converge: after {} iterations and {} refinement correction(s) the "
+        "estimated relative error of the solution is {:.2e} (tolerance {:.1e}). The "
+        "stiffness matrix is too ill-conditioned for this preconditioner{}, or singular "
+        "(check boundary conditions); use a direct solver (--backend=cpu or "
+        "--backend=cuda).",
+        label, ctx.last_iters, rep.corrections, rep.estimated_error, ctx.tolerance,
+        std::string_view(label) == "cuda-pcg-mixed" ? " in fp32" : "");
+}
+
+/// A solve that missed the target keeps its iterate for the F06, under a fatal message.
+static void require_refined(CudaPCGContext& ctx, const std::vector<double>& solution, const char* label) {
+    auto failure = refinement_failure(ctx, label);
+    if (!failure)
+        return;
+    for (double value : solution)
+        if (!std::isfinite(value))
+            throw SolverError(*failure);
+    ctx.fatals.push_back(std::move(*failure));
 }
 
 #include "cuda_partitioned_pcg.hpp"
@@ -2284,7 +2299,7 @@ static std::vector<double> solve_cuda_pcg_colored(
     const auto full = K.expanded_symmetric();
     auto solution = solve_ordered(ctx, full, F);
     ctx.last_iters += attempted_iters;
-    require_refined(ctx, label);
+    require_refined(ctx, solution, label);
     return solution;
 }
 
@@ -2402,7 +2417,7 @@ static std::vector<double> solve_cuda_amg(CudaPCGContext& ctx, const SparseMatri
     detail::AmgSystem system(k, ctx.tolerance, cuda_amg_engines(ctx, mixed), ctx.near_nullspace);
     auto result = system.solve(k, rhs);
     record_amg(ctx, result);
-    require_refined(ctx, label);
+    require_refined(ctx, result.solution, label);
     return std::move(result.solution);
 }
 
@@ -2417,7 +2432,8 @@ static std::unique_ptr<LinearFactor> make_cuda_amg_factor(CudaPCGContext& ctx,
         },
         [&ctx, label](const detail::AmgPcgResult& result) -> Status {
             record_amg(ctx, result);
-            try { require_refined(ctx, label); } catch (const SolverError& e) { return Error{e.what()}; }
+            if (auto failure = refinement_failure(ctx, label))
+                return Error{std::move(*failure)};
             return std::nullopt;
         });
 }

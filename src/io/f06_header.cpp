@@ -82,6 +82,20 @@ std::string local_time_text() {
   return text;
 }
 
+static void write_messages(std::ostream &out, std::string_view heading, std::string_view prefix,
+                           const std::vector<std::string> &messages) {
+  if (messages.empty())
+    return;
+  out << " " << heading << "\n";
+  const std::string indent(prefix.size(), ' ');
+  for (const auto &message : messages) {
+    const auto lines = wrap(message, kPageWidth - prefix.size() - 1);
+    for (std::size_t i = 0; i < lines.size(); ++i)
+      out << (i == 0 ? std::string(prefix) : indent) << lines[i] << "\n";
+  }
+  out << "\n";
+}
+
 void write_f06_header(std::ostream &out, std::string_view title,
                       const SolveSummary &summary, const F06RunInfo *run) {
   const std::time_t now = std::time(nullptr);
@@ -102,6 +116,7 @@ void write_f06_header(std::ostream &out, std::string_view title,
       << "   F06 MYSTRAN-COMPATIBLE OUTPUT\n";
   out << centered(title) << "\n\n";
 
+  write_messages(out, "FATAL MESSAGES", "   *** FATAL: ", summary.fatals);
   if (run != nullptr) {
     F06Section r{"RUN", {}};
     r.add("Input", run->input.string());
@@ -118,15 +133,7 @@ void write_f06_header(std::ostream &out, std::string_view title,
   write_section(out, build_section());
   write_section(out, summary.solution);
   write_section(out, summary.solver);
-  if (!summary.notices.empty()) {
-    out << " NOTICES\n";
-    for (const auto &notice : summary.notices) {
-      const auto lines = wrap(notice, kPageWidth - 17);
-      for (std::size_t i = 0; i < lines.size(); ++i)
-        out << (i == 0 ? "   *** WARNING: " : "                ") << lines[i] << "\n";
-    }
-    out << "\n";
-  }
+  write_messages(out, "NOTICES", "   *** WARNING: ", summary.notices);
 }
 
 F06Section solution_section(const Model &model, std::string_view solution) {
@@ -157,14 +164,24 @@ F06Section solver_section(std::string_view backend,
   return s;
 }
 
+static void collect(std::vector<std::string> &into, std::vector<std::string> messages,
+                    std::string_view context) {
+  for (auto &message : messages) {
+    std::string text =
+        context.empty() ? std::move(message) : std::format("{}: {}", context, message);
+    if (into.empty() || into.back() != text)
+      into.push_back(std::move(text));
+  }
+}
+
 void collect_notices(SolveSummary &summary, std::vector<std::string> notices,
                      std::string_view context) {
-  for (auto &notice : notices) {
-    std::string text =
-        context.empty() ? std::move(notice) : std::format("{}: {}", context, notice);
-    if (summary.notices.empty() || summary.notices.back() != text)
-      summary.notices.push_back(std::move(text));
-  }
+  collect(summary.notices, std::move(notices), context);
+}
+
+void collect_fatals(SolveSummary &summary, std::vector<std::string> fatals,
+                    std::string_view context) {
+  collect(summary.fatals, std::move(fatals), context);
 }
 
 } // namespace vibestran

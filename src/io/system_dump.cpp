@@ -3,7 +3,7 @@
 
 #include "io/system_dump.hpp"
 #include "core/exceptions.hpp"
-#include <algorithm>
+#include <array>
 #include <cstdio>
 #include <format>
 #include <memory>
@@ -61,31 +61,34 @@ void write_matrix_market(const std::filesystem::path &path, std::span<const doub
   check_written(f.get(), path);
 }
 
+std::vector<EquationDof> reduced_equation_dofs(const Model &model, const MpcHandler &mpc_handler) {
+  std::vector<EquationDof> dofs;
+  const DofMap &full = mpc_handler.full_dof_map();
+  for (const auto &[id, g] : model.nodes)
+    for (int c = 0; c < 6; ++c) {
+      const EqIndex red = mpc_handler.reduced_index(full.eq_index(id, c));
+      if (red == CONSTRAINED_DOF)
+        continue;
+      const auto eq = static_cast<std::size_t>(red);
+      if (eq >= dofs.size())
+        dofs.resize(eq + 1);
+      dofs[eq] = {id.value, c + 1};
+    }
+  return dofs;
+}
+
+std::string equation_dof_name(const EquationDof &dof) {
+  static constexpr std::array<const char *, 6> kComponents{"T1", "T2", "T3", "R1", "R2", "R3"};
+  return std::format("grid {} {}", dof.grid, kComponents.at(static_cast<std::size_t>(dof.component - 1)));
+}
+
 void write_dof_map(const std::filesystem::path &path, const Model &model,
                    const MpcHandler &mpc_handler) {
-  std::vector<NodeId> grids;
-  grids.reserve(model.nodes.size());
-  for (const auto &[id, g] : model.nodes)
-    grids.push_back(id);
-  std::sort(grids.begin(), grids.end(),
-            [](NodeId a, NodeId b) { return a.value < b.value; });
-  struct Row {
-    EqIndex eq;
-    int grid, comp;
-  };
-  std::vector<Row> rows;
-  const DofMap &full = mpc_handler.full_dof_map();
-  for (NodeId g : grids)
-    for (int c = 0; c < 6; ++c) {
-      const EqIndex red = mpc_handler.reduced_index(full.eq_index(g, c));
-      if (red != CONSTRAINED_DOF)
-        rows.push_back({red, g.value, c + 1});
-    }
-  std::sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) { return a.eq < b.eq; });
+  const std::vector<EquationDof> dofs = reduced_equation_dofs(model, mpc_handler);
   File f = open_for_writing(path);
   std::fprintf(f.get(), "# equation grid component (1-6 = T1 T2 T3 R1 R2 R3)\n");
-  for (const Row &r : rows)
-    std::fprintf(f.get(), "%d %d %d\n", r.eq + 1, r.grid, r.comp);
+  for (std::size_t i = 0; i < dofs.size(); ++i)
+    std::fprintf(f.get(), "%zu %d %d\n", i + 1, dofs[i].grid, dofs[i].component);
   check_written(f.get(), path);
 }
 

@@ -3,6 +3,7 @@
 #include "amg_cpu.hpp"
 #include "core/factor_ratio_check.hpp"
 #include "core/types.hpp"
+#include "linear_factor_checks.hpp"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <Eigen/SparseCholesky>
@@ -30,27 +31,8 @@ using Ms = std::chrono::duration<double, std::milli>;
 using ESM = Eigen::SparseMatrix<double>;
 using ESMR = Eigen::SparseMatrix<double, Eigen::RowMajor>;
 using CsrData = SparseMatrixBuilder::CsrData;
-
-/// Shape errors shared by every factor() implementation.
-Status check_matrix(const CsrData &K) {
-  if (K.n == 0)
-    return Error{"Matrix is empty — no free DOFs"};
-  if (K.row_ptr.size() != static_cast<std::size_t>(K.n) + 1 ||
-      K.col_ind.size() != static_cast<std::size_t>(K.nnz) ||
-      K.values.size() != static_cast<std::size_t>(K.nnz))
-    return Error{std::format("Malformed CSR matrix: n={}, nnz={}, row_ptr {}, "
-                             "col_ind {}, values {}",
-                             K.n, K.nnz, K.row_ptr.size(), K.col_ind.size(),
-                             K.values.size())};
-  return std::nullopt;
-}
-
-Status check_rhs(int n, std::span<const double> B, int nrhs) {
-  if (nrhs < 1 || B.size() != static_cast<std::size_t>(n) * static_cast<std::size_t>(nrhs))
-    return Error{std::format("Right-hand side has {} values; expected {} x {}",
-                             B.size(), n, nrhs)};
-  return std::nullopt;
-}
+using detail::check_matrix;
+using detail::check_rhs;
 
 /// Lower triangle of K in compressed column-major storage, the input of every
 /// direct factorization below. A full mirrored matrix is reduced to its lower
@@ -111,7 +93,7 @@ Status factor_ratio_status(const FactorRatioCheckPolicy &policy,
       "backend {})",
       policy.context, matrix_name, result.max_ratio, policy.maxratio,
       result.row_1based, result.matrix_diag, result.factor_diag, backend_label);
-  if (policy.fatal)
+  if (policy.fatal && result.max_ratio > policy.fatal_ratio)
     return Error{std::move(message)};
   notices.add(std::move(message));
   return std::nullopt;
@@ -630,8 +612,11 @@ CpuPCGSolverBackend::solve(const SparseMatrixBuilder::CsrData &K_csr, const std:
     throw SolverError(std::format("Force vector size {} != matrix size {}", F.size(), K_csr.n));
   detail::AmgSystem system(K_csr, tolerance_, detail::amg_cpu_engine(max_iters_), near_nullspace());
   auto result = system.solve(K_csr, F);
-  if (auto e = accept_amg(result))
-    throw SolverError(e->message);
+  if (auto e = accept_amg(result)) {
+    if (!Eigen::Map<const Eigen::VectorXd>(result.solution.data(), K_csr.n).allFinite())
+      throw SolverError(e->message);
+    notices().add_fatal(e->message); // the best iterate is still written
+  }
   return std::move(result.solution);
 }
 

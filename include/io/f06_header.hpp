@@ -48,6 +48,9 @@ struct SolveSummary {
   F06Section solver{"SOLVER", {}};
   /// Warnings about the solve, already logged; prefixed with their subcase.
   std::vector<std::string> notices;
+  /// Why the results can't be trusted, already logged: first in the F06, and
+  /// the run exits with kExitFatal after writing what it has.
+  std::vector<std::string> fatals;
 };
 
 /// Run information that only the driver knows.
@@ -83,6 +86,10 @@ template <typename Backend>
 /// (e.g. "Subcase 2"), dropping one identical to the previous notice.
 void collect_notices(SolveSummary &summary, std::vector<std::string> notices,
                      std::string_view context);
+
+/// The same for fatal messages.
+void collect_fatals(SolveSummary &summary, std::vector<std::string> fatals,
+                    std::string_view context);
 
 /// Current local date and time, "YYYY-MM-DD HH:MM:SS".
 [[nodiscard]] std::string local_time_text();

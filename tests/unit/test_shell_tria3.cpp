@@ -133,7 +133,7 @@ SolverResults run_patch(const std::function<std::array<double, 6>(double, double
   }
   os << "FORCE,1,1,,0.,1.,0.,0.\nENDDATA\n";
   Model model = BdfParser::parse_string(os.str());
-  LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+  LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
   return solver.solve(model);
 }
 
@@ -188,7 +188,7 @@ TEST(ShellTria3, TransverseShearIsRecovered) {
   os << "PSHELL,1,1,0.1,1,,1\nMAT1,1,1.0E7,,0.3\nSPC1,1,123456,1,22\n"
         "FORCE,1,21,,0.5,0.,0.,1.\nFORCE,1,42,,0.5,0.,0.,1.\nENDDATA\n";
   Model model = BdfParser::parse_string(os.str());
-  LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+  LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
   const SolverResults res = solver.solve(model);
   int checked = 0;
   for (const auto &ps : res.subcases.at(0).plate_stresses) {
@@ -264,7 +264,7 @@ TEST(ShellTria3, TiltedSnormDirectorsKeepThinPlateBending) {
     }
     os << "ENDDATA\n";
     Model model = BdfParser::parse_string(os.str());
-    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
     const SolverResults res = solver.solve(model);
     for (const auto &nd : res.subcases.at(0).displacements)
       if (nd.node.value == id(20, 2)) // cppcheck-suppress useStlAlgorithm

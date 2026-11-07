@@ -83,6 +83,16 @@ struct FactorStats {
     int solves{0}; ///< right-hand sides solved
 };
 
+/// What a direct factorization found about K's pivots, by row of K.
+struct PivotReport {
+    double max_ratio{0.0};          ///< Largest |K_ii / D_i|.
+    int max_ratio_row{-1};          ///< Where; -1 when there is none.
+    double max_ratio_diagonal{0.0}; ///< K_ii there.
+    double max_ratio_pivot{0.0};    ///< D_i there.
+    int negative_pivots{0};
+    std::vector<int> held_rows;     ///< Exactly zero pivots, whose unknowns were held at zero.
+};
+
 /// A factorization of a symmetric matrix K, from SolverBackend::factor().
 /// It solves any number of right-hand sides and can be refactored with new
 /// values. The symbolic analysis (ordering and symbolic factor) is reused
@@ -114,6 +124,9 @@ public:
     [[nodiscard]] virtual std::string_view ordering() const noexcept { return {}; }
 
     [[nodiscard]] virtual FactorStats stats() const noexcept = 0;
+
+    /// The pivots of the last factorization, where the factor can see them.
+    [[nodiscard]] virtual std::optional<PivotReport> pivot_report() const { return std::nullopt; }
 };
 
 /// Abstract interface for linear system solvers: K * u = F
@@ -174,6 +187,9 @@ public:
         return std::nullopt;
     }
 
+    /// The pivots of the most recent solve(), where the backend can see them.
+    [[nodiscard]] virtual std::optional<PivotReport> last_pivot_report() const { return std::nullopt; }
+
     /// Where the last AMG hierarchy ran; empty if the last solve built none.
     [[nodiscard]] virtual std::optional<AmgDeviceReport> last_amg_device_report() const noexcept {
         return std::nullopt;
@@ -214,7 +230,44 @@ private:
     std::shared_ptr<const NearNullspace> near_nullspace_;
 };
 
-/// CPU backend using Eigen's sparse Cholesky.
+/// The default CPU direct backend, on every platform: the vendored LDL^T library
+/// (src/solver/ldlt), supernodal and threaded. It factors without pivoting, tries Cholesky on
+/// each front and holds an exactly zero pivot's unknown at zero. A matrix with negative pivots
+/// is refactored with threshold pivoting, unless FactorOptions::require_spd makes that an
+/// error. last_pivot_report() gives K_ii/D_i and the held rows, which the analyses turn into
+/// F06 messages.
+class LdltSolverBackend final : public SolverBackend {
+public:
+    [[nodiscard]] Result<std::unique_ptr<LinearFactor>> factor(
+        const SparseMatrixBuilder::CsrData& K, const FactorOptions& options = {}) override;
+
+    void set_refinement(bool enabled) noexcept override { refine_ = enabled; }
+
+    [[nodiscard]] std::optional<RefinementReport> last_refinement() const noexcept override {
+        return last_refinement_;
+    }
+
+    [[nodiscard]] std::optional<PivotReport> last_pivot_report() const override {
+        return last_pivots_;
+    }
+
+    /// The analyses apply PARAM,MAXRATIO from last_pivot_report(), so the policy is unused.
+    [[nodiscard]] std::vector<double> solve(
+        const SparseMatrixBuilder::CsrData& K,
+        const std::vector<double>& F,
+        const FactorRatioCheckPolicy* factor_ratio_policy = nullptr) override;
+
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>> details() const override;
+
+    [[nodiscard]] std::string_view name() const noexcept override { return "LDL^T library (CPU)"; }
+
+private:
+    bool refine_{false};
+    std::optional<RefinementReport> last_refinement_;
+    std::optional<PivotReport> last_pivots_;
+};
+
+/// CPU backend using Eigen's sparse Cholesky (--backend=cpu-eigen), to check the default one.
 /// Solver priority: Apple Accelerate > SuiteSparse CHOLMOD > SimplicialLLT.
 /// A single backward-stable solve is accurate to about cond(K) eps.  With
 /// set_refinement(true) the solution is refined with the factorization and

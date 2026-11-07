@@ -32,8 +32,9 @@ synthetic B–H curve is for demonstrating the solve. `--current` is the current
 in each single conductor loop, not an assumed turn count. The motor dimensions
 are in meters (the outer box is 40 mm wide with the default extent).
 
-`--backend=cpu` or automatic selection uses Accelerate, CHOLMOD, or Eigen sparse
-Cholesky, according to the configured build. GPU/PCG and structural quality or
+`--backend=cpu` or automatic selection uses the vendored LDLᵀ library;
+`--backend=cpu-eigen` uses Accelerate, CHOLMOD, or Eigen sparse Cholesky,
+according to the configured build. GPU/PCG and structural quality or
 refinement overrides are not supported for MAGSTAT. Magnetic validity checks
 are mandatory. The numerical implementation is built without fast-math.
 

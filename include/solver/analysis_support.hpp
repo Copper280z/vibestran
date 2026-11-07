@@ -5,10 +5,23 @@
 #include "core/model.hpp"
 
 #include <array>
+#include <functional>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace vibestran {
+
+class Notices;
+struct FactorRatioCheckPolicy;
+struct PivotReport;
+
+/// Turns what a direct factorization found about K into F06 messages. Held pivots and a
+/// K_ii/D_i above policy.fatal_ratio are fatal, or warnings when policy.fatal is off;
+/// a K_ii/D_i above policy.maxratio is a warning. equation_name labels a row of K.
+void report_pivots(const PivotReport &pivots, const FactorRatioCheckPolicy &policy,
+                   const std::function<std::string(int)> &equation_name, Notices &notices);
+
 
 /// Whether AUTOSPC is on: it is unless PARAM,AUTOSPC,NO turns it off.
 [[nodiscard]] bool autospc_enabled(const Model &model);

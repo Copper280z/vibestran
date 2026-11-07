@@ -76,7 +76,7 @@ SPC1,1,23456,2
 FORCE,1,2,,5.,1.,0.,0.
 ENDDATA
 )");
-  LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+  LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
   solver.set_system_dump((dir / "chain").string());
   (void)solver.solve(model);
   const auto k = lines(dir / "chain_sc1_K.mtx");

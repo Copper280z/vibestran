@@ -780,7 +780,7 @@ TEST(AirGapSolve, MeshMethodIsIdenticalToPlainAir) {
   // an order that varies from run to run, so even one deck solved twice
   // differs in the last bits; across the three decks the results agree to
   // that round-off and no more.
-  vibestran::EigenSolverBackend direct;
+  vibestran::LdltSolverBackend direct;
   std::vector<Results> runs(decks.size());
   std::transform(decks.begin(), decks.end(), runs.begin(),
                  [&](const std::string &gap) { return run(gap, direct); });

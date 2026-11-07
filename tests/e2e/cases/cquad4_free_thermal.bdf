@@ -43,6 +43,9 @@ $ Minimal BCs (all compatible with free thermal field u=alpha*dT*x, v=alpha*dT*y
 SPC1,1,12,1
 SPC1,1,2,2
 SPC1,1,1,4
+$ Out of plane: T3 at three corners holds the plate's three rigid-body modes, which this
+$ in-plane load never reaches but which would leave K singular.
+SPC1,1,3,1,2,3
 $ Uniform temperature T = 100 °C on all nodes
 TEMP,1,1,100.0
 TEMP,1,2,100.0

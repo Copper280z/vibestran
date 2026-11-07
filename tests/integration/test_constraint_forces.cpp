@@ -17,7 +17,7 @@ using namespace vibestran;
 namespace {
 
 SubCaseResults solve_forces(const Model& model) {
-    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
     return solver.solve(model).subcases.at(0);
 }
 
@@ -468,7 +468,7 @@ FORCE,2,3,0,1.e308,1.,0.,0.
 FORCE,2,4,0,10.,1.,0.,0.
 ENDDATA
 )");
-    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
     const SolverResults results = solver.solve(model);
     const auto& result = results.subcases.at(0);
     EXPECT_NE(result.constraint_force_error.find("force accumulation overflow at GRID 1"),

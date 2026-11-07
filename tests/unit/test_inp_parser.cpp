@@ -782,11 +782,11 @@ S
     EXPECT_NO_THROW(inp_model.validate());
 
     // Solve both
-    auto bdf_backend = std::make_unique<EigenSolverBackend>();
+    auto bdf_backend = std::make_unique<LdltSolverBackend>();
     LinearStaticSolver bdf_solver(std::move(bdf_backend));
     SolverResults bdf_results = bdf_solver.solve(bdf_model);
 
-    auto inp_backend = std::make_unique<EigenSolverBackend>();
+    auto inp_backend = std::make_unique<LdltSolverBackend>();
     LinearStaticSolver inp_solver(std::move(inp_backend));
     SolverResults inp_results = inp_solver.solve(inp_model);
 

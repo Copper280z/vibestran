@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace vibestran {
 
@@ -29,6 +30,17 @@ void write_matrix_market(const std::filesystem::path &path, std::span<const doub
 
 void write_dof_map(const std::filesystem::path &path, const Model &model,
                    const MpcHandler &mpc_handler);
+
+/// Grid and component (1-6 = T1 T2 T3 R1 R2 R3) of each equation of the reduced system.
+struct EquationDof {
+  int grid{0};
+  int component{0};
+};
+[[nodiscard]] std::vector<EquationDof> reduced_equation_dofs(const Model &model,
+                                                             const MpcHandler &mpc_handler);
+
+/// "grid 7 R2", for messages about an equation of the reduced system.
+[[nodiscard]] std::string equation_dof_name(const EquationDof &dof);
 
 /// P_scN_<name> for the prefix and subcase.
 [[nodiscard]] std::filesystem::path system_dump_path(const std::string &prefix, int subcase,

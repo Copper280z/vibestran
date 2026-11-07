@@ -170,8 +170,8 @@ endif
 # MAGSTAT results group). Structural solutions do not need it, so without
 # HDF5 the solver still builds and MAGSTAT decks fail with a clear error.
 # Meson's HDF5 lookup needs a C compiler even though only the C API headers
-# and library are used from C++.
-add_languages('c', native : false, required : get_option('hdf5'))
+# and library are used from C++. The vendored LDL^T library is C.
+add_languages('c', native : false, required : true)
 hdf5_dep = dependency('hdf5', method : 'pkg-config', required : get_option('hdf5'))
 hdf5_args = []
 if hdf5_dep.found()
@@ -358,6 +358,10 @@ else
   message('CUDA sparse solver backend: disabled (no CUDA compiler / nvcc not in PATH)')
 endif
 
+# ── LDL^T library (vendored): the default CPU direct backend ────────────────
+# After every add_project_arguments, which Meson refuses once a target exists.
+subdir('src/solver/ldlt')
+
 # ── cppcheck ─────────────────────────────────────────────────────────────────
 cppcheck = find_program('cppcheck', required: false)
 if cppcheck.found()
@@ -370,6 +374,9 @@ if cppcheck.found()
     '--suppress=*:/Library/Developer/CommandLineTools/*',
     '--suppress=*:/Applications/Xcode.app/*',
     '--suppress=*:*/lib/gcc/*',
+    # The vendored library's API has callers outside this project, and its tests prefer plain loops.
+    '--suppress=unusedFunction:' + join_paths(meson.project_source_root(), 'src/solver/ldlt') + '/*',
+    '--suppress=useStlAlgorithm:' + join_paths(meson.project_source_root(), 'src/solver/ldlt/tests') + '/*',
   ]
   run_target('cppcheck',
     command: [
@@ -396,6 +403,7 @@ solver_sources = files(
   # Vulkan sources are appended conditionally below
   # Core
   'src/core/logger.cpp',
+  'src/core/threads.cpp',
   'src/core/model.cpp',
   'src/core/quality_checks.cpp',
   'src/core/dof_map.cpp',
@@ -426,6 +434,7 @@ solver_sources = files(
   'src/io/csv_writer.cpp',
   # Solver
   'src/solver/solver_backend.cpp',
+  'src/solver/ldlt_solver_backend.cpp',
   'src/solver/tangent_solver.cpp',
   'src/solver/analysis_support.cpp',
   'src/solver/linear_static.cpp',
@@ -480,7 +489,7 @@ src_inc = include_directories('src/solver') # for internal vulkan_pipelines.hpp
 # ── Library (solver logic, no main) ──────────────────────────────────────────
 tbb_args = tbb_dep.found() ? ['-DHAVE_TBB=1'] : []
 
-solver_lib_deps = [eigen_dep, spectra_dep, spdlog_dep, thread_dep, amgcl_dep]
+solver_lib_deps = [eigen_dep, spectra_dep, spdlog_dep, thread_dep, amgcl_dep, ldlt_dep]
 if hdf5_dep.found()
   solver_lib_deps += hdf5_dep
 endif
@@ -634,6 +643,8 @@ unit_test_sources = files(
   'tests/unit/test_inp_parser.cpp',
   'tests/unit/test_numbers.cpp',
   'tests/unit/test_linear_factor.cpp',
+  'tests/unit/test_ldlt_backend.cpp',
+  'tests/unit/test_threads.cpp',
   'tests/unit/test_tangent_solver.cpp',
   'tests/unit/test_axisymmetric.cpp',
   'tests/unit/test_line_gap.cpp',
@@ -653,6 +664,34 @@ test('unit_tests', unit_tests,
   timeout : 120,
   suite   : 'unit',
 )
+
+ldlt_tests = executable(
+  'ldlt_tests',
+  files('src/solver/ldlt/tests/test_main.cc', 'src/solver/ldlt/tests/test_basic.cc',
+        'src/solver/ldlt/tests/test_solve.cc', 'src/solver/ldlt/tests/test_factor.cc'),
+  dependencies : [ldlt_dep, gtest_dep],
+  cpp_args : ldlt_defs,
+)
+
+test('ldlt_tests', ldlt_tests,
+  timeout : 300,
+  suite   : 'unit',
+)
+
+if host_machine.system() != 'windows'
+  # Black-box: drives the vibestran executable and reads what it leaves behind.
+  cli_exit_tests = executable(
+    'cli_exit_tests',
+    'tests/e2e/test_cli_exit_codes.cpp',
+    dependencies : [gtest_dep],
+  )
+  test('cli_exit_codes', cli_exit_tests,
+    timeout : 120,
+    suite   : 'e2e',
+    depends : vibestran_exe,
+    env     : {'VIBESTRAN' : vibestran_exe.full_path()},
+  )
+endif
 
 # Analytical MAGSTAT CLI checks. External solvers live in Magnetic_Validation
 # and are deliberately not registered with Meson or ordinary CI. MAGSTAT needs
@@ -706,6 +745,7 @@ integration_test_sources = files(
   'tests/integration/test_autospc.cpp',
   'tests/integration/test_parallel_recovery.cpp',
   'tests/integration/test_rod_and_scalar.cpp',
+  'tests/integration/test_fatal_messages.cpp',
   'tests/integration/test_pbarl_and_springs.cpp',
   'tests/integration/test_mpc_frames.cpp',
   'tests/integration/test_thermal_steady.cpp',

@@ -4,10 +4,13 @@
 
 #include "assembly_parallel.hpp"
 #include "core/coord_sys.hpp"
+#include "core/factor_ratio_check.hpp"
+#include "core/notices.hpp"
 #include "elements/element_factory.hpp"
 #include "elements/rbe_constraints.hpp"
 #include "elements/shell_section.hpp"
 #include "solver/linear_static.hpp"
+#include "solver/solver_backend.hpp"
 #include <Eigen/Dense>
 
 #include <algorithm>
@@ -24,6 +27,42 @@
 #include <unordered_map>
 
 namespace vibestran {
+
+void report_pivots(const PivotReport &pivots, const FactorRatioCheckPolicy &policy,
+                   const std::function<std::string(int)> &equation_name, Notices &notices) {
+  const auto report = [&](std::string text, bool fatal) {
+    if (fatal)
+      notices.add_fatal(std::move(text));
+    else
+      notices.add(std::move(text));
+  };
+  if (!pivots.held_rows.empty()) {
+    constexpr std::size_t kListed = 8;
+    std::string names;
+    for (std::size_t i = 0; i < std::min(pivots.held_rows.size(), kListed); ++i)
+      names += (i == 0 ? "" : ", ") + equation_name(pivots.held_rows[i]);
+    if (pivots.held_rows.size() > kListed)
+      names += std::format(" and {} more", pivots.held_rows.size() - kListed);
+    report(std::format("the {} is singular: {} pivot(s) came out exactly zero, and these "
+                       "unknowns were held at zero: {}. The model has an unconstrained "
+                       "mechanism there",
+                       policy.matrix_name, pivots.held_rows.size(), names),
+           policy.fatal);
+  }
+  if (pivots.max_ratio > policy.maxratio && pivots.max_ratio_row >= 0) {
+    const bool past_fatal = pivots.max_ratio > policy.fatal_ratio;
+    report(std::format("the {} has K_ii/D_i = {:.3e} at {} (K_ii {:.3e}, D_i {:.3e}), above "
+                       "{} = {:.1e}{}",
+                       policy.matrix_name, pivots.max_ratio, equation_name(pivots.max_ratio_row),
+                       pivots.max_ratio_diagonal, pivots.max_ratio_pivot,
+                       past_fatal ? "the limit for a singular matrix" : "MAXRATIO",
+                       past_fatal ? policy.fatal_ratio : policy.maxratio,
+                       past_fatal ? ": it is numerically singular, so the model likely has a "
+                                    "mechanism or a stiffness too small to resolve there"
+                                  : ""),
+           past_fatal && policy.fatal);
+  }
+}
 
 namespace {
 

@@ -264,6 +264,8 @@ RefinementReport refine_solution(const SparseMatrixBuilder::CsrData &K, std::spa
   return finish(r);
 }
 bool indicates_mechanism(const RefinementReport &r, bool refined) {
+  if (!(r.relative_residual <= kMechanismResidual))
+    return true;
   if (refined)
     return !r.converged && !(r.estimated_error <= 1e-2);
   return !(std::abs(r.epsilon) <= kMechanismEpsilon);

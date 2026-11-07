@@ -178,7 +178,7 @@ SolverResults run_patch(const std::function<std::array<double, 6>(double, double
   }
   os << "FORCE,1,1,,0.,1.,0.,0.\nENDDATA\n";
   Model model = BdfParser::parse_string(os.str());
-  LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+  LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
   return solver.solve(model);
 }
 
@@ -264,7 +264,7 @@ SolverResults run_strip(const std::string &extra, double zoffs = 0.0) {
     os << std::format("SPC1,1,123456,{}\n", 1 + 21 * j);
   os << extra << "ENDDATA\n";
   Model model = BdfParser::parse_string(os.str());
-  LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+  LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
   return solver.solve(model);
 }
 
@@ -755,7 +755,7 @@ double orthotropic_cylinder_expansion_error(bool trias) {
   os << std::format("SPC1,1,3,{},{}\nSPC1,1,1,{}\nENDDATA\n", id(0, 0), id(kN / 2, 0),
                     id(kN / 4, 0));
   Model model = BdfParser::parse_string(os.str());
-  LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+  LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
   const SolverResults res = solver.solve(model);
   double worst = 0.0;
   for (const auto &nd : res.subcases.at(0).displacements) {

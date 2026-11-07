@@ -32,7 +32,7 @@ SubCaseResults solve_with(const Backend backend, const std::string& deck) {
     Model model = BdfParser::parse_string(deck);
     std::unique_ptr<SolverBackend> solver;
     if (backend == Backend::Direct)
-        solver = std::make_unique<EigenSolverBackend>();
+        solver = std::make_unique<LdltSolverBackend>();
     else
         solver = std::make_unique<CpuPCGSolverBackend>();
     return LinearStaticSolver(std::move(solver)).solve(model).subcases.at(0);

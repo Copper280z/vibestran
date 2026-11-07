@@ -21,7 +21,7 @@ using namespace vibestran;
 namespace {
 
 SolverResults solve_all(const Model& model) {
-    LinearStaticSolver solver(std::make_unique<EigenSolverBackend>());
+    LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
     return solver.solve(model);
 }
 
@@ -395,8 +395,13 @@ TEST(CelasRecovery, FullyPrescribedModelHasNothingToSolve) {
 TEST(CelasRecovery, AModelWithoutElementsIsStillAnError) {
     // Only a spring's DOFs may be fully prescribed: this deck has lost its elements,
     // so answering with zeros would hide that.
-    EXPECT_THROW(solve_static(spring_deck("GRID,1,,0.,0.,0.\nSPC,1,1,1,0.\nCQUAD8,1,1,1,1,1,1\n")),
-                 SolverError);
+    Model model = BdfParser::parse_string(spring_deck("GRID,1,,0.,0.,0.\nSPC,1,1,1,0.\nCQUAD8,1,1,1,1,1,1\n"));
+    LinearStaticSolver solver(std::make_unique<LdltSolverBackend>());
+    const SolverResults results = solver.solve(model);
+    ASSERT_EQ(results.summary.fatals.size(), 1u);
+    EXPECT_NE(results.summary.fatals[0].find("empty"), std::string::npos) << results.summary.fatals[0];
+    ASSERT_EQ(results.subcases.size(), 1u);
+    EXPECT_TRUE(results.subcases[0].displacements.empty());
 }
 
 TEST(CelasRecovery, ComponentOnACdGridStretchesAlongItsFrame) {
